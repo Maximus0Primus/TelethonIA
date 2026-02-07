@@ -6,7 +6,6 @@ import { FloatingNav } from "@/components/layout/FloatingNav";
 import { HeroSection } from "@/components/layout/HeroSection";
 import { CyclingHeading } from "@/components/layout/CyclingHeading";
 import { ViewControls } from "@/components/layout/ViewControls";
-import type { ScoringMode } from "@/components/layout/ViewControls";
 import { TokenGrid } from "@/components/tokens/TokenGrid";
 import type { TokenCardData } from "@/components/tokens/TokenCard";
 import type { AnimationPhase } from "@/components/tokens/TokenCard";
@@ -20,7 +19,7 @@ interface ApiResponse {
     total: number;
     hasMore: boolean;
   };
-  mode: string;
+  blend: number;
   stats: {
     totalTokens: number;
     totalMentions: number;
@@ -37,7 +36,7 @@ export default function Home() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<"grid" | "list">("grid");
-  const [scoringMode, setScoringMode] = useState<ScoringMode>("conviction");
+  const [blend, setBlend] = useState(0);
   const [introDone, setIntroDone] = useState(false);
   const [animationPhase, setAnimationPhase] = useState<AnimationPhase>("idle");
   const introHandled = useRef(false);
@@ -48,9 +47,9 @@ export default function Home() {
     setIntroDone(true);
   }, []);
 
-  const fetchRanking = useCallback(async (mode?: ScoringMode): Promise<TokenCardData[]> => {
-    const m = mode || scoringMode;
-    const response = await fetch(`/api/ranking?mode=${m}&limit=30`);
+  const fetchRanking = useCallback(async (b?: number): Promise<TokenCardData[]> => {
+    const blendValue = b ?? blend;
+    const response = await fetch(`/api/ranking?blend=${blendValue}&limit=30`);
     const data: ApiResponse = await response.json();
 
     if (!response.ok) {
@@ -67,7 +66,7 @@ export default function Home() {
       trend: token.trend as "up" | "down" | "stable",
       change24h: token.change24h,
     }));
-  }, [scoringMode]);
+  }, [blend]);
 
   // Initial load
   useEffect(() => {
@@ -86,18 +85,16 @@ export default function Home() {
     })();
   }, [fetchRanking]);
 
-  // Animation sequence when data changes
-  const handleDataUpdate = useCallback(async () => {
+  // Animation sequence: glitch → fetch → shuffle → idle
+  const runAnimation = useCallback(async (fetchBlend?: number) => {
     if (animationPhase !== "idle") return;
 
     // Phase 1: Glitch cascade (1.2s)
     setAnimationPhase("glitching");
-
-    // Wait for glitch to finish, then fetch new data
     await new Promise((r) => setTimeout(r, 1200));
 
     try {
-      const newTokens = await fetchRanking();
+      const newTokens = await fetchRanking(fetchBlend);
 
       // Store current tokens as previous for rank delta
       setPrevTokens(tokens);
@@ -116,11 +113,17 @@ export default function Home() {
     setAnimationPhase("idle");
   }, [animationPhase, fetchRanking, tokens]);
 
-  // Auto-refresh polling
+  // Called when user clicks OK in the filter slider
+  const handleApplyBlend = useCallback((newBlend: number) => {
+    setBlend(newBlend);
+    runAnimation(newBlend);
+  }, [runAnimation]);
+
+  // Auto-refresh polling (uses current blend)
   useAutoRefresh({
     interval: 60_000,
     enabled: introDone,
-    onDataChange: handleDataUpdate,
+    onDataChange: () => runAnimation(),
   });
 
   return (
@@ -139,8 +142,8 @@ export default function Home() {
         <ViewControls
           viewMode={viewMode}
           onViewModeChange={setViewMode}
-          scoringMode={scoringMode}
-          onScoringModeChange={setScoringMode}
+          blend={blend}
+          onApplyBlend={handleApplyBlend}
         />
 
         <main>
@@ -172,7 +175,7 @@ export default function Home() {
           {process.env.NODE_ENV === "development" && (
             <div className="fixed bottom-6 right-6 z-50">
               <button
-                onClick={handleDataUpdate}
+                onClick={() => runAnimation()}
                 disabled={animationPhase !== "idle"}
                 className="px-3 py-1.5 text-xs font-mono rounded-lg border border-[#00ff41]/30 bg-[#00ff41]/10 text-[#00ff41] hover:bg-[#00ff41]/20 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
               >

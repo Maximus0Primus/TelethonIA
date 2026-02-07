@@ -1,10 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceRoleClient } from "@/lib/supabase/server";
 
-type ScoringMode = "conviction" | "momentum";
-
-const VALID_MODES: ScoringMode[] = ["conviction", "momentum"];
-
 interface RankingRow {
   rank: number;
   symbol: string;
@@ -19,7 +15,7 @@ interface RankingRow {
 }
 
 async function callRpc(
-  sortMode: string,
+  blend: number,
   limit: number,
   offset: number,
 ): Promise<{ data: RankingRow[] | null; error: string | null }> {
@@ -41,7 +37,7 @@ async function callRpc(
       p_time_window: "7d",
       p_limit: limit,
       p_offset: offset,
-      p_sort_mode: sortMode,
+      p_blend: blend,
     }),
     cache: "no-store",
   });
@@ -59,17 +55,9 @@ export async function GET(request: NextRequest) {
   const searchParams = request.nextUrl.searchParams;
 
   // Parse and validate query parameters
-  const mode = searchParams.get("mode") || "conviction";
+  const blend = Math.max(0, Math.min(100, parseInt(searchParams.get("blend") || "0", 10)));
   const limit = parseInt(searchParams.get("limit") || "10", 10);
   const offset = parseInt(searchParams.get("offset") || "0", 10);
-
-  // Validate mode
-  if (!VALID_MODES.includes(mode as ScoringMode)) {
-    return NextResponse.json(
-      { error: "Invalid mode. Must be one of: " + VALID_MODES.join(", ") },
-      { status: 400 }
-    );
-  }
 
   // Validate limit and offset
   if (isNaN(limit) || limit < 1 || limit > 100) {
@@ -90,7 +78,7 @@ export async function GET(request: NextRequest) {
     const supabase = createServiceRoleClient();
 
     // Fetch ranked tokens via the locked-down RPC (direct REST call)
-    const { data: tokens, error: rpcError } = await callRpc(mode, limit, offset);
+    const { data: tokens, error: rpcError } = await callRpc(blend, limit, offset);
 
     if (rpcError || !tokens) {
       console.error("RPC error:", rpcError);
@@ -109,11 +97,11 @@ export async function GET(request: NextRequest) {
     const total = count ?? 0;
 
     // Map DB column names to camelCase for frontend
-    // Use the mode-specific score as the displayed score
+    // The RPC already returns the blended score as `score`
     const mappedTokens = tokens.map((t) => ({
       rank: Number(t.rank),
       symbol: t.symbol,
-      score: mode === "momentum" ? t.score_momentum : t.score_conviction,
+      score: t.score,
       mentions: t.mentions,
       uniqueKols: t.unique_kols,
       sentiment: Number(t.sentiment),
@@ -160,7 +148,7 @@ export async function GET(request: NextRequest) {
         total,
         hasMore: total > offset + limit,
       },
-      mode,
+      blend,
       stats: metaStats,
       updated_at: metaUpdatedAt,
     });
