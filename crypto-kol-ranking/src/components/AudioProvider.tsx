@@ -2,14 +2,12 @@
 
 import { createContext, useContext, useRef, useCallback, useEffect, useState } from "react";
 
+const STORAGE_KEY = "cryptosensus_intro_seen_v4";
+
 interface AudioContextValue {
-  /** Play the one-shot start sound */
   playStart: () => void;
-  /** Start the ambient loop (requires prior user gesture) */
   playLoop: () => void;
-  /** Whether audio has been unlocked by a user gesture */
   unlocked: boolean;
-  /** Unlock audio in a click handler — must be called from a user gesture */
   unlock: () => void;
 }
 
@@ -66,10 +64,36 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
 
   const playLoop = useCallback(() => {
     if (!loopRef.current) return;
-    // Only play if not already playing
     if (loopRef.current.paused) {
       loopRef.current.play().catch(() => {});
     }
+  }, []);
+
+  // Auto-resume loop on first interaction for returning visitors
+  useEffect(() => {
+    const seen = typeof window !== "undefined" && localStorage.getItem(STORAGE_KEY);
+    if (!seen) return;
+
+    const resumeOnInteraction = () => {
+      if (unlockedRef.current) return;
+      unlockedRef.current = true;
+      setUnlocked(true);
+
+      if (loopRef.current) {
+        loopRef.current.play().catch(() => {});
+      }
+
+      document.removeEventListener("click", resumeOnInteraction);
+      document.removeEventListener("touchstart", resumeOnInteraction);
+    };
+
+    document.addEventListener("click", resumeOnInteraction, { once: true });
+    document.addEventListener("touchstart", resumeOnInteraction, { once: true });
+
+    return () => {
+      document.removeEventListener("click", resumeOnInteraction);
+      document.removeEventListener("touchstart", resumeOnInteraction);
+    };
   }, []);
 
   return (
