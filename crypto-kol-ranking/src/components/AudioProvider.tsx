@@ -2,11 +2,12 @@
 
 import { createContext, useContext, useRef, useCallback, useEffect, useState } from "react";
 
-const STORAGE_KEY = "cryptosensus_intro_seen_v4";
-
 interface AudioContextValue {
   playStart: () => void;
   playLoop: () => void;
+  stopLoop: () => void;
+  toggleLoop: () => void;
+  loopPlaying: boolean;
   unlocked: boolean;
   unlock: () => void;
 }
@@ -14,6 +15,9 @@ interface AudioContextValue {
 const AudioCtx = createContext<AudioContextValue>({
   playStart: () => {},
   playLoop: () => {},
+  stopLoop: () => {},
+  toggleLoop: () => {},
+  loopPlaying: false,
   unlocked: false,
   unlock: () => {},
 });
@@ -25,6 +29,7 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
   const loopRef = useRef<HTMLAudioElement | null>(null);
   const unlockedRef = useRef(false);
   const [unlocked, setUnlocked] = useState(false);
+  const [loopPlaying, setLoopPlaying] = useState(false);
 
   // Create audio elements once, persist across navigations
   useEffect(() => {
@@ -66,38 +71,36 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
     if (!loopRef.current) return;
     if (loopRef.current.paused) {
       loopRef.current.play().catch(() => {});
+      setLoopPlaying(true);
     }
   }, []);
 
-  // Auto-resume loop on first interaction for returning visitors
-  useEffect(() => {
-    const seen = typeof window !== "undefined" && localStorage.getItem(STORAGE_KEY);
-    if (!seen) return;
+  const stopLoop = useCallback(() => {
+    if (!loopRef.current) return;
+    loopRef.current.pause();
+    setLoopPlaying(false);
+  }, []);
 
-    const resumeOnInteraction = () => {
-      if (unlockedRef.current) return;
+  const toggleLoop = useCallback(() => {
+    if (!loopRef.current) return;
+
+    // First toggle also unlocks audio
+    if (!unlockedRef.current) {
       unlockedRef.current = true;
       setUnlocked(true);
+    }
 
-      if (loopRef.current) {
-        loopRef.current.play().catch(() => {});
-      }
-
-      document.removeEventListener("click", resumeOnInteraction);
-      document.removeEventListener("touchstart", resumeOnInteraction);
-    };
-
-    document.addEventListener("click", resumeOnInteraction, { once: true });
-    document.addEventListener("touchstart", resumeOnInteraction, { once: true });
-
-    return () => {
-      document.removeEventListener("click", resumeOnInteraction);
-      document.removeEventListener("touchstart", resumeOnInteraction);
-    };
+    if (loopRef.current.paused) {
+      loopRef.current.play().catch(() => {});
+      setLoopPlaying(true);
+    } else {
+      loopRef.current.pause();
+      setLoopPlaying(false);
+    }
   }, []);
 
   return (
-    <AudioCtx.Provider value={{ playStart, playLoop, unlocked, unlock }}>
+    <AudioCtx.Provider value={{ playStart, playLoop, stopLoop, toggleLoop, loopPlaying, unlocked, unlock }}>
       {children}
     </AudioCtx.Provider>
   );
