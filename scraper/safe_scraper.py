@@ -25,7 +25,8 @@ from telethon.tl.types import PeerChannel
 from telethon.errors import FloodWaitError
 
 from pipeline import aggregate_ranking
-from push_to_supabase import upsert_tokens
+from push_to_supabase import upsert_tokens, insert_snapshots
+from outcome_tracker import fill_outcomes
 
 # Load .env from the scraper directory
 load_dotenv(Path(__file__).parent / ".env")
@@ -40,7 +41,7 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_API_ID = int(os.environ["TELEGRAM_API_ID"])
 TELEGRAM_API_HASH = os.environ["TELEGRAM_API_HASH"]
-MESSAGES_PER_GROUP = 100
+MESSAGES_PER_GROUP = 200
 
 
 def _get_session():
@@ -134,6 +135,45 @@ def load_group_cache() -> dict:
     return {}
 
 
+async def _fetch_messages(client: TelegramClient, peer, count: int) -> list[dict]:
+    """
+    Fetch `count` messages from a peer with pagination.
+    Telegram returns max 100 per GetHistoryRequest, so we paginate.
+    """
+    all_msgs = []
+    offset_id = 0
+
+    while len(all_msgs) < count:
+        batch_limit = min(100, count - len(all_msgs))
+        history = await client(GetHistoryRequest(
+            peer=peer,
+            limit=batch_limit,
+            offset_date=None,
+            offset_id=offset_id,
+            max_id=0,
+            min_id=0,
+            add_offset=0,
+            hash=0,
+        ))
+
+        if not history.messages:
+            break
+
+        for message in history.messages:
+            if not message.message:
+                continue
+            all_msgs.append({
+                "text": message.message.strip(),
+                "date": message.date.isoformat(),
+            })
+
+        offset_id = history.messages[-1].id
+        if len(history.messages) < batch_limit:
+            break  # No more messages available
+
+    return all_msgs
+
+
 async def scrape_groups(client: TelegramClient) -> dict[str, list[dict]]:
     """
     Fetch the latest messages from all groups.
@@ -154,27 +194,7 @@ async def scrape_groups(client: TelegramClient) -> dict[str, list[dict]]:
 
         try:
             peer = PeerChannel(group_cache[username])
-
-            history = await client(GetHistoryRequest(
-                peer=peer,
-                limit=MESSAGES_PER_GROUP,
-                offset_date=None,
-                offset_id=0,
-                max_id=0,
-                min_id=0,
-                add_offset=0,
-                hash=0,
-            ))
-
-            group_msgs = []
-            for message in history.messages:
-                if not message.message:
-                    continue
-                group_msgs.append({
-                    "text": message.message.strip(),
-                    "date": message.date.isoformat(),
-                })
-
+            group_msgs = await _fetch_messages(client, peer, MESSAGES_PER_GROUP)
             messages_data[username] = group_msgs
             logger.info("Fetched %d msgs from %s", len(group_msgs), username)
 
@@ -185,24 +205,7 @@ async def scrape_groups(client: TelegramClient) -> dict[str, list[dict]]:
             # Retry once after wait
             try:
                 peer = PeerChannel(group_cache[username])
-                history = await client(GetHistoryRequest(
-                    peer=peer,
-                    limit=MESSAGES_PER_GROUP,
-                    offset_date=None,
-                    offset_id=0,
-                    max_id=0,
-                    min_id=0,
-                    add_offset=0,
-                    hash=0,
-                ))
-                group_msgs = []
-                for message in history.messages:
-                    if not message.message:
-                        continue
-                    group_msgs.append({
-                        "text": message.message.strip(),
-                        "date": message.date.isoformat(),
-                    })
+                group_msgs = await _fetch_messages(client, peer, MESSAGES_PER_GROUP)
                 messages_data[username] = group_msgs
                 logger.info("Retry OK: %d msgs from %s", len(group_msgs), username)
             except Exception as retry_err:
@@ -248,6 +251,16 @@ def process_and_push(messages_data: dict[str, list[dict]]) -> None:
 
     upsert_tokens(ranking_by_window, stats)
     logger.info("Pushed to Supabase: %d tokens (24h)", len(data_24h))
+
+    # Insert snapshots for ML training data (use 24h window — most balanced)
+    if data_24h:
+        insert_snapshots(data_24h)
+
+    # Fill outcome labels for old snapshots
+    try:
+        fill_outcomes()
+    except Exception as e:
+        logger.error("Outcome tracker failed: %s", e)
 
 
 async def run_one_cycle(client: TelegramClient) -> None:

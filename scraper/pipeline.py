@@ -4,6 +4,8 @@ Reusable functions called by the scraper's main loop.
 """
 
 import re
+import json
+import math
 import time
 import logging
 from datetime import datetime, timezone, timedelta
@@ -11,14 +13,17 @@ from collections import defaultdict
 from typing import TypedDict
 from pathlib import Path
 
+import numpy as np
 import requests
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+from enrich import enrich_tokens
 
 logger = logging.getLogger(__name__)
 
 # === TOKEN EXTRACTION ===
 
-TOKEN_REGEX = re.compile(r"(?<![A-Z0-9_])\$([A-Z][A-Z0-9]{1,14})\b")
+TOKEN_REGEX = re.compile(r"(?<![A-Za-z0-9_])\$([A-Za-z][A-Za-z0-9]{0,14})\b")
+BARE_TOKEN_REGEX = re.compile(r"\b([A-Z][A-Z0-9]{2,14})\b")
 
 EXCLUDED_TOKENS = {
     # Stablecoins & majors (never memecoins)
@@ -32,6 +37,28 @@ EXCLUDED_TOKENS = {
     "URL", "API", "NFT", "DAO", "DEFI",
     "GMT", "UTC", "EST", "PST",
     "DM", "RT", "TG", "CT",
+    # Common English words (bare token false positives)
+    "THE", "AND", "FOR", "NOT", "YOU", "ALL", "CAN", "HER", "WAS", "ONE",
+    "OUR", "OUT", "ARE", "HAS", "BUT", "GET", "HIS", "HOW", "ITS", "LET",
+    "MAY", "NEW", "NOW", "OLD", "SEE", "WAY", "WHO", "DID", "GOT", "HIM",
+    "MAN", "TOP", "USE", "SAY", "SHE", "TOO", "BIG", "END", "TRY", "ASK",
+    "MEN", "RUN", "RAN", "SAT", "WIN", "WON", "YES", "YET", "BET", "BAD",
+    "HOT", "LOT", "SET", "SIT", "CUT", "HIT", "PUT", "RIP",
+    # Crypto slang (not tokens)
+    "GG", "GM", "GN", "WEN", "SER", "FOMO", "HODL", "DYOR", "NGMI", "WAGMI",
+    "BASED", "CHAD", "COPE", "SHILL", "ALPHA", "BETA", "GAMMA", "DELTA",
+    "LONG", "SHORT", "PUMP", "DUMP", "MOON", "SEND", "CALL", "PLAY",
+    "HOLD", "SELL", "JUST", "LIKE", "WITH", "THIS", "THAT", "FROM",
+    "HAVE", "WILL", "BEEN", "WHAT", "WHEN", "YOUR", "THEM", "THAN",
+    "EACH", "MAKE", "VERY", "SOME", "BACK", "ONLY", "COME", "MADE",
+    "AFTER", "ALSO", "INTO", "OVER", "SUCH", "TAKE", "MOST", "GOOD",
+    "KNOW", "TIME", "LOOK", "NEXT", "MUCH", "MORE", "LAST", "STILL",
+    "HIGH", "GONNA", "GOING", "ABOUT", "THINK", "THESE", "RIGHT",
+    "CHECK", "LOOKS", "PRICE", "CHART", "ENTRY", "MARKET", "TOKEN",
+    "COINS", "TRADE", "PROFIT", "UPDATE", "BUYING", "TODAY", "WATCH",
+    "WAITING", "EARLY", "MASSIVE",
+    # Known paid shills / casino platforms (not real memecoins)
+    "METAWIN",
 }
 
 # === CRYPTO LEXICON ===
@@ -67,6 +94,7 @@ class TokenStats(TypedDict):
     sentiments: list[float]
     groups: set[str]
     convictions: list[int]
+    hours_ago: list[float]
 
 
 class TokenRanking(TypedDict):
@@ -80,6 +108,10 @@ class TokenRanking(TypedDict):
     trend: str
     change_24h: float
     top_kols: list[str]
+    # ML features (added for snapshot collection)
+    avg_conviction: float
+    recency_score: float
+    _total_kols: int
 
 
 # === VADER ANALYZER (module-level singleton) ===
@@ -125,7 +157,7 @@ def _is_active_token(pairs: list[dict], symbol_raw: str) -> bool:
         sells = int(txns.get("sells", 0) or 0)
         total_txns = buys + sells
 
-        if vol_24h > 1000 or total_txns > 10:
+        if vol_24h > 100 or total_txns > 5:
             return True
 
     return False
@@ -181,18 +213,122 @@ def verify_tokens_exist(symbols: list[str]) -> set[str]:
     return verified
 
 
+# === ML MODEL (lazy-loaded) ===
+
+_ML_MODEL_PATH = Path(__file__).parent / "model_12h.json"
+_ML_META_PATH = Path(__file__).parent / "model_12h_meta.json"
+_ml_model = None
+_ml_features = None
+
+
+def _load_ml_model():
+    """Lazy-load XGBoost model if available."""
+    global _ml_model, _ml_features
+    if _ml_model is not None:
+        return _ml_model, _ml_features
+
+    if not _ML_MODEL_PATH.exists():
+        return None, None
+
+    try:
+        import xgboost as xgb
+        _ml_model = xgb.XGBClassifier()
+        _ml_model.load_model(str(_ML_MODEL_PATH))
+
+        # Load feature list from metadata
+        if _ML_META_PATH.exists():
+            with open(_ML_META_PATH, "r") as f:
+                meta = json.load(f)
+            _ml_features = meta.get("features", [])
+        else:
+            _ml_features = [
+                "mentions", "sentiment", "breadth", "avg_conviction", "recency_score",
+                "volume_24h_log", "liquidity_usd_log", "market_cap_log",
+                "txn_count_24h", "price_change_1h",
+                "risk_score", "top10_holder_pct", "insider_pct",
+            ]
+
+        logger.info("ML model loaded from %s (%d features)", _ML_MODEL_PATH, len(_ml_features))
+        return _ml_model, _ml_features
+    except Exception as e:
+        logger.warning("Failed to load ML model: %s — using manual scores", e)
+        _ml_model = None
+        _ml_features = None
+        return None, None
+
+
+def _apply_ml_scores(ranking: list[dict]) -> None:
+    """
+    If an XGBoost model is available, compute ML-based scores and override manual scores.
+    Falls back silently to manual scores if model is not available.
+    """
+    model, features = _load_ml_model()
+    if model is None or not features:
+        return
+
+    # Build feature matrix
+    rows = []
+    for token in ranking:
+        row = {}
+        for feat in features:
+            if feat == "volume_24h_log":
+                v = token.get("volume_24h")
+                row[feat] = np.log1p(float(v)) if v is not None and float(v) > 0 else np.nan
+            elif feat == "liquidity_usd_log":
+                v = token.get("liquidity_usd")
+                row[feat] = np.log1p(float(v)) if v is not None and float(v) > 0 else np.nan
+            elif feat == "market_cap_log":
+                v = token.get("market_cap")
+                row[feat] = np.log1p(float(v)) if v is not None and float(v) > 0 else np.nan
+            elif feat == "breadth":
+                uk = token.get("unique_kols", 0)
+                tk = token.get("_total_kols", 50)
+                row[feat] = uk / max(1, tk)
+            else:
+                val = token.get(feat)
+                row[feat] = float(val) if val is not None else np.nan
+        rows.append(row)
+
+    try:
+        import pandas as pd
+        X = pd.DataFrame(rows, columns=features)
+        probas = model.predict_proba(X)[:, 1]
+
+        for token, prob in zip(ranking, probas):
+            token["score_ml"] = int(prob * 100)
+            token["score"] = int(prob * 100)  # ML score replaces manual score
+
+        logger.info("ML scores applied to %d tokens", len(ranking))
+    except Exception as e:
+        logger.warning("ML scoring failed: %s — keeping manual scores", e)
+
+
 # === PUBLIC API ===
 
 def extract_tokens(text: str) -> list[str]:
-    """Extract $TOKEN symbols from message text."""
-    matches = TOKEN_REGEX.findall(text.upper())
+    """Extract $TOKEN symbols (case-insensitive) + bare ALL-CAPS tokens from text."""
+    matches = TOKEN_REGEX.findall(text)
     tokens = []
     seen: set[str] = set()
+
+    # 1) $-prefixed tokens (case-insensitive match, uppercased)
     for match in matches:
+        upper = match.upper()
+        symbol = f"${upper}"
+        if upper not in EXCLUDED_TOKENS and symbol not in seen:
+            tokens.append(symbol)
+            seen.add(symbol)
+
+    # 2) Bare ALL-CAPS tokens (3+ chars, no $ prefix)
+    bare_matches = BARE_TOKEN_REGEX.findall(text)
+    for match in bare_matches:
+        if match != match.upper():
+            continue  # Only exact ALL-CAPS words
         symbol = f"${match}"
         if match not in EXCLUDED_TOKENS and symbol not in seen:
             tokens.append(symbol)
             seen.add(symbol)
+
     return tokens
 
 
@@ -243,6 +379,7 @@ def aggregate_ranking(
         "sentiments": [],
         "groups": set(),
         "convictions": [],
+        "hours_ago": [],
     })
 
     for group_name, msgs in messages_dict.items():
@@ -265,7 +402,7 @@ def aggregate_ranking(
                 continue
 
             text = msg.get("text", "")
-            if not text or len(text) < 5:
+            if not text or len(text) < 3:
                 continue
 
             tokens = extract_tokens(text)
@@ -273,12 +410,14 @@ def aggregate_ranking(
                 continue
 
             sentiment = calculate_sentiment(text)
+            hours_ago = (now - date).total_seconds() / 3600
 
             for token in tokens:
                 token_data[token]["mentions"] += 1
                 token_data[token]["sentiments"].append(sentiment)
                 token_data[token]["groups"].add(group_name)
                 token_data[token]["convictions"].append(conviction)
+                token_data[token]["hours_ago"].append(hours_ago)
 
     # Score & rank
     ranking: list[TokenRanking] = []
@@ -307,21 +446,27 @@ def aggregate_ranking(
         )
         score = min(100, max(0, int(raw_score * 100)))
 
-        # Conviction mode: long-term holds — trust KOL consensus + conviction
+        # Conviction mode: sustained discussion across many KOLs
         raw_conviction = (
-            0.40 * kol_consensus
-            + 0.35 * conviction_score
-            + 0.15 * sentiment_score
-            + 0.10 * breadth_score
+            0.35 * kol_consensus
+            + 0.30 * conviction_score
+            + 0.10 * sentiment_score
+            + 0.25 * breadth_score
         )
         score_conviction = min(100, max(0, int(raw_conviction * 100)))
 
-        # Momentum mode: quick gains — trust recent buzz + positive sentiment
+        # Recency score: exponential decay — recent mentions weigh much more
+        # 1h ago ≈ 0.74, 3h ≈ 0.41, 6h ≈ 0.17, 12h ≈ 0.03
+        decay_lambda = 0.3
+        recency_weights = [math.exp(-decay_lambda * h) for h in data["hours_ago"]]
+        recency_score = min(1.0, sum(recency_weights) / 10)
+
+        # Momentum mode: what's trending NOW — driven by recency
         raw_momentum = (
-            0.35 * sentiment_score
-            + 0.30 * breadth_score
+            0.40 * recency_score
+            + 0.30 * sentiment_score
             + 0.20 * kol_consensus
-            + 0.15 * conviction_score
+            + 0.10 * breadth_score
         )
         score_momentum = min(100, max(0, int(raw_momentum * 100)))
 
@@ -345,6 +490,9 @@ def aggregate_ranking(
             "trend": trend,
             "change_24h": 0.0,
             "top_kols": top_kols,
+            "avg_conviction": round(avg_conviction, 2),
+            "recency_score": round(recency_score, 3),
+            "_total_kols": total_kols,
         })
 
     # Verify tokens exist on-chain via DexScreener (filters false positives)
@@ -356,6 +504,12 @@ def aggregate_ranking(
         filtered = before_count - len(ranking)
         if filtered > 0:
             logger.info("DexScreener filter removed %d fake tokens", filtered)
+
+    # Enrich with on-chain data (DexScreener + RugCheck)
+    enrich_tokens(ranking)
+
+    # Apply ML scoring if model is available (overrides manual score)
+    _apply_ml_scores(ranking)
 
     ranking.sort(key=lambda x: (x["score"], x["mentions"]), reverse=True)
     return ranking

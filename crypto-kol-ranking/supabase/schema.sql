@@ -247,3 +247,53 @@ INSERT INTO groups (name, conviction, category, active) VALUES
 ('SolanaGems', 7, 'solana', true),
 ('BaseBuilders', 7, 'base', true)
 ON CONFLICT (name) DO NOTHING;
+
+-- ============================================
+-- TOKEN SNAPSHOTS TABLE (ML Training Data)
+-- Each row = one token at one point in time, with features + eventual outcome labels
+-- ============================================
+CREATE TABLE IF NOT EXISTS token_snapshots (
+  id SERIAL PRIMARY KEY,
+  symbol VARCHAR(20) NOT NULL,
+  snapshot_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+  -- Telegram features (from pipeline.py)
+  mentions INTEGER,
+  sentiment DECIMAL(4,3),
+  breadth DECIMAL(4,3),
+  avg_conviction DECIMAL(4,2),
+  recency_score DECIMAL(4,3),
+
+  -- On-chain features (DexScreener)
+  volume_24h DECIMAL(18,2),
+  liquidity_usd DECIMAL(18,2),
+  market_cap DECIMAL(18,2),
+  txn_count_24h INTEGER,
+  price_change_1h DECIMAL(8,4),
+
+  -- Safety features (RugCheck)
+  risk_score INTEGER,
+  top10_holder_pct DECIMAL(5,2),
+  insider_pct DECIMAL(5,2),
+
+  -- Price at snapshot (for outcome calculation)
+  price_at_snapshot DECIMAL(18,10),
+  token_address VARCHAR(60),
+
+  -- Outcome labels (filled later by outcome_tracker)
+  price_after_6h DECIMAL(18,10),
+  price_after_12h DECIMAL(18,10),
+  price_after_24h DECIMAL(18,10),
+  max_price_24h DECIMAL(18,10),
+  did_2x_6h BOOLEAN,
+  did_2x_12h BOOLEAN,
+  did_2x_24h BOOLEAN
+);
+
+CREATE INDEX IF NOT EXISTS idx_snapshots_pending ON token_snapshots(snapshot_at)
+  WHERE did_2x_24h IS NULL;
+CREATE INDEX IF NOT EXISTS idx_snapshots_labeled ON token_snapshots(snapshot_at)
+  WHERE did_2x_24h IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_snapshots_symbol ON token_snapshots(symbol);
+
+ALTER TABLE token_snapshots ENABLE ROW LEVEL SECURITY;

@@ -204,3 +204,28 @@ Pour que le scraper tourne 24/7 :
 - **Render** : Background Worker
 - **Fly.io** : Machine always-on
 - **VPS** : n'importe quel VPS avec `tmux` ou `systemd`
+
+---
+
+## ML Scoring Algorithm — XGBoost + Data Enrichment (DONE)
+
+### Implementation Status
+
+- [x] **Step 1:** `scraper/enrich.py` — DexScreener + RugCheck enrichment module
+- [x] **Step 2:** Supabase migration — `token_snapshots` table created
+- [x] **Step 3:** `scraper/push_to_supabase.py` — Added `insert_snapshots()` function
+- [x] **Step 4:** `scraper/pipeline.py` — Calls `enrich_tokens()` + exposes ML features
+- [x] **Step 5:** `scraper/outcome_tracker.py` — Fills price labels after 6h/12h/24h
+- [x] **Step 6:** `scraper/safe_scraper.py` — Calls `insert_snapshots()` + `fill_outcomes()` in loop
+- [x] **Step 7:** `scraper/train_model.py` — XGBoost + Optuna training script
+- [x] **Step 8:** `scraper/pipeline.py` — ML model integration (auto-loads model_12h.json)
+- [x] **Step 9:** `scraper/requirements.txt` — Added xgboost, optuna, pandas, numpy, scikit-learn
+- [x] **Step 10:** `supabase/schema.sql` — Documented token_snapshots table
+
+### Next Steps (Manual)
+
+1. `pip install -r scraper/requirements.txt` — install new ML dependencies
+2. Run scraper normally — starts collecting snapshots + enrichment automatically
+3. Wait ~1-2 weeks for ~200+ labeled snapshots
+4. `python scraper/train_model.py --horizon 12h --trials 100` — train first model
+5. Model auto-loads on next scraper cycle (pipeline.py detects model_12h.json)
