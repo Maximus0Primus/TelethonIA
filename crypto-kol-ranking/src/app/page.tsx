@@ -171,23 +171,6 @@ export default function Home() {
 
           <CyclingHeading />
 
-          {/* Debug button — remove in production */}
-          {process.env.NODE_ENV === "development" && (
-            <div className="fixed bottom-6 right-6 z-50">
-              <button
-                onClick={() => runAnimation()}
-                disabled={animationPhase !== "idle"}
-                className="px-3 py-1.5 text-xs font-mono rounded-lg border border-[#00ff41]/30 bg-[#00ff41]/10 text-[#00ff41] hover:bg-[#00ff41]/20 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-              >
-                {animationPhase === "idle"
-                  ? "Trigger Update"
-                  : animationPhase === "glitching"
-                  ? "Glitching..."
-                  : "Shuffling..."}
-              </button>
-            </div>
-          )}
-
           {/* Loading State */}
           {loading && tokens.length === 0 ? (
             <div className="flex items-center justify-center min-h-[50vh]">

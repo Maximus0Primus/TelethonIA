@@ -1,8 +1,9 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect } from "react";
 import { motion, useScroll, useTransform } from "framer-motion";
 import { GlitchText } from "./GlitchText";
+import { useAudio } from "@/components/AudioProvider";
 
 const STORAGE_KEY = "cryptosensus_intro_seen_v4";
 
@@ -33,20 +34,11 @@ export function HeroSection({ onIntroComplete }: HeroSectionProps) {
   const [hasSeenIntro, setHasSeenIntro] = useState(false);
   const [step, setStep] = useState(0);
 
-  const startSoundRef = useRef<HTMLAudioElement | null>(null);
-  const loopSoundRef = useRef<HTMLAudioElement | null>(null);
-  const audioUnlockedRef = useRef(false);
+  const { playStart, playLoop, unlock, unlocked } = useAudio();
 
   const { scrollY } = useScroll();
   const opacity = useTransform(scrollY, [0, 400], [1, 0]);
   const scale = useTransform(scrollY, [0, 400], [1, 0.92]);
-
-  // Initialize audio elements
-  useEffect(() => {
-    startSoundRef.current = new Audio("/audio/start.wav");
-    loopSoundRef.current = new Audio("/audio/loop.wav");
-    loopSoundRef.current.loop = true;
-  }, []);
 
   // Mount + localStorage check
   useEffect(() => {
@@ -59,30 +51,18 @@ export function HeroSection({ onIntroComplete }: HeroSectionProps) {
 
   // Click to start intro — user gesture unlocks audio playback
   const handleStart = () => {
-    if (audioUnlockedRef.current) return;
-    audioUnlockedRef.current = true;
-
-    // Play start sound directly in click context (step 1 sound)
-    startSoundRef.current?.play().catch(() => {});
-
-    // Warm up loop element so it can be played later programmatically
-    if (loopSoundRef.current) {
-      loopSoundRef.current.volume = 0;
-      loopSoundRef.current.play().then(() => {
-        loopSoundRef.current!.pause();
-        loopSoundRef.current!.currentTime = 0;
-        loopSoundRef.current!.volume = 1;
-      }).catch(() => {});
-    }
-
+    if (unlocked) return;
+    unlock();
+    playStart();
     setStep(1);
   };
 
   // Returning visitor: click anywhere to start ambient loop
   const handleUnlockLoop = () => {
-    if (audioUnlockedRef.current) return;
-    audioUnlockedRef.current = true;
-    loopSoundRef.current?.play().catch(() => {});
+    if (unlocked) return;
+    unlock();
+    // Small delay to let the warm-up finish
+    setTimeout(() => playLoop(), 100);
   };
 
   // Step progression + sound triggers
@@ -96,15 +76,13 @@ export function HeroSection({ onIntroComplete }: HeroSectionProps) {
     // step 0: waiting for click (handleStart)
     if (step === 0) return;
 
-    // step 1: sound already played by handleStart
     // step 3: replay start sound
-    if (step === 3 && startSoundRef.current) {
-      startSoundRef.current.currentTime = 0;
-      startSoundRef.current.play().catch(() => {});
+    if (step === 3) {
+      playStart();
     }
     // step 5: start ambient loop
     if (step === 5) {
-      loopSoundRef.current?.play().catch(() => {});
+      playLoop();
     }
 
     const ms = STEP_TIMINGS[step];
