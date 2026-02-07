@@ -51,11 +51,10 @@ export function HeroSection({ onIntroComplete }: HeroSectionProps) {
   // Mount + localStorage check
   useEffect(() => {
     setMounted(true);
-    // TODO: restore localStorage check after testing
-    // const seen = localStorage.getItem(STORAGE_KEY);
-    // if (seen) {
-    //   setHasSeenIntro(true);
-    // }
+    const seen = localStorage.getItem(STORAGE_KEY);
+    if (seen) {
+      setHasSeenIntro(true);
+    }
   }, []);
 
   // Click to start intro — user gesture unlocks audio playback
