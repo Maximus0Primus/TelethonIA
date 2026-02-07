@@ -5,22 +5,20 @@ import { motion, AnimatePresence } from "framer-motion";
 import { LayoutGrid, List, SlidersHorizontal } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-export type TimeWindow = "3h" | "6h" | "12h" | "24h" | "48h" | "7d";
-
-const TIME_WINDOWS: TimeWindow[] = ["3h", "6h", "12h", "24h", "48h", "7d"];
+export type ScoringMode = "conviction" | "momentum";
 
 interface ViewControlsProps {
   viewMode: "grid" | "list";
   onViewModeChange: (mode: "grid" | "list") => void;
-  timeWindow: TimeWindow;
-  onTimeWindowChange: (window: TimeWindow) => void;
+  scoringMode: ScoringMode;
+  onScoringModeChange: (mode: ScoringMode) => void;
 }
 
 export function ViewControls({
   viewMode,
   onViewModeChange,
-  timeWindow,
-  onTimeWindowChange,
+  scoringMode,
+  onScoringModeChange,
 }: ViewControlsProps) {
   const [filterOpen, setFilterOpen] = useState(false);
   const filterRef = useRef<HTMLDivElement>(null);
@@ -74,7 +72,7 @@ export function ViewControls({
         </div>
       </motion.div>
 
-      {/* Filter Button + Time Window Popover - Bottom Right */}
+      {/* Filter Button + Scoring Mode Popover - Bottom Right */}
       <motion.div
         ref={filterRef}
         initial={{ opacity: 0, x: 20 }}
@@ -91,23 +89,34 @@ export function ViewControls({
               transition={{ duration: 0.15 }}
               className="glass-control rounded-lg p-1.5 flex items-center gap-0.5"
             >
-              {TIME_WINDOWS.map((w) => (
-                <button
-                  key={w}
-                  onClick={() => {
-                    onTimeWindowChange(w);
-                    setFilterOpen(false);
-                  }}
-                  className={cn(
-                    "px-3 py-1.5 text-xs font-mono rounded-md transition-colors",
-                    timeWindow === w
-                      ? "bg-white text-black"
-                      : "text-white/60 hover:text-white"
-                  )}
-                >
-                  {w}
-                </button>
-              ))}
+              <button
+                onClick={() => {
+                  onScoringModeChange("conviction");
+                  setFilterOpen(false);
+                }}
+                className={cn(
+                  "px-4 py-2 text-xs font-medium rounded-md transition-colors whitespace-nowrap",
+                  scoringMode === "conviction"
+                    ? "bg-white text-black"
+                    : "text-white/60 hover:text-white"
+                )}
+              >
+                Conviction
+              </button>
+              <button
+                onClick={() => {
+                  onScoringModeChange("momentum");
+                  setFilterOpen(false);
+                }}
+                className={cn(
+                  "px-4 py-2 text-xs font-medium rounded-md transition-colors whitespace-nowrap",
+                  scoringMode === "momentum"
+                    ? "bg-white text-black"
+                    : "text-white/60 hover:text-white"
+                )}
+              >
+                Quick Gains
+              </button>
             </motion.div>
           )}
         </AnimatePresence>
@@ -122,7 +131,7 @@ export function ViewControls({
           )}
         >
           <SlidersHorizontal className="h-4 w-4" />
-          <span>{timeWindow}</span>
+          <span>{scoringMode === "conviction" ? "Conviction" : "Quick Gains"}</span>
         </button>
       </motion.div>
     </>

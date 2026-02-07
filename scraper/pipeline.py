@@ -62,6 +62,8 @@ class TokenStats(TypedDict):
 class TokenRanking(TypedDict):
     symbol: str
     score: int
+    score_conviction: int
+    score_momentum: int
     mentions: int
     unique_kols: int
     sentiment: float
@@ -192,6 +194,7 @@ def aggregate_ranking(
 
         breadth_score = min(1.0, data["mentions"] / 30)
 
+        # Balanced score (legacy, kept as default)
         raw_score = (
             0.35 * kol_consensus
             + 0.25 * sentiment_score
@@ -199,6 +202,24 @@ def aggregate_ranking(
             + 0.15 * breadth_score
         )
         score = min(100, max(0, int(raw_score * 100)))
+
+        # Conviction mode: long-term holds — trust KOL consensus + conviction
+        raw_conviction = (
+            0.40 * kol_consensus
+            + 0.35 * conviction_score
+            + 0.15 * sentiment_score
+            + 0.10 * breadth_score
+        )
+        score_conviction = min(100, max(0, int(raw_conviction * 100)))
+
+        # Momentum mode: quick gains — trust recent buzz + positive sentiment
+        raw_momentum = (
+            0.35 * sentiment_score
+            + 0.30 * breadth_score
+            + 0.20 * kol_consensus
+            + 0.15 * conviction_score
+        )
+        score_momentum = min(100, max(0, int(raw_momentum * 100)))
 
         trend = "up" if avg_sentiment > 0.15 else ("down" if avg_sentiment < -0.15 else "stable")
 
@@ -212,6 +233,8 @@ def aggregate_ranking(
         ranking.append({
             "symbol": symbol,
             "score": score,
+            "score_conviction": score_conviction,
+            "score_momentum": score_momentum,
             "mentions": data["mentions"],
             "unique_kols": unique_kols,
             "sentiment": round(avg_sentiment, 3),

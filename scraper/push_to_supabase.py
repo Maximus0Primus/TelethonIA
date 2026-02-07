@@ -41,6 +41,8 @@ def upsert_tokens(
             {
                 "symbol": t["symbol"],
                 "score": t["score"],
+                "score_conviction": t.get("score_conviction", t["score"]),
+                "score_momentum": t.get("score_momentum", t["score"]),
                 "mentions": t["mentions"],
                 "unique_kols": t["unique_kols"],
                 "sentiment": t["sentiment"],

@@ -6,7 +6,7 @@ import { FloatingNav } from "@/components/layout/FloatingNav";
 import { HeroSection } from "@/components/layout/HeroSection";
 import { CyclingHeading } from "@/components/layout/CyclingHeading";
 import { ViewControls } from "@/components/layout/ViewControls";
-import type { TimeWindow } from "@/components/layout/ViewControls";
+import type { ScoringMode } from "@/components/layout/ViewControls";
 import { TokenGrid } from "@/components/tokens/TokenGrid";
 import type { TokenCardData } from "@/components/tokens/TokenCard";
 import type { AnimationPhase } from "@/components/tokens/TokenCard";
@@ -20,7 +20,7 @@ interface ApiResponse {
     total: number;
     hasMore: boolean;
   };
-  timeWindow: string;
+  mode: string;
   stats: {
     totalTokens: number;
     totalMentions: number;
@@ -37,7 +37,7 @@ export default function Home() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<"grid" | "list">("grid");
-  const [timeWindow, setTimeWindow] = useState<TimeWindow>("24h");
+  const [scoringMode, setScoringMode] = useState<ScoringMode>("conviction");
   const [introDone, setIntroDone] = useState(false);
   const [animationPhase, setAnimationPhase] = useState<AnimationPhase>("idle");
   const introHandled = useRef(false);
@@ -48,9 +48,9 @@ export default function Home() {
     setIntroDone(true);
   }, []);
 
-  const fetchRanking = useCallback(async (window?: TimeWindow): Promise<TokenCardData[]> => {
-    const w = window || timeWindow;
-    const response = await fetch(`/api/ranking?window=${w}&limit=30`);
+  const fetchRanking = useCallback(async (mode?: ScoringMode): Promise<TokenCardData[]> => {
+    const m = mode || scoringMode;
+    const response = await fetch(`/api/ranking?mode=${m}&limit=30`);
     const data: ApiResponse = await response.json();
 
     if (!response.ok) {
@@ -67,7 +67,7 @@ export default function Home() {
       trend: token.trend as "up" | "down" | "stable",
       change24h: token.change24h,
     }));
-  }, [timeWindow]);
+  }, [scoringMode]);
 
   // Initial load
   useEffect(() => {
@@ -139,8 +139,8 @@ export default function Home() {
         <ViewControls
           viewMode={viewMode}
           onViewModeChange={setViewMode}
-          timeWindow={timeWindow}
-          onTimeWindowChange={setTimeWindow}
+          scoringMode={scoringMode}
+          onScoringModeChange={setScoringMode}
         />
 
         <main>
