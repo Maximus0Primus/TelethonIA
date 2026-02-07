@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_API_ID = int(os.environ["TELEGRAM_API_ID"])
 TELEGRAM_API_HASH = os.environ["TELEGRAM_API_HASH"]
-MESSAGES_PER_GROUP = 50
+MESSAGES_PER_GROUP = 100
 
 
 def _get_session():
