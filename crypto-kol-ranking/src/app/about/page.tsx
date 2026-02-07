@@ -78,8 +78,8 @@ export default function AboutPage() {
             className="manifesto-section pt-12 pb-16 border-t border-black/10"
           >
             <p className="text-2xl sm:text-3xl md:text-4xl leading-relaxed text-black/70">
-              We track sentiment from{" "}
-              <span className="text-black font-medium">50+ crypto KOLs</span>{" "}
+              We track data from{" "}
+              <span className="text-black font-medium">degens</span>{" "}
               to surface the tokens that matter.
             </p>
           </motion.section>
@@ -101,34 +101,6 @@ export default function AboutPage() {
             initial={{ opacity: 0, y: 30 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.6, delay: 0.4 }}
-            className="pt-12 pb-16 border-t border-black/10"
-          >
-            <div className="grid sm:grid-cols-3 gap-8">
-              <div>
-                <h3 className="text-sm font-medium text-black/40 uppercase tracking-wider mb-3">
-                  KOLs Tracked
-                </h3>
-                <p className="text-4xl sm:text-5xl font-bold text-black">50+</p>
-              </div>
-              <div>
-                <h3 className="text-sm font-medium text-black/40 uppercase tracking-wider mb-3">
-                  Messages Analyzed
-                </h3>
-                <p className="text-4xl sm:text-5xl font-bold text-black">24h</p>
-              </div>
-              <div>
-                <h3 className="text-sm font-medium text-black/40 uppercase tracking-wider mb-3">
-                  Sentiment Methods
-                </h3>
-                <p className="text-4xl sm:text-5xl font-bold text-black">3</p>
-              </div>
-            </div>
-          </motion.section>
-
-          <motion.section
-            initial={{ opacity: 0, y: 30 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.6, delay: 0.5 }}
             className="pt-12 border-t border-black/10"
           >
             <h3 className="text-sm font-medium text-black/40 uppercase tracking-wider mb-6">
@@ -136,16 +108,16 @@ export default function AboutPage() {
             </h3>
             <div className="space-y-4">
               <p className="text-lg text-black/70">
-                <span className="text-black font-medium">1.</span> Scrape messages from top crypto Telegram groups
+                <span className="text-black font-medium">1.</span> We listen to what the smartest degens are talking about
               </p>
               <p className="text-lg text-black/70">
-                <span className="text-black font-medium">2.</span> Extract token mentions and analyze sentiment using VADER, CryptoBERT, and custom lexicon
+                <span className="text-black font-medium">2.</span> Our algorithm detects which tokens are gaining real traction
               </p>
               <p className="text-lg text-black/70">
-                <span className="text-black font-medium">3.</span> Weight by KOL conviction score and aggregate into consensus rankings
+                <span className="text-black font-medium">3.</span> Each token gets a conviction score from 0 to 100
               </p>
               <p className="text-lg text-black/70">
-                <span className="text-black font-medium">4.</span> Display real-time insights in a clean, actionable format
+                <span className="text-black font-medium">4.</span> You see what matters, updated automatically
               </p>
             </div>
           </motion.section>

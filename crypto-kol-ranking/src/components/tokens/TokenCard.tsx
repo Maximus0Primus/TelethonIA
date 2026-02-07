@@ -300,9 +300,9 @@ export function TokenCard({
               </span>
             </div>
 
-            {/* KOL count */}
+            {/* Mentions count */}
             <span className="text-xs text-muted-foreground">
-              {token.uniqueKols} KOLs
+              {token.mentions} mentions
             </span>
           </div>
 
