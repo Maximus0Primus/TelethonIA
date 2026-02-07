@@ -300,10 +300,6 @@ export function TokenCard({
               </span>
             </div>
 
-            {/* Mentions count */}
-            <span className="text-xs text-muted-foreground">
-              {token.mentions} mentions
-            </span>
           </div>
 
           {/* Subtle hover border glow */}
