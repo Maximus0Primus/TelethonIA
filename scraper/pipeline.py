@@ -32,8 +32,6 @@ EXCLUDED_TOKENS = {
     "URL", "API", "NFT", "DAO", "DEFI",
     "GMT", "UTC", "EST", "PST",
     "DM", "RT", "TG", "CT",
-    # User-reported false positives
-    "TESLA",
 }
 
 # === CRYPTO LEXICON ===
@@ -112,11 +110,33 @@ def _save_token_cache(cache: dict[str, bool]) -> None:
         json.dump(cache, f, indent=2)
 
 
+def _is_active_token(pairs: list[dict], symbol_raw: str) -> bool:
+    """
+    Check if any trading pair for this symbol shows real recent activity.
+    Criteria: exact symbol match + 24h volume > $1000 OR 24h transactions > 10.
+    """
+    for p in pairs:
+        if p.get("baseToken", {}).get("symbol", "").upper() != symbol_raw:
+            continue
+
+        vol_24h = float(p.get("volume", {}).get("h24", 0) or 0)
+        txns = p.get("txns", {}).get("h24", {})
+        buys = int(txns.get("buys", 0) or 0)
+        sells = int(txns.get("sells", 0) or 0)
+        total_txns = buys + sells
+
+        if vol_24h > 1000 or total_txns > 10:
+            return True
+
+    return False
+
+
 def verify_tokens_exist(symbols: list[str]) -> set[str]:
     """
-    Check which token symbols have active trading pairs on DexScreener.
-    Returns the set of symbols that are verified as real tokens.
-    Uses a persistent cache to avoid re-checking known tokens.
+    Check which token symbols have active trading on DexScreener.
+    A token is kept only if it has real recent activity (volume or transactions
+    in the last 24h), not just leftover liquidity from a dead pair.
+    Uses a persistent cache to avoid re-checking known tokens within a cycle.
     """
     cache = _load_token_cache()
     verified: set[str] = set()
@@ -141,27 +161,20 @@ def verify_tokens_exist(symbols: list[str]) -> set[str]:
             if resp.status_code == 200:
                 data = resp.json()
                 pairs = data.get("pairs") or []
-                # Check if any pair has this exact symbol with real liquidity
-                found = any(
-                    p.get("baseToken", {}).get("symbol", "").upper() == raw
-                    and float(p.get("liquidity", {}).get("usd", 0) or 0) > 500
-                    for p in pairs
-                )
+                found = _is_active_token(pairs, raw)
                 cache[raw] = found
                 if found:
                     verified.add(sym)
-                    logger.info("Token %s verified on DexScreener", sym)
+                    logger.info("Token %s verified (active trading)", sym)
                 else:
-                    logger.info("Token %s NOT found on DexScreener — filtered out", sym)
+                    logger.info("Token %s filtered out (no recent activity)", sym)
             else:
-                logger.warning("DexScreener API %d for %s — skipping filter", resp.status_code, sym)
-                # Don't cache errors — let it retry next cycle
+                logger.warning("DexScreener API %d for %s — keeping token", resp.status_code, sym)
                 verified.add(sym)
         except requests.RequestException as e:
-            logger.warning("DexScreener request failed for %s: %s — keeping token", sym, e)
+            logger.warning("DexScreener failed for %s: %s — keeping token", sym, e)
             verified.add(sym)
 
-        # Rate limit: ~0.5s between requests
         time.sleep(0.5)
 
     _save_token_cache(cache)
