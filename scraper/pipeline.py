@@ -21,10 +21,10 @@ logger = logging.getLogger(__name__)
 TOKEN_REGEX = re.compile(r"(?<![A-Z0-9_])\$([A-Z][A-Z0-9]{1,14})\b")
 
 EXCLUDED_TOKENS = {
-    # Stablecoins & majors
+    # Stablecoins & majors (never memecoins)
     "USD", "USDT", "USDC", "BUSD", "DAI", "TUSD",
     "SOL", "ETH", "BTC", "BNB", "XRP", "ADA", "DOT", "AVAX", "MATIC",
-    # Crypto jargon
+    # Crypto jargon (always false positives in KOL messages)
     "CA", "LP", "MC", "ATH", "ATL", "FDV", "TVL",
     "PNL", "ROI", "APY", "APR", "CRYPTO", "DEX", "CEX",
     "ICO", "IDO", "IEO", "TGE", "KOL",
@@ -32,15 +32,8 @@ EXCLUDED_TOKENS = {
     "URL", "API", "NFT", "DAO", "DEFI",
     "GMT", "UTC", "EST", "PST",
     "DM", "RT", "TG", "CT",
-    # Stock tickers / common false positives
-    "TESLA", "AAPL", "GOOGL", "GOOG", "AMZN", "MSFT", "META",
-    "NVDA", "TSLA", "AMD", "INTC", "NFLX", "PYPL", "COIN",
-    "SPY", "QQQ", "IWM", "VIX",
-    # Common English words with $ prefix
-    "MONEY", "CASH", "PROFIT", "LOSS", "PRICE", "COST",
-    "FREE", "WIN", "WINS", "PLAY", "GAME",
-    "SEND", "HOLD", "HODL", "LONG", "SHORT",
-    "NEW", "HOT", "TOP", "BIG", "MAX", "PRO",
+    # User-reported false positives
+    "TESLA",
 }
 
 # === CRYPTO LEXICON ===
