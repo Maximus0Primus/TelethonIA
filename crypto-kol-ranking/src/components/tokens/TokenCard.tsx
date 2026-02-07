@@ -257,10 +257,11 @@ export function TokenCard({
           )}
 
           {/* Symbol */}
-          <div>
+          <div className="overflow-hidden">
             <span
               className={cn(
-                "text-2xl sm:text-3xl font-bold",
+                "font-bold block truncate",
+                token.symbol.length > 8 ? "text-lg sm:text-xl" : "text-2xl sm:text-3xl",
                 isGlitching
                   ? "text-[#00ff41] glitch-text-shadow"
                   : "text-white"
