@@ -4,24 +4,43 @@ Reusable functions called by the scraper's main loop.
 """
 
 import re
+import time
+import logging
 from datetime import datetime, timezone, timedelta
 from collections import defaultdict
 from typing import TypedDict
+from pathlib import Path
 
+import requests
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+
+logger = logging.getLogger(__name__)
 
 # === TOKEN EXTRACTION ===
 
 TOKEN_REGEX = re.compile(r"(?<![A-Z0-9_])\$([A-Z][A-Z0-9]{1,14})\b")
 
 EXCLUDED_TOKENS = {
-    "USD", "USDT", "USDC", "SOL", "ETH", "BTC", "BNB",
+    # Stablecoins & majors
+    "USD", "USDT", "USDC", "BUSD", "DAI", "TUSD",
+    "SOL", "ETH", "BTC", "BNB", "XRP", "ADA", "DOT", "AVAX", "MATIC",
+    # Crypto jargon
     "CA", "LP", "MC", "ATH", "ATL", "FDV", "TVL",
-    "PNL", "ROI", "APY", "APR", "CRYPTO",
-    "CEO", "COO", "CTO",
-    "URL", "API", "NFT", "DAO",
+    "PNL", "ROI", "APY", "APR", "CRYPTO", "DEX", "CEX",
+    "ICO", "IDO", "IEO", "TGE", "KOL",
+    "CEO", "COO", "CTO", "CFO",
+    "URL", "API", "NFT", "DAO", "DEFI",
     "GMT", "UTC", "EST", "PST",
-    "DM", "RT", "TG",
+    "DM", "RT", "TG", "CT",
+    # Stock tickers / common false positives
+    "TESLA", "AAPL", "GOOGL", "GOOG", "AMZN", "MSFT", "META",
+    "NVDA", "TSLA", "AMD", "INTC", "NFLX", "PYPL", "COIN",
+    "SPY", "QQQ", "IWM", "VIX",
+    # Common English words with $ prefix
+    "MONEY", "CASH", "PROFIT", "LOSS", "PRICE", "COST",
+    "FREE", "WIN", "WINS", "PLAY", "GAME",
+    "SEND", "HOLD", "HODL", "LONG", "SHORT",
+    "NEW", "HOT", "TOP", "BIG", "MAX", "PRO",
 }
 
 # === CRYPTO LEXICON ===
@@ -75,6 +94,85 @@ class TokenRanking(TypedDict):
 # === VADER ANALYZER (module-level singleton) ===
 
 _vader = SentimentIntensityAnalyzer()
+
+# === DEXSCREENER TOKEN VERIFICATION ===
+
+_DEXSCREENER_CACHE_FILE = Path(__file__).parent / "token_cache.json"
+_DEXSCREENER_URL = "https://api.dexscreener.com/latest/dex/search"
+
+
+def _load_token_cache() -> dict[str, bool]:
+    """Load cached token verification results. { "SYMBOL": true/false }"""
+    import json
+    if _DEXSCREENER_CACHE_FILE.exists():
+        try:
+            with open(_DEXSCREENER_CACHE_FILE, "r") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
+
+
+def _save_token_cache(cache: dict[str, bool]) -> None:
+    import json
+    with open(_DEXSCREENER_CACHE_FILE, "w") as f:
+        json.dump(cache, f, indent=2)
+
+
+def verify_tokens_exist(symbols: list[str]) -> set[str]:
+    """
+    Check which token symbols have active trading pairs on DexScreener.
+    Returns the set of symbols that are verified as real tokens.
+    Uses a persistent cache to avoid re-checking known tokens.
+    """
+    cache = _load_token_cache()
+    verified: set[str] = set()
+    to_check: list[str] = []
+
+    for sym in symbols:
+        raw = sym.lstrip("$")
+        if raw in cache:
+            if cache[raw]:
+                verified.add(sym)
+        else:
+            to_check.append(sym)
+
+    for sym in to_check:
+        raw = sym.lstrip("$")
+        try:
+            resp = requests.get(
+                _DEXSCREENER_URL,
+                params={"q": raw},
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                pairs = data.get("pairs") or []
+                # Check if any pair has this exact symbol with real liquidity
+                found = any(
+                    p.get("baseToken", {}).get("symbol", "").upper() == raw
+                    and float(p.get("liquidity", {}).get("usd", 0) or 0) > 500
+                    for p in pairs
+                )
+                cache[raw] = found
+                if found:
+                    verified.add(sym)
+                    logger.info("Token %s verified on DexScreener", sym)
+                else:
+                    logger.info("Token %s NOT found on DexScreener — filtered out", sym)
+            else:
+                logger.warning("DexScreener API %d for %s — skipping filter", resp.status_code, sym)
+                # Don't cache errors — let it retry next cycle
+                verified.add(sym)
+        except requests.RequestException as e:
+            logger.warning("DexScreener request failed for %s: %s — keeping token", sym, e)
+            verified.add(sym)
+
+        # Rate limit: ~0.5s between requests
+        time.sleep(0.5)
+
+    _save_token_cache(cache)
+    return verified
 
 
 # === PUBLIC API ===
@@ -242,6 +340,16 @@ def aggregate_ranking(
             "change_24h": 0.0,
             "top_kols": top_kols,
         })
+
+    # Verify tokens exist on-chain via DexScreener (filters false positives)
+    if ranking:
+        all_symbols = [r["symbol"] for r in ranking]
+        verified = verify_tokens_exist(all_symbols)
+        before_count = len(ranking)
+        ranking = [r for r in ranking if r["symbol"] in verified]
+        filtered = before_count - len(ranking)
+        if filtered > 0:
+            logger.info("DexScreener filter removed %d fake tokens", filtered)
 
     ranking.sort(key=lambda x: (x["score"], x["mentions"]), reverse=True)
     return ranking
