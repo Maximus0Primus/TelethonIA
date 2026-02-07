@@ -17,7 +17,7 @@ TOKEN_REGEX = re.compile(r"(?<![A-Z0-9_])\$([A-Z][A-Z0-9]{1,14})\b")
 EXCLUDED_TOKENS = {
     "USD", "USDT", "USDC", "SOL", "ETH", "BTC", "BNB",
     "CA", "LP", "MC", "ATH", "ATL", "FDV", "TVL",
-    "PNL", "ROI", "APY", "APR",
+    "PNL", "ROI", "APY", "APR", "CRYPTO",
     "CEO", "COO", "CTO",
     "URL", "API", "NFT", "DAO",
     "GMT", "UTC", "EST", "PST",
