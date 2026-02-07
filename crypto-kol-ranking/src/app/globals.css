@@ -1,0 +1,268 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+/* Phantom Dark Theme */
+:root {
+  /* Base - Pure Black */
+  --background: #000000;
+  --foreground: #FFFFFF;
+
+  /* Cards - Dark surfaces */
+  --card: #111111;
+  --card-foreground: #FFFFFF;
+
+  /* Popover */
+  --popover: #111111;
+  --popover-foreground: #FFFFFF;
+
+  /* Primary - White accent */
+  --primary: #FFFFFF;
+  --primary-foreground: #000000;
+  --primary-light: #888888;
+
+  /* Secondary */
+  --secondary: #1A1A1A;
+  --secondary-foreground: #FFFFFF;
+
+  /* Muted */
+  --muted: #1A1A1A;
+  --muted-foreground: #888888;
+
+  /* Accent */
+  --accent: rgba(255, 255, 255, 0.05);
+  --accent-foreground: #FFFFFF;
+
+  /* Destructive */
+  --destructive: #EF4444;
+  --destructive-foreground: #FFFFFF;
+
+  /* Borders */
+  --border: #222222;
+  --input: #222222;
+  --ring: #FFFFFF;
+  --card-border: #222222;
+
+  /* Chart colors */
+  --chart-1: #FFFFFF;
+  --chart-2: #22C55E;
+  --chart-3: #EF4444;
+  --chart-4: #888888;
+  --chart-5: #444444;
+
+  /* Custom semantic colors */
+  --bullish: #22C55E;
+  --bearish: #EF4444;
+
+  /* Sidebar */
+  --sidebar: #000000;
+  --sidebar-foreground: #FFFFFF;
+  --sidebar-primary: #FFFFFF;
+  --sidebar-primary-foreground: #000000;
+  --sidebar-accent: rgba(255, 255, 255, 0.05);
+  --sidebar-accent-foreground: #FFFFFF;
+  --sidebar-border: #222222;
+  --sidebar-ring: #FFFFFF;
+
+  /* Radius */
+  --radius: 0.75rem;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary-light: var(--primary-light);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-card-border: var(--card-border);
+
+  /* Chart colors */
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+
+  /* Custom colors */
+  --color-bullish: var(--bullish);
+  --color-bearish: var(--bearish);
+
+  /* Fonts */
+  --font-sans: var(--font-inter), system-ui, sans-serif;
+  --font-mono: var(--font-jetbrains-mono), ui-monospace, monospace;
+
+  /* Radius */
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 8px);
+
+  /* Sidebar */
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  html {
+    color-scheme: dark;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-feature-settings: "rlig" 1, "calt" 1;
+  }
+
+  /* Tabular numbers for data displays */
+  .tabular-nums {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum" 1;
+  }
+}
+
+@layer utilities {
+  /* Dark surface card */
+  .surface-card {
+    background: #111111;
+    border: 1px solid #222222;
+  }
+}
+
+/* Custom scrollbar - Dark theme */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #0A0A0A;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #333333;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #444444;
+}
+
+/* Selection - White on dark */
+::selection {
+  background: rgba(255, 255, 255, 0.2);
+  color: #FFFFFF;
+}
+
+/* 3D Grid perspective */
+.perspective-container {
+  perspective: 1200px;
+  perspective-origin: 50% 0%;
+}
+
+.grid-3d {
+  transform-style: preserve-3d;
+  transform: rotateX(12deg);
+}
+
+/* Floating nav glass effect */
+.glass-nav {
+  background: rgba(17, 17, 17, 0.8);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+/* View controls glass */
+.glass-control {
+  background: rgba(17, 17, 17, 0.6);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+/* Token card hover effect */
+.token-card {
+  transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.token-card:hover {
+  transform: translateY(-4px) translateZ(10px);
+  border-color: rgba(255, 255, 255, 0.2);
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4);
+}
+
+/* Background grid pattern */
+.bg-grid-pattern {
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
+  background-size: 60px 60px;
+}
+
+/* Glitch animation keyframes */
+@keyframes scanlines {
+  0% { background-position: 0 0; }
+  100% { background-position: 0 4px; }
+}
+
+.scanlines {
+  background: repeating-linear-gradient(
+    0deg,
+    rgba(0, 255, 65, 0.03) 0px,
+    rgba(0, 255, 65, 0.03) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+  animation: scanlines 0.15s steps(2) infinite;
+}
+
+@keyframes glitch-border {
+  0%, 100% { border-color: rgba(0, 255, 65, 0.3); }
+  50% { border-color: rgba(255, 0, 64, 0.3); }
+}
+
+.glitch-active {
+  animation: glitch-border 0.1s steps(2) infinite;
+  box-shadow: 0 0 15px rgba(0, 255, 65, 0.15);
+}
+
+.glitch-text-shadow {
+  text-shadow:
+    2px 0 rgba(255, 0, 64, 0.4),
+    -2px 0 rgba(0, 100, 255, 0.4);
+}
+
+/* Manifesto page styles */
+.manifesto-section {
+  @apply border-t border-border/50;
+}
+
+.manifesto-highlight {
+  @apply text-foreground font-medium;
+}

@@ -1,0 +1,5084 @@
+{
+  "updated_at": "2026-02-04T23:28:48.081686+00:00",
+  "stats": {
+    "totalTokens": 67,
+    "totalMentions": 134,
+    "avgSentiment": 31.1,
+    "totalKols": 61
+  },
+  "tokens": {
+    "3h": [
+      {
+        "rank": 1,
+        "symbol": "$YEE",
+        "score": 39,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.805,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "dylansdegens"
+        ]
+      },
+      {
+        "rank": 2,
+        "symbol": "$BLOWFISH",
+        "score": 33,
+        "mentions": 3,
+        "uniqueKols": 2,
+        "sentiment": 0.261,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "spidersjournal",
+          "veigarcalls"
+        ]
+      },
+      {
+        "rank": 3,
+        "symbol": "$CLAWNCH",
+        "score": 31,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.135,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "spidersjournal"
+        ]
+      },
+      {
+        "rank": 4,
+        "symbol": "$PENGUIN",
+        "score": 29,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.0,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "inside_calls"
+        ]
+      },
+      {
+        "rank": 5,
+        "symbol": "$GOYIM",
+        "score": 26,
+        "mentions": 2,
+        "uniqueKols": 2,
+        "sentiment": -0.346,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "MaybachCalls",
+          "MaybachGambleCalls"
+        ]
+      },
+      {
+        "rank": 6,
+        "symbol": "$CANCER",
+        "score": 26,
+        "mentions": 2,
+        "uniqueKols": 2,
+        "sentiment": -0.346,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "MaybachCalls",
+          "MaybachGambleCalls"
+        ]
+      },
+      {
+        "rank": 7,
+        "symbol": "$HITLER",
+        "score": 26,
+        "mentions": 2,
+        "uniqueKols": 2,
+        "sentiment": -0.346,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "MaybachCalls",
+          "MaybachGambleCalls"
+        ]
+      },
+      {
+        "rank": 8,
+        "symbol": "$SHARK",
+        "score": 26,
+        "mentions": 2,
+        "uniqueKols": 2,
+        "sentiment": -0.346,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "MaybachCalls",
+          "MaybachGambleCalls"
+        ]
+      },
+      {
+        "rank": 9,
+        "symbol": "$SHIBYARD",
+        "score": 26,
+        "mentions": 2,
+        "uniqueKols": 2,
+        "sentiment": -0.346,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "MaybachCalls",
+          "MaybachGambleCalls"
+        ]
+      },
+      {
+        "rank": 10,
+        "symbol": "$PEDO",
+        "score": 26,
+        "mentions": 2,
+        "uniqueKols": 2,
+        "sentiment": -0.346,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "MaybachCalls",
+          "MaybachGambleCalls"
+        ]
+      },
+      {
+        "rank": 11,
+        "symbol": "$JOOGLE",
+        "score": 26,
+        "mentions": 2,
+        "uniqueKols": 2,
+        "sentiment": -0.346,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "MaybachCalls",
+          "MaybachGambleCalls"
+        ]
+      },
+      {
+        "rank": 12,
+        "symbol": "$GBOYWHICH",
+        "score": 26,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.295,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "veigarcalls"
+        ]
+      }
+    ],
+    "6h": [
+      {
+        "rank": 1,
+        "symbol": "$YEE",
+        "score": 39,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.805,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "dylansdegens"
+        ]
+      },
+      {
+        "rank": 2,
+        "symbol": "$TOILET",
+        "score": 38,
+        "mentions": 3,
+        "uniqueKols": 2,
+        "sentiment": 0.308,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "spidersjournal",
+          "BossmanCallsOfficial"
+        ]
+      },
+      {
+        "rank": 3,
+        "symbol": "$CLAWSTR",
+        "score": 37,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.657,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "BossmanCallsOfficial"
+        ]
+      },
+      {
+        "rank": 4,
+        "symbol": "$BEAM",
+        "score": 36,
+        "mentions": 2,
+        "uniqueKols": 1,
+        "sentiment": 0.501,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "BossmanCallsOfficial"
+        ]
+      },
+      {
+        "rank": 5,
+        "symbol": "$SHARK",
+        "score": 35,
+        "mentions": 3,
+        "uniqueKols": 3,
+        "sentiment": -0.011,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "MaybachCalls",
+          "BossmanCallsOfficial",
+          "MaybachGambleCalls"
+        ]
+      },
+      {
+        "rank": 6,
+        "symbol": "$LUCCA",
+        "score": 34,
+        "mentions": 2,
+        "uniqueKols": 1,
+        "sentiment": 0.401,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "slingdeez"
+        ]
+      },
+      {
+        "rank": 7,
+        "symbol": "$BLOWFISH",
+        "score": 33,
+        "mentions": 3,
+        "uniqueKols": 2,
+        "sentiment": 0.261,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "spidersjournal",
+          "veigarcalls"
+        ]
+      },
+      {
+        "rank": 8,
+        "symbol": "$CLAWNCH",
+        "score": 31,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.135,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "spidersjournal"
+        ]
+      },
+      {
+        "rank": 9,
+        "symbol": "$PENGUIN",
+        "score": 29,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.0,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "inside_calls"
+        ]
+      },
+      {
+        "rank": 10,
+        "symbol": "$GOYIM",
+        "score": 26,
+        "mentions": 2,
+        "uniqueKols": 2,
+        "sentiment": -0.346,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "MaybachCalls",
+          "MaybachGambleCalls"
+        ]
+      },
+      {
+        "rank": 11,
+        "symbol": "$CANCER",
+        "score": 26,
+        "mentions": 2,
+        "uniqueKols": 2,
+        "sentiment": -0.346,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "MaybachCalls",
+          "MaybachGambleCalls"
+        ]
+      },
+      {
+        "rank": 12,
+        "symbol": "$HITLER",
+        "score": 26,
+        "mentions": 2,
+        "uniqueKols": 2,
+        "sentiment": -0.346,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "MaybachCalls",
+          "MaybachGambleCalls"
+        ]
+      },
+      {
+        "rank": 13,
+        "symbol": "$SHIBYARD",
+        "score": 26,
+        "mentions": 2,
+        "uniqueKols": 2,
+        "sentiment": -0.346,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "MaybachCalls",
+          "MaybachGambleCalls"
+        ]
+      },
+      {
+        "rank": 14,
+        "symbol": "$PEDO",
+        "score": 26,
+        "mentions": 2,
+        "uniqueKols": 2,
+        "sentiment": -0.346,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "MaybachCalls",
+          "MaybachGambleCalls"
+        ]
+      },
+      {
+        "rank": 15,
+        "symbol": "$JOOGLE",
+        "score": 26,
+        "mentions": 2,
+        "uniqueKols": 2,
+        "sentiment": -0.346,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "MaybachCalls",
+          "MaybachGambleCalls"
+        ]
+      },
+      {
+        "rank": 16,
+        "symbol": "$GBOYWHICH",
+        "score": 26,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.295,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "veigarcalls"
+        ]
+      },
+      {
+        "rank": 17,
+        "symbol": "$DUCK",
+        "score": 25,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.182,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "watisdes"
+        ]
+      },
+      {
+        "rank": 18,
+        "symbol": "$CLIPPY",
+        "score": 23,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.0,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "AnimeGems"
+        ]
+      },
+      {
+        "rank": 19,
+        "symbol": "$LUNAR",
+        "score": 23,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.0,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "CarnagecallsGambles"
+        ]
+      }
+    ],
+    "12h": [
+      {
+        "rank": 1,
+        "symbol": "$SHARK",
+        "score": 44,
+        "mentions": 5,
+        "uniqueKols": 5,
+        "sentiment": 0.059,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "MaybachCalls",
+          "BossmanCallsOfficial",
+          "jsdao",
+          "MaybachGambleCalls",
+          "veigarcalls"
+        ]
+      },
+      {
+        "rank": 2,
+        "symbol": "$BEAM",
+        "score": 41,
+        "mentions": 7,
+        "uniqueKols": 3,
+        "sentiment": 0.21,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "BossmanCallsOfficial",
+          "jsdao",
+          "BatmanSafuCalls"
+        ]
+      },
+      {
+        "rank": 3,
+        "symbol": "$TOILET",
+        "score": 40,
+        "mentions": 5,
+        "uniqueKols": 2,
+        "sentiment": 0.429,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "spidersjournal",
+          "BossmanCallsOfficial"
+        ]
+      },
+      {
+        "rank": 4,
+        "symbol": "$YEE",
+        "score": 39,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.805,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "dylansdegens"
+        ]
+      },
+      {
+        "rank": 5,
+        "symbol": "$LMAO",
+        "score": 37,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.665,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "slingdeez"
+        ]
+      },
+      {
+        "rank": 6,
+        "symbol": "$CLAWSTR",
+        "score": 36,
+        "mentions": 2,
+        "uniqueKols": 2,
+        "sentiment": 0.483,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "BossmanCallsOfficial",
+          "missorplays"
+        ]
+      },
+      {
+        "rank": 7,
+        "symbol": "$LUCCA",
+        "score": 35,
+        "mentions": 3,
+        "uniqueKols": 1,
+        "sentiment": 0.401,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "slingdeez"
+        ]
+      },
+      {
+        "rank": 8,
+        "symbol": "$FLOW",
+        "score": 34,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.401,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "slingdeez"
+        ]
+      },
+      {
+        "rank": 9,
+        "symbol": "$BLOWFISH",
+        "score": 33,
+        "mentions": 3,
+        "uniqueKols": 2,
+        "sentiment": 0.261,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "spidersjournal",
+          "veigarcalls"
+        ]
+      },
+      {
+        "rank": 10,
+        "symbol": "$GOYIM",
+        "score": 33,
+        "mentions": 3,
+        "uniqueKols": 3,
+        "sentiment": -0.23,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "MaybachCalls",
+          "jsdao",
+          "MaybachGambleCalls"
+        ]
+      },
+      {
+        "rank": 11,
+        "symbol": "$CLIPPY",
+        "score": 33,
+        "mentions": 2,
+        "uniqueKols": 2,
+        "sentiment": 0.201,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "slingdeez",
+          "AnimeGems"
+        ]
+      },
+      {
+        "rank": 12,
+        "symbol": "$LASEREYES",
+        "score": 31,
+        "mentions": 2,
+        "uniqueKols": 2,
+        "sentiment": 0.09,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "spidersjournal",
+          "veigarcalls"
+        ]
+      },
+      {
+        "rank": 13,
+        "symbol": "$CLAWNCH",
+        "score": 31,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.135,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "spidersjournal"
+        ]
+      },
+      {
+        "rank": 14,
+        "symbol": "$PENGUIN",
+        "score": 29,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.0,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "inside_calls"
+        ]
+      },
+      {
+        "rank": 15,
+        "symbol": "$CANCER",
+        "score": 26,
+        "mentions": 2,
+        "uniqueKols": 2,
+        "sentiment": -0.346,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "MaybachCalls",
+          "MaybachGambleCalls"
+        ]
+      },
+      {
+        "rank": 16,
+        "symbol": "$HITLER",
+        "score": 26,
+        "mentions": 2,
+        "uniqueKols": 2,
+        "sentiment": -0.346,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "MaybachCalls",
+          "MaybachGambleCalls"
+        ]
+      },
+      {
+        "rank": 17,
+        "symbol": "$SHIBYARD",
+        "score": 26,
+        "mentions": 2,
+        "uniqueKols": 2,
+        "sentiment": -0.346,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "MaybachCalls",
+          "MaybachGambleCalls"
+        ]
+      },
+      {
+        "rank": 18,
+        "symbol": "$PEDO",
+        "score": 26,
+        "mentions": 2,
+        "uniqueKols": 2,
+        "sentiment": -0.346,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "MaybachCalls",
+          "MaybachGambleCalls"
+        ]
+      },
+      {
+        "rank": 19,
+        "symbol": "$JOOGLE",
+        "score": 26,
+        "mentions": 2,
+        "uniqueKols": 2,
+        "sentiment": -0.346,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "MaybachCalls",
+          "MaybachGambleCalls"
+        ]
+      },
+      {
+        "rank": 20,
+        "symbol": "$GBOYWHICH",
+        "score": 26,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.295,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "veigarcalls"
+        ]
+      },
+      {
+        "rank": 21,
+        "symbol": "$DUCK",
+        "score": 25,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.182,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "watisdes"
+        ]
+      },
+      {
+        "rank": 22,
+        "symbol": "$BOBO",
+        "score": 23,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.036,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "AnimeGems"
+        ]
+      },
+      {
+        "rank": 23,
+        "symbol": "$ICEBLOX",
+        "score": 23,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.0,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "cryptotalkwithfrog"
+        ]
+      },
+      {
+        "rank": 24,
+        "symbol": "$LUNAR",
+        "score": 23,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.0,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "CarnagecallsGambles"
+        ]
+      },
+      {
+        "rank": 25,
+        "symbol": "$CUM",
+        "score": 23,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.0,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "cryptowhalecalls7"
+        ]
+      },
+      {
+        "rank": 26,
+        "symbol": "$BORT",
+        "score": 23,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.0,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "cryptowhalecalls7"
+        ]
+      },
+      {
+        "rank": 27,
+        "symbol": "$MEMES",
+        "score": 22,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": -0.072,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "sadcatgamble"
+        ]
+      },
+      {
+        "rank": 28,
+        "symbol": "$MARIUS",
+        "score": 20,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": -0.209,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "cryptotalkwithfrog"
+        ]
+      },
+      {
+        "rank": 29,
+        "symbol": "$MEGA",
+        "score": 20,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": -0.19,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "cryptowhalecalls7"
+        ]
+      }
+    ],
+    "24h": [
+      {
+        "rank": 1,
+        "symbol": "$SHARK",
+        "score": 54,
+        "mentions": 11,
+        "uniqueKols": 6,
+        "sentiment": 0.228,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "spidersjournal",
+          "MaybachCalls",
+          "BossmanCallsOfficial",
+          "jsdao",
+          "MaybachGambleCalls"
+        ]
+      },
+      {
+        "rank": 2,
+        "symbol": "$CLAWSTR",
+        "score": 53,
+        "mentions": 9,
+        "uniqueKols": 5,
+        "sentiment": 0.41,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "spidersjournal",
+          "inside_calls",
+          "BossmanCallsOfficial",
+          "dylansdegens",
+          "missorplays"
+        ]
+      },
+      {
+        "rank": 3,
+        "symbol": "$BEAM",
+        "score": 45,
+        "mentions": 10,
+        "uniqueKols": 4,
+        "sentiment": 0.147,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "BossmanCallsOfficial",
+          "jsdao",
+          "robogems",
+          "BatmanSafuCalls"
+        ]
+      },
+      {
+        "rank": 4,
+        "symbol": "$TOILET",
+        "score": 41,
+        "mentions": 7,
+        "uniqueKols": 2,
+        "sentiment": 0.456,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "spidersjournal",
+          "BossmanCallsOfficial"
+        ]
+      },
+      {
+        "rank": 5,
+        "symbol": "$GOYIM",
+        "score": 41,
+        "mentions": 4,
+        "uniqueKols": 4,
+        "sentiment": 0.036,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "spidersjournal",
+          "MaybachCalls",
+          "jsdao",
+          "MaybachGambleCalls"
+        ]
+      },
+      {
+        "rank": 6,
+        "symbol": "$LIT",
+        "score": 40,
+        "mentions": 2,
+        "uniqueKols": 1,
+        "sentiment": 0.354,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "PoseidonTAA"
+        ]
+      },
+      {
+        "rank": 7,
+        "symbol": "$COPPERINU",
+        "score": 40,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.429,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "marcellcooks"
+        ]
+      },
+      {
+        "rank": 8,
+        "symbol": "$YEE",
+        "score": 39,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.805,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "dylansdegens"
+        ]
+      },
+      {
+        "rank": 9,
+        "symbol": "$MOLTBOOK",
+        "score": 39,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.836,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "spidersjournal"
+        ]
+      },
+      {
+        "rank": 10,
+        "symbol": "$SS",
+        "score": 39,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.836,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "spidersjournal"
+        ]
+      },
+      {
+        "rank": 11,
+        "symbol": "$BUTTCOIN",
+        "score": 39,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.836,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "spidersjournal"
+        ]
+      },
+      {
+        "rank": 12,
+        "symbol": "$CRUST",
+        "score": 38,
+        "mentions": 2,
+        "uniqueKols": 1,
+        "sentiment": 0.677,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "spidersjournal"
+        ]
+      },
+      {
+        "rank": 13,
+        "symbol": "$EPSTEIN",
+        "score": 38,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.731,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "ALSTEIN_GEMCLUB"
+        ]
+      },
+      {
+        "rank": 14,
+        "symbol": "$SPX",
+        "score": 38,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.753,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "BossmanCallsOfficial"
+        ]
+      },
+      {
+        "rank": 15,
+        "symbol": "$GIGA",
+        "score": 38,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.753,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "BossmanCallsOfficial"
+        ]
+      },
+      {
+        "rank": 16,
+        "symbol": "$MOG",
+        "score": 38,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.753,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "BossmanCallsOfficial"
+        ]
+      },
+      {
+        "rank": 17,
+        "symbol": "$TROLL",
+        "score": 38,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.753,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "BossmanCallsOfficial"
+        ]
+      },
+      {
+        "rank": 18,
+        "symbol": "$PENGU",
+        "score": 38,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.753,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "BossmanCallsOfficial"
+        ]
+      },
+      {
+        "rank": 19,
+        "symbol": "$REKT",
+        "score": 38,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.753,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "BossmanCallsOfficial"
+        ]
+      },
+      {
+        "rank": 20,
+        "symbol": "$HYPE",
+        "score": 38,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.753,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "BossmanCallsOfficial"
+        ]
+      },
+      {
+        "rank": 21,
+        "symbol": "$ASTER",
+        "score": 38,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.753,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "BossmanCallsOfficial"
+        ]
+      },
+      {
+        "rank": 22,
+        "symbol": "$PUMP",
+        "score": 38,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.753,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "BossmanCallsOfficial"
+        ]
+      },
+      {
+        "rank": 23,
+        "symbol": "$PUNKSTR",
+        "score": 38,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.753,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "BossmanCallsOfficial"
+        ]
+      },
+      {
+        "rank": 24,
+        "symbol": "$VIBESTR",
+        "score": 38,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.753,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "BossmanCallsOfficial"
+        ]
+      },
+      {
+        "rank": 25,
+        "symbol": "$UNI",
+        "score": 38,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.753,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "BossmanCallsOfficial"
+        ]
+      },
+      {
+        "rank": 26,
+        "symbol": "$LMAO",
+        "score": 37,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.665,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "slingdeez"
+        ]
+      },
+      {
+        "rank": 27,
+        "symbol": "$HITLER",
+        "score": 36,
+        "mentions": 3,
+        "uniqueKols": 3,
+        "sentiment": 0.011,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "inside_calls",
+          "MaybachCalls",
+          "MaybachGambleCalls"
+        ]
+      },
+      {
+        "rank": 28,
+        "symbol": "$LUCCA",
+        "score": 35,
+        "mentions": 3,
+        "uniqueKols": 1,
+        "sentiment": 0.401,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "slingdeez"
+        ]
+      },
+      {
+        "rank": 29,
+        "symbol": "$ICEBOX",
+        "score": 35,
+        "mentions": 3,
+        "uniqueKols": 1,
+        "sentiment": 0.43,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "ALSTEIN_GEMCLUB"
+        ]
+      },
+      {
+        "rank": 30,
+        "symbol": "$K2",
+        "score": 35,
+        "mentions": 2,
+        "uniqueKols": 1,
+        "sentiment": 0.47,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "ALSTEIN_GEMCLUB"
+        ]
+      },
+      {
+        "rank": 31,
+        "symbol": "$BORT",
+        "score": 35,
+        "mentions": 2,
+        "uniqueKols": 2,
+        "sentiment": 0.418,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "spidersjournal",
+          "cryptowhalecalls7"
+        ]
+      },
+      {
+        "rank": 32,
+        "symbol": "$RENT",
+        "score": 34,
+        "mentions": 3,
+        "uniqueKols": 1,
+        "sentiment": 0.349,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "spidersjournal"
+        ]
+      },
+      {
+        "rank": 33,
+        "symbol": "$TORCH",
+        "score": 34,
+        "mentions": 2,
+        "uniqueKols": 2,
+        "sentiment": 0.052,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "ArcaneGems",
+          "dylansdegens"
+        ]
+      },
+      {
+        "rank": 34,
+        "symbol": "$FLOW",
+        "score": 34,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.401,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "slingdeez"
+        ]
+      },
+      {
+        "rank": 35,
+        "symbol": "$MOLTACRACY",
+        "score": 34,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.417,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "spidersjournal"
+        ]
+      },
+      {
+        "rank": 36,
+        "symbol": "$BLOWFISH",
+        "score": 33,
+        "mentions": 3,
+        "uniqueKols": 2,
+        "sentiment": 0.261,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "spidersjournal",
+          "veigarcalls"
+        ]
+      },
+      {
+        "rank": 37,
+        "symbol": "$CLIPPY",
+        "score": 33,
+        "mentions": 2,
+        "uniqueKols": 2,
+        "sentiment": 0.201,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "slingdeez",
+          "AnimeGems"
+        ]
+      },
+      {
+        "rank": 38,
+        "symbol": "$PURCH",
+        "score": 33,
+        "mentions": 2,
+        "uniqueKols": 1,
+        "sentiment": 0.289,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "spidersjournal"
+        ]
+      },
+      {
+        "rank": 39,
+        "symbol": "$GITM",
+        "score": 33,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.334,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "spidersjournal"
+        ]
+      },
+      {
+        "rank": 40,
+        "symbol": "$CLAWNCH",
+        "score": 32,
+        "mentions": 2,
+        "uniqueKols": 1,
+        "sentiment": 0.234,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "spidersjournal"
+        ]
+      },
+      {
+        "rank": 41,
+        "symbol": "$LASEREYES",
+        "score": 31,
+        "mentions": 2,
+        "uniqueKols": 2,
+        "sentiment": 0.09,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "spidersjournal",
+          "veigarcalls"
+        ]
+      },
+      {
+        "rank": 42,
+        "symbol": "$SEXCOIN",
+        "score": 31,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.664,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "AnimeGems"
+        ]
+      },
+      {
+        "rank": 43,
+        "symbol": "$SOMA",
+        "score": 31,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.144,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "spidersjournal"
+        ]
+      },
+      {
+        "rank": 44,
+        "symbol": "$ICEBLOX",
+        "score": 30,
+        "mentions": 5,
+        "uniqueKols": 2,
+        "sentiment": 0.163,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "AnimeGems",
+          "cryptotalkwithfrog"
+        ]
+      },
+      {
+        "rank": 45,
+        "symbol": "$WAR",
+        "score": 28,
+        "mentions": 2,
+        "uniqueKols": 2,
+        "sentiment": -0.377,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "inside_calls",
+          "dylansdegens"
+        ]
+      },
+      {
+        "rank": 46,
+        "symbol": "$MOONER",
+        "score": 28,
+        "mentions": 2,
+        "uniqueKols": 1,
+        "sentiment": 0.362,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "cryptotalkwithfrog"
+        ]
+      },
+      {
+        "rank": 47,
+        "symbol": "$QUANTRA",
+        "score": 28,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.462,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "AnimeGems"
+        ]
+      },
+      {
+        "rank": 48,
+        "symbol": "$PENGUIN",
+        "score": 27,
+        "mentions": 2,
+        "uniqueKols": 1,
+        "sentiment": -0.158,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "inside_calls"
+        ]
+      },
+      {
+        "rank": 49,
+        "symbol": "$LCHAN",
+        "score": 27,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.386,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "cryptotalkwithfrog"
+        ]
+      },
+      {
+        "rank": 50,
+        "symbol": "$CANCER",
+        "score": 26,
+        "mentions": 2,
+        "uniqueKols": 2,
+        "sentiment": -0.346,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "MaybachCalls",
+          "MaybachGambleCalls"
+        ]
+      },
+      {
+        "rank": 51,
+        "symbol": "$SHIBYARD",
+        "score": 26,
+        "mentions": 2,
+        "uniqueKols": 2,
+        "sentiment": -0.346,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "MaybachCalls",
+          "MaybachGambleCalls"
+        ]
+      },
+      {
+        "rank": 52,
+        "symbol": "$PEDO",
+        "score": 26,
+        "mentions": 2,
+        "uniqueKols": 2,
+        "sentiment": -0.346,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "MaybachCalls",
+          "MaybachGambleCalls"
+        ]
+      },
+      {
+        "rank": 53,
+        "symbol": "$JOOGLE",
+        "score": 26,
+        "mentions": 2,
+        "uniqueKols": 2,
+        "sentiment": -0.346,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "MaybachCalls",
+          "MaybachGambleCalls"
+        ]
+      },
+      {
+        "rank": 54,
+        "symbol": "$GBOYWHICH",
+        "score": 26,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.295,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "veigarcalls"
+        ]
+      },
+      {
+        "rank": 55,
+        "symbol": "$DUCK",
+        "score": 25,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.182,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "watisdes"
+        ]
+      },
+      {
+        "rank": 56,
+        "symbol": "$WHITEWHALE",
+        "score": 25,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": -0.317,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "inside_calls"
+        ]
+      },
+      {
+        "rank": 57,
+        "symbol": "$CATCOIN",
+        "score": 24,
+        "mentions": 2,
+        "uniqueKols": 2,
+        "sentiment": -0.216,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "leoclub168g",
+          "leoclub168c"
+        ]
+      },
+      {
+        "rank": 58,
+        "symbol": "$EPSIZZA",
+        "score": 24,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.088,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "veigarcalls"
+        ]
+      },
+      {
+        "rank": 59,
+        "symbol": "$LQUID",
+        "score": 24,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.152,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "CarnagecallsGambles"
+        ]
+      },
+      {
+        "rank": 60,
+        "symbol": "$ESPIZZA",
+        "score": 23,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.0,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "veigarcalls"
+        ]
+      },
+      {
+        "rank": 61,
+        "symbol": "$ACCELERANDO",
+        "score": 23,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.0,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "veigarcalls"
+        ]
+      },
+      {
+        "rank": 62,
+        "symbol": "$BOBO",
+        "score": 23,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.036,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "AnimeGems"
+        ]
+      },
+      {
+        "rank": 63,
+        "symbol": "$LUNAR",
+        "score": 23,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.0,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "CarnagecallsGambles"
+        ]
+      },
+      {
+        "rank": 64,
+        "symbol": "$CUM",
+        "score": 23,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.0,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "cryptowhalecalls7"
+        ]
+      },
+      {
+        "rank": 65,
+        "symbol": "$MEMES",
+        "score": 22,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": -0.072,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "sadcatgamble"
+        ]
+      },
+      {
+        "rank": 66,
+        "symbol": "$MARIUS",
+        "score": 20,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": -0.209,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "cryptotalkwithfrog"
+        ]
+      },
+      {
+        "rank": 67,
+        "symbol": "$MEGA",
+        "score": 20,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": -0.19,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "cryptowhalecalls7"
+        ]
+      }
+    ],
+    "48h": [
+      {
+        "rank": 1,
+        "symbol": "$SHARK",
+        "score": 70,
+        "mentions": 30,
+        "uniqueKols": 8,
+        "sentiment": 0.141,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "cryptorugmuncher",
+          "spidersjournal",
+          "MaybachCalls",
+          "BossmanCallsOfficial",
+          "jsdao"
+        ]
+      },
+      {
+        "rank": 2,
+        "symbol": "$CLAWSTR",
+        "score": 57,
+        "mentions": 12,
+        "uniqueKols": 6,
+        "sentiment": 0.327,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "spidersjournal",
+          "inside_calls",
+          "BossmanCallsOfficial",
+          "dylansdegens",
+          "certifiedprintor"
+        ]
+      },
+      {
+        "rank": 3,
+        "symbol": "$BEAM",
+        "score": 47,
+        "mentions": 15,
+        "uniqueKols": 4,
+        "sentiment": 0.128,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "BossmanCallsOfficial",
+          "jsdao",
+          "robogems",
+          "BatmanSafuCalls"
+        ]
+      },
+      {
+        "rank": 4,
+        "symbol": "$MONKI",
+        "score": 43,
+        "mentions": 4,
+        "uniqueKols": 3,
+        "sentiment": 0.294,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "marcellcooks",
+          "ArcaneGems",
+          "KittysKasino"
+        ]
+      },
+      {
+        "rank": 5,
+        "symbol": "$USELESS",
+        "score": 43,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.641,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "marcellcooks"
+        ]
+      },
+      {
+        "rank": 6,
+        "symbol": "$USOR",
+        "score": 43,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.113,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "cryptorugmuncher"
+        ]
+      },
+      {
+        "rank": 7,
+        "symbol": "$VDR",
+        "score": 43,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.113,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "cryptorugmuncher"
+        ]
+      },
+      {
+        "rank": 8,
+        "symbol": "$WAR",
+        "score": 42,
+        "mentions": 5,
+        "uniqueKols": 5,
+        "sentiment": -0.157,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "inside_calls",
+          "wulfcryptocalls",
+          "dylansdegens",
+          "robogems",
+          "chiggajogambles"
+        ]
+      },
+      {
+        "rank": 9,
+        "symbol": "$TOILET",
+        "score": 41,
+        "mentions": 7,
+        "uniqueKols": 2,
+        "sentiment": 0.456,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "spidersjournal",
+          "BossmanCallsOfficial"
+        ]
+      },
+      {
+        "rank": 10,
+        "symbol": "$GOYIM",
+        "score": 41,
+        "mentions": 4,
+        "uniqueKols": 4,
+        "sentiment": 0.036,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "spidersjournal",
+          "MaybachCalls",
+          "jsdao",
+          "MaybachGambleCalls"
+        ]
+      },
+      {
+        "rank": 11,
+        "symbol": "$PUMP",
+        "score": 41,
+        "mentions": 2,
+        "uniqueKols": 2,
+        "sentiment": 0.595,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "PowsGemCalls",
+          "BossmanCallsOfficial"
+        ]
+      },
+      {
+        "rank": 12,
+        "symbol": "$LIT",
+        "score": 40,
+        "mentions": 2,
+        "uniqueKols": 1,
+        "sentiment": 0.354,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "PoseidonTAA"
+        ]
+      },
+      {
+        "rank": 13,
+        "symbol": "$COPPERINU",
+        "score": 40,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.429,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "marcellcooks"
+        ]
+      },
+      {
+        "rank": 14,
+        "symbol": "$CRYPTO",
+        "score": 40,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.371,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "MarkGems"
+        ]
+      },
+      {
+        "rank": 15,
+        "symbol": "$YEE",
+        "score": 39,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.805,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "dylansdegens"
+        ]
+      },
+      {
+        "rank": 16,
+        "symbol": "$MOLTBOOK",
+        "score": 39,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.836,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "spidersjournal"
+        ]
+      },
+      {
+        "rank": 17,
+        "symbol": "$SS",
+        "score": 39,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.836,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "spidersjournal"
+        ]
+      },
+      {
+        "rank": 18,
+        "symbol": "$BUTTCOIN",
+        "score": 39,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.836,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "spidersjournal"
+        ]
+      },
+      {
+        "rank": 19,
+        "symbol": "$HYPE",
+        "score": 38,
+        "mentions": 3,
+        "uniqueKols": 2,
+        "sentiment": 0.324,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "ArcaneGems",
+          "BossmanCallsOfficial"
+        ]
+      },
+      {
+        "rank": 20,
+        "symbol": "$CRUST",
+        "score": 38,
+        "mentions": 2,
+        "uniqueKols": 1,
+        "sentiment": 0.677,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "spidersjournal"
+        ]
+      },
+      {
+        "rank": 21,
+        "symbol": "$EPSTEIN",
+        "score": 38,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.731,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "ALSTEIN_GEMCLUB"
+        ]
+      },
+      {
+        "rank": 22,
+        "symbol": "$SPX",
+        "score": 38,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.753,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "BossmanCallsOfficial"
+        ]
+      },
+      {
+        "rank": 23,
+        "symbol": "$GIGA",
+        "score": 38,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.753,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "BossmanCallsOfficial"
+        ]
+      },
+      {
+        "rank": 24,
+        "symbol": "$MOG",
+        "score": 38,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.753,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "BossmanCallsOfficial"
+        ]
+      },
+      {
+        "rank": 25,
+        "symbol": "$TROLL",
+        "score": 38,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.753,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "BossmanCallsOfficial"
+        ]
+      },
+      {
+        "rank": 26,
+        "symbol": "$PENGU",
+        "score": 38,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.753,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "BossmanCallsOfficial"
+        ]
+      },
+      {
+        "rank": 27,
+        "symbol": "$REKT",
+        "score": 38,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.753,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "BossmanCallsOfficial"
+        ]
+      },
+      {
+        "rank": 28,
+        "symbol": "$PUNKSTR",
+        "score": 38,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.753,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "BossmanCallsOfficial"
+        ]
+      },
+      {
+        "rank": 29,
+        "symbol": "$VIBESTR",
+        "score": 38,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.753,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "BossmanCallsOfficial"
+        ]
+      },
+      {
+        "rank": 30,
+        "symbol": "$UNI",
+        "score": 38,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.753,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "BossmanCallsOfficial"
+        ]
+      },
+      {
+        "rank": 31,
+        "symbol": "$ASTER",
+        "score": 37,
+        "mentions": 3,
+        "uniqueKols": 2,
+        "sentiment": 0.276,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "ArcaneGems",
+          "BossmanCallsOfficial"
+        ]
+      },
+      {
+        "rank": 32,
+        "symbol": "$LMAO",
+        "score": 37,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.665,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "slingdeez"
+        ]
+      },
+      {
+        "rank": 33,
+        "symbol": "$RENT",
+        "score": 36,
+        "mentions": 6,
+        "uniqueKols": 1,
+        "sentiment": 0.348,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "spidersjournal"
+        ]
+      },
+      {
+        "rank": 34,
+        "symbol": "$ACCELERANDO",
+        "score": 36,
+        "mentions": 4,
+        "uniqueKols": 2,
+        "sentiment": 0.366,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "PowsGemCalls",
+          "veigarcalls"
+        ]
+      },
+      {
+        "rank": 35,
+        "symbol": "$WHITEWHALE",
+        "score": 36,
+        "mentions": 3,
+        "uniqueKols": 3,
+        "sentiment": 0.06,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "inside_calls",
+          "BossmanCallsOfficial",
+          "veigarcalls"
+        ]
+      },
+      {
+        "rank": 36,
+        "symbol": "$K2",
+        "score": 36,
+        "mentions": 3,
+        "uniqueKols": 2,
+        "sentiment": 0.344,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "ALSTEIN_GEMCLUB",
+          "AnimeGems"
+        ]
+      },
+      {
+        "rank": 37,
+        "symbol": "$HITLER",
+        "score": 36,
+        "mentions": 3,
+        "uniqueKols": 3,
+        "sentiment": 0.011,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "inside_calls",
+          "MaybachCalls",
+          "MaybachGambleCalls"
+        ]
+      },
+      {
+        "rank": 38,
+        "symbol": "$ICEBLOX",
+        "score": 35,
+        "mentions": 15,
+        "uniqueKols": 2,
+        "sentiment": 0.138,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "AnimeGems",
+          "cryptotalkwithfrog"
+        ]
+      },
+      {
+        "rank": 39,
+        "symbol": "$PENGUIN",
+        "score": 35,
+        "mentions": 6,
+        "uniqueKols": 2,
+        "sentiment": 0.118,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "inside_calls",
+          "veigarcalls"
+        ]
+      },
+      {
+        "rank": 40,
+        "symbol": "$LUCCA",
+        "score": 35,
+        "mentions": 3,
+        "uniqueKols": 1,
+        "sentiment": 0.401,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "slingdeez"
+        ]
+      },
+      {
+        "rank": 41,
+        "symbol": "$ICEBOX",
+        "score": 35,
+        "mentions": 3,
+        "uniqueKols": 1,
+        "sentiment": 0.43,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "ALSTEIN_GEMCLUB"
+        ]
+      },
+      {
+        "rank": 42,
+        "symbol": "$BORT",
+        "score": 35,
+        "mentions": 2,
+        "uniqueKols": 2,
+        "sentiment": 0.418,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "spidersjournal",
+          "cryptowhalecalls7"
+        ]
+      },
+      {
+        "rank": 43,
+        "symbol": "$PNUT",
+        "score": 35,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.0,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "marcellcooks"
+        ]
+      },
+      {
+        "rank": 44,
+        "symbol": "$WOJAK",
+        "score": 35,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.497,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "BossmanCallsOfficial"
+        ]
+      },
+      {
+        "rank": 45,
+        "symbol": "$CLIPPY",
+        "score": 34,
+        "mentions": 3,
+        "uniqueKols": 2,
+        "sentiment": 0.33,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "slingdeez",
+          "AnimeGems"
+        ]
+      },
+      {
+        "rank": 46,
+        "symbol": "$TORCH",
+        "score": 34,
+        "mentions": 2,
+        "uniqueKols": 2,
+        "sentiment": 0.052,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "ArcaneGems",
+          "dylansdegens"
+        ]
+      },
+      {
+        "rank": 47,
+        "symbol": "$FLOW",
+        "score": 34,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.401,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "slingdeez"
+        ]
+      },
+      {
+        "rank": 48,
+        "symbol": "$PEPE",
+        "score": 34,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.436,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "PowsGemCalls"
+        ]
+      },
+      {
+        "rank": 49,
+        "symbol": "$MOLTACRACY",
+        "score": 34,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.417,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "spidersjournal"
+        ]
+      },
+      {
+        "rank": 50,
+        "symbol": "$BLOWFISH",
+        "score": 33,
+        "mentions": 3,
+        "uniqueKols": 2,
+        "sentiment": 0.261,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "spidersjournal",
+          "veigarcalls"
+        ]
+      },
+      {
+        "rank": 51,
+        "symbol": "$PURCH",
+        "score": 33,
+        "mentions": 2,
+        "uniqueKols": 1,
+        "sentiment": 0.289,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "spidersjournal"
+        ]
+      },
+      {
+        "rank": 52,
+        "symbol": "$GITM",
+        "score": 33,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.334,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "spidersjournal"
+        ]
+      },
+      {
+        "rank": 53,
+        "symbol": "$CLAWNCH",
+        "score": 32,
+        "mentions": 2,
+        "uniqueKols": 1,
+        "sentiment": 0.234,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "spidersjournal"
+        ]
+      },
+      {
+        "rank": 54,
+        "symbol": "$HOPE",
+        "score": 32,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.765,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "AnimeGems"
+        ]
+      },
+      {
+        "rank": 55,
+        "symbol": "$LASEREYES",
+        "score": 31,
+        "mentions": 2,
+        "uniqueKols": 2,
+        "sentiment": 0.09,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "spidersjournal",
+          "veigarcalls"
+        ]
+      },
+      {
+        "rank": 56,
+        "symbol": "$AI",
+        "score": 31,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.185,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "ArcaneGems"
+        ]
+      },
+      {
+        "rank": 57,
+        "symbol": "$SEXCOIN",
+        "score": 31,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.664,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "AnimeGems"
+        ]
+      },
+      {
+        "rank": 58,
+        "symbol": "$DONT",
+        "score": 31,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.653,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "cryptotalkwithfrog"
+        ]
+      },
+      {
+        "rank": 59,
+        "symbol": "$SOMA",
+        "score": 31,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.144,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "spidersjournal"
+        ]
+      },
+      {
+        "rank": 60,
+        "symbol": "$PEACE",
+        "score": 30,
+        "mentions": 2,
+        "uniqueKols": 1,
+        "sentiment": 0.543,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "chiggajogambles"
+        ]
+      },
+      {
+        "rank": 61,
+        "symbol": "$SAN",
+        "score": 30,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.119,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "CatfishcallsbyPoe"
+        ]
+      },
+      {
+        "rank": 62,
+        "symbol": "$CT",
+        "score": 29,
+        "mentions": 2,
+        "uniqueKols": 1,
+        "sentiment": 0.453,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "BatmanSafuCalls"
+        ]
+      },
+      {
+        "rank": 63,
+        "symbol": "$QUANTRA",
+        "score": 29,
+        "mentions": 2,
+        "uniqueKols": 1,
+        "sentiment": 0.508,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "AnimeGems"
+        ]
+      },
+      {
+        "rank": 64,
+        "symbol": "$DARKFLOBI",
+        "score": 29,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.543,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "Luca_Apes"
+        ]
+      },
+      {
+        "rank": 65,
+        "symbol": "$JEW",
+        "score": 28,
+        "mentions": 3,
+        "uniqueKols": 2,
+        "sentiment": 0.015,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "AnimeGems",
+          "CarnagecallsGambles"
+        ]
+      },
+      {
+        "rank": 66,
+        "symbol": "$MOONER",
+        "score": 28,
+        "mentions": 2,
+        "uniqueKols": 1,
+        "sentiment": 0.362,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "cryptotalkwithfrog"
+        ]
+      },
+      {
+        "rank": 67,
+        "symbol": "$DADS",
+        "score": 28,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.447,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "veigarcalls"
+        ]
+      },
+      {
+        "rank": 68,
+        "symbol": "$CATCOIN",
+        "score": 27,
+        "mentions": 3,
+        "uniqueKols": 2,
+        "sentiment": -0.033,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "leoclub168g",
+          "leoclub168c"
+        ]
+      },
+      {
+        "rank": 69,
+        "symbol": "$CLAWFI",
+        "score": 27,
+        "mentions": 2,
+        "uniqueKols": 1,
+        "sentiment": -0.163,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "certifiedprintor"
+        ]
+      },
+      {
+        "rank": 70,
+        "symbol": "$LCHAN",
+        "score": 27,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.386,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "cryptotalkwithfrog"
+        ]
+      },
+      {
+        "rank": 71,
+        "symbol": "$XXX",
+        "score": 27,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.368,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "CarnagecallsGambles"
+        ]
+      },
+      {
+        "rank": 72,
+        "symbol": "$CANCER",
+        "score": 26,
+        "mentions": 2,
+        "uniqueKols": 2,
+        "sentiment": -0.346,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "MaybachCalls",
+          "MaybachGambleCalls"
+        ]
+      },
+      {
+        "rank": 73,
+        "symbol": "$SHIBYARD",
+        "score": 26,
+        "mentions": 2,
+        "uniqueKols": 2,
+        "sentiment": -0.346,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "MaybachCalls",
+          "MaybachGambleCalls"
+        ]
+      },
+      {
+        "rank": 74,
+        "symbol": "$PEDO",
+        "score": 26,
+        "mentions": 2,
+        "uniqueKols": 2,
+        "sentiment": -0.346,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "MaybachCalls",
+          "MaybachGambleCalls"
+        ]
+      },
+      {
+        "rank": 75,
+        "symbol": "$JOOGLE",
+        "score": 26,
+        "mentions": 2,
+        "uniqueKols": 2,
+        "sentiment": -0.346,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "MaybachCalls",
+          "MaybachGambleCalls"
+        ]
+      },
+      {
+        "rank": 76,
+        "symbol": "$GBOYWHICH",
+        "score": 26,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.295,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "veigarcalls"
+        ]
+      },
+      {
+        "rank": 77,
+        "symbol": "$SHIKSA",
+        "score": 26,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.253,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "chiggajogambles"
+        ]
+      },
+      {
+        "rank": 78,
+        "symbol": "$PAAL",
+        "score": 26,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.28,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "MaybachGambleCalls"
+        ]
+      },
+      {
+        "rank": 79,
+        "symbol": "$DUCK",
+        "score": 25,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.182,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "watisdes"
+        ]
+      },
+      {
+        "rank": 80,
+        "symbol": "$CHONKACHU",
+        "score": 25,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": -0.325,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "certifiedprintor"
+        ]
+      },
+      {
+        "rank": 81,
+        "symbol": "$PIGGY",
+        "score": 25,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": -0.325,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "certifiedprintor"
+        ]
+      },
+      {
+        "rank": 82,
+        "symbol": "$COIN",
+        "score": 25,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": -0.325,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "certifiedprintor"
+        ]
+      },
+      {
+        "rank": 83,
+        "symbol": "$CHICKEN",
+        "score": 25,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": -0.325,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "certifiedprintor"
+        ]
+      },
+      {
+        "rank": 84,
+        "symbol": "$FIRE",
+        "score": 25,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": -0.325,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "certifiedprintor"
+        ]
+      },
+      {
+        "rank": 85,
+        "symbol": "$MEMES",
+        "score": 24,
+        "mentions": 2,
+        "uniqueKols": 1,
+        "sentiment": 0.097,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "sadcatgamble"
+        ]
+      },
+      {
+        "rank": 86,
+        "symbol": "$EPSIZZA",
+        "score": 24,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.088,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "veigarcalls"
+        ]
+      },
+      {
+        "rank": 87,
+        "symbol": "$RICK",
+        "score": 24,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.105,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "cryptotalkwithfrog"
+        ]
+      },
+      {
+        "rank": 88,
+        "symbol": "$BLACKWHALE",
+        "score": 24,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.09,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "cryptotalkwithfrog"
+        ]
+      },
+      {
+        "rank": 89,
+        "symbol": "$LQUID",
+        "score": 24,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.152,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "CarnagecallsGambles"
+        ]
+      },
+      {
+        "rank": 90,
+        "symbol": "$DARKO",
+        "score": 23,
+        "mentions": 2,
+        "uniqueKols": 1,
+        "sentiment": 0.0,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "Luca_Apes"
+        ]
+      },
+      {
+        "rank": 91,
+        "symbol": "$GRUSHKY",
+        "score": 23,
+        "mentions": 2,
+        "uniqueKols": 1,
+        "sentiment": 0.0,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "Luca_Apes"
+        ]
+      },
+      {
+        "rank": 92,
+        "symbol": "$BOBO",
+        "score": 23,
+        "mentions": 2,
+        "uniqueKols": 1,
+        "sentiment": 0.018,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "AnimeGems"
+        ]
+      },
+      {
+        "rank": 93,
+        "symbol": "$ESPIZZA",
+        "score": 23,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.0,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "veigarcalls"
+        ]
+      },
+      {
+        "rank": 94,
+        "symbol": "$FROG",
+        "score": 23,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.0,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "cryptotalkwithfrog"
+        ]
+      },
+      {
+        "rank": 95,
+        "symbol": "$LUNAR",
+        "score": 23,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.0,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "CarnagecallsGambles"
+        ]
+      },
+      {
+        "rank": 96,
+        "symbol": "$CUM",
+        "score": 23,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.0,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "cryptowhalecalls7"
+        ]
+      },
+      {
+        "rank": 97,
+        "symbol": "$BOOB",
+        "score": 23,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.0,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "cryptowhalecalls7"
+        ]
+      },
+      {
+        "rank": 98,
+        "symbol": "$MOSSAD",
+        "score": 22,
+        "mentions": 3,
+        "uniqueKols": 1,
+        "sentiment": -0.129,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "CarnagecallsGambles"
+        ]
+      },
+      {
+        "rank": 99,
+        "symbol": "$JEWPITER",
+        "score": 22,
+        "mentions": 2,
+        "uniqueKols": 1,
+        "sentiment": -0.074,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "MaybachGambleCalls"
+        ]
+      },
+      {
+        "rank": 100,
+        "symbol": "$MARIUS",
+        "score": 20,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": -0.209,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "cryptotalkwithfrog"
+        ]
+      },
+      {
+        "rank": 101,
+        "symbol": "$MEGA",
+        "score": 20,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": -0.19,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "cryptowhalecalls7"
+        ]
+      }
+    ],
+    "7d": [
+      {
+        "rank": 1,
+        "symbol": "$SHARK",
+        "score": 74,
+        "mentions": 37,
+        "uniqueKols": 9,
+        "sentiment": 0.207,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "cryptorugmuncher",
+          "spidersjournal",
+          "MaybachCalls",
+          "BossmanCallsOfficial",
+          "jsdao"
+        ]
+      },
+      {
+        "rank": 2,
+        "symbol": "$CLAWSTR",
+        "score": 57,
+        "mentions": 12,
+        "uniqueKols": 6,
+        "sentiment": 0.327,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "spidersjournal",
+          "inside_calls",
+          "BossmanCallsOfficial",
+          "dylansdegens",
+          "certifiedprintor"
+        ]
+      },
+      {
+        "rank": 3,
+        "symbol": "$WAR",
+        "score": 50,
+        "mentions": 15,
+        "uniqueKols": 5,
+        "sentiment": -0.05,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "inside_calls",
+          "wulfcryptocalls",
+          "dylansdegens",
+          "robogems",
+          "chiggajogambles"
+        ]
+      },
+      {
+        "rank": 4,
+        "symbol": "$CATCOIN",
+        "score": 50,
+        "mentions": 11,
+        "uniqueKols": 6,
+        "sentiment": 0.156,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "CatfishcallsbyPoe",
+          "kweensjournal",
+          "leoclub168c",
+          "MarkDegens",
+          "leoclub168g"
+        ]
+      },
+      {
+        "rank": 5,
+        "symbol": "$CRM",
+        "score": 49,
+        "mentions": 4,
+        "uniqueKols": 1,
+        "sentiment": 0.514,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "cryptorugmuncher"
+        ]
+      },
+      {
+        "rank": 6,
+        "symbol": "$BEAM",
+        "score": 47,
+        "mentions": 17,
+        "uniqueKols": 4,
+        "sentiment": 0.106,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "BossmanCallsOfficial",
+          "jsdao",
+          "robogems",
+          "BatmanSafuCalls"
+        ]
+      },
+      {
+        "rank": 7,
+        "symbol": "$CRYPTORUGMUNCH",
+        "score": 47,
+        "mentions": 2,
+        "uniqueKols": 1,
+        "sentiment": 0.442,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "cryptorugmuncher"
+        ]
+      },
+      {
+        "rank": 8,
+        "symbol": "$SHIB",
+        "score": 46,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.885,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "MarkGems"
+        ]
+      },
+      {
+        "rank": 9,
+        "symbol": "$FARTCOIN",
+        "score": 46,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.885,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "MarkGems"
+        ]
+      },
+      {
+        "rank": 10,
+        "symbol": "$PENGUIN",
+        "score": 43,
+        "mentions": 11,
+        "uniqueKols": 3,
+        "sentiment": 0.235,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "inside_calls",
+          "LevisAlpha",
+          "veigarcalls"
+        ]
+      },
+      {
+        "rank": 11,
+        "symbol": "$MONKI",
+        "score": 43,
+        "mentions": 4,
+        "uniqueKols": 3,
+        "sentiment": 0.294,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "marcellcooks",
+          "ArcaneGems",
+          "KittysKasino"
+        ]
+      },
+      {
+        "rank": 12,
+        "symbol": "$BUTTCOIN",
+        "score": 43,
+        "mentions": 3,
+        "uniqueKols": 2,
+        "sentiment": 0.727,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "spidersjournal",
+          "ALSTEIN_GEMCLUB"
+        ]
+      },
+      {
+        "rank": 13,
+        "symbol": "$USELESS",
+        "score": 43,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.641,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "marcellcooks"
+        ]
+      },
+      {
+        "rank": 14,
+        "symbol": "$VDR",
+        "score": 43,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.113,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "cryptorugmuncher"
+        ]
+      },
+      {
+        "rank": 15,
+        "symbol": "$USOR",
+        "score": 42,
+        "mentions": 2,
+        "uniqueKols": 1,
+        "sentiment": 0.04,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "cryptorugmuncher"
+        ]
+      },
+      {
+        "rank": 16,
+        "symbol": "$TOILET",
+        "score": 41,
+        "mentions": 7,
+        "uniqueKols": 2,
+        "sentiment": 0.456,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "spidersjournal",
+          "BossmanCallsOfficial"
+        ]
+      },
+      {
+        "rank": 17,
+        "symbol": "$HYPE",
+        "score": 41,
+        "mentions": 5,
+        "uniqueKols": 2,
+        "sentiment": 0.477,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "ArcaneGems",
+          "BossmanCallsOfficial"
+        ]
+      },
+      {
+        "rank": 18,
+        "symbol": "$PEPE",
+        "score": 41,
+        "mentions": 4,
+        "uniqueKols": 4,
+        "sentiment": -0.048,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "MarkGems",
+          "PowsGemCalls",
+          "BossmanCallsOfficial",
+          "MarkDegens"
+        ]
+      },
+      {
+        "rank": 19,
+        "symbol": "$GOYIM",
+        "score": 41,
+        "mentions": 4,
+        "uniqueKols": 4,
+        "sentiment": 0.036,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "spidersjournal",
+          "MaybachCalls",
+          "jsdao",
+          "MaybachGambleCalls"
+        ]
+      },
+      {
+        "rank": 20,
+        "symbol": "$PUMP",
+        "score": 41,
+        "mentions": 2,
+        "uniqueKols": 2,
+        "sentiment": 0.595,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "PowsGemCalls",
+          "BossmanCallsOfficial"
+        ]
+      },
+      {
+        "rank": 21,
+        "symbol": "$LIT",
+        "score": 40,
+        "mentions": 2,
+        "uniqueKols": 1,
+        "sentiment": 0.354,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "PoseidonTAA"
+        ]
+      },
+      {
+        "rank": 22,
+        "symbol": "$MOLT",
+        "score": 40,
+        "mentions": 2,
+        "uniqueKols": 2,
+        "sentiment": 0.572,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "CatfishcallsbyPoe",
+          "BossmanCallsOfficial"
+        ]
+      },
+      {
+        "rank": 23,
+        "symbol": "$COPPERINU",
+        "score": 40,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.429,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "marcellcooks"
+        ]
+      },
+      {
+        "rank": 24,
+        "symbol": "$KEVIN",
+        "score": 40,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": -0.139,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "cryptorugmuncher"
+        ]
+      },
+      {
+        "rank": 25,
+        "symbol": "$ZAUTH",
+        "score": 40,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.87,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "BossmanCallsOfficial"
+        ]
+      },
+      {
+        "rank": 26,
+        "symbol": "$MOLTBOOK",
+        "score": 39,
+        "mentions": 3,
+        "uniqueKols": 2,
+        "sentiment": -0.219,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "cryptorugmuncher",
+          "spidersjournal"
+        ]
+      },
+      {
+        "rank": 27,
+        "symbol": "$YEE",
+        "score": 39,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.805,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "dylansdegens"
+        ]
+      },
+      {
+        "rank": 28,
+        "symbol": "$ZHC",
+        "score": 39,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.787,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "ALSTEIN_GEMCLUB"
+        ]
+      },
+      {
+        "rank": 29,
+        "symbol": "$SHITCOIN",
+        "score": 39,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.787,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "ALSTEIN_GEMCLUB"
+        ]
+      },
+      {
+        "rank": 30,
+        "symbol": "$WHALEFLOKI",
+        "score": 39,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.787,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "ALSTEIN_GEMCLUB"
+        ]
+      },
+      {
+        "rank": 31,
+        "symbol": "$MCV",
+        "score": 39,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.787,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "ALSTEIN_GEMCLUB"
+        ]
+      },
+      {
+        "rank": 32,
+        "symbol": "$HORSE",
+        "score": 39,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.787,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "ALSTEIN_GEMCLUB"
+        ]
+      },
+      {
+        "rank": 33,
+        "symbol": "$HSMA",
+        "score": 39,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.787,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "ALSTEIN_GEMCLUB"
+        ]
+      },
+      {
+        "rank": 34,
+        "symbol": "$AMELIA",
+        "score": 39,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.787,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "ALSTEIN_GEMCLUB"
+        ]
+      },
+      {
+        "rank": 35,
+        "symbol": "$AIDEN",
+        "score": 39,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.787,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "ALSTEIN_GEMCLUB"
+        ]
+      },
+      {
+        "rank": 36,
+        "symbol": "$GRU",
+        "score": 39,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.787,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "ALSTEIN_GEMCLUB"
+        ]
+      },
+      {
+        "rank": 37,
+        "symbol": "$TATA",
+        "score": 39,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.787,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "ALSTEIN_GEMCLUB"
+        ]
+      },
+      {
+        "rank": 38,
+        "symbol": "$SHRIMP",
+        "score": 39,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.787,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "ALSTEIN_GEMCLUB"
+        ]
+      },
+      {
+        "rank": 39,
+        "symbol": "$SS",
+        "score": 39,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.836,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "spidersjournal"
+        ]
+      },
+      {
+        "rank": 40,
+        "symbol": "$LUCCA",
+        "score": 38,
+        "mentions": 4,
+        "uniqueKols": 2,
+        "sentiment": 0.41,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "slingdeez",
+          "cryptotalkwithfrog"
+        ]
+      },
+      {
+        "rank": 41,
+        "symbol": "$CRUST",
+        "score": 38,
+        "mentions": 2,
+        "uniqueKols": 1,
+        "sentiment": 0.677,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "spidersjournal"
+        ]
+      },
+      {
+        "rank": 42,
+        "symbol": "$SPX",
+        "score": 38,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.753,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "BossmanCallsOfficial"
+        ]
+      },
+      {
+        "rank": 43,
+        "symbol": "$GIGA",
+        "score": 38,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.753,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "BossmanCallsOfficial"
+        ]
+      },
+      {
+        "rank": 44,
+        "symbol": "$MOG",
+        "score": 38,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.753,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "BossmanCallsOfficial"
+        ]
+      },
+      {
+        "rank": 45,
+        "symbol": "$TROLL",
+        "score": 38,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.753,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "BossmanCallsOfficial"
+        ]
+      },
+      {
+        "rank": 46,
+        "symbol": "$PENGU",
+        "score": 38,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.753,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "BossmanCallsOfficial"
+        ]
+      },
+      {
+        "rank": 47,
+        "symbol": "$REKT",
+        "score": 38,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.753,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "BossmanCallsOfficial"
+        ]
+      },
+      {
+        "rank": 48,
+        "symbol": "$PUNKSTR",
+        "score": 38,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.753,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "BossmanCallsOfficial"
+        ]
+      },
+      {
+        "rank": 49,
+        "symbol": "$VIBESTR",
+        "score": 38,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.753,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "BossmanCallsOfficial"
+        ]
+      },
+      {
+        "rank": 50,
+        "symbol": "$UNI",
+        "score": 38,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.753,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "BossmanCallsOfficial"
+        ]
+      },
+      {
+        "rank": 51,
+        "symbol": "$DADS",
+        "score": 37,
+        "mentions": 4,
+        "uniqueKols": 2,
+        "sentiment": 0.441,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "inside_calls",
+          "veigarcalls"
+        ]
+      },
+      {
+        "rank": 52,
+        "symbol": "$ASTER",
+        "score": 37,
+        "mentions": 3,
+        "uniqueKols": 2,
+        "sentiment": 0.276,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "ArcaneGems",
+          "BossmanCallsOfficial"
+        ]
+      },
+      {
+        "rank": 53,
+        "symbol": "$LMAO",
+        "score": 37,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.665,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "slingdeez"
+        ]
+      },
+      {
+        "rank": 54,
+        "symbol": "$RENT",
+        "score": 36,
+        "mentions": 6,
+        "uniqueKols": 1,
+        "sentiment": 0.348,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "spidersjournal"
+        ]
+      },
+      {
+        "rank": 55,
+        "symbol": "$ACCELERANDO",
+        "score": 36,
+        "mentions": 4,
+        "uniqueKols": 2,
+        "sentiment": 0.366,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "PowsGemCalls",
+          "veigarcalls"
+        ]
+      },
+      {
+        "rank": 56,
+        "symbol": "$WHITEWHALE",
+        "score": 36,
+        "mentions": 3,
+        "uniqueKols": 3,
+        "sentiment": 0.06,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "inside_calls",
+          "BossmanCallsOfficial",
+          "veigarcalls"
+        ]
+      },
+      {
+        "rank": 57,
+        "symbol": "$K2",
+        "score": 36,
+        "mentions": 3,
+        "uniqueKols": 2,
+        "sentiment": 0.344,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "ALSTEIN_GEMCLUB",
+          "AnimeGems"
+        ]
+      },
+      {
+        "rank": 58,
+        "symbol": "$HITLER",
+        "score": 36,
+        "mentions": 3,
+        "uniqueKols": 3,
+        "sentiment": 0.011,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "inside_calls",
+          "MaybachCalls",
+          "MaybachGambleCalls"
+        ]
+      },
+      {
+        "rank": 59,
+        "symbol": "$EUDAEMON",
+        "score": 36,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.549,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "CatfishcallsbyPoe"
+        ]
+      },
+      {
+        "rank": 60,
+        "symbol": "$ICEBLOX",
+        "score": 35,
+        "mentions": 15,
+        "uniqueKols": 2,
+        "sentiment": 0.138,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "AnimeGems",
+          "cryptotalkwithfrog"
+        ]
+      },
+      {
+        "rank": 61,
+        "symbol": "$PURCH",
+        "score": 35,
+        "mentions": 4,
+        "uniqueKols": 2,
+        "sentiment": 0.356,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "spidersjournal",
+          "veigarcalls"
+        ]
+      },
+      {
+        "rank": 62,
+        "symbol": "$PEACE",
+        "score": 35,
+        "mentions": 4,
+        "uniqueKols": 2,
+        "sentiment": 0.301,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "OnyxxGems",
+          "chiggajogambles"
+        ]
+      },
+      {
+        "rank": 63,
+        "symbol": "$EPSTEIN",
+        "score": 35,
+        "mentions": 4,
+        "uniqueKols": 2,
+        "sentiment": 0.095,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "MaybachCalls",
+          "ALSTEIN_GEMCLUB"
+        ]
+      },
+      {
+        "rank": 64,
+        "symbol": "$ICEBOX",
+        "score": 35,
+        "mentions": 3,
+        "uniqueKols": 1,
+        "sentiment": 0.43,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "ALSTEIN_GEMCLUB"
+        ]
+      },
+      {
+        "rank": 65,
+        "symbol": "$BORT",
+        "score": 35,
+        "mentions": 2,
+        "uniqueKols": 2,
+        "sentiment": 0.418,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "spidersjournal",
+          "cryptowhalecalls7"
+        ]
+      },
+      {
+        "rank": 66,
+        "symbol": "$PNUT",
+        "score": 35,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.0,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "marcellcooks"
+        ]
+      },
+      {
+        "rank": 67,
+        "symbol": "$BNKR",
+        "score": 35,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.489,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "ALSTEIN_GEMCLUB"
+        ]
+      },
+      {
+        "rank": 68,
+        "symbol": "$WOJAK",
+        "score": 35,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.497,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "BossmanCallsOfficial"
+        ]
+      },
+      {
+        "rank": 69,
+        "symbol": "$CLIPPY",
+        "score": 34,
+        "mentions": 3,
+        "uniqueKols": 2,
+        "sentiment": 0.33,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "slingdeez",
+          "AnimeGems"
+        ]
+      },
+      {
+        "rank": 70,
+        "symbol": "$TORCH",
+        "score": 34,
+        "mentions": 2,
+        "uniqueKols": 2,
+        "sentiment": 0.052,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "ArcaneGems",
+          "dylansdegens"
+        ]
+      },
+      {
+        "rank": 71,
+        "symbol": "$TOKEN",
+        "score": 34,
+        "mentions": 2,
+        "uniqueKols": 2,
+        "sentiment": 0.566,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "leoclub168g",
+          "leoclub168c"
+        ]
+      },
+      {
+        "rank": 72,
+        "symbol": "$FLOW",
+        "score": 34,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.401,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "slingdeez"
+        ]
+      },
+      {
+        "rank": 73,
+        "symbol": "$METAWIN",
+        "score": 34,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.447,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "LevisAlpha"
+        ]
+      },
+      {
+        "rank": 74,
+        "symbol": "$MOLTACRACY",
+        "score": 34,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.417,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "spidersjournal"
+        ]
+      },
+      {
+        "rank": 75,
+        "symbol": "$XAG",
+        "score": 33,
+        "mentions": 4,
+        "uniqueKols": 2,
+        "sentiment": -0.361,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "MarkGems",
+          "MarkDegens"
+        ]
+      },
+      {
+        "rank": 76,
+        "symbol": "$BLOWFISH",
+        "score": 33,
+        "mentions": 3,
+        "uniqueKols": 2,
+        "sentiment": 0.261,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "spidersjournal",
+          "veigarcalls"
+        ]
+      },
+      {
+        "rank": 77,
+        "symbol": "$GITM",
+        "score": 33,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.334,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "spidersjournal"
+        ]
+      },
+      {
+        "rank": 78,
+        "symbol": "$BANKR",
+        "score": 32,
+        "mentions": 3,
+        "uniqueKols": 2,
+        "sentiment": 0.207,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "ALSTEIN_GEMCLUB",
+          "MarkDegens"
+        ]
+      },
+      {
+        "rank": 79,
+        "symbol": "$CRYPTO",
+        "score": 32,
+        "mentions": 3,
+        "uniqueKols": 2,
+        "sentiment": -0.29,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "MarkGems",
+          "MarkDegens"
+        ]
+      },
+      {
+        "rank": 80,
+        "symbol": "$XAU",
+        "score": 32,
+        "mentions": 3,
+        "uniqueKols": 2,
+        "sentiment": -0.277,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "MarkGems",
+          "MarkDegens"
+        ]
+      },
+      {
+        "rank": 81,
+        "symbol": "$CLAWNCH",
+        "score": 32,
+        "mentions": 2,
+        "uniqueKols": 1,
+        "sentiment": 0.234,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "spidersjournal"
+        ]
+      },
+      {
+        "rank": 82,
+        "symbol": "$HOPE",
+        "score": 32,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.765,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "AnimeGems"
+        ]
+      },
+      {
+        "rank": 83,
+        "symbol": "$ELON",
+        "score": 31,
+        "mentions": 4,
+        "uniqueKols": 2,
+        "sentiment": 0.012,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "MaybachCalls",
+          "MarkDegens"
+        ]
+      },
+      {
+        "rank": 84,
+        "symbol": "$SHELLRAISER",
+        "score": 31,
+        "mentions": 3,
+        "uniqueKols": 1,
+        "sentiment": 0.095,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "ALSTEIN_GEMCLUB"
+        ]
+      },
+      {
+        "rank": 85,
+        "symbol": "$LASEREYES",
+        "score": 31,
+        "mentions": 2,
+        "uniqueKols": 2,
+        "sentiment": 0.09,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "spidersjournal",
+          "veigarcalls"
+        ]
+      },
+      {
+        "rank": 86,
+        "symbol": "$AI",
+        "score": 31,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.185,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "ArcaneGems"
+        ]
+      },
+      {
+        "rank": 87,
+        "symbol": "$SEXCOIN",
+        "score": 31,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.664,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "AnimeGems"
+        ]
+      },
+      {
+        "rank": 88,
+        "symbol": "$DONT",
+        "score": 31,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.653,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "cryptotalkwithfrog"
+        ]
+      },
+      {
+        "rank": 89,
+        "symbol": "$SOMA",
+        "score": 31,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.144,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "spidersjournal"
+        ]
+      },
+      {
+        "rank": 90,
+        "symbol": "$SAN",
+        "score": 30,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.119,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "CatfishcallsbyPoe"
+        ]
+      },
+      {
+        "rank": 91,
+        "symbol": "$CT",
+        "score": 29,
+        "mentions": 2,
+        "uniqueKols": 1,
+        "sentiment": 0.453,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "BatmanSafuCalls"
+        ]
+      },
+      {
+        "rank": 92,
+        "symbol": "$QUANTRA",
+        "score": 29,
+        "mentions": 2,
+        "uniqueKols": 1,
+        "sentiment": 0.508,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "AnimeGems"
+        ]
+      },
+      {
+        "rank": 93,
+        "symbol": "$SILVER",
+        "score": 29,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.0,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "BossmanCallsOfficial"
+        ]
+      },
+      {
+        "rank": 94,
+        "symbol": "$COMPUTER",
+        "score": 29,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.535,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "KittysKasino"
+        ]
+      },
+      {
+        "rank": 95,
+        "symbol": "$JEW",
+        "score": 28,
+        "mentions": 3,
+        "uniqueKols": 2,
+        "sentiment": 0.015,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "AnimeGems",
+          "CarnagecallsGambles"
+        ]
+      },
+      {
+        "rank": 96,
+        "symbol": "$MOONER",
+        "score": 28,
+        "mentions": 2,
+        "uniqueKols": 1,
+        "sentiment": 0.362,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "cryptotalkwithfrog"
+        ]
+      },
+      {
+        "rank": 97,
+        "symbol": "$FIRE",
+        "score": 28,
+        "mentions": 2,
+        "uniqueKols": 1,
+        "sentiment": -0.139,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "certifiedprintor"
+        ]
+      },
+      {
+        "rank": 98,
+        "symbol": "$THINK",
+        "score": 28,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.469,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "chiggajogambles"
+        ]
+      },
+      {
+        "rank": 99,
+        "symbol": "$CLAWFI",
+        "score": 27,
+        "mentions": 2,
+        "uniqueKols": 1,
+        "sentiment": -0.163,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "certifiedprintor"
+        ]
+      },
+      {
+        "rank": 100,
+        "symbol": "$BUCK",
+        "score": 27,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": -0.163,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "darkocalls"
+        ]
+      },
+      {
+        "rank": 101,
+        "symbol": "$PUSSYCOIN",
+        "score": 27,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.362,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "cryptotalkwithfrog"
+        ]
+      },
+      {
+        "rank": 102,
+        "symbol": "$XXX",
+        "score": 27,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.368,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "CarnagecallsGambles"
+        ]
+      },
+      {
+        "rank": 103,
+        "symbol": "$DARKFLOBI",
+        "score": 26,
+        "mentions": 2,
+        "uniqueKols": 1,
+        "sentiment": 0.272,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "Luca_Apes"
+        ]
+      },
+      {
+        "rank": 104,
+        "symbol": "$CANCER",
+        "score": 26,
+        "mentions": 2,
+        "uniqueKols": 2,
+        "sentiment": -0.346,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "MaybachCalls",
+          "MaybachGambleCalls"
+        ]
+      },
+      {
+        "rank": 105,
+        "symbol": "$SHIBYARD",
+        "score": 26,
+        "mentions": 2,
+        "uniqueKols": 2,
+        "sentiment": -0.346,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "MaybachCalls",
+          "MaybachGambleCalls"
+        ]
+      },
+      {
+        "rank": 106,
+        "symbol": "$PEDO",
+        "score": 26,
+        "mentions": 2,
+        "uniqueKols": 2,
+        "sentiment": -0.346,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "MaybachCalls",
+          "MaybachGambleCalls"
+        ]
+      },
+      {
+        "rank": 107,
+        "symbol": "$JOOGLE",
+        "score": 26,
+        "mentions": 2,
+        "uniqueKols": 2,
+        "sentiment": -0.346,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "MaybachCalls",
+          "MaybachGambleCalls"
+        ]
+      },
+      {
+        "rank": 108,
+        "symbol": "$CLAWDICT",
+        "score": 26,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.242,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "MarkDegens"
+        ]
+      },
+      {
+        "rank": 109,
+        "symbol": "$GBOYWHICH",
+        "score": 26,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.295,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "veigarcalls"
+        ]
+      },
+      {
+        "rank": 110,
+        "symbol": "$PROFIT",
+        "score": 26,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.308,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "veigarcalls"
+        ]
+      },
+      {
+        "rank": 111,
+        "symbol": "$SHIKSA",
+        "score": 26,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.253,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "chiggajogambles"
+        ]
+      },
+      {
+        "rank": 112,
+        "symbol": "$PAAL",
+        "score": 26,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.28,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "MaybachGambleCalls"
+        ]
+      },
+      {
+        "rank": 113,
+        "symbol": "$DONALD",
+        "score": 25,
+        "mentions": 4,
+        "uniqueKols": 1,
+        "sentiment": 0.045,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "SaviourCALLS"
+        ]
+      },
+      {
+        "rank": 114,
+        "symbol": "$MEMES",
+        "score": 25,
+        "mentions": 3,
+        "uniqueKols": 1,
+        "sentiment": 0.106,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "sadcatgamble"
+        ]
+      },
+      {
+        "rank": 115,
+        "symbol": "$GOY",
+        "score": 25,
+        "mentions": 2,
+        "uniqueKols": 2,
+        "sentiment": -0.119,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "veigarcalls",
+          "CarnagecallsGambles"
+        ]
+      },
+      {
+        "rank": 116,
+        "symbol": "$LCHAN",
+        "score": 25,
+        "mentions": 2,
+        "uniqueKols": 1,
+        "sentiment": 0.193,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "cryptotalkwithfrog"
+        ]
+      },
+      {
+        "rank": 117,
+        "symbol": "$DUCK",
+        "score": 25,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.182,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "watisdes"
+        ]
+      },
+      {
+        "rank": 118,
+        "symbol": "$PISSFACE",
+        "score": 25,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.206,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "robogems"
+        ]
+      },
+      {
+        "rank": 119,
+        "symbol": "$CLAWD",
+        "score": 25,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": -0.276,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "inside_calls"
+        ]
+      },
+      {
+        "rank": 120,
+        "symbol": "$CHONKACHU",
+        "score": 25,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": -0.325,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "certifiedprintor"
+        ]
+      },
+      {
+        "rank": 121,
+        "symbol": "$PIGGY",
+        "score": 25,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": -0.325,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "certifiedprintor"
+        ]
+      },
+      {
+        "rank": 122,
+        "symbol": "$COIN",
+        "score": 25,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": -0.325,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "certifiedprintor"
+        ]
+      },
+      {
+        "rank": 123,
+        "symbol": "$CHICKEN",
+        "score": 25,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": -0.325,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "certifiedprintor"
+        ]
+      },
+      {
+        "rank": 124,
+        "symbol": "$PUSSY",
+        "score": 24,
+        "mentions": 2,
+        "uniqueKols": 1,
+        "sentiment": 0.052,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "cryptotalkwithfrog"
+        ]
+      },
+      {
+        "rank": 125,
+        "symbol": "$PYRA",
+        "score": 24,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.125,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "sadcatgamble"
+        ]
+      },
+      {
+        "rank": 126,
+        "symbol": "$EPSIZZA",
+        "score": 24,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.088,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "veigarcalls"
+        ]
+      },
+      {
+        "rank": 127,
+        "symbol": "$RICK",
+        "score": 24,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.105,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "cryptotalkwithfrog"
+        ]
+      },
+      {
+        "rank": 128,
+        "symbol": "$BLACKWHALE",
+        "score": 24,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.09,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "cryptotalkwithfrog"
+        ]
+      },
+      {
+        "rank": 129,
+        "symbol": "$CHUCKY",
+        "score": 24,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.09,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "cryptotalkwithfrog"
+        ]
+      },
+      {
+        "rank": 130,
+        "symbol": "$LQUID",
+        "score": 24,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.152,
+        "trend": "up",
+        "change24h": 0.0,
+        "topKols": [
+          "CarnagecallsGambles"
+        ]
+      },
+      {
+        "rank": 131,
+        "symbol": "$DAISY",
+        "score": 24,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.09,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "SaviourCALLS"
+        ]
+      },
+      {
+        "rank": 132,
+        "symbol": "$DARKO",
+        "score": 23,
+        "mentions": 2,
+        "uniqueKols": 1,
+        "sentiment": 0.0,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "Luca_Apes"
+        ]
+      },
+      {
+        "rank": 133,
+        "symbol": "$GRUSHKY",
+        "score": 23,
+        "mentions": 2,
+        "uniqueKols": 1,
+        "sentiment": 0.0,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "Luca_Apes"
+        ]
+      },
+      {
+        "rank": 134,
+        "symbol": "$BOBO",
+        "score": 23,
+        "mentions": 2,
+        "uniqueKols": 1,
+        "sentiment": 0.018,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "AnimeGems"
+        ]
+      },
+      {
+        "rank": 135,
+        "symbol": "$PATRIOT",
+        "score": 23,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.0,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "sadcatgamble"
+        ]
+      },
+      {
+        "rank": 136,
+        "symbol": "$OPENCLAW",
+        "score": 23,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.072,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "MarkDegens"
+        ]
+      },
+      {
+        "rank": 137,
+        "symbol": "$ESPIZZA",
+        "score": 23,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.0,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "veigarcalls"
+        ]
+      },
+      {
+        "rank": 138,
+        "symbol": "$MICASA",
+        "score": 23,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.0,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "veigarcalls"
+        ]
+      },
+      {
+        "rank": 139,
+        "symbol": "$FROG",
+        "score": 23,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.0,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "cryptotalkwithfrog"
+        ]
+      },
+      {
+        "rank": 140,
+        "symbol": "$GOLEM",
+        "score": 23,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.0,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "cryptotalkwithfrog"
+        ]
+      },
+      {
+        "rank": 141,
+        "symbol": "$LUNAR",
+        "score": 23,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.0,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "CarnagecallsGambles"
+        ]
+      },
+      {
+        "rank": 142,
+        "symbol": "$CUM",
+        "score": 23,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.0,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "cryptowhalecalls7"
+        ]
+      },
+      {
+        "rank": 143,
+        "symbol": "$BOOB",
+        "score": 23,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": 0.0,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "cryptowhalecalls7"
+        ]
+      },
+      {
+        "rank": 144,
+        "symbol": "$MOSSAD",
+        "score": 22,
+        "mentions": 3,
+        "uniqueKols": 1,
+        "sentiment": -0.129,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "CarnagecallsGambles"
+        ]
+      },
+      {
+        "rank": 145,
+        "symbol": "$JEWPITER",
+        "score": 22,
+        "mentions": 2,
+        "uniqueKols": 1,
+        "sentiment": -0.074,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "MaybachGambleCalls"
+        ]
+      },
+      {
+        "rank": 146,
+        "symbol": "$MESA",
+        "score": 22,
+        "mentions": 2,
+        "uniqueKols": 1,
+        "sentiment": -0.059,
+        "trend": "stable",
+        "change24h": 0.0,
+        "topKols": [
+          "cryptotalkwithfrog"
+        ]
+      },
+      {
+        "rank": 147,
+        "symbol": "$MARIUS",
+        "score": 20,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": -0.209,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "cryptotalkwithfrog"
+        ]
+      },
+      {
+        "rank": 148,
+        "symbol": "$MEGA",
+        "score": 20,
+        "mentions": 1,
+        "uniqueKols": 1,
+        "sentiment": -0.19,
+        "trend": "down",
+        "change24h": 0.0,
+        "topKols": [
+          "cryptowhalecalls7"
+        ]
+      }
+    ]
+  }
+}

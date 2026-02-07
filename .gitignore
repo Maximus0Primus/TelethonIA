@@ -1,0 +1,50 @@
+# === SECRETS & AUTH ===
+*.session
+.env
+.env.*
+!.env.example
+!.env.local.example
+
+# Legacy scripts with hardcoded credentials
+exportfinaljson.py
+TelethonClient.py
+getID.py
+read_export.py
+
+# === PYTHON ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# === NODE.JS ===
+node_modules/
+.next/
+out/
+.vercel
+*.tsbuildinfo
+next-env.d.ts
+
+# === DATA EXPORTS ===
+messages_export_*.json
+ConvictionApp/data/
+ConvictionApp/cache/
+
+# === OS ===
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# === TOOLING ===
+.claude/
+.mcp.json
+.playwright-mcp/
+
+# === BINARY ASSETS ===
+*.wav
+*.png
+*.pem
