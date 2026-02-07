@@ -1,19 +1,25 @@
 "use client";
 
 import { motion } from "framer-motion";
-import { LayoutGrid, List, SlidersHorizontal } from "lucide-react";
+import { LayoutGrid, List } from "lucide-react";
 import { cn } from "@/lib/utils";
+
+export type TimeWindow = "3h" | "6h" | "12h" | "24h" | "48h" | "7d";
+
+const TIME_WINDOWS: TimeWindow[] = ["3h", "6h", "12h", "24h", "48h", "7d"];
 
 interface ViewControlsProps {
   viewMode: "grid" | "list";
   onViewModeChange: (mode: "grid" | "list") => void;
-  onFilterClick?: () => void;
+  timeWindow: TimeWindow;
+  onTimeWindowChange: (window: TimeWindow) => void;
 }
 
 export function ViewControls({
   viewMode,
   onViewModeChange,
-  onFilterClick,
+  timeWindow,
+  onTimeWindowChange,
 }: ViewControlsProps) {
   return (
     <>
@@ -52,20 +58,29 @@ export function ViewControls({
         </div>
       </motion.div>
 
-      {/* Filter Button - Bottom Right */}
+      {/* Time Window Selector - Bottom Right */}
       <motion.div
         initial={{ opacity: 0, x: 20 }}
         animate={{ opacity: 1, x: 0 }}
         transition={{ duration: 0.5, delay: 0.6 }}
         className="fixed bottom-8 right-6 z-40 hidden sm:flex"
       >
-        <button
-          onClick={onFilterClick}
-          className="glass-control flex h-11 items-center gap-2 rounded-lg px-4 text-sm font-medium text-white/80 hover:text-white transition-colors"
-        >
-          <SlidersHorizontal className="h-4 w-4" />
-          <span>Filter</span>
-        </button>
+        <div className="glass-control flex items-center rounded-lg p-1 gap-0.5">
+          {TIME_WINDOWS.map((w) => (
+            <button
+              key={w}
+              onClick={() => onTimeWindowChange(w)}
+              className={cn(
+                "px-3 py-1.5 text-xs font-mono rounded-md transition-colors",
+                timeWindow === w
+                  ? "bg-white text-black"
+                  : "text-white/60 hover:text-white"
+              )}
+            >
+              {w}
+            </button>
+          ))}
+        </div>
       </motion.div>
     </>
   );
