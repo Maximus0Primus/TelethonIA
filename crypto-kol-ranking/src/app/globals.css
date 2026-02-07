@@ -198,6 +198,14 @@
   border: 1px solid rgba(255, 255, 255, 0.1);
 }
 
+/* Contact modal glass */
+.glass-modal {
+  background: rgba(17, 17, 17, 0.85);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
 /* View controls glass */
 .glass-control {
   background: rgba(17, 17, 17, 0.6);
@@ -220,8 +228,8 @@
 /* Background grid pattern */
 .bg-grid-pattern {
   background-image:
-    linear-gradient(rgba(255, 255, 255, 0.03) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
+    linear-gradient(rgba(255, 255, 255, 0.07) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.07) 1px, transparent 1px);
   background-size: 60px 60px;
 }
 
@@ -265,4 +273,9 @@
 
 .manifesto-highlight {
   @apply text-foreground font-medium;
+}
+
+/* Password gate z-index (above z-50) */
+.z-60 {
+  z-index: 60;
 }

@@ -1,12 +1,49 @@
 "use client";
 
+import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { motion } from "framer-motion";
-import { Header } from "@/components/layout/Header";
-import { FloatingNav } from "@/components/layout/FloatingNav";
+import Link from "next/link";
 import { useAudio } from "@/components/AudioProvider";
+
+const ACCESS_TOKEN_KEY = "cryptosensus_access_token";
 
 export default function AboutPage() {
   const { toggleLoop, loopPlaying } = useAudio();
+  const router = useRouter();
+  const [authChecked, setAuthChecked] = useState(false);
+
+  // Verify token on mount — redirect to / if not authenticated
+  useEffect(() => {
+    const token = localStorage.getItem(ACCESS_TOKEN_KEY);
+    if (!token) {
+      router.replace("/");
+      return;
+    }
+
+    fetch("/api/auth/verify-token", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token }),
+    })
+      .then((res) => res.json())
+      .then((data) => {
+        if (!data.valid) {
+          localStorage.removeItem(ACCESS_TOKEN_KEY);
+          router.replace("/");
+        } else {
+          setAuthChecked(true);
+        }
+      })
+      .catch(() => {
+        // Network error — graceful degradation
+        setAuthChecked(true);
+      });
+  }, [router]);
+
+  if (!authChecked) {
+    return <div className="min-h-screen bg-[#F0F0F0]" />;
+  }
 
   return (
     <div className="min-h-screen bg-[#F0F0F0]">
@@ -18,11 +55,11 @@ export default function AboutPage() {
         className="fixed top-0 left-0 right-0 z-50 pointer-events-none"
       >
         <div className="mx-auto flex h-20 max-w-7xl items-center justify-between px-6 sm:px-8">
-          <a href="/" className="pointer-events-auto">
+          <Link href="/" className="pointer-events-auto">
             <h1 className="text-xl font-bold tracking-tight text-black hover:text-black/70 transition-colors">
               Cryptosensus
             </h1>
-          </a>
+          </Link>
           <button
             onClick={toggleLoop}
             className="pointer-events-auto text-[11px] font-mono tracking-wider text-black/30 hover:text-black/60 transition-colors uppercase"
@@ -40,12 +77,12 @@ export default function AboutPage() {
         className="fixed bottom-8 left-1/2 -translate-x-1/2 z-50"
       >
         <div className="flex items-center gap-1 rounded-full px-2 py-2 bg-white/80 backdrop-blur-xl border border-black/10">
-          <a
+          <Link
             href="/"
             className="px-5 py-2 text-sm font-medium rounded-full text-black/60 hover:text-black transition-colors"
           >
             Tokens
-          </a>
+          </Link>
           <span className="relative px-5 py-2 text-sm font-medium rounded-full text-white">
             <span className="absolute inset-0 bg-black rounded-full" />
             <span className="relative z-10">About</span>

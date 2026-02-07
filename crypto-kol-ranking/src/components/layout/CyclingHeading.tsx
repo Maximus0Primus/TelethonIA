@@ -4,7 +4,7 @@ import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 
 const CATEGORIES = ["MEMECOIN", "AI COIN", "DEFI COIN", "TECH COIN"];
-const CYCLE_INTERVAL = 3000;
+const CYCLE_INTERVAL = 1800;
 
 const slideUp = {
   initial: { y: "100%", opacity: 0 },
@@ -13,7 +13,7 @@ const slideUp = {
 };
 
 const transition = {
-  duration: 0.5,
+  duration: 0.3,
   ease: [0.16, 1, 0.3, 1] as const,
 };
 
@@ -34,7 +34,7 @@ export function CyclingHeading() {
         <motion.span
           className="relative inline-flex overflow-hidden items-center"
           layout
-          transition={{ duration: 0.35, ease: [0.16, 1, 0.3, 1] }}
+          transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
         >
           {/* Invisible sizer: only the CURRENT word, sets natural width */}
           <span className="invisible whitespace-nowrap" aria-hidden="true">

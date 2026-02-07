@@ -10,6 +10,7 @@ import { TokenGrid } from "@/components/tokens/TokenGrid";
 import type { TokenCardData } from "@/components/tokens/TokenCard";
 import type { AnimationPhase } from "@/components/tokens/TokenCard";
 import { useAutoRefresh } from "@/hooks/useAutoRefresh";
+import { GridDistortion } from "@/components/effects/GridDistortion";
 
 interface ApiResponse {
   data: TokenCardData[];
@@ -128,8 +129,9 @@ export default function Home() {
 
   return (
     <>
-      {/* Background grid pattern */}
-      <div className="fixed inset-0 bg-grid-pattern pointer-events-none" />
+      <GridDistortion />
+
+      <Header />
 
       <HeroSection onIntroComplete={handleIntroComplete} />
 
@@ -137,7 +139,6 @@ export default function Home() {
         className="transition-opacity duration-700 ease-out"
         style={{ opacity: introDone ? 1 : 0, pointerEvents: introDone ? "auto" : "none" }}
       >
-        <Header />
         <FloatingNav />
         <ViewControls
           viewMode={viewMode}

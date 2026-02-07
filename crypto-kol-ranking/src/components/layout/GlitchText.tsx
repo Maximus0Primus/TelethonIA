@@ -17,9 +17,10 @@ interface GlitchTextProps {
   mode: "reveal" | "ambient" | "fullglitch" | "idle";
   onRevealComplete?: () => void;
   className?: string;
+  subtle?: boolean;
 }
 
-export function GlitchText({ text, mode, onRevealComplete, className = "" }: GlitchTextProps) {
+export function GlitchText({ text, mode, onRevealComplete, className = "", subtle = false }: GlitchTextProps) {
   const [mounted, setMounted] = useState(false);
   const [displayChars, setDisplayChars] = useState<string[]>(text.split(""));
   const [lockedCount, setLockedCount] = useState(text.length);
@@ -200,7 +201,9 @@ export function GlitchText({ text, mode, onRevealComplete, className = "" }: Gli
           : isRevealing
             ? { x: [0, -1, 2, -1, 0] }
             : isAmbient
-              ? { x: [0, 1.5, -1.2, 1.8, 0] }
+              ? subtle
+                ? { x: [0, 0.3, -0.2, 0.3, 0] }
+                : { x: [0, 1.5, -1.2, 1.8, 0] }
               : { x: 0 }
       }
       transition={
@@ -227,9 +230,13 @@ export function GlitchText({ text, mode, onRevealComplete, className = "" }: Gli
               fontFamily: showGlitchStyle ? "var(--font-jetbrains-mono), monospace" : "inherit",
               color: showGlitchStyle ? "#00ff41" : "inherit",
               textShadow: showGlitchStyle
-                ? "3px 0 #ff0040, -3px 0 #00ff41"
+                ? subtle
+                  ? "0 0 6px rgba(0,255,65,0.4)"
+                  : "3px 0 #ff0040, -3px 0 #00ff41"
                 : isAmbient
-                  ? "2px 0 rgba(255,0,64,0.6), -2px 0 rgba(0,255,65,0.6)"
+                  ? subtle
+                    ? "0 0 4px rgba(0,255,65,0.2)"
+                    : "2px 0 rgba(255,0,64,0.6), -2px 0 rgba(0,255,65,0.6)"
                   : "none",
               minWidth: "0.6em",
               textAlign: "center",
