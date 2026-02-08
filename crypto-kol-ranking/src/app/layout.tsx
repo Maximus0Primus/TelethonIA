@@ -20,19 +20,19 @@ const BASE_URL = process.env.NEXT_PUBLIC_SITE_URL || "https://cryptosensus.org";
 export const metadata: Metadata = {
   metadataBase: new URL(BASE_URL),
   title: {
-    default: "Cryptosensus — First Real-Time Crypto Lowcap Buy Score",
+    default: "Cryptosensus — Real-Time Lowcap Crypto Buy Indicator",
     template: "%s | Cryptosensus",
   },
   description:
-    "Cryptosensus brings clarity to the noise. Stop wasting your time trading. Know what to buy before the crowd does.",
+    "Cryptosensus brings clarity to the noise. We score lowcap tokens so you know what to buy before the crowd does. Stop guessing. Start winning.",
   authors: [{ name: "Cryptosensus" }],
   alternates: {
     canonical: BASE_URL,
   },
   openGraph: {
-    title: "Cryptosensus — First Real-Time Crypto Lowcap Buy Score",
+    title: "Cryptosensus — Real-Time Lowcap Crypto Buy Indicator",
     description:
-      "Cryptosensus brings clarity to the noise. Stop wasting your time trading. Know what to buy before the crowd does.",
+      "Cryptosensus brings clarity to the noise. We score lowcap tokens so you know what to buy before the crowd does. Stop guessing. Start winning.",
     url: BASE_URL,
     type: "website",
     siteName: "Cryptosensus",
@@ -41,16 +41,16 @@ export const metadata: Metadata = {
         url: "/opengraph-image",
         width: 1200,
         height: 630,
-        alt: "Cryptosensus — First Real-Time Crypto Lowcap Buy Score",
+        alt: "Cryptosensus — Real-Time Lowcap Crypto Buy Indicator",
       },
     ],
   },
   twitter: {
     card: "summary_large_image",
     creator: "@Maximus0Primus",
-    title: "Cryptosensus — First Real-Time Crypto Lowcap Buy Score",
+    title: "Cryptosensus — Real-Time Lowcap Crypto Buy Indicator",
     description:
-      "Cryptosensus brings clarity to the noise. Stop wasting your time trading. Know what to buy before the crowd does.",
+      "Cryptosensus brings clarity to the noise. We score lowcap tokens so you know what to buy before the crowd does. Stop guessing. Start winning.",
     images: ["/opengraph-image"],
   },
 };
@@ -67,7 +67,7 @@ export default function RootLayout({
     name: "Cryptosensus",
     url: BASE_URL,
     description:
-      "Cryptosensus brings clarity to the noise. Stop wasting your time trading. Know what to buy before the crowd does.",
+      "Cryptosensus brings clarity to the noise. We score lowcap tokens so you know what to buy before the crowd does. Stop guessing. Start winning.",
     applicationCategory: "FinanceApplication",
     operatingSystem: "Web",
     offers: {
