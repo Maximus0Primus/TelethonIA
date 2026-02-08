@@ -88,6 +88,71 @@ ALL_FEATURE_COLS = [
     "birdeye_buy_sell_ratio",
     "v_buy_24h_usd_log",
     "v_sell_24h_usd_log",
+    # Phase 1 scoring features
+    "social_velocity",
+    "mention_acceleration",
+    "onchain_multiplier",
+    "safety_penalty",
+    # Phase 2 features
+    "kol_reputation_avg",
+    "narrative_is_hot",
+    "pump_graduated",
+    "mentions_delta",
+    "sentiment_delta",
+    "volume_delta",
+    "holder_delta",
+    # Phase 3: Helius on-chain intelligence
+    "helius_holder_count_log",
+    "helius_top5_pct",
+    "helius_top20_pct",
+    "helius_gini",
+    "bundle_detected",
+    "bundle_count",
+    "bundle_pct",
+    "helius_recent_tx_count",
+    "helius_unique_buyers",
+    "helius_onchain_bsr",
+    # Phase 3B: Jupiter swap data
+    "jup_tradeable",
+    "jup_price_impact_1k",
+    "jup_route_count",
+    # Phase 3B: Whale tracking
+    "whale_count",
+    "whale_total_pct",
+    "whale_change",
+    "whale_new_entries",
+    # Phase 3B: Narrative confidence
+    "narrative_confidence",
+    # Algorithm v2: Wash trading detection
+    "wash_trading_score",
+    # Algorithm v2: Jito bundle detection
+    "jito_bundle_detected",
+    "jito_bundle_slots",
+    "jito_max_slot_txns",
+    # Algorithm v2: PVP detection
+    "pvp_same_name_count",
+    "pvp_recent_count",
+    # Algorithm v2: Per-message conviction NLP
+    "msg_conviction_avg",
+    "price_target_count",
+    "hedging_count",
+    # Algorithm v3 Sprint A: New features
+    "short_term_heat",
+    "txn_velocity",
+    "sentiment_consistency",
+    "is_artificial_pump",
+    # Algorithm v3 Sprint C: ME2F-inspired ML features
+    "volatility_proxy",
+    "whale_dominance",
+    "sentiment_amplification",
+    # Algorithm v3.1: 5m granularity + already pumped + Bubblemaps
+    "volume_5m_log",
+    "buy_sell_ratio_5m",
+    "ultra_short_heat",
+    "already_pumped_penalty",
+    "bubblemaps_score",
+    "bubblemaps_cluster_max_pct",
+    "bubblemaps_cluster_count",
 ]
 
 HORIZONS = {
@@ -137,17 +202,23 @@ def prepare_features(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
         "volume_24h": "volume_24h_log",
         "volume_6h": "volume_6h_log",
         "volume_1h": "volume_1h_log",
+        "volume_5m": "volume_5m_log",
         "liquidity_usd": "liquidity_usd_log",
         "market_cap": "market_cap_log",
         "holder_count": "holder_count_log",
         "v_buy_24h_usd": "v_buy_24h_usd_log",
         "v_sell_24h_usd": "v_sell_24h_usd_log",
+        "helius_holder_count": "helius_holder_count_log",
     }
     for raw_col, log_col in log_cols.items():
         if raw_col in df.columns:
             df[log_col] = df[raw_col].apply(
                 lambda x: np.log1p(float(x)) if pd.notna(x) and float(x) > 0 else np.nan
             )
+
+    # Pump.fun graduation binary (from pump_graduation_status)
+    if "pump_graduation_status" in df.columns:
+        df["pump_graduated"] = (df["pump_graduation_status"] == "graduated").astype(int)
 
     # Birdeye buy/sell ratio
     if "birdeye_buy_24h" in df.columns and "birdeye_sell_24h" in df.columns:
@@ -347,8 +418,27 @@ def train_ensemble(
         X_train, y_train, X_test, y_test, scale_pos, n_trials
     )
 
+    # Calibrate XGBoost with isotonic regression on a hold-out portion of test set
+    cal_split = max(10, len(X_test) // 2)
+    X_cal, X_eval = X_test.iloc[:cal_split], X_test.iloc[cal_split:]
+    y_cal, y_eval = y_test.iloc[:cal_split], y_test.iloc[cal_split:]
+
+    calibrated = False
+    xgb_calibrated = xgb_model
+    if len(y_cal) >= 10 and y_cal.nunique() == 2:
+        try:
+            xgb_calibrated = CalibratedClassifierCV(xgb_model, method="isotonic", cv="prefit")
+            xgb_calibrated.fit(X_cal, y_cal)
+            calibrated = True
+            logger.info("XGBoost calibrated with isotonic regression on %d samples", len(y_cal))
+        except Exception as e:
+            logger.warning("Calibration failed: %s — using raw probabilities", e)
+            xgb_calibrated = xgb_model
+    else:
+        logger.info("Insufficient calibration data (%d samples) — skipping calibration", len(y_cal))
+
     # Ensemble: weighted average of probabilities
-    xgb_proba = xgb_model.predict_proba(X_test)[:, 1]
+    xgb_proba = xgb_calibrated.predict_proba(X_test)[:, 1]
     lgb_proba = lgb_model.predict_proba(X_test)[:, 1]
 
     # Weight by individual precision@5 performance
@@ -391,9 +481,20 @@ def train_ensemble(
         logger.info("  %s: %.4f", feat, imp)
 
     # Save XGBoost model (primary — used by pipeline.py)
+    # Save raw model (XGBoost JSON format, always available)
     xgb_path = MODEL_DIR / f"model_{horizon}.json"
     xgb_model.save_model(str(xgb_path))
     logger.info("XGBoost model saved to %s", xgb_path)
+
+    # Save calibrated model via joblib if calibration succeeded
+    if calibrated:
+        try:
+            from joblib import dump as joblib_dump
+            cal_path = MODEL_DIR / f"model_{horizon}_calibrated.joblib"
+            joblib_dump(xgb_calibrated, str(cal_path))
+            logger.info("Calibrated model saved to %s", cal_path)
+        except ImportError:
+            logger.warning("joblib not available — calibrated model not saved to disk")
 
     # Save LightGBM model
     lgb_path = MODEL_DIR / f"model_{horizon}_lgb.txt"
@@ -425,6 +526,8 @@ def train_ensemble(
         "shap_importances_xgb": xgb_shap,
         "shap_importances_lgb": lgb_shap,
         "features": available_features,
+        "calibrated": calibrated,
+        "calibration_samples": int(len(y_cal)) if calibrated else 0,
     }
 
     meta_path = MODEL_DIR / f"model_{horizon}_meta.json"

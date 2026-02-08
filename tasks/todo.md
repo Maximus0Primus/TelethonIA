@@ -229,3 +229,222 @@ Pour que le scraper tourne 24/7 :
 3. Wait ~1-2 weeks for ~200+ labeled snapshots
 4. `python scraper/train_model.py --horizon 12h --trials 100` — train first model
 5. Model auto-loads on next scraper cycle (pipeline.py detects model_12h.json)
+
+---
+
+## Phase 2: Algorithm Intelligence Upgrade (DONE)
+
+### Implementation Status
+
+- [x] **Step 1:** `scraper/kol_scorer.py` — KOL reputation scoring from historical 2x outcomes
+- [x] **Step 2:** `scraper/pipeline.py` — Narrative/meta classification (ai_agent, animal, politics, etc.)
+- [x] **Step 3:** `scraper/pipeline.py` — CryptoBERT sentiment (optional, falls back to VADER)
+- [x] **Step 4:** `scraper/enrich.py` — Pump.fun graduation detection (bonding → graduated)
+- [x] **Step 5:** `scraper/push_to_supabase.py` — Temporal features (mentions/sentiment/volume/holder deltas)
+- [x] **Step 6:** `scraper/train_model.py` — ML calibration (isotonic regression via CalibratedClassifierCV)
+- [x] **Step 7:** `scraper/train_model.py` — Phase 1+2 features added to ALL_FEATURE_COLS
+- [x] **Step 8:** Supabase migration — 9 new columns on token_snapshots
+
+### Files Modified
+- `scraper/pipeline.py` — KOL reputation weighting, narrative classification, CryptoBERT optional, pump.fun/narrative score bonuses
+- `scraper/enrich.py` — pump_graduation_status field (bonding/graduated/null)
+- `scraper/push_to_supabase.py` — temporal deltas, Phase 2 columns in snapshots
+- `scraper/train_model.py` — +11 features (Phase 1+2), pump_graduated derived, calibration
+- `scraper/requirements.txt` — joblib, optional transformers/torch
+
+### Files Created
+- `scraper/kol_scorer.py` — computes KOL hit rates, caches to kol_scores.json
+
+### DB Migration
+- token_snapshots: +9 columns (top_kols, narrative, kol_reputation_avg, narrative_is_hot, pump_graduation_status, mentions_delta, sentiment_delta, volume_delta, holder_delta)
+
+### Verification
+1. `python kol_scorer.py --verbose` — check kol_scores.json has plausible hit rates
+2. Run scraper twice → second run should have non-null temporal deltas
+3. Check logs for "CryptoBERT loaded" (if transformers installed) or "VADER fallback"
+4. Check enriched tokens for pump_graduation_status
+5. `python train_model.py --horizon 12h --trials 5` → verify new features appear
+
+---
+
+## Phase 3: Helius Smart Money & Bundle Detection (DONE)
+
+### Implementation Status
+
+- [x] **Step 1:** Supabase migration — +10 columns on token_snapshots (helius_holder_count, helius_top5_pct, helius_top20_pct, helius_gini, bundle_detected, bundle_count, bundle_pct, helius_recent_tx_count, helius_unique_buyers, helius_onchain_bsr)
+- [x] **Step 2:** `scraper/enrich_helius.py` — Full Helius API module (getTokenAccounts, getSignaturesForAddress, bundle detection, Gini coefficient, holder quality analysis)
+- [x] **Step 3:** `scraper/pipeline.py` — Helius integration (import, call after enrich_tokens, safety penalty for bundles/gini/low holders, on-chain multiplier for tx activity/BSR)
+- [x] **Step 4:** `scraper/push_to_supabase.py` — 10 new Helius fields in insert_snapshots()
+- [x] **Step 5:** `scraper/train_model.py` — +10 features in ALL_FEATURE_COLS, helius_holder_count log transform
+- [x] **Step 6:** `scraper/.env` — HELIUS_API_KEY added
+
+### Files Modified
+- `scraper/pipeline.py` — import enrich_helius, call in aggregate_ranking, 3 new safety checks (bundle, gini, holder count), 2 new on-chain factors (tx count, BSR)
+- `scraper/push_to_supabase.py` — 10 new Helius fields in snapshot rows
+- `scraper/train_model.py` — 10 new features + helius_holder_count log transform
+
+### Files Created
+- `scraper/enrich_helius.py` — Complete Helius API module (bundle detection, holder quality, transaction analysis, 2h cache, rate limiting)
+
+### DB Migration (RUN MANUALLY)
+```sql
+ALTER TABLE token_snapshots
+  ADD COLUMN IF NOT EXISTS helius_holder_count integer,
+  ADD COLUMN IF NOT EXISTS helius_top5_pct real,
+  ADD COLUMN IF NOT EXISTS helius_top20_pct real,
+  ADD COLUMN IF NOT EXISTS helius_gini real,
+  ADD COLUMN IF NOT EXISTS bundle_detected smallint,
+  ADD COLUMN IF NOT EXISTS bundle_count integer,
+  ADD COLUMN IF NOT EXISTS bundle_pct real,
+  ADD COLUMN IF NOT EXISTS helius_recent_tx_count integer,
+  ADD COLUMN IF NOT EXISTS helius_unique_buyers integer,
+  ADD COLUMN IF NOT EXISTS helius_onchain_bsr real;
+```
+
+### Verification
+- [x] Syntax: all 4 files compile (py_compile)
+- [x] Unit test: Gini (equal=0.0, whale=0.99) PASS
+- [x] Unit test: Bundle detection (10 similar=detected, diverse=not detected) PASS
+- [x] Integration: enrich_tokens_helius graceful fallback without API key PASS
+- [ ] DB migration: run SQL above in Supabase SQL Editor
+- [ ] Live test: run scraper → check token_snapshots for non-null helius_holder_count on top 10
+- [ ] ML test: `python train_model.py --horizon 12h --trials 5` → new features in metadata
+
+### Credit Budget
+- Free tier: 1M credits/month
+- Estimated usage: ~22K/month (2.2% of budget)
+- getTokenAccounts: 10 credits/page, top 10 tokens/cycle
+- getSignaturesForAddress: 10 credits/call, top 5 tokens/cycle
+
+---
+
+## Phase 3B: Jupiter, Whale Tracking, Semantic Narratives (DONE)
+
+### Implementation Status
+
+- [x] **Step 1:** Supabase migration — +9 columns on token_snapshots (jup_tradeable, jup_price_impact_1k, jup_route_count, jup_price_usd, whale_count, whale_total_pct, whale_change, whale_new_entries, narrative_confidence)
+- [x] **Step 2:** `scraper/enrich_jupiter.py` — Jupiter API module (quote for tradeability + price impact, batch price lookup, 30min cache)
+- [x] **Step 3:** `scraper/enrich_helius.py` — Whale tracking (_analyze_whales, cross-cycle comparison, no extra API calls)
+- [x] **Step 4:** `scraper/pipeline.py` — Semantic narrative classifier (all-MiniLM-L6-v2, 12 narratives, keyword fallback), Jupiter + whale scoring factors
+- [x] **Step 5:** `scraper/push_to_supabase.py` — 9 new fields in insert_snapshots()
+- [x] **Step 6:** `scraper/train_model.py` — +8 features in ALL_FEATURE_COLS (69 total)
+- [x] **Step 7:** `scraper/requirements.txt` — Optional sentence-transformers
+
+### Files Created
+- `scraper/enrich_jupiter.py` — Jupiter Quote + Price API module
+
+### Files Modified
+- `scraper/enrich_helius.py` — _analyze_whales(), _empty_helius_result() +4 whale fields
+- `scraper/pipeline.py` — semantic narrative (12 categories), Jupiter import + call, onchain_multiplier +2 factors (Jupiter liquidity, whale accumulation), safety_penalty +1 check (whale concentration)
+- `scraper/push_to_supabase.py` — +9 columns in snapshot rows
+- `scraper/train_model.py` — +8 ML features
+- `scraper/requirements.txt` — optional sentence-transformers
+
+### API Budget: $0
+- Jupiter Quote + Price: FREE, no auth, 10 req/s
+- Whale tracking: reuses existing Helius holder data (0 extra API calls)
+- sentence-transformers: local CPU model (22MB)
+
+### Verification
+- [x] Syntax: all 5 files compile (py_compile)
+- [x] Unit test: Jupiter quote parsing (400=not tradeable, 200=tradeable with price impact)
+- [x] Unit test: Jupiter batch price lookup
+- [x] Unit test: Whale tracking first cycle (count=2, change=None)
+- [x] Unit test: Whale tracking second cycle (change detected, new_entries=1)
+- [x] Unit test: Narrative keyword fallback (ai_agent, animal, no match)
+- [x] Unit test: classify_narrative returns (str|None, float) tuple
+- [x] Unit test: _compute_onchain_multiplier Jupiter penalty (0.50 for not tradeable)
+- [x] Unit test: _compute_onchain_multiplier whale accumulation bonus (1.30)
+- [x] Unit test: _compute_safety_penalty whale concentration (0.50 for 80%)
+- [x] Feature count: 8 Phase 3B features in train_model.py (69 total)
+- [x] DB migration: applied via Supabase MCP
+- [ ] Live test: run scraper → check token_snapshots for non-null jup_tradeable + whale_count
+- [ ] ML test: `python train_model.py --horizon 12h --trials 5` → 8 new features in metadata
+
+---
+
+## Algorithm v3: Research-Informed Improvements (DONE)
+
+### Sprint A: Quick Wins (no new API calls) — `pipeline.py`
+- [x] **A1:** Short-term volume heat (1h/6h acceleration in onchain_multiplier)
+- [x] **A2:** Transaction velocity (txn/holder activity density in onchain_multiplier)
+- [x] **A3:** Sentiment consistency (std dev of KOL sentiments — ML feature)
+- [x] **A4:** Liquidity floor ($10K) + holder floor (30) hard gates
+- [x] **A5:** Artificial pump detection (price pump + no organic growth → 0.2x penalty)
+- [x] **A6:** Enhanced wash trading (volume spike + flat price divergence signal)
+
+### Sprint B: Architecture Fixes — `pipeline.py`
+- [x] **B1:** ML blend (70% ML + 30% manual) instead of pure ML override
+- [x] **B2:** Missing data penalty (no factors → 0.7 instead of 1.0)
+
+### Sprint C: ME2F-Inspired ML Features — `pipeline.py`
+- [x] **C1:** Volatility proxy (multi-timeframe price change std dev)
+- [x] **C2:** Whale dominance (top10_pct * gini — single concentration metric)
+- [x] **C3:** Sentiment amplification (sentiment volatility * price reaction)
+
+### Storage & ML Updates
+- [x] `scraper/push_to_supabase.py` — 7 new snapshot fields
+- [x] `scraper/train_model.py` — 7 new ML features in ALL_FEATURE_COLS
+- [x] Supabase migration — 7 new columns on token_snapshots
+
+### Verification
+- [x] Syntax: all 3 files compile (ast.parse)
+- [x] DB migration: 7 columns verified via information_schema query
+- [ ] Live test: run `python safe_scraper.py --once` → check logs for new gates + features
+- [ ] After 2+ weeks: retrain ML model, check if new features appear in SHAP top-15
+
+---
+
+## Algorithm v3.1: User Feedback Improvements (DONE)
+
+### 1. 5m Volume Granularity
+- [x] `scraper/enrich.py` — Extract `volume_5m` + `buy_sell_ratio_5m` from DexScreener (already in response, was ignored)
+- [x] `scraper/pipeline.py` — `ultra_short_heat = (vol_5m * 12) / vol_1h` in onchain_multiplier
+
+### 2. "Already Pumped" Penalty
+- [x] `scraper/pipeline.py` — Degressive penalty: 200% → 1.0, 350% → 0.7, 500%+ → 0.4 floor
+- [x] Stored as `already_pumped_penalty` for ML feature
+
+### 3. Fix A5 Pump Detection (Supply Control ≠ Manipulation)
+- [x] `scraper/pipeline.py` — If `whale_change > 0` during pump, skip artificial pump flag (whales accumulating = bullish supply control)
+
+### 4. Bubblemaps Wallet Clustering
+- [x] `scraper/enrich_bubblemaps.py` — NEW FILE: Bubblemaps API integration (decentralization_score, clusters, CEX/DEX supply breakdown)
+- [x] `scraper/pipeline.py` — Import + call after Jupiter, safety penalty for low decentralization + large clusters
+- [x] Graceful fallback: no API key = silently skipped
+
+### Storage & ML Updates
+- [x] `scraper/push_to_supabase.py` — 7 new snapshot fields (volume_5m, buy_sell_ratio_5m, ultra_short_heat, already_pumped_penalty, bubblemaps_score, bubblemaps_cluster_max_pct, bubblemaps_cluster_count)
+- [x] `scraper/train_model.py` — 7 new ML features + volume_5m log transform
+- [x] Supabase migration — 7 new columns on token_snapshots
+
+### Verification
+- [x] Syntax: all 5 files compile (ast.parse)
+- [x] DB migration: 7 new columns verified via information_schema query
+- [ ] Live test: run scraper → check ultra_short_heat values + already_pumped_penalty in logs
+- [ ] Email `api@bubblemaps.io` to request beta API key
+- [ ] After key obtained: set `BUBBLEMAPS_API_KEY` in `.env`, verify bubblemaps_score populated
+
+---
+
+## Outcome Tracker Fix: Max Price via OHLCV (DONE)
+
+**Problem:** `outcome_tracker.py` checked the price at a single instant (when `fill_outcomes()` runs). A token that pumped to 3x then dumped back was labeled `did_2x = False`. This polluted ML training data with false negatives.
+
+**Fix:** Use GeckoTerminal OHLCV candles (5-min resolution) to find the **max high price** during the 6h/12h/24h window.
+
+### Implementation
+- [x] `scraper/enrich.py` — Extract `pair_address` (pool address) from DexScreener for OHLCV lookups
+- [x] `scraper/push_to_supabase.py` — Store `pair_address` in snapshots
+- [x] `scraper/outcome_tracker.py` — Full rewrite:
+  - GeckoTerminal `/tokens/{addr}/pools` to find pool address (cached 7 days)
+  - GeckoTerminal OHLCV 5-min candles → `max(high)` during window
+  - Fallback to DexScreener current price if OHLCV fails
+  - Rate limiting: 2.1s between GeckoTerminal calls (30 req/min free tier)
+  - Stores `max_price_6h`, `max_price_12h`, `max_price_24h` alongside labels
+- [x] Supabase migration — `pair_address`, `max_price_6h`, `max_price_12h` columns
+
+### Verification
+- [x] Syntax: all 3 modified files compile (ast.parse)
+- [x] DB migration: 4 new columns verified
+- [ ] Live test: run scraper → wait 6h+ → check logs for "OHLCV max" vs "current price" in outcomes

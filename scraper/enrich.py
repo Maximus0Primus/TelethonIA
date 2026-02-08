@@ -103,6 +103,30 @@ def _fetch_dexscreener(symbol: str) -> dict | None:
         # Count total active pairs for this token (more pairs = more liquidity venues)
         pair_count = len(sol_pairs)
 
+        # PVP detection: count distinct token addresses with same symbol
+        best_address = best.get("baseToken", {}).get("address", "")
+        distinct_addresses = set()
+        for p in sol_pairs:
+            addr = p.get("baseToken", {}).get("address", "")
+            if addr:
+                distinct_addresses.add(addr)
+        pvp_same_name_count = len(distinct_addresses)
+
+        # Count competing tokens created within 4h of our best pair
+        pvp_recent_count = 0
+        best_created = best.get("pairCreatedAt")
+        if best_created and pvp_same_name_count > 1:
+            for p in sol_pairs:
+                p_addr = p.get("baseToken", {}).get("address", "")
+                p_created = p.get("pairCreatedAt")
+                if p_addr != best_address and p_created:
+                    try:
+                        diff_h = abs(int(best_created) - int(p_created)) / (1000 * 3600)
+                        if diff_h <= 4:
+                            pvp_recent_count += 1
+                    except (ValueError, TypeError):
+                        pass
+
         # Transaction data
         txns_h24 = best.get("txns", {}).get("h24", {})
         buys_24h = int(txns_h24.get("buys", 0) or 0)
@@ -124,6 +148,7 @@ def _fetch_dexscreener(symbol: str) -> dict | None:
         # Buy/sell ratio (0 to 1, 0.5 = balanced, >0.5 = more buys)
         buy_sell_ratio_24h = buys_24h / max(1, total_txns)
         buy_sell_ratio_1h = buys_1h / max(1, buys_1h + sells_1h)
+        buy_sell_ratio_5m = buys_5m / max(1, buys_5m + sells_5m)
 
         # Price changes at multiple timeframes
         price_changes = best.get("priceChange", {})
@@ -137,6 +162,7 @@ def _fetch_dexscreener(symbol: str) -> dict | None:
         volume_24h = _safe_float(volumes.get("h24"), 0)
         volume_6h = _safe_float(volumes.get("h6"), 0)
         volume_1h = _safe_float(volumes.get("h1"), 0)
+        volume_5m = _safe_float(volumes.get("m5"), 0)
 
         # Market data
         liquidity_usd = _safe_float(best.get("liquidity", {}).get("usd"), 0)
@@ -165,13 +191,26 @@ def _fetch_dexscreener(symbol: str) -> dict | None:
         dex_id = best.get("dexId", "").lower()
         is_pump_fun = 1 if "pump" in dex_id else 0
 
+        # Pump.fun graduation detection
+        has_pump_pair = any("pump" in p.get("dexId", "").lower() for p in sol_pairs)
+        has_raydium_pair = any("raydium" in p.get("dexId", "").lower() for p in sol_pairs)
+
+        if has_pump_pair and has_raydium_pair:
+            pump_graduation_status = "graduated"
+        elif has_pump_pair:
+            pump_graduation_status = "bonding"
+        else:
+            pump_graduation_status = None
+
         return {
             "token_address": best.get("baseToken", {}).get("address", ""),
+            "pair_address": best.get("pairAddress", ""),  # Pool address for OHLCV lookups
             "price_usd": price_usd,
             # Volume features
             "volume_24h": volume_24h,
             "volume_6h": volume_6h,
             "volume_1h": volume_1h,
+            "volume_5m": volume_5m,
             # Liquidity & market cap
             "liquidity_usd": liquidity_usd,
             "market_cap": market_cap,
@@ -182,6 +221,7 @@ def _fetch_dexscreener(symbol: str) -> dict | None:
             # Buy/sell ratios
             "buy_sell_ratio_24h": round(buy_sell_ratio_24h, 3),
             "buy_sell_ratio_1h": round(buy_sell_ratio_1h, 3),
+            "buy_sell_ratio_5m": round(buy_sell_ratio_5m, 3),
             # Price changes (multiple timeframes)
             "price_change_5m": price_change_5m,
             "price_change_1h": price_change_1h,
@@ -196,6 +236,10 @@ def _fetch_dexscreener(symbol: str) -> dict | None:
             "is_pump_fun": is_pump_fun,
             "pair_count": pair_count,
             "dex_id": dex_id,
+            "pump_graduation_status": pump_graduation_status,
+            # PVP detection
+            "pvp_same_name_count": pvp_same_name_count,
+            "pvp_recent_count": pvp_recent_count,
         }
 
     except requests.RequestException as e:
@@ -313,11 +357,13 @@ def _empty_result() -> dict:
     """Return a dict with all enrichment fields set to None."""
     return {
         "token_address": None,
+        "pair_address": None,
         "price_usd": None,
         # DexScreener features
         "volume_24h": None,
         "volume_6h": None,
         "volume_1h": None,
+        "volume_5m": None,
         "liquidity_usd": None,
         "market_cap": None,
         "txn_count_24h": None,
@@ -325,6 +371,7 @@ def _empty_result() -> dict:
         "sells_24h": None,
         "buy_sell_ratio_24h": None,
         "buy_sell_ratio_1h": None,
+        "buy_sell_ratio_5m": None,
         "price_change_5m": None,
         "price_change_1h": None,
         "price_change_6h": None,
@@ -336,6 +383,10 @@ def _empty_result() -> dict:
         "is_pump_fun": None,
         "pair_count": None,
         "dex_id": None,
+        "pump_graduation_status": None,
+        # PVP detection
+        "pvp_same_name_count": None,
+        "pvp_recent_count": None,
         # RugCheck features
         "risk_score": None,
         "top10_holder_pct": None,
