@@ -228,14 +228,14 @@ def _fetch_rugcheck(mint: str) -> dict | None:
             risk_score = min(10000, int(risk_score))
 
         # Top holders analysis
-        top_holders = data.get("topHolders", [])
+        top_holders = data.get("topHolders") or []
         top10 = top_holders[:10] if top_holders else []
         top10_pct = sum(h.get("pct", 0) for h in top10)
         insider_pct = sum(h.get("pct", 0) for h in top_holders if h.get("insider", False))
         holder_count = len(top_holders)
 
         # Security flags from risks array
-        risks = data.get("risks", [])
+        risks = data.get("risks") or []
         risk_names = [r.get("name", "") for r in risks]
         has_mint_authority = 1 if any("mint" in r.lower() for r in risk_names) else 0
         has_freeze_authority = 1 if any("freeze" in r.lower() for r in risk_names) else 0
