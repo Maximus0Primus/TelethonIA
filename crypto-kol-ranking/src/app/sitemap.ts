@@ -15,6 +15,21 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
       changeFrequency: "monthly",
       priority: 0.5,
     },
+    {
+      url: `${BASE_URL}/disclaimer`,
+      changeFrequency: "yearly" as const,
+      priority: 0.3,
+    },
+    {
+      url: `${BASE_URL}/privacy`,
+      changeFrequency: "yearly" as const,
+      priority: 0.3,
+    },
+    {
+      url: `${BASE_URL}/terms`,
+      changeFrequency: "yearly" as const,
+      priority: 0.3,
+    },
   ];
 
   // Fetch token symbols for dynamic pages

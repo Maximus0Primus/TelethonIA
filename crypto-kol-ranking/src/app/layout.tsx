@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Inter, JetBrains_Mono } from "next/font/google";
 import { AudioProvider } from "@/components/AudioProvider";
+import { Footer } from "@/components/layout/Footer";
 import "./globals.css";
 
 const inter = Inter({
@@ -24,22 +25,6 @@ export const metadata: Metadata = {
   },
   description:
     "Cryptosensus brings clarity to the noise. Stop wasting your time trading. Know what to buy before the crowd does.",
-  keywords: [
-    "crypto",
-    "cryptosensus",
-    "token",
-    "ranking",
-    "sentiment",
-    "memecoin",
-    "crypto sentiment",
-    "memecoin ranking",
-    "crypto analytics",
-    "crypto trading signals",
-    "lowcap crypto",
-    "crypto buy score",
-    "best crypto to buy",
-    "crypto prediction",
-  ],
   authors: [{ name: "Cryptosensus" }],
   alternates: {
     canonical: BASE_URL,
@@ -101,7 +86,10 @@ export default function RootLayout({
           type="application/ld+json"
           dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
         />
-        <AudioProvider>{children}</AudioProvider>
+        <AudioProvider>
+          {children}
+          <Footer />
+        </AudioProvider>
       </body>
     </html>
   );
