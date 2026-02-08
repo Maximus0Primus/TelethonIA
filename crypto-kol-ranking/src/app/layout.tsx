@@ -19,11 +19,11 @@ const BASE_URL = process.env.NEXT_PUBLIC_SITE_URL || "https://cryptosensus.org";
 export const metadata: Metadata = {
   metadataBase: new URL(BASE_URL),
   title: {
-    default: "Cryptosensus — Real-Time Crypto Lowcap Buy Score",
+    default: "Cryptosensus — First Real-Time Crypto Lowcap Buy Score",
     template: "%s | Cryptosensus",
   },
   description:
-    "Cryptosensus brings clarity to the noise. Real-time crypto lowcap buy scores to surface the tokens that matter.",
+    "Cryptosensus brings clarity to the noise. Stop wasting your time trading. Know what to buy before the crowd does.",
   keywords: [
     "crypto",
     "cryptosensus",
@@ -35,20 +35,38 @@ export const metadata: Metadata = {
     "memecoin ranking",
     "crypto analytics",
     "crypto trading signals",
+    "lowcap crypto",
+    "crypto buy score",
+    "best crypto to buy",
+    "crypto prediction",
   ],
   authors: [{ name: "Cryptosensus" }],
+  alternates: {
+    canonical: BASE_URL,
+  },
   openGraph: {
-    title: "Cryptosensus — Real-Time Crypto Lowcap Buy Score",
+    title: "Cryptosensus — First Real-Time Crypto Lowcap Buy Score",
     description:
-      "Real-time crypto lowcap buy scores. Data-driven insights to surface the tokens that matter.",
+      "Cryptosensus brings clarity to the noise. Stop wasting your time trading. Know what to buy before the crowd does.",
+    url: BASE_URL,
     type: "website",
     siteName: "Cryptosensus",
+    images: [
+      {
+        url: "/opengraph-image",
+        width: 1200,
+        height: 630,
+        alt: "Cryptosensus — First Real-Time Crypto Lowcap Buy Score",
+      },
+    ],
   },
   twitter: {
     card: "summary_large_image",
-    title: "Cryptosensus — Real-Time Crypto Lowcap Buy Score",
+    creator: "@Maximus0Primus",
+    title: "Cryptosensus — First Real-Time Crypto Lowcap Buy Score",
     description:
-      "Real-time crypto lowcap buy scores. Data-driven insights to surface the tokens that matter.",
+      "Cryptosensus brings clarity to the noise. Stop wasting your time trading. Know what to buy before the crowd does.",
+    images: ["/opengraph-image"],
   },
 };
 
@@ -64,7 +82,7 @@ export default function RootLayout({
     name: "Cryptosensus",
     url: BASE_URL,
     description:
-      "Real-time crypto lowcap buy scores to surface the tokens that matter.",
+      "Cryptosensus brings clarity to the noise. Stop wasting your time trading. Know what to buy before the crowd does.",
     applicationCategory: "FinanceApplication",
     operatingSystem: "Web",
     offers: {
