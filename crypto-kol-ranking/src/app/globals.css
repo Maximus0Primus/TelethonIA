@@ -132,7 +132,7 @@
 
   html {
     color-scheme: dark;
-    overflow-x: hidden;
+    overflow-x: clip;
   }
 
   body {

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
+import { motion } from "framer-motion";
 import { Header } from "@/components/layout/Header";
 import { FloatingNav } from "@/components/layout/FloatingNav";
 import { HeroSection } from "@/components/layout/HeroSection";
@@ -135,58 +136,61 @@ export default function Home() {
 
       <HeroSection onIntroComplete={handleIntroComplete} />
 
-      <div
-        className="transition-opacity duration-700 ease-out"
-        style={{ opacity: introDone ? 1 : 0, pointerEvents: introDone ? "auto" : "none" }}
-      >
-        <FloatingNav />
-        <ViewControls
-          viewMode={viewMode}
-          onViewModeChange={setViewMode}
-          blend={blend}
-          onApplyBlend={handleApplyBlend}
-        />
+      {introDone && (
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ duration: 0.7, ease: "easeOut" }}
+        >
+          <FloatingNav />
+          <ViewControls
+            viewMode={viewMode}
+            onViewModeChange={setViewMode}
+            blend={blend}
+            onApplyBlend={handleApplyBlend}
+          />
 
-        <main>
-          {/* Error Banner */}
-          {error && (
-            <div className="fixed top-20 left-1/2 -translate-x-1/2 z-40">
-              <div className="rounded-lg border border-red-500/30 bg-red-500/10 backdrop-blur-sm px-4 py-3 text-sm text-red-400">
-                {error}
-                <button
-                  onClick={() => {
-                    setLoading(true);
-                    setError(null);
-                    fetchRanking()
-                      .then(setTokens)
-                      .catch((e) => setError(e instanceof Error ? e.message : "Failed"))
-                      .finally(() => setLoading(false));
-                  }}
-                  className="ml-2 underline hover:no-underline"
-                >
-                  Retry
-                </button>
+          <main>
+            {/* Error Banner */}
+            {error && (
+              <div className="fixed top-20 left-1/2 -translate-x-1/2 z-40">
+                <div className="rounded-lg border border-red-500/30 bg-red-500/10 backdrop-blur-sm px-4 py-3 text-sm text-red-400">
+                  {error}
+                  <button
+                    onClick={() => {
+                      setLoading(true);
+                      setError(null);
+                      fetchRanking()
+                        .then(setTokens)
+                        .catch((e) => setError(e instanceof Error ? e.message : "Failed"))
+                        .finally(() => setLoading(false));
+                    }}
+                    className="ml-2 underline hover:no-underline"
+                  >
+                    Retry
+                  </button>
+                </div>
               </div>
-            </div>
-          )}
+            )}
 
-          <CyclingHeading />
+            <CyclingHeading />
 
-          {/* Loading State */}
-          {loading && tokens.length === 0 ? (
-            <div className="flex items-center justify-center min-h-[50vh]">
-              <div className="h-8 w-8 animate-spin rounded-full border-2 border-white border-t-transparent" />
-            </div>
-          ) : (
-            <TokenGrid
-              tokens={tokens}
-              viewMode={viewMode}
-              animationPhase={animationPhase}
-              prevTokens={prevTokens}
-            />
-          )}
-        </main>
-      </div>
+            {/* Loading State */}
+            {loading && tokens.length === 0 ? (
+              <div className="flex items-center justify-center min-h-[50vh]">
+                <div className="h-8 w-8 animate-spin rounded-full border-2 border-white border-t-transparent" />
+              </div>
+            ) : (
+              <TokenGrid
+                tokens={tokens}
+                viewMode={viewMode}
+                animationPhase={animationPhase}
+                prevTokens={prevTokens}
+              />
+            )}
+          </main>
+        </motion.div>
+      )}
     </>
   );
 }
