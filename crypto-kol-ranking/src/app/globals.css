@@ -132,6 +132,7 @@
 
   html {
     color-scheme: dark;
+    overflow-x: hidden;
   }
 
   body {
@@ -183,6 +184,7 @@
 .perspective-container {
   perspective: 1200px;
   perspective-origin: 50% 0%;
+  overflow: hidden;
 }
 
 .grid-3d {

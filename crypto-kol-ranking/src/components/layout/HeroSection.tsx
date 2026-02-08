@@ -351,7 +351,7 @@ export function HeroSection({ onIntroComplete }: HeroSectionProps) {
       {/* ─── Landing page (not authenticated) ─── */}
       {showLanding && (
         <div
-          className="flex flex-col"
+          className="flex flex-col overflow-x-hidden"
           onMouseMove={handleLandingMouseMove}
           onMouseLeave={() => setCursorVisible(false)}
           onClick={handleLandingClick}
@@ -587,7 +587,7 @@ export function HeroSection({ onIntroComplete }: HeroSectionProps) {
           />
 
           {/* ── Section 4: Contact ── */}
-          <section id="contact-section" className="py-24 sm:py-32 px-6">
+          <section id="contact-section" className="pt-24 pb-10 sm:pt-32 sm:pb-14 px-6">
             <motion.div
               initial={{ opacity: 0, y: 30 }}
               whileInView={{ opacity: 1, y: 0 }}
@@ -670,7 +670,7 @@ export function HeroSection({ onIntroComplete }: HeroSectionProps) {
           />
 
           {/* ── Footer spacer ── */}
-          <div className="h-16" />
+          <div className="h-6" />
         </div>
       )}
     </>

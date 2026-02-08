@@ -27,7 +27,7 @@ export function Header() {
         transition={{ duration: 0.5, delay: 0.3 }}
         className="fixed top-0 left-0 right-0 z-50 pointer-events-none"
       >
-        <div className="mx-auto flex h-20 max-w-7xl items-center justify-between px-6 sm:px-8">
+        <div className="mx-auto flex h-20 max-w-7xl items-center justify-between px-4 sm:px-8">
           <Link
             href="/"
             className="pointer-events-auto"
@@ -37,7 +37,7 @@ export function Header() {
             </h1>
           </Link>
 
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2 sm:gap-4">
             <button
               onClick={toggleLoop}
               className="pointer-events-auto text-[11px] font-mono tracking-wider text-white/40 hover:text-white/70 transition-colors uppercase"
