@@ -12,39 +12,46 @@ export default function Icon() {
           width: 32,
           height: 32,
           background: "#000",
-          borderRadius: 8,
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
           position: "relative",
-          overflow: "hidden",
         }}
       >
-        {/* Subtle green accent dot */}
+        {/* Circle */}
         <div
           style={{
-            position: "absolute",
-            width: 12,
-            height: 12,
+            width: 24,
+            height: 24,
             borderRadius: "50%",
-            background: "radial-gradient(circle, rgba(0,255,65,0.4) 0%, transparent 70%)",
-            top: 2,
-            right: 2,
+            border: "2px solid #fff",
             display: "flex",
           }}
         />
-        {/* C letter */}
+        {/* Horizontal line */}
         <div
           style={{
-            fontSize: 22,
-            fontWeight: 800,
-            color: "#fff",
-            lineHeight: 1,
+            position: "absolute",
+            top: 15,
+            left: 2,
+            width: 28,
+            height: 2,
+            background: "#fff",
             display: "flex",
           }}
-        >
-          C
-        </div>
+        />
+        {/* Vertical line */}
+        <div
+          style={{
+            position: "absolute",
+            top: 2,
+            left: 15,
+            width: 2,
+            height: 28,
+            background: "#fff",
+            display: "flex",
+          }}
+        />
       </div>
     ),
     { ...size }

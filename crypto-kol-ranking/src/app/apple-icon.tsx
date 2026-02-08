@@ -12,50 +12,46 @@ export default function AppleIcon() {
           width: 180,
           height: 180,
           background: "#000",
-          borderRadius: 40,
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
           position: "relative",
-          overflow: "hidden",
         }}
       >
-        {/* Grid pattern */}
+        {/* Circle */}
         <div
           style={{
-            position: "absolute",
-            inset: 0,
-            backgroundImage:
-              "linear-gradient(rgba(255,255,255,0.04) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.04) 1px, transparent 1px)",
-            backgroundSize: "20px 20px",
-            display: "flex",
-          }}
-        />
-        {/* Green accent glow */}
-        <div
-          style={{
-            position: "absolute",
-            width: 60,
-            height: 60,
+            width: 130,
+            height: 130,
             borderRadius: "50%",
-            background: "radial-gradient(circle, rgba(0,255,65,0.25) 0%, transparent 70%)",
-            top: 10,
-            right: 10,
+            border: "8px solid #fff",
             display: "flex",
           }}
         />
-        {/* C letter */}
+        {/* Horizontal line */}
         <div
           style={{
-            fontSize: 120,
-            fontWeight: 800,
-            color: "#fff",
-            lineHeight: 1,
+            position: "absolute",
+            top: 86,
+            left: 10,
+            width: 160,
+            height: 8,
+            background: "#fff",
             display: "flex",
           }}
-        >
-          C
-        </div>
+        />
+        {/* Vertical line */}
+        <div
+          style={{
+            position: "absolute",
+            top: 10,
+            left: 86,
+            width: 8,
+            height: 160,
+            background: "#fff",
+            display: "flex",
+          }}
+        />
       </div>
     ),
     { ...size }
