@@ -51,6 +51,7 @@ export async function generateMetadata({
       title: `$${normalized} Analysis`,
       description: `View real-time KOL sentiment analysis and conviction score for $${normalized} on Cryptosensus.`,
       alternates: { canonical: `/token/${canonicalSymbol}` },
+      robots: { index: false, follow: false },
     };
   }
 
@@ -69,6 +70,7 @@ export async function generateMetadata({
     title,
     description,
     alternates: { canonical: `/token/${canonicalSymbol}` },
+    robots: { index: false, follow: false },
     openGraph: {
       title: `$${tokenData.symbol} — Score ${tokenData.score} | Cryptosensus`,
       description,

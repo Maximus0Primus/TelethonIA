@@ -303,9 +303,9 @@ export function HeroSection({ onIntroComplete }: HeroSectionProps) {
                     className="text-base sm:text-lg md:text-xl text-white/40 tracking-wide font-light"
                   >
                     The first{" "}
-                    <span className="text-white font-normal">real-time crypto</span>
+                    <span className="text-white font-normal">real-time</span>
                     {" "}lowcap{" "}
-                    <span className="text-white font-normal">buy score</span>
+                    <span className="text-white font-normal">crypto buy indicator</span>
                   </motion.p>
                   <motion.p
                     initial={{ opacity: 0, y: 10 }}
@@ -336,9 +336,9 @@ export function HeroSection({ onIntroComplete }: HeroSectionProps) {
             <div className="mt-8 flex flex-col items-center gap-2.5 text-center">
               <p className="text-base sm:text-lg md:text-xl text-white/40 tracking-wide font-light">
                 The first{" "}
-                <span className="text-white font-normal">real-time crypto</span>
+                <span className="text-white font-normal">real-time</span>
                 {" "}lowcap{" "}
-                <span className="text-white font-normal">buy score</span>
+                <span className="text-white font-normal">crypto buy indicator</span>
               </p>
               <p className="text-sm sm:text-base text-white/25 tracking-wide font-light">
                 Get high rewards with minimal risk
@@ -379,7 +379,7 @@ export function HeroSection({ onIntroComplete }: HeroSectionProps) {
             >
               Join the most advanced
               <br />
-              <span className="text-white/70">crypto buy score</span> prediction
+              <span className="text-white/70">lowcap crypto</span> buy indicator
             </motion.h1>
 
             <motion.p
@@ -389,8 +389,6 @@ export function HeroSection({ onIntroComplete }: HeroSectionProps) {
               className="mt-6 text-white/40 text-base sm:text-lg text-center max-w-2xl leading-relaxed"
             >
               Stop wasting your time trading. Know what to buy before the crowd does.
-              <br />
-              <span className="text-white/25 text-sm sm:text-base">Become an insider</span>
             </motion.p>
 
             <motion.div

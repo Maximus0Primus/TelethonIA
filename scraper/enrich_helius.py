@@ -87,47 +87,66 @@ def _fetch_token_accounts(mint: str, api_key: str) -> list[dict] | None:
             "params": {
                 "mint": mint,
                 "limit": 1000,
-                "showZeroBalance": False,
+                "options": {
+                    "showZeroBalance": False,
+                },
             },
         }
         if cursor:
             payload["params"]["cursor"] = cursor
 
-        try:
-            resp = requests.post(url, json=payload, timeout=15)
-            if resp.status_code != 200:
-                logger.warning("Helius getTokenAccounts %d for %s (page %d)", resp.status_code, mint[:8], page)
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                resp = requests.post(url, json=payload, timeout=15)
+
+                if resp.status_code == 429:
+                    wait = 2 ** attempt + 1
+                    logger.debug("Helius 429 for %s page %d — retry %d in %ds", mint[:8], page, attempt + 1, wait)
+                    time.sleep(wait)
+                    continue
+
+                if resp.status_code != 200:
+                    logger.warning("Helius getTokenAccounts %d for %s (page %d)", resp.status_code, mint[:8], page)
+                    break
+
+                data = resp.json()
+                if "error" in data:
+                    logger.warning("Helius RPC error for %s: %s", mint[:8], data["error"])
+                    break
+
+                result = data.get("result", {})
+                accounts = result.get("token_accounts", [])
+                if not accounts:
+                    break
+
+                for acc in accounts:
+                    amount = acc.get("amount")
+                    owner = acc.get("owner")
+                    if amount is not None and owner:
+                        try:
+                            amt = int(amount)
+                            if amt > 0:
+                                all_accounts.append({"owner": owner, "amount": amt})
+                        except (ValueError, TypeError):
+                            pass
+
+                cursor = result.get("cursor")
+                if not cursor:
+                    break
+
+                time.sleep(HELIUS_SLEEP)
+                break  # Success — exit retry loop
+
+            except requests.RequestException as e:
+                if attempt < max_retries - 1:
+                    time.sleep(1)
+                    continue
+                logger.warning("Helius getTokenAccounts error for %s: %s", mint[:8], e)
                 break
-
-            data = resp.json()
-            if "error" in data:
-                logger.warning("Helius RPC error for %s: %s", mint[:8], data["error"])
-                break
-
-            result = data.get("result", {})
-            accounts = result.get("token_accounts", [])
-            if not accounts:
-                break
-
-            for acc in accounts:
-                amount = acc.get("amount")
-                owner = acc.get("owner")
-                if amount is not None and owner:
-                    try:
-                        amt = int(amount)
-                        if amt > 0:
-                            all_accounts.append({"owner": owner, "amount": amt})
-                    except (ValueError, TypeError):
-                        pass
-
-            cursor = result.get("cursor")
-            if not cursor:
-                break
-
-            time.sleep(HELIUS_SLEEP)
-
-        except requests.RequestException as e:
-            logger.warning("Helius getTokenAccounts error for %s: %s", mint[:8], e)
+        else:
+            # All retries exhausted (429s)
+            logger.warning("Helius 429 exhausted retries for %s page %d", mint[:8], page)
             break
 
     if all_accounts:
@@ -459,10 +478,32 @@ def _analyze_whales(accounts: list[dict], cache: dict, mint: str) -> dict:
         curr_addrs = set(current_whales.keys())
         whale_new_entries = len(curr_addrs - prev_addrs)
 
+    # Algorithm v4: Track whale_change history (last 3 cycles) for direction trend
+    whale_change_history = prev_entry.get("whale_change_history", []) if prev_entry else []
+    if whale_change is not None:
+        whale_change_history.append(whale_change)
+    # Keep only the last 3 entries
+    whale_change_history = whale_change_history[-3:]
+
+    # Compute whale direction trend from history
+    whale_direction = "unknown"
+    if len(whale_change_history) >= 2:
+        if all(wc > 0 for wc in whale_change_history):
+            whale_direction = "accumulating"    # Consistently buying — very bullish
+        elif whale_change_history[-1] < 0 and whale_change_history[0] > 0:
+            whale_direction = "distributing"    # Was buying, now selling — DANGER
+        elif all(wc < 0 for wc in whale_change_history):
+            whale_direction = "dumping"         # Consistent selling — bearish
+        elif all(abs(wc) < 2 for wc in whale_change_history):
+            whale_direction = "holding"         # Stable — neutral
+        else:
+            whale_direction = "mixed"
+
     # Store for next cycle (no TTL — we want to compare across cycles)
     cache[whale_cache_key] = {
         "whales": current_whales,
         "total_pct": whale_total_pct,
+        "whale_change_history": whale_change_history,
         "_cached_at": time.time(),
     }
 
@@ -471,6 +512,7 @@ def _analyze_whales(accounts: list[dict], cache: dict, mint: str) -> dict:
         "whale_total_pct": whale_total_pct,
         "whale_change": whale_change,
         "whale_new_entries": whale_new_entries,
+        "whale_direction": whale_direction,
     }
 
 
@@ -495,6 +537,8 @@ def _empty_helius_result() -> dict:
         "whale_total_pct": None,
         "whale_change": None,
         "whale_new_entries": None,
+        # Algorithm v4: Whale direction tracking
+        "whale_direction": None,
     }
 
 
@@ -514,7 +558,7 @@ def enrich_token_helius(
     cache : shared cache dict (mutated in-place)
     fetch_signatures : whether to also fetch recent signatures (extra 10 credits)
     """
-    if not mint:
+    if not mint or mint.startswith("0x") or len(mint) < 32 or len(mint) > 44:
         return _empty_helius_result()
 
     # Check cache
@@ -561,10 +605,11 @@ def enrich_token_helius(
         if bsr is not None:
             result["helius_onchain_bsr"] = bsr
 
-    # Update cache
-    cache_entry = dict(result)
-    cache_entry["_cached_at"] = time.time()
-    cache[cache_key] = cache_entry
+    # Only cache successful results — don't poison cache with transient failures
+    if result.get("helius_holder_count") is not None:
+        cache_entry = dict(result)
+        cache_entry["_cached_at"] = time.time()
+        cache[cache_key] = cache_entry
 
     return result
 

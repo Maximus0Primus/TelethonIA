@@ -1,13 +1,14 @@
 """
 Jupiter API enrichment: swap routing + price data.
 
-Endpoints used (all public, no auth):
-- GET /quote: Check if token is tradeable, get price impact + route info
+Endpoints used:
+- GET /swap/v1/quote: Check if token is tradeable, get price impact + route info (requires API key)
 - GET /price/v2: Batch price lookup
 
-Free tier: 10 req/s, 25M requests/month. Estimated usage: ~500/month (<0.01%).
+Get API key at https://portal.jup.ag
 """
 
+import os
 import json
 import time
 import logging
@@ -18,7 +19,7 @@ import requests
 logger = logging.getLogger(__name__)
 
 CACHE_FILE = Path(__file__).parent / "jupiter_cache.json"
-CACHE_TTL_SECONDS = 30 * 60  # 30 minutes
+CACHE_TTL_SECONDS = 2 * 3600  # 2 hours — tradeability rarely changes
 
 JUPITER_TOP_N = 10  # How many tokens to enrich per cycle
 JUPITER_SLEEP = 0.2  # seconds between calls (under 10 RPS)
@@ -52,21 +53,31 @@ def _is_cache_fresh(entry: dict) -> bool:
 
 # === Jupiter API calls ===
 
+def _get_api_key() -> str | None:
+    return os.environ.get("JUPITER_API_KEY")
+
+
 def _fetch_jupiter_quote(mint: str) -> dict | None:
     """
     Get a swap quote from Jupiter: WSOL -> token for ~$1000.
     Returns quote data or None if the token is not routable.
     A 400 response means the token is not tradeable on Jupiter.
     """
+    headers = {}
+    api_key = _get_api_key()
+    if api_key:
+        headers["x-api-key"] = api_key
+
     try:
         resp = requests.get(
-            "https://api.jup.ag/quote",
+            "https://api.jup.ag/swap/v1/quote",
             params={
                 "inputMint": WSOL_MINT,
                 "outputMint": mint,
                 "amount": str(QUOTE_AMOUNT_LAMPORTS),
                 "slippageBps": "50",
             },
+            headers=headers,
             timeout=10,
         )
 
@@ -106,16 +117,22 @@ def _fetch_jupiter_quote(mint: str) -> dict | None:
 
 def _fetch_jupiter_prices(mints: list[str]) -> dict[str, float]:
     """
-    Batch price lookup via Jupiter Price API v2.
+    Batch price lookup via Jupiter Price API v3.
     Returns { mint: price_usd } for tokens that have prices.
     """
     if not mints:
         return {}
 
+    headers = {}
+    api_key = _get_api_key()
+    if api_key:
+        headers["x-api-key"] = api_key
+
     try:
         resp = requests.get(
-            "https://api.jup.ag/price/v2",
+            "https://api.jup.ag/price/v3/price",
             params={"ids": ",".join(mints)},
+            headers=headers,
             timeout=10,
         )
 
@@ -123,10 +140,13 @@ def _fetch_jupiter_prices(mints: list[str]) -> dict[str, float]:
             logger.warning("Jupiter price API %d", resp.status_code)
             return {}
 
-        data = resp.json().get("data", {})
+        # v3 response: { mint: { usdPrice, liquidity, ... } } — no "data" wrapper
+        data = resp.json()
         prices = {}
         for mint, info in data.items():
-            price = info.get("price")
+            if not isinstance(info, dict):
+                continue
+            price = info.get("usdPrice")
             if price is not None:
                 try:
                     prices[mint] = float(price)

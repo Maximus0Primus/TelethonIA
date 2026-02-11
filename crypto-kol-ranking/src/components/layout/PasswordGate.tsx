@@ -64,7 +64,7 @@ export function PasswordGate({ onSuccess, inline = false }: PasswordGateProps) {
       const res = await fetch("/api/auth/verify-password", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ password }),
+        body: JSON.stringify({ password: password.trim() }),
       });
       const data = await res.json();
 

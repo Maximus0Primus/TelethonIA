@@ -21,7 +21,6 @@ interface ApiResponse {
     total: number;
     hasMore: boolean;
   };
-  blend: number;
   stats: {
     totalTokens: number;
     totalMentions: number;
@@ -43,7 +42,6 @@ export function HomeClient({ initialTokens }: HomeClientProps) {
   const [loading, setLoading] = useState(!hasInitialData);
   const [error, setError] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<"grid" | "list">("grid");
-  const [blend, setBlend] = useState(0);
   const [introDone, setIntroDone] = useState(false);
   const [animationPhase, setAnimationPhase] = useState<AnimationPhase>("idle");
   const introHandled = useRef(false);
@@ -54,9 +52,8 @@ export function HomeClient({ initialTokens }: HomeClientProps) {
     setIntroDone(true);
   }, []);
 
-  const fetchRanking = useCallback(async (b?: number): Promise<TokenCardData[]> => {
-    const blendValue = b ?? blend;
-    const response = await fetch(`/api/ranking?blend=${blendValue}&limit=30`);
+  const fetchRanking = useCallback(async (): Promise<TokenCardData[]> => {
+    const response = await fetch(`/api/ranking?limit=30`);
     const data: ApiResponse = await response.json();
 
     if (!response.ok) {
@@ -73,7 +70,7 @@ export function HomeClient({ initialTokens }: HomeClientProps) {
       trend: token.trend as "up" | "down" | "stable",
       change24h: token.change24h,
     }));
-  }, [blend]);
+  }, []);
 
   // Initial load — skip if we have SSR data
   useEffect(() => {
@@ -95,7 +92,7 @@ export function HomeClient({ initialTokens }: HomeClientProps) {
   }, [fetchRanking, hasInitialData]);
 
   // Animation sequence: glitch → fetch → shuffle → idle
-  const runAnimation = useCallback(async (fetchBlend?: number) => {
+  const runAnimation = useCallback(async () => {
     if (animationPhase !== "idle") return;
 
     // Phase 1: Glitch cascade (1.2s)
@@ -103,7 +100,7 @@ export function HomeClient({ initialTokens }: HomeClientProps) {
     await new Promise((r) => setTimeout(r, 1200));
 
     try {
-      const newTokens = await fetchRanking(fetchBlend);
+      const newTokens = await fetchRanking();
 
       // Store current tokens as previous for rank delta
       setPrevTokens(tokens);
@@ -122,13 +119,7 @@ export function HomeClient({ initialTokens }: HomeClientProps) {
     setAnimationPhase("idle");
   }, [animationPhase, fetchRanking, tokens]);
 
-  // Called when user clicks OK in the filter slider
-  const handleApplyBlend = useCallback((newBlend: number) => {
-    setBlend(newBlend);
-    runAnimation(newBlend);
-  }, [runAnimation]);
-
-  // Auto-refresh polling (uses current blend)
+  // Auto-refresh polling
   useAutoRefresh({
     interval: 60_000,
     enabled: introDone,
@@ -153,8 +144,6 @@ export function HomeClient({ initialTokens }: HomeClientProps) {
           <ViewControls
             viewMode={viewMode}
             onViewModeChange={setViewMode}
-            blend={blend}
-            onApplyBlend={handleApplyBlend}
           />
 
           <main>

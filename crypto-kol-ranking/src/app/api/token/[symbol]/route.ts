@@ -1,141 +1,65 @@
 import { NextRequest, NextResponse } from "next/server";
-import { readFileSync, existsSync } from "fs";
-import { join } from "path";
 
-interface TokenData {
-  rank: number;
-  symbol: string;
-  score: number;
-  mentions: number;
-  uniqueKols: number;
-  sentiment: number;
-  trend: string;
-  change24h: number;
-  topKols: string[];
-}
+const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
+const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-interface RankingData {
-  updated_at: string;
-  stats: {
-    totalTokens: number;
-    totalMentions: number;
-    avgSentiment: number;
-    totalKols: number;
-  };
-  tokens: Record<string, TokenData[]>;
-}
-
-// Groups with their conviction scores (matching Python pipeline)
-const GROUPS_CONVICTION: Record<string, number> = {
-  overdose_gems_calls: 10,
-  cryptorugmuncher: 10,
-  thetonymoontana: 10,
-  marcellcooks: 9,
-  Carnagecalls: 9,
-  PoseidonTAA: 9,
-  MarkGems: 9,
-  slingdeez: 8,
-  ghastlygems: 8,
-  archercallz: 8,
-  LevisAlpha: 8,
-  darkocalls: 8,
-  kweensjournal: 8,
-  ArcaneGems: 8,
-  dylansdegens: 8,
-  ALSTEIN_GEMCLUB: 8,
-  jsdao: 8,
-  MaybachCalls: 8,
-  inside_calls: 8,
-  BossmanCallsOfficial: 8,
-  bounty_journal: 8,
-  StereoCalls: 8,
-  PowsGemCalls: 8,
-  CatfishcallsbyPoe: 8,
-  spidersjournal: 8,
-  cryptolyxecalls: 8,
-  izzycooks: 8,
-  wulfcryptocalls: 8,
-  OnyxxGems: 8,
-  eunicalls: 8,
-  TheCabalCalls: 8,
-  sugarydick: 8,
-  certifiedprintor: 8,
-  LittleMustachoCalls: 8,
+const HEADERS = {
+  apikey: SERVICE_KEY!,
+  Authorization: `Bearer ${SERVICE_KEY}`,
+  "Content-Type": "application/json",
 };
 
-function loadRankingData(): RankingData | null {
-  const dataPath = join(process.cwd(), "public", "data", "ranking_data.json");
-
-  if (!existsSync(dataPath)) {
-    return null;
-  }
-
-  try {
-    const rawData = readFileSync(dataPath, "utf-8");
-    return JSON.parse(rawData) as RankingData;
-  } catch (error) {
-    console.error("Error reading ranking data:", error);
-    return null;
-  }
-}
-
 export async function GET(
-  request: NextRequest,
+  _request: NextRequest,
   { params }: { params: Promise<{ symbol: string }> }
 ) {
   const { symbol } = await params;
-  const searchParams = request.nextUrl.searchParams;
-  const timeWindow = searchParams.get("window") || "24h";
 
-  // Normalize symbol (add $ prefix if not present)
-  const normalizedSymbol = symbol.startsWith("$") ? symbol.toUpperCase() : `$${symbol.toUpperCase()}`;
+  if (!SUPABASE_URL || !SERVICE_KEY) {
+    return NextResponse.json(
+      { error: "Server configuration error" },
+      { status: 500 }
+    );
+  }
+
+  // Normalize: add $ prefix, uppercase
+  const normalized = symbol.toUpperCase().replace(/^\$/, "");
+  const dbSymbol = `$${normalized}`;
 
   try {
-    // Load data from JSON file
-    const data = loadRankingData();
+    // Fetch token summary from tokens table (7d window)
+    const tokenRes = await fetch(
+      `${SUPABASE_URL}/rest/v1/tokens?select=symbol,score,score_conviction,score_momentum,mentions,unique_kols,sentiment,conviction_weighted,trend,change_24h,momentum,breadth&symbol=eq.${encodeURIComponent(dbSymbol)}&time_window=eq.7d&limit=1`,
+      { headers: HEADERS, cache: "no-store" }
+    );
 
-    if (!data) {
+    if (!tokenRes.ok) {
       return NextResponse.json(
-        { error: "Ranking data not available. Run the pipeline script first." },
-        { status: 503 }
+        { error: "Failed to fetch token data" },
+        { status: 502 }
       );
     }
 
-    const tokens = data.tokens[timeWindow] || [];
-    const token = tokens.find((t) => t.symbol.toUpperCase() === normalizedSymbol);
-
-    if (!token) {
-      return NextResponse.json(
-        { error: "Token not found" },
-        { status: 404 }
-      );
+    const tokenRows = await tokenRes.json();
+    if (!tokenRows || tokenRows.length === 0) {
+      return NextResponse.json({ error: "Token not found" }, { status: 404 });
     }
 
-    // Build KOL breakdown with conviction scores
-    const topKols = token.topKols.map((name) => ({
-      name,
-      mentions: 1, // We don't have per-KOL mention counts in the simplified data
-      conviction: GROUPS_CONVICTION[name] || 7,
-    }));
+    const token = tokenRows[0];
 
-    return NextResponse.json({
-      token: {
-        symbol: token.symbol,
-        score: token.score,
-        mentions: token.mentions,
-        unique_kols: token.uniqueKols,
-        sentiment: token.sentiment,
-        trend: token.trend,
-        change_24h: token.change24h,
-        rank: token.rank,
-      },
-      topKols,
-      recentMentions: [], // Not available in simplified data
-      timeWindow,
-      updated_at: data.updated_at,
-    });
+    // Fetch latest snapshot (on-chain details)
+    const snapRes = await fetch(
+      `${SUPABASE_URL}/rest/v1/token_snapshots?select=token_address,price_at_snapshot,market_cap,liquidity_usd,volume_24h,holder_count,top10_holder_pct,price_change_5m,price_change_1h,price_change_6h,price_change_24h,risk_score,has_mint_authority,has_freeze_authority,bundle_detected,bundle_count,bundle_pct,whale_count,whale_total_pct,whale_direction,wash_trading_score,token_age_hours,is_pump_fun,ath_ratio,momentum_direction,price_action_score,top_kols,narrative,bubblemaps_score&symbol=eq.${encodeURIComponent(dbSymbol)}&order=snapshot_at.desc&limit=1`,
+      { headers: HEADERS, cache: "no-store" }
+    );
+
+    const snapshot = snapRes.ok
+      ? ((await snapRes.json()) as Record<string, unknown>[])?.[0] ?? null
+      : null;
+
+    return NextResponse.json({ token, snapshot });
   } catch (error) {
-    console.error("API error:", error);
+    console.error("Token API error:", error);
     return NextResponse.json(
       { error: "Internal server error" },
       { status: 500 }

@@ -1,3 +1,45 @@
+# Algorithm v4 Implementation — COMPLETE
+
+## Sprint 1: Price Action Analysis via Birdeye OHLCV ✅
+- [x] `scraper/enrich_birdeye_ohlcv.py` — Birdeye OHLCV 15m candles (top 15 tokens)
+- [x] `scraper/price_action.py` — price position, momentum direction, volume confirm, support
+- [x] `scraper/pipeline.py` — OHLCV enrichment + price action + v4 balanced weights
+- [x] `scraper/push_to_supabase.py` — new snapshot fields
+- [x] `supabase/migrations/v4_price_action.sql` — DB migration
+
+## Sprint 2: Fix Incohérences ✅
+- [x] Balanced: 30% consensus + 10% sentiment + 20% conviction + 20% breadth + 20% price_action
+- [x] Token age: 6-48h optimal (was 1-24h)
+- [x] Volatility proxy + whale dominance integrated
+- [x] Pump detection degressive (was binary 0.2x)
+- [x] Quality-weighted breadth (KOL reputation * mentions)
+- [x] Removed blend slider (ViewControls, HomeClient, route.ts)
+
+## Sprint 3: Micro-Refresh Prix (5 min) ✅
+- [x] `scraper/price_refresh.py` — DexScreener refresh for top 20
+- [x] `scraper/safe_scraper.py` — 5min background asyncio task
+- [x] base_score columns in tokens table
+
+## Sprint 4: Whale Direction Tracking ✅
+- [x] `scraper/enrich_helius.py` — whale_change_history + whale_direction
+- [x] distributing → 0.6x safety, accumulating → 1.15x on-chain
+
+## Algorithm v8: Harvard Adaptations (Volume Squeeze, Trend Strength, Confirmation Gate) ✅
+- [x] `_detect_volume_squeeze()` — BB Squeeze adaptation: compression → expansion detection
+- [x] `_compute_trend_strength()` — ADX adaptation: directional conviction across timeframes
+- [x] Squeeze bonus (up to 1.2x for firing) + Trend bonus (up to 1.15x for strong trend)
+- [x] Multi-indicator confirmation gate: 2 of 3 pillars required (consensus/price_action/breadth)
+- [x] Unconfirmed tokens get 0.7x penalty across all 3 scoring modes
+- [x] New DB columns: squeeze_state, squeeze_score, trend_strength, confirmation_pillars
+- [x] push_to_supabase.py updated: snapshot inserts + NUMERIC_LIMITS
+- [x] Migration applied to Supabase
+
+## Pending Actions
+- [ ] Run `supabase/migrations/v4_price_action.sql` in Supabase SQL editor
+- [ ] Add `BIRDEYE_API_KEY=<key>` to `scraper/.env`
+
+---
+
 # Consensus - Phantom Style Redesign
 
 ## Completed Tasks
@@ -448,3 +490,68 @@ ALTER TABLE token_snapshots
 - [x] Syntax: all 3 modified files compile (ast.parse)
 - [x] DB migration: 4 new columns verified
 - [ ] Live test: run scraper → wait 6h+ → check logs for "OHLCV max" vs "current price" in outcomes
+
+---
+
+## Algorithm v7: Scoring Improvements (DONE)
+
+### Part 1: Backtest Pipeline
+- [x] `scraper/backtest.py` — Standalone CLI: fetch_snapshots, compute_score, evaluate_weights, parameter_sensitivity, walk_forward
+- [x] Weight renormalization in score recomputation
+- [x] CLI: `python backtest.py [--threshold N] [--sensitivity] [--walk-forward]`
+
+### Part 2: Minsky Lifecycle Phases
+- [x] `_classify_lifecycle_phase()` — 5-phase model (displacement/boom/euphoria/profit_taking/panic/unknown)
+- [x] Replaces flat `already_pumped_penalty` with phase-aware penalties [0.25, 1.1]
+- [x] Boom phase gives 1.1x bonus (only phase with positive multiplier)
+- [x] `lifecycle_phase` field on token dict + snapshots
+
+### Part 3: Weakest Component + Interpretation Bands
+- [x] `_identify_weakest_component()` — finds lowest-scoring of 5 components
+- [x] `_interpret_score()` — strong/good/moderate/weak/low_conviction bands
+- [x] TokenCard: colored interpretation badge + weakest component label
+- [x] API route: passes weakestComponent + scoreInterpretation to frontend
+
+### Part 4: Missing-Data Weight Renormalization
+- [x] `_compute_score_with_renormalization()` — redistributes missing component weight
+- [x] `data_confidence` field (1.0 = all data, 0.6 = missing price_action)
+- [x] Replaces hardcoded 0.5 price_action placeholder with proper renormalization
+- [x] `_compute_onchain_multiplier` no-data fallback 0.7 → 0.85
+
+### DB Migration
+- [x] `supabase/migrations/v7_scoring_improvements.sql` — applied via MCP
+- [x] 5 new columns on token_snapshots, 3 on tokens
+- [x] Updated `get_token_ranking` RPC with new fields
+
+### Verification
+- [x] Syntax: pipeline.py, push_to_supabase.py, backtest.py compile (ast.parse)
+- [x] DB: all columns verified via information_schema
+- [x] RPC: get_token_ranking returns weakest_component, score_interpretation, data_confidence
+- [x] Frontend: `npm run build` passes with 0 errors
+- [ ] Live test: run scraper → verify lifecycle_phase, weakest_component, data_confidence populated
+- [ ] Backtest: `python backtest.py` with labeled snapshots → report generated
+
+---
+
+## Algorithm v5.1: Post-Scraping Fixes (DONE)
+
+### Fix 1: Soften Safety Penalty — `pipeline.py`
+- [x] All safety penalty factors softened (higher floors, gentler curves)
+- [x] Global floor: `max(0.3, penalty)` — never destroy a token completely
+- [x] Key changes: insider 0.2→0.5, top10 0.3→0.7, risk 0.2→0.5, jito 0.2→0.4, gini 0.6→0.8
+
+### Fix 2: Enrichment After Gates — `pipeline.py`
+- [x] Moved Helius/Jupiter/Bubblemaps/OHLCV enrichment AFTER quality gates
+- [x] DexScreener + RugCheck still runs on ALL tokens (needed for gates)
+- [x] Expensive enrichment now targets SURVIVORS only → 100% coverage for displayed tokens
+
+### Fix 3: Numeric Clamping — `push_to_supabase.py`
+- [x] Added NUMERIC_LIMITS dict for 15 bounded numeric fields
+- [x] `_sanitize_row()` clamps values to prevent `numeric(6,3)` overflow
+- [x] Fixes $COMPANY crash on `volatility_proxy`
+
+### Verification
+- [x] Syntax: both files compile (ast.parse)
+- [ ] Live test: `python safe_scraper.py --once --dump` → safety penalties >= 0.3
+- [ ] Live test: top 10 tokens in 7d window have ath_ratio, helius_holder_count, jup_tradeable
+- [ ] Live test: no `numeric field overflow` errors in Supabase logs

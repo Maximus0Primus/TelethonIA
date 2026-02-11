@@ -5,12 +5,96 @@ Uses service_role key to bypass RLS.
 
 import os
 import json
+import math
 import logging
 from datetime import datetime, timezone
 
 from supabase import create_client, Client
 
 logger = logging.getLogger(__name__)
+
+
+def _sanitize_value(v):
+    """
+    Convert a value to a JSON-safe Python type.
+    Handles numpy types, NaN, Infinity, sets, and other non-serializable objects.
+    """
+    if v is None:
+        return None
+
+    # Handle numpy types (np.float64, np.int64, np.bool_, etc.)
+    type_name = type(v).__module__
+    if type_name == "numpy":
+        # numpy scalar → Python native
+        if hasattr(v, "item"):
+            v = v.item()
+
+    # Handle float NaN/Infinity → None
+    if isinstance(v, float):
+        if math.isnan(v) or math.isinf(v):
+            return None
+        return v
+
+    # Handle bool (must check before int since bool is subclass of int)
+    if isinstance(v, bool):
+        return v
+
+    # Handle int, str — pass through
+    if isinstance(v, (int, str)):
+        return v
+
+    # Handle sets → lists
+    if isinstance(v, set):
+        return list(v)
+
+    # Handle lists/dicts — pass through (json.dumps handles nested structures)
+    if isinstance(v, (list, dict)):
+        return v
+
+    # Fallback: convert to string
+    return str(v)
+
+
+# Max values for bounded numeric(p,s) columns to prevent DB overflow
+NUMERIC_LIMITS = {
+    "volatility_proxy": 999.999,
+    "short_term_heat": 99.999,
+    "ultra_short_heat": 99.999,
+    "txn_velocity": 99.999,
+    "volume_acceleration": 99999.999,
+    "sentiment": 1.0,
+    "breadth": 1.0,
+    "recency_score": 9.999,
+    "wash_trading_score": 9.999,
+    "buy_sell_ratio_1h": 99.999,
+    "buy_sell_ratio_24h": 99.999,
+    "buy_sell_ratio_5m": 9.999,
+    "already_pumped_penalty": 9.999,
+    "sentiment_consistency": 9.999,
+    "rsi_14": 100.0,
+    "macd_histogram": 99999.999,
+    "bb_width": 99.999,
+    "bb_pct_b": 9.999,
+    "obv_slope_norm": 999.999,
+    "data_confidence": 1.0,
+    "weakest_component_value": 1.0,
+    "squeeze_score": 1.0,
+    "trend_strength": 1.0,
+}
+
+
+def _sanitize_row(row: dict) -> dict:
+    """Sanitize all values in a row dict for JSON serialization + numeric clamping."""
+    sanitized = {k: _sanitize_value(v) for k, v in row.items()}
+    # Clamp bounded numeric fields to prevent DB overflow
+    for field, limit in NUMERIC_LIMITS.items():
+        val = sanitized.get(field)
+        if val is not None and isinstance(val, (int, float)):
+            if val > limit:
+                sanitized[field] = limit
+            elif val < -limit:
+                sanitized[field] = -limit
+    return sanitized
 
 
 def _get_client() -> Client:
@@ -39,7 +123,7 @@ def upsert_tokens(
             continue
 
         rows = [
-            {
+            _sanitize_row({
                 "symbol": t["symbol"],
                 "score": t["score"],
                 "score_conviction": t.get("score_conviction", t["score"]),
@@ -50,7 +134,19 @@ def upsert_tokens(
                 "trend": t["trend"],
                 "time_window": time_window,
                 "change_24h": t.get("change_24h", 0.0),
-            }
+                # Pipeline-computed features
+                "conviction_weighted": round(t.get("avg_conviction", 0), 2),
+                "momentum": round(t.get("recency_score", 0), 3),
+                "breadth": round(t.get("breadth_score", 0), 3),
+                # v4: base scores for micro-refresh recalculation
+                "base_score": t["score"],
+                "base_score_conviction": t.get("score_conviction", t["score"]),
+                "base_score_momentum": t.get("score_momentum", t["score"]),
+                # v7: scoring improvements
+                "weakest_component": t.get("weakest_component"),
+                "score_interpretation": t.get("score_interpretation"),
+                "data_confidence": t.get("data_confidence"),
+            })
             for t in tokens
         ]
 
@@ -289,11 +385,48 @@ def insert_snapshots(ranking: list[dict]) -> None:
             "bubblemaps_score": t.get("bubblemaps_score"),
             "bubblemaps_cluster_max_pct": t.get("bubblemaps_cluster_max_pct"),
             "bubblemaps_cluster_count": t.get("bubblemaps_cluster_count"),
+            # Algorithm v4 Sprint 1: Price action analysis
+            "ath_24h": t.get("ath_24h"),
+            "ath_ratio": t.get("ath_ratio"),
+            "price_action_score": t.get("price_action_score"),
+            "momentum_direction": t.get("momentum_direction"),
+            "support_level": t.get("support_level"),
+            # Algorithm v4 Sprint 4: Whale direction
+            "whale_direction": t.get("whale_direction"),
+            # Algorithm v6: pandas-ta technical indicators
+            "rsi_14": t.get("rsi_14"),
+            "macd_histogram": t.get("macd_histogram"),
+            "bb_width": t.get("bb_width"),
+            "bb_pct_b": t.get("bb_pct_b"),
+            "obv_slope_norm": t.get("obv_slope_norm"),
+            # Algorithm v7: Scoring improvements
+            "lifecycle_phase": t.get("lifecycle_phase"),
+            "weakest_component": t.get("weakest_component"),
+            "weakest_component_value": t.get("weakest_component_value"),
+            "score_interpretation": t.get("score_interpretation"),
+            "data_confidence": t.get("data_confidence"),
+            # Algorithm v8: Harvard adaptations (squeeze, trend, confirmation)
+            "squeeze_state": t.get("squeeze_state"),
+            "squeeze_score": t.get("squeeze_score"),
+            "trend_strength": t.get("trend_strength"),
+            "confirmation_pillars": t.get("confirmation_pillars"),
         }
-        rows.append(row)
+        rows.append(_sanitize_row(row))
 
+    # Batch insert with row-by-row fallback on failure
     try:
         client.table("token_snapshots").insert(rows).execute()
-        logger.info("Inserted %d token snapshots (Phase 3B: Jupiter + whales + narratives)", len(rows))
+        logger.info("Inserted %d token snapshots", len(rows))
     except Exception as e:
-        logger.error("Failed to insert snapshots: %s", e)
+        logger.error("Batch snapshot insert failed (%s: %s) — trying row-by-row", type(e).__name__, e)
+        inserted = 0
+        for row in rows:
+            try:
+                client.table("token_snapshots").insert(row).execute()
+                inserted += 1
+            except Exception as row_err:
+                logger.error(
+                    "Snapshot insert failed for %s (%s: %s)",
+                    row.get("symbol", "?"), type(row_err).__name__, row_err,
+                )
+        logger.info("Row-by-row fallback: inserted %d/%d snapshots", inserted, len(rows))

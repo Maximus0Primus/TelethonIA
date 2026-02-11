@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { motion } from "framer-motion";
 import Link from "next/link";
-import { TrendingUp, TrendingDown, Minus } from "lucide-react";
+import { TrendingUp, TrendingDown, Minus, AlertTriangle } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export type AnimationPhase = "idle" | "glitching" | "shuffling";
@@ -17,6 +17,9 @@ export interface TokenCardData {
   sentiment: number;
   trend: "up" | "down" | "stable";
   change24h: number;
+  weakestComponent?: string | null;
+  scoreInterpretation?: string | null;
+  dataConfidence?: number | null;
 }
 
 interface TokenCardProps {
@@ -63,6 +66,22 @@ const PODIUM_STYLES: Record<number, {
     badge: "text-[#a17a56]",
     badgeBg: "bg-[#a17a56]/10 border-[#a17a56]/15",
   },
+};
+
+const INTERPRETATION_STYLES: Record<string, { text: string; bg: string; label: string }> = {
+  strong_signal: { text: "text-emerald-400", bg: "bg-emerald-400/10", label: "Strong" },
+  good_signal: { text: "text-cyan-400", bg: "bg-cyan-400/10", label: "Good" },
+  moderate_signal: { text: "text-yellow-400", bg: "bg-yellow-400/10", label: "Moderate" },
+  weak_signal: { text: "text-orange-400", bg: "bg-orange-400/10", label: "Weak" },
+  low_conviction: { text: "text-red-400", bg: "bg-red-400/10", label: "Low" },
+};
+
+const COMPONENT_LABELS: Record<string, string> = {
+  consensus: "KOL consensus",
+  sentiment: "Sentiment",
+  conviction: "Conviction",
+  breadth: "Breadth",
+  price_action: "Price action",
 };
 
 // Characters used for the glitch scramble effect
@@ -272,16 +291,25 @@ export function TokenCard({
           </div>
 
           {/* Score - Large centered */}
-          <div className="flex-1 flex items-center justify-center">
+          <div className="flex-1 flex items-center justify-center flex-col gap-1">
             <span className={cn(
               "text-5xl sm:text-6xl font-bold tabular-nums",
               podium ? podium.score : "text-white"
             )}>
               {scrambledScore}
             </span>
+            {token.scoreInterpretation && INTERPRETATION_STYLES[token.scoreInterpretation] && (
+              <span className={cn(
+                "text-[9px] font-semibold tracking-wider uppercase px-2 py-0.5 rounded-full",
+                INTERPRETATION_STYLES[token.scoreInterpretation].bg,
+                INTERPRETATION_STYLES[token.scoreInterpretation].text,
+              )}>
+                {INTERPRETATION_STYLES[token.scoreInterpretation].label}
+              </span>
+            )}
           </div>
 
-          {/* Bottom: Trend indicator */}
+          {/* Bottom: Trend + weakest component */}
           <div className="flex items-center justify-between">
             <div
               className={cn(
@@ -300,6 +328,12 @@ export function TokenCard({
               </span>
             </div>
 
+            {token.weakestComponent && COMPONENT_LABELS[token.weakestComponent] && (
+              <div className="flex items-center gap-1 text-[10px] text-muted-foreground/60">
+                <AlertTriangle className="h-3 w-3" />
+                <span>{COMPONENT_LABELS[token.weakestComponent]}</span>
+              </div>
+            )}
           </div>
 
           {/* Subtle hover border glow */}

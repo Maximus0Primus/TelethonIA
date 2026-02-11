@@ -20,6 +20,8 @@ from enrich import enrich_tokens
 from enrich_helius import enrich_tokens_helius
 from enrich_jupiter import enrich_tokens_jupiter
 from enrich_bubblemaps import enrich_tokens_bubblemaps
+from enrich_dexpaprika_ohlcv import enrich_tokens_ohlcv
+from price_action import compute_price_action_score
 from kol_scorer import get_kol_scores
 
 logger = logging.getLogger(__name__)
@@ -30,6 +32,9 @@ TOKEN_REGEX = re.compile(r"(?<![A-Za-z0-9_])\$([A-Za-z][A-Za-z0-9]{0,14})\b")
 BARE_TOKEN_REGEX = re.compile(r"\b([A-Z][A-Z0-9]{2,14})\b")
 # Solana base58 addresses (32-44 chars, no 0/O/I/l)
 CA_REGEX = re.compile(r"\b([1-9A-HJ-NP-Za-km-z]{32,44})\b")
+# URL-based token discovery (DexScreener links + pump.fun links)
+DEXSCREENER_URL_REGEX = re.compile(r"dexscreener\.com/(\w+)/([a-zA-Z0-9]{20,50})")
+PUMP_FUN_URL_REGEX = re.compile(r"pump\.fun/(?:coin/)?([a-zA-Z0-9]{20,50})")
 
 # Well-known Solana program addresses — never actual tokens
 KNOWN_PROGRAM_ADDRESSES = {
@@ -48,39 +53,52 @@ KNOWN_PROGRAM_ADDRESSES = {
 }
 
 EXCLUDED_TOKENS = {
-    # Stablecoins & majors (never memecoins)
+    # Stablecoins (never memecoins)
     "USD", "USDT", "USDC", "BUSD", "DAI", "TUSD",
+    # L1/L2 blue chips (not memecoins — these have their own markets)
     "SOL", "ETH", "BTC", "BNB", "XRP", "ADA", "DOT", "AVAX", "MATIC",
-    # Crypto jargon (always false positives in KOL messages)
+    # Crypto abbreviations that are NEVER token names
+    # (kept minimal — real tokens like $DEGEN, $COPE, $PUMP are allowed)
     "CA", "LP", "MC", "ATH", "ATL", "FDV", "TVL",
-    "PNL", "ROI", "APY", "APR", "CRYPTO", "DEX", "CEX",
-    "ICO", "IDO", "IEO", "TGE", "KOL",
-    "CEO", "COO", "CTO", "CFO",
-    "URL", "API", "NFT", "DAO", "DEFI",
-    "GMT", "UTC", "EST", "PST",
+    "PNL", "ROI", "APY", "APR", "DEX", "CEX",
+    "ICO", "IDO", "IEO", "TGE", "KOL", "NFA", "DYOR", "DCA",
+    "URL", "API", "GMT", "UTC", "EST", "PST",
     "DM", "RT", "TG", "CT",
-    # Common English words (bare token false positives)
+    "GG", "GM", "GN",
+    # L1/L2 tokens sometimes mentioned as context, not as calls
+    "SOLANA",
+    # TradFi tickers that KOLs discuss but aren't memecoins
+    "SPX", "TSLA", "SNP",
+    # Known paid shills / casino platforms
+    "METAWIN",
+}
+
+# Common English words / crypto slang that bare ALLCAPS regex often matches.
+# These are ONLY blocked when found as bare ALLCAPS (without $ prefix).
+# If a KOL writes "$WAR" (with $), it's treated as a real token call.
+# If a KOL writes "WAR" (bare), it needs confirmation from another $ or CA mention.
+# This set is used as an EXTRA gate for bare ALLCAPS to avoid obvious noise
+# even when the symbol got "confirmed" by one KOL writing e.g. "$NFA" (Not Financial Advice).
+BARE_WORD_SUSPECTS = {
+    # 2-3 letter English words that are almost never tokens
     "THE", "AND", "FOR", "NOT", "YOU", "ALL", "CAN", "HER", "WAS", "ONE",
     "OUR", "OUT", "ARE", "HAS", "BUT", "GET", "HIS", "HOW", "ITS", "LET",
     "MAY", "NEW", "NOW", "OLD", "SEE", "WAY", "WHO", "DID", "GOT", "HIM",
-    "MAN", "TOP", "USE", "SAY", "SHE", "TOO", "BIG", "END", "TRY", "ASK",
-    "MEN", "RUN", "RAN", "SAT", "WIN", "WON", "YES", "YET", "BET", "BAD",
-    "HOT", "LOT", "SET", "SIT", "CUT", "HIT", "PUT", "RIP",
-    # Crypto slang (not tokens)
-    "GG", "GM", "GN", "WEN", "SER", "FOMO", "HODL", "DYOR", "NGMI", "WAGMI",
-    "BASED", "CHAD", "COPE", "SHILL", "ALPHA", "BETA", "GAMMA", "DELTA",
-    "LONG", "SHORT", "PUMP", "DUMP", "MOON", "SEND", "CALL", "PLAY",
-    "HOLD", "SELL", "JUST", "LIKE", "WITH", "THIS", "THAT", "FROM",
+    "MAN", "USE", "SAY", "SHE", "TOO", "BIG", "END", "TRY", "ASK",
+    "MEN", "RUN", "RAN", "SAT", "YES", "YET", "BAD",
+    "LOT", "SET", "SIT", "CUT", "PUT",
+    # 4+ letter common English words
+    "JUST", "LIKE", "WITH", "THIS", "THAT", "FROM",
     "HAVE", "WILL", "BEEN", "WHAT", "WHEN", "YOUR", "THEM", "THAN",
     "EACH", "MAKE", "VERY", "SOME", "BACK", "ONLY", "COME", "MADE",
     "AFTER", "ALSO", "INTO", "OVER", "SUCH", "TAKE", "MOST", "GOOD",
     "KNOW", "TIME", "LOOK", "NEXT", "MUCH", "MORE", "LAST", "STILL",
-    "HIGH", "GONNA", "GOING", "ABOUT", "THINK", "THESE", "RIGHT",
-    "CHECK", "LOOKS", "PRICE", "CHART", "ENTRY", "MARKET", "TOKEN",
-    "COINS", "TRADE", "PROFIT", "UPDATE", "BUYING", "TODAY", "WATCH",
-    "WAITING", "EARLY", "MASSIVE",
-    # Known paid shills / casino platforms (not real memecoins)
-    "METAWIN",
+    "GONNA", "GOING", "ABOUT", "THINK", "THESE", "RIGHT",
+    "CHECK", "LOOKS", "BUYING", "TODAY", "WATCH", "WAITING", "EARLY",
+    "UNTIL", "BONUS", "HIGHER", "BETTER", "NEVER", "FALLS", "FIRST",
+    "STRONG", "CRAZY", "LEVEL", "COST", "HERE", "SOON", "EVERY",
+    "ANYMORE", "NOBODY", "PERFECT", "BREATHE", "CAMP", "WORTH",
+    "RANGE", "MOVE", "TRUST", "HOLY", "PAIN",
 }
 
 # === CRYPTO LEXICON ===
@@ -432,6 +450,43 @@ def _resolve_ca_to_symbol(address: str, ca_cache: dict[str, dict]) -> str | None
         time.sleep(0.3)  # Rate limit: ~3 req/s
 
 
+_DEXSCREENER_PAIRS_URL = "https://api.dexscreener.com/latest/dex/pairs/{chain}/{pair_address}"
+
+
+def _resolve_pair_to_symbol(chain: str, pair_address: str, ca_cache: dict[str, dict]) -> str | None:
+    """
+    Resolve a DexScreener pair address to its base token symbol.
+    Uses the pairs API endpoint (different from the tokens endpoint).
+    """
+    cache_key = f"pair:{chain}:{pair_address}"
+    if cache_key in ca_cache:
+        entry = ca_cache[cache_key]
+        if time.time() - entry.get("resolved_at", 0) < _CA_CACHE_TTL:
+            return entry.get("symbol")
+
+    try:
+        resp = requests.get(
+            _DEXSCREENER_PAIRS_URL.format(chain=chain, pair_address=pair_address),
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            pairs = data.get("pairs") or data if isinstance(data, list) else data.get("pairs", [])
+            if isinstance(pairs, list) and pairs:
+                symbol = pairs[0].get("baseToken", {}).get("symbol", "").upper()
+                if symbol and len(symbol) <= 15:
+                    ca_cache[cache_key] = {"symbol": symbol, "resolved_at": time.time()}
+                    logger.info("Resolved pair %s/%s… → $%s", chain, pair_address[:8], symbol)
+                    return symbol
+        ca_cache[cache_key] = {"symbol": None, "resolved_at": time.time()}
+        return None
+    except requests.RequestException as e:
+        logger.debug("Pair resolution failed for %s/%s…: %s", chain, pair_address[:8], e)
+        return None
+    finally:
+        time.sleep(0.3)
+
+
 def _load_token_cache() -> dict[str, bool]:
     """Load cached token verification results. { "SYMBOL": true/false }"""
     import json
@@ -452,10 +507,12 @@ def _save_token_cache(cache: dict[str, bool]) -> None:
 
 def _is_active_token(pairs: list[dict], symbol_raw: str) -> bool:
     """
-    Check if any trading pair for this symbol shows real recent activity.
-    Criteria: exact symbol match + 24h volume > $1000 OR 24h transactions > 10.
+    Check if any Solana trading pair for this symbol shows real recent activity.
+    Criteria: Solana chain + exact symbol match + 24h volume > $100 OR 24h transactions > 5.
     """
     for p in pairs:
+        if p.get("chainId") != "solana":
+            continue
         if p.get("baseToken", {}).get("symbol", "").upper() != symbol_raw:
             continue
 
@@ -508,11 +565,17 @@ def verify_tokens_exist(symbols: list[str]) -> set[str]:
                     logger.info("Token %s verified (active trading)", sym)
                 else:
                     logger.info("Token %s filtered out (no recent activity)", sym)
-            else:
-                logger.warning("DexScreener API %d for %s — keeping token", resp.status_code, sym)
+            elif resp.status_code >= 500:
+                # Server error: not our fault, keep the token to retry next cycle
+                logger.warning("DexScreener API %d for %s — keeping token (server error)", resp.status_code, sym)
                 verified.add(sym)
+            else:
+                # 4xx = bad request / not found — token is invalid, reject it
+                cache[raw] = False
+                logger.info("Token %s rejected (DexScreener %d)", sym, resp.status_code)
         except requests.RequestException as e:
-            logger.warning("DexScreener failed for %s: %s — keeping token", sym, e)
+            # Network error: keep the token to retry next cycle
+            logger.warning("DexScreener failed for %s: %s — keeping token (network error)", sym, e)
             verified.add(sym)
 
         time.sleep(0.5)
@@ -617,39 +680,92 @@ def _apply_ml_scores(ranking: list[dict]) -> None:
 
 # === PUBLIC API ===
 
-def extract_tokens(text: str, ca_cache: dict[str, dict] | None = None) -> list[str]:
+def extract_tokens(
+    text: str,
+    ca_cache: dict[str, dict] | None = None,
+    confirmed_symbols: set[str] | None = None,
+) -> list[str]:
     """
     Extract token symbols from text via three methods:
-    1) $TOKEN prefix (case-insensitive)
-    2) Bare ALL-CAPS words (3+ chars)
+    1) $TOKEN prefix — high confidence, always extracted
+    2) Bare ALL-CAPS words (3+ chars) — only if symbol is confirmed by $ or CA elsewhere
     3) Solana contract addresses → resolved to symbols via DexScreener
+
+    Parameters
+    ----------
+    confirmed_symbols : set of uppercase symbol names (without $) that have been
+        confirmed via $-prefix or CA resolution elsewhere in this scrape cycle.
+        When provided, bare ALLCAPS words are only extracted if they appear in this set
+        AND are not in BARE_WORD_SUSPECTS. When None (backward compat), bare ALLCAPS
+        extraction is unrestricted (legacy behavior).
     """
     tokens = []
     seen: set[str] = set()
 
-    # 1) $-prefixed tokens (case-insensitive match, uppercased)
+    # 1) $-prefixed tokens: always extract (KOL intentionally naming a token)
     for match in TOKEN_REGEX.findall(text):
         upper = match.upper()
+        if not upper.isascii():
+            continue
         symbol = f"${upper}"
         if upper not in EXCLUDED_TOKENS and symbol not in seen:
             tokens.append(symbol)
             seen.add(symbol)
 
-    # 2) Bare ALL-CAPS tokens (3+ chars, no $ prefix)
+    # 2) Bare ALL-CAPS tokens: only accept if confirmed elsewhere
     for match in BARE_TOKEN_REGEX.findall(text):
         if match != match.upper():
             continue
+        if not match.isascii():
+            continue
+        # Gate: bare ALLCAPS must be confirmed by $-prefix or CA in another message
+        if confirmed_symbols is not None:
+            if match not in confirmed_symbols:
+                continue
+            # Extra gate: even if "confirmed", common English words as bare ALLCAPS
+            # are almost always noise (e.g. someone wrote "$NEVER" once as slang)
+            if match in BARE_WORD_SUSPECTS:
+                continue
         symbol = f"${match}"
         if match not in EXCLUDED_TOKENS and symbol not in seen:
             tokens.append(symbol)
             seen.add(symbol)
 
-    # 3) Solana contract addresses → resolve to symbol
+    # 3) Solana contract addresses → resolve to symbol (definitive proof)
+    #    Skip addresses that are part of DexScreener/pump.fun URLs (handled in step 4)
+    url_addresses = set()
+    for _, pair_addr in DEXSCREENER_URL_REGEX.findall(text):
+        url_addresses.add(pair_addr)
+    for pump_addr in PUMP_FUN_URL_REGEX.findall(text):
+        url_addresses.add(pump_addr)
+
     if ca_cache is not None:
         for match in CA_REGEX.findall(text):
             if match in KNOWN_PROGRAM_ADDRESSES:
                 continue
+            if match in url_addresses:
+                continue  # Will be handled by URL extraction below
             resolved = _resolve_ca_to_symbol(match, ca_cache)
+            if resolved:
+                symbol = f"${resolved}"
+                if resolved not in EXCLUDED_TOKENS and symbol not in seen:
+                    tokens.append(symbol)
+                    seen.add(symbol)
+
+    # 4) DexScreener/pump.fun URLs → resolve pair/token address to symbol
+    if ca_cache is not None:
+        # DexScreener: pair address → resolve via pairs API
+        for chain, pair_addr in DEXSCREENER_URL_REGEX.findall(text):
+            resolved = _resolve_pair_to_symbol(chain, pair_addr, ca_cache)
+            if resolved:
+                symbol = f"${resolved}"
+                if resolved not in EXCLUDED_TOKENS and symbol not in seen:
+                    tokens.append(symbol)
+                    seen.add(symbol)
+
+        # pump.fun: token CA directly → resolve via tokens API
+        for pump_addr in PUMP_FUN_URL_REGEX.findall(text):
+            resolved = _resolve_ca_to_symbol(pump_addr, ca_cache)
             if resolved:
                 symbol = f"${resolved}"
                 if resolved not in EXCLUDED_TOKENS and symbol not in seen:
@@ -817,6 +933,68 @@ def _apply_hard_gates(ranking: list[dict]) -> list[dict]:
     return passed
 
 
+def _detect_volume_squeeze(token: dict) -> tuple[str, float]:
+    """
+    Detect volume squeeze/fire pattern (adapted from Harvard BB Squeeze).
+    When volume compresses (6h avg << 24h avg) then explodes (1h >> 6h avg) = breakout.
+    Returns (state, squeeze_score) where state is 'squeezing', 'firing', 'none'.
+    squeeze_score: 0.0 (no signal) to 1.0 (strong squeeze fire).
+    """
+    vol_1h = token.get("volume_1h", 0) or 0
+    vol_6h = token.get("volume_6h", 0) or 0
+    vol_24h = token.get("volume_24h", 0) or 0
+
+    if not vol_6h or not vol_24h:
+        return "none", 0.0
+
+    avg_hourly_6h = vol_6h / 6
+    avg_hourly_24h = vol_24h / 24
+
+    if avg_hourly_24h <= 0:
+        return "none", 0.0
+
+    # Compression: 6h hourly average much lower than 24h hourly average
+    compression_ratio = avg_hourly_6h / avg_hourly_24h
+
+    if compression_ratio < 0.5:  # Volume was compressed
+        if vol_1h > 0 and avg_hourly_6h > 0:
+            expansion = vol_1h / avg_hourly_6h
+            if expansion > 2.0:  # Breakout: 1h volume explodes past compressed average
+                return "firing", min(1.0, expansion / 5.0)
+        return "squeezing", 0.3
+
+    return "none", 0.0
+
+
+def _compute_trend_strength(token: dict) -> float:
+    """
+    ADX-like trend strength from available price data (adapted from Harvard ADX).
+    Measures directional conviction across timeframes.
+    Returns 0.0 (no trend / conflicting signals) to 1.0 (very strong directional move).
+    """
+    pc1h = token.get("price_change_1h") or 0
+    pc6h = token.get("price_change_6h") or 0
+    pc24h = token.get("price_change_24h") or 0
+
+    if not pc24h and not pc6h and not pc1h:
+        return 0.0
+
+    direction_1h = 1 if pc1h > 0 else -1
+    direction_6h = 1 if pc6h > 0 else -1
+    direction_24h = 1 if pc24h > 0 else -1
+
+    # All timeframes agree in direction = strong trend
+    agreement = (direction_1h == direction_6h == direction_24h)
+
+    # Magnitude: clamped to reasonable range for memecoins (100%+ move in 24h = max)
+    magnitude = min(abs(pc24h) / 100, 1.0)
+
+    if agreement:
+        return min(1.0, 0.5 + magnitude * 0.5)
+    else:
+        return magnitude * 0.3  # Conflicting signals = weak trend
+
+
 def _compute_onchain_multiplier(token: dict) -> float:
     """
     Returns a multiplier [0.3, 1.5] based on on-chain health.
@@ -849,17 +1027,19 @@ def _compute_onchain_multiplier(token: dict) -> float:
     if va is not None:
         factors.append(min(1.5, 0.5 + va * 0.5))
 
-    # 5. Token age penalty (too new = risky, too old = less likely to 2x)
+    # 5. Token age penalty (v4: 6-48h optimal window)
     age = token.get("token_age_hours")
     if age is not None:
         if age < 1:
-            factors.append(0.6)
-        elif age < 24:
-            factors.append(1.2)
+            factors.append(0.5)     # Too fresh, no data
+        elif age < 6:
+            factors.append(1.0)     # Young, unproven
+        elif age < 48:
+            factors.append(1.2)     # Sweet spot: survived early hours
         elif age < 168:
-            factors.append(1.0)
+            factors.append(1.0)     # Established
         else:
-            factors.append(0.8)
+            factors.append(0.8)     # Old, less likely to 2x
 
     # 6. Phase 3: Helius recent transaction activity
     recent_tx = token.get("helius_recent_tx_count")
@@ -930,93 +1110,276 @@ def _compute_onchain_multiplier(token: dict) -> float:
         elif velocity < 0.2:
             factors.append(0.6)    # stagnant
 
+    # Algorithm v4: Volatility proxy penalty (high volatility = unstable)
+    vol_proxy = token.get("volatility_proxy")
+    if vol_proxy is not None and vol_proxy > 50:
+        factors.append(0.8)
+
+    # Algorithm v4 Sprint 4: Whale direction accumulation bonus
+    whale_dir = token.get("whale_direction")
+    if whale_dir == "accumulating":
+        factors.append(1.15)  # Whales consistently buying = bullish
+
     if not factors:
-        return 0.7  # Algorithm v3 B2: penalize missing data instead of being neutral
+        return 0.85  # v7: milder penalty — renormalization handles the base score
 
     return max(0.3, min(1.5, sum(factors) / len(factors)))
 
 
 def _compute_safety_penalty(token: dict) -> float:
     """
-    Returns a penalty multiplier [0.0, 1.0].
-    1.0 = safe, 0.0 = extremely dangerous (score zeroed out).
+    Returns a penalty multiplier [0.3, 1.0].
+    1.0 = safe, 0.3 = floor (never destroy a token completely).
+    v5.1: Softened all factors — memecoin-typical patterns shouldn't obliterate scores.
     """
     penalty = 1.0
 
     # NOTE: mint_authority and freeze_authority are now handled by _apply_hard_gates()
     # (hard reject, score=0). No soft penalty needed here.
 
-    # High insider concentration (bundled)
+    # High insider concentration (bundled) — softer curve, higher floor
     insider_pct = token.get("insider_pct")
     if insider_pct is not None and insider_pct > 30:
-        penalty *= max(0.2, 1.0 - (insider_pct - 30) / 70)
+        penalty *= max(0.5, 1.0 - (insider_pct - 30) / 100)
 
-    # Top 10 holders own too much
+    # Top 10 holders own too much — 50-60% is common on pump.fun
     top10 = token.get("top10_holder_pct")
     if top10 is not None and top10 > 50:
-        penalty *= max(0.3, 1.0 - (top10 - 50) / 50)
+        penalty *= max(0.7, 1.0 - (top10 - 50) / 100)
 
-    # RugCheck risk score (0=safe, 10000=dangerous)
+    # RugCheck risk score (0=safe, 10000=dangerous) — higher floor
     risk = token.get("risk_score")
     if risk is not None and risk > 5000:
-        penalty *= max(0.2, 1.0 - (risk - 5000) / 5000)
+        penalty *= max(0.5, 1.0 - (risk - 5000) / 5000)
 
-    # Multiple risk flags
+    # Multiple risk flags — 3 flags is common on pump.fun tokens
     risk_count = token.get("risk_count", 0) or 0
     if risk_count >= 3:
-        penalty *= 0.7
+        penalty *= 0.9
 
     # Jito slot-based bundle detection (high confidence, low false positives)
     jito_max_txns = token.get("jito_max_slot_txns") or 0
     if jito_max_txns >= 5:
-        penalty *= 0.2  # definite Jito bundle
+        penalty *= 0.4  # definite Jito bundle — still harsh but not near-zero
     elif jito_max_txns >= 3:
-        penalty *= 0.4  # suspicious slot clustering
+        penalty *= 0.6  # suspicious slot clustering
     else:
         # Fallback: balance-based bundle detection (higher false positive rate)
         bundle_detected = token.get("bundle_detected")
         bundle_pct = token.get("bundle_pct") or 0
         if bundle_detected:
             if bundle_pct > 20:
-                penalty *= 0.3
+                penalty *= 0.5  # bundling common in memecoins
             elif bundle_pct > 10:
-                penalty *= 0.5
+                penalty *= 0.7  # mild bundling
 
-    # Phase 3: High Gini = wealth too concentrated
+    # Phase 3: High Gini = wealth too concentrated — normal for small tokens
     helius_gini = token.get("helius_gini")
     if helius_gini is not None and helius_gini > 0.85:
-        penalty *= 0.6
+        penalty *= 0.8
 
-    # Phase 3: Too few holders = no organic community
+    # Phase 3: Too few holders — expected for new tokens
     helius_holder_count = token.get("helius_holder_count")
     if helius_holder_count is not None and helius_holder_count < 50:
-        penalty *= 0.7
+        penalty *= 0.85
 
-    # Phase 3B: Whale concentration too high
+    # Phase 3B: Whale concentration too high — softer curve
     whale_total_pct = token.get("whale_total_pct")
     if whale_total_pct is not None and whale_total_pct > 60:
-        penalty *= max(0.3, 1.0 - (whale_total_pct - 60) / 40)
+        penalty *= max(0.7, 1.0 - (whale_total_pct - 60) / 80)
 
     # Algorithm v3.1: Bubblemaps — low decentralization = clustered supply
     bb_score = token.get("bubblemaps_score")
     if bb_score is not None:
         if bb_score < 20:
-            penalty *= 0.4  # very centralized
+            penalty *= 0.6  # very centralized
         elif bb_score < 40:
-            penalty *= 0.7  # moderately centralized
+            penalty *= 0.85  # moderately centralized
 
     # Algorithm v3.1: Bubblemaps — largest wallet cluster holds too much
     bb_cluster_max = token.get("bubblemaps_cluster_max_pct")
     if bb_cluster_max is not None and bb_cluster_max > 30:
-        penalty *= max(0.3, 1.0 - (bb_cluster_max - 30) / 70)
+        penalty *= max(0.6, 1.0 - (bb_cluster_max - 30) / 70)
 
-    return max(0.0, penalty)
+    # Algorithm v4: Whale dominance (concentration * inequality) — mild flag
+    whale_dom = token.get("whale_dominance")
+    if whale_dom is not None and whale_dom > 0.5:
+        penalty *= 0.85
+
+    # Algorithm v4 Sprint 4: Whale direction tracking — softer
+    whale_dir = token.get("whale_direction")
+    if whale_dir == "distributing":
+        penalty *= 0.75   # Whales switching from buy to sell = uncertain
+    elif whale_dir == "dumping":
+        penalty *= 0.65   # Consistent selling = bearish
+
+    # FLOOR: never destroy a token completely — let the user decide
+    return max(0.3, penalty)
+
+
+# === SCORE COMPUTATION WEIGHTS ===
+BALANCED_WEIGHTS = {
+    "consensus": 0.25,
+    "sentiment": 0.05,
+    "conviction": 0.15,
+    "breadth": 0.15,
+    "price_action": 0.40,
+}
+
+
+def _get_component_value(token: dict, component: str) -> float | None:
+    """
+    Extract a normalized [0, 1] component value from a token dict.
+    Returns None if data is genuinely missing.
+    """
+    if component == "consensus":
+        uk = token.get("unique_kols")
+        if uk is None:
+            return None
+        tk = token.get("_total_kols", 50)
+        # Use tier-weighted if available
+        kol_tiers = token.get("kol_tiers", {})
+        if kol_tiers:
+            tw_func = token.get("_tw_func")
+            if tw_func:
+                weighted = sum(tw_func(g) for g in kol_tiers)
+            else:
+                weighted = uk
+            return min(1.0, weighted / (tk * 0.15))
+        return min(1.0, uk / (tk * 0.15))
+    elif component == "sentiment":
+        s = token.get("sentiment")
+        if s is None:
+            return None
+        return (s + 1) / 2
+    elif component == "conviction":
+        ac = token.get("avg_conviction")
+        if ac is None:
+            return None
+        return max(0, min(1, (ac - 5) / 5))
+    elif component == "breadth":
+        bs = token.get("breadth_score")
+        if bs is not None:
+            return bs
+        m = token.get("mentions")
+        if m is None:
+            return None
+        return min(1.0, m / 30)
+    elif component == "price_action":
+        pa = token.get("price_action_score")
+        return pa  # None if no OHLCV data
+    return None
+
+
+def _compute_score_with_renormalization(token: dict) -> tuple[float, float]:
+    """
+    Compute balanced score with weight renormalization for missing components.
+    Returns (raw_score_0_to_1, data_confidence).
+
+    data_confidence = sum(available_weights) / sum(all_weights)
+    - 1.0 = all 5 components have data
+    - 0.6 = only 60% of weighted components available (e.g. missing price_action)
+    """
+    available = {}
+    for comp, weight in BALANCED_WEIGHTS.items():
+        value = _get_component_value(token, comp)
+        if value is not None:
+            available[comp] = (value, weight)
+
+    total_available_weight = sum(w for _, w in available.values())
+    if total_available_weight == 0:
+        return 0.0, 0.0
+
+    renormalized_score = sum(v * (w / total_available_weight) for v, w in available.values())
+    data_confidence = total_available_weight / sum(BALANCED_WEIGHTS.values())
+
+    return renormalized_score, round(data_confidence, 3)
+
+
+def _classify_lifecycle_phase(token: dict) -> tuple[str, float]:
+    """
+    Classify token into Minsky lifecycle phase.
+    Returns (phase_name, phase_penalty) where penalty is [0.2, 1.1].
+    Priority: panic > profit_taking > euphoria > boom > displacement > unknown.
+    """
+    pc24 = token.get("price_change_24h")
+    uk = token.get("unique_kols", 0)
+    va = token.get("volume_acceleration")
+    sv = token.get("social_velocity", 0)
+    ma = token.get("mention_acceleration", 0)
+    sent = token.get("sentiment", 0)
+    vol_proxy = token.get("volatility_proxy")
+    whale_dir = token.get("whale_direction")
+    age = token.get("token_age_hours")
+
+    # Panic: dump in progress
+    if pc24 is not None and pc24 < -30:
+        if (va is not None and va < 0.5) or whale_dir == "dumping":
+            return "panic", 0.25
+
+    # Profit-taking: smart money exiting
+    if pc24 is not None and pc24 > 100:
+        vol_spike = vol_proxy is not None and vol_proxy > 40
+        whale_exit = whale_dir in ("distributing", "dumping")
+        if (vol_spike or whale_exit) and ma < 0:
+            return "profit_taking", 0.35
+
+    # Euphoria: over-saturated, most KOLs already in
+    if uk >= 5 and pc24 is not None and pc24 > 200 and sent > 0.3:
+        return "euphoria", 0.5
+
+    # Boom: sweet spot — growing interest + price confirming
+    if uk >= 2 and pc24 is not None and 10 < pc24 <= 200:
+        has_vol = va is not None and va > 1.0
+        has_social = sv > 0.3 or ma > 0.2
+        if has_vol and has_social:
+            return "boom", 1.1
+
+    # Displacement: fresh, unproven
+    if age is not None and age < 6 and uk <= 1:
+        if pc24 is None or pc24 < 50:
+            return "displacement", 0.9
+
+    return "unknown", 1.0
+
+
+def _identify_weakest_component(token: dict) -> tuple[str, float]:
+    """
+    Identify the weakest scoring component and return (name, value).
+    """
+    components = {}
+    for comp in BALANCED_WEIGHTS:
+        val = _get_component_value(token, comp)
+        if val is not None:
+            components[comp] = val
+
+    if not components:
+        return "unknown", 0.0
+
+    weakest = min(components, key=components.get)
+    return weakest, round(components[weakest], 3)
+
+
+def _interpret_score(score: int) -> str:
+    """Return human-readable interpretation band."""
+    if score >= 80:
+        return "strong_signal"
+    elif score >= 65:
+        return "good_signal"
+    elif score >= 50:
+        return "moderate_signal"
+    elif score >= 35:
+        return "weak_signal"
+    else:
+        return "low_conviction"
 
 
 def aggregate_ranking(
     messages_dict: dict[str, list[dict]],
     groups_conviction: dict[str, int],
     hours: int,
+    groups_tier: dict[str, str] | None = None,
+    tier_weights: dict[str, float] | None = None,
 ) -> list[TokenRanking]:
     """
     Given raw messages grouped by channel username, compute ranked token list
@@ -1027,6 +1390,8 @@ def aggregate_ranking(
     messages_dict : { "group_username": [ { "text": ..., "date": ISO str, ... }, ... ] }
     groups_conviction : { "group_username": conviction_int }
     hours : time window in hours
+    groups_tier : { "group_username": "S" | "A" } — KOL tier classification
+    tier_weights : { "S": 2.0, "A": 1.0 } — weight multiplier per tier
 
     Returns
     -------
@@ -1036,6 +1401,12 @@ def aggregate_ranking(
     cutoff = now - timedelta(hours=hours)
     total_kols = len(groups_conviction)
 
+    # Tier weight helper: returns the tier multiplier for a KOL group
+    def tw(group: str) -> float:
+        if tier_weights and groups_tier:
+            return tier_weights.get(groups_tier.get(group, "A"), 1.0)
+        return 1.0
+
     # Load KOL reputation scores
     kol_scores = get_kol_scores()
     if kol_scores:
@@ -1043,6 +1414,46 @@ def aggregate_ranking(
 
     # Load CA cache once for the entire aggregation cycle
     ca_cache = _load_ca_cache()
+
+    # === Phase 1: Build confirmed symbols from $-prefix and CA across ALL messages ===
+    # A symbol is "confirmed" if at least one KOL explicitly named it with $ or posted its CA.
+    # Bare ALLCAPS words (like "SHARK") only count as mentions if confirmed here.
+    confirmed_symbols: set[str] = set()
+
+    for group_name, msgs in messages_dict.items():
+        for msg in msgs:
+            text = msg.get("text", "")
+            if not text or len(text) < 3:
+                continue
+            # $-prefixed tokens → confirmed
+            for match in TOKEN_REGEX.findall(text):
+                upper = match.upper()
+                if upper.isascii() and upper not in EXCLUDED_TOKENS:
+                    confirmed_symbols.add(upper)
+            # CA-resolved tokens → confirmed
+            for match in CA_REGEX.findall(text):
+                if match in KNOWN_PROGRAM_ADDRESSES:
+                    continue
+                resolved = _resolve_ca_to_symbol(match, ca_cache)
+                if resolved and resolved not in EXCLUDED_TOKENS:
+                    confirmed_symbols.add(resolved)
+            # DexScreener URL pair addresses → confirmed
+            for chain, pair_addr in DEXSCREENER_URL_REGEX.findall(text):
+                resolved = _resolve_pair_to_symbol(chain, pair_addr, ca_cache)
+                if resolved and resolved not in EXCLUDED_TOKENS:
+                    confirmed_symbols.add(resolved)
+            # pump.fun URLs → confirmed
+            for pump_addr in PUMP_FUN_URL_REGEX.findall(text):
+                resolved = _resolve_ca_to_symbol(pump_addr, ca_cache)
+                if resolved and resolved not in EXCLUDED_TOKENS:
+                    confirmed_symbols.add(resolved)
+
+    logger.info(
+        "Phase 1: %d confirmed symbols from $-prefix, CA, and URL resolution",
+        len(confirmed_symbols),
+    )
+
+    # === Phase 2: Full message processing with confirmation gate ===
 
     token_data: dict[str, TokenStats] = defaultdict(lambda: {
         "mentions": 0,
@@ -1056,6 +1467,7 @@ def aggregate_ranking(
         "msg_conviction_scores": [],  # per-message NLP conviction scores
         "price_target_count": 0,      # messages with price targets
         "hedging_count": 0,           # messages with hedging language
+        "kol_mention_counts": {},     # per-KOL mention count for quality weighting
     })
 
     for group_name, msgs in messages_dict.items():
@@ -1081,7 +1493,7 @@ def aggregate_ranking(
             if not text or len(text) < 3:
                 continue
 
-            tokens = extract_tokens(text, ca_cache=ca_cache)
+            tokens = extract_tokens(text, ca_cache=ca_cache, confirmed_symbols=confirmed_symbols)
             if not tokens:
                 continue
 
@@ -1094,14 +1506,25 @@ def aggregate_ranking(
             msg_conv = _compute_message_conviction(text)
 
             for token in tokens:
-                token_data[token]["mentions"] += 1
+                # Always track sentiment (negative views are useful signal)
                 token_data[token]["sentiments"].append(sentiment)
-                token_data[token]["groups"].add(group_name)
-                token_data[token]["convictions"].append(conviction)
                 token_data[token]["hours_ago"].append(hours_ago)
                 token_data[token]["msg_conviction_scores"].append(msg_conv["msg_conviction_score"])
-                if msg_conv["has_price_target"]:
-                    token_data[token]["price_target_count"] += 1
+
+                # Negative mentions (sentiment < -0.3) = KOL is warning, not calling
+                # Don't count toward mentions/breadth/conviction — prevents false positives
+                is_positive_mention = sentiment >= -0.3
+
+                if is_positive_mention:
+                    token_data[token]["mentions"] += 1
+                    token_data[token]["groups"].add(group_name)
+                    token_data[token]["convictions"].append(conviction)
+                    # Track per-KOL mention counts for quality-weighted breadth
+                    kol_counts = token_data[token]["kol_mention_counts"]
+                    kol_counts[group_name] = kol_counts.get(group_name, 0) + 1
+                    if msg_conv["has_price_target"]:
+                        token_data[token]["price_target_count"] += 1
+
                 if msg_conv["has_hedging"]:
                     token_data[token]["hedging_count"] += 1
                 if narrative:
@@ -1133,7 +1556,8 @@ def aggregate_ranking(
             continue
 
         unique_kols = len(data["groups"])
-        kol_consensus = min(1.0, unique_kols / (total_kols * 0.15))
+        weighted_unique = sum(tw(g) for g in data["groups"])
+        kol_consensus = min(1.0, weighted_unique / (total_kols * 0.15))
 
         avg_sentiment = sum(data["sentiments"]) / len(data["sentiments"])
         sentiment_score = (avg_sentiment + 1) / 2
@@ -1166,7 +1590,16 @@ def aggregate_ranking(
         avg_conviction = sum(data["convictions"]) / len(data["convictions"])
         conviction_score = max(0, min(1, (effective_conviction - 5) / 5))  # Scale 5-10 → 0-1
 
-        breadth_score = min(1.0, data["mentions"] / 30)
+        # Algorithm v4: Quality-weighted breadth (KOL reputation * tier weight * mention count)
+        kol_mention_counts = data.get("kol_mention_counts", {})
+        if kol_mention_counts and kol_scores:
+            weighted_mentions = sum(
+                kol_scores.get(kol, 0.5) * tw(kol) * count
+                for kol, count in kol_mention_counts.items()
+            )
+            breadth_score = min(1.0, weighted_mentions / 20)
+        else:
+            breadth_score = min(1.0, data["mentions"] / 30)
 
         # --- Narrative classification ---
         token_narrative = None
@@ -1206,13 +1639,21 @@ def aggregate_ranking(
 
         # --- Base Telegram scores (3 modes) ---
 
-        # Balanced score (legacy, kept as default)
-        raw_score = (
-            0.35 * kol_consensus
-            + 0.25 * sentiment_score
-            + 0.25 * conviction_score
-            + 0.15 * breadth_score
-        )
+        # Algorithm v7: Balanced score with weight renormalization
+        # price_action will be None until OHLCV enrichment — renormalization handles this
+        # by distributing its 40% weight across available components
+        # Store _tw_func for renormalization to use
+        _initial_token = {
+            "unique_kols": unique_kols,
+            "_total_kols": total_kols,
+            "kol_tiers": {g: groups_tier.get(g, "A") for g in data["groups"]} if groups_tier else {},
+            "_tw_func": tw,
+            "sentiment": avg_sentiment,
+            "avg_conviction": avg_conviction,
+            "breadth_score": breadth_score,
+            "price_action_score": None,  # not yet enriched
+        }
+        raw_score, data_conf = _compute_score_with_renormalization(_initial_token)
         score = min(100, max(0, int(raw_score * 100)))
 
         # Conviction mode: sustained discussion across many KOLs
@@ -1275,6 +1716,13 @@ def aggregate_ranking(
             "hedging_count": data.get("hedging_count", 0),
             # Algorithm v3 A3: Sentiment consistency
             "sentiment_consistency": round(sentiment_consistency, 3),
+            # Breadth score for upsert and price action recalculation
+            "breadth_score": round(breadth_score, 3),
+            # KOL tier info (for debugging/dashboard)
+            "kol_tiers": {g: groups_tier.get(g, "A") for g in data["groups"]} if groups_tier else {},
+            # Algorithm v7: Weight renormalization
+            "_tw_func": tw,
+            "data_confidence": data_conf,
         })
 
     # Verify tokens exist on-chain via DexScreener (filters false positives)
@@ -1287,9 +1735,56 @@ def aggregate_ranking(
         if filtered > 0:
             logger.info("DexScreener filter removed %d fake tokens", filtered)
 
-    # Enrich with on-chain data (DexScreener + RugCheck)
+    # Enrich with on-chain data (DexScreener + RugCheck) — needed for gates
     enrich_tokens(ranking)
 
+    # === Quality gates BEFORE expensive enrichment (v5.1) ===
+    # Gate 1: Remove tokens that DexScreener couldn't resolve to a token_address
+    before_addr = len(ranking)
+    ranking = [t for t in ranking if t.get("token_address")]
+    addr_filtered = before_addr - len(ranking)
+    if addr_filtered:
+        logger.info("No-address gate removed %d unresolvable tokens", addr_filtered)
+
+    # Gate 1b: Remove tokens with no usable on-chain data (no volume AND no liquidity)
+    before_data = len(ranking)
+    ranking = [
+        t for t in ranking
+        if (t.get("volume_24h") or 0) > 0 or (t.get("liquidity_usd") or 0) > 0
+    ]
+    data_filtered = before_data - len(ranking)
+    if data_filtered:
+        logger.info("No-data gate removed %d tokens (no volume, no liquidity)", data_filtered)
+
+    # Gate 2: For longer windows (48h+), require 1 S-tier OR 2+ any-tier KOLs
+    if hours >= 48:
+        before_kol = len(ranking)
+        kept = []
+        for t in ranking:
+            tiers = t.get("kol_tiers", {})
+            has_s_tier = any(tier == "S" for tier in tiers.values())
+            if has_s_tier or t.get("unique_kols", 0) >= 2:
+                kept.append(t)
+        ranking = kept
+        kol_filtered = before_kol - len(ranking)
+        if kol_filtered:
+            logger.info("Single-A-tier gate removed %d tokens (window=%dh)", kol_filtered, hours)
+
+    # === Hard gates (uses RugCheck + DexScreener data) ===
+    ranking = _apply_hard_gates(ranking)
+
+    # === Wash trading gate (uses DexScreener volume/txn data) ===
+    for token in ranking:
+        token["wash_trading_score"] = round(_compute_wash_trading_score(token), 3)
+    before_wash = len(ranking)
+    ranking = [t for t in ranking if t.get("wash_trading_score", 0) <= 0.8]
+    wash_gated = before_wash - len(ranking)
+    if wash_gated:
+        logger.info("Wash trading gate removed %d tokens (score > 0.8)", wash_gated)
+
+    logger.info("Post-gate survivors: %d tokens — now running expensive enrichment", len(ranking))
+
+    # === Expensive enrichment on SURVIVORS only (v5.1) ===
     # Phase 3: Helius enrichment (bundle detection + holder quality + whale tracking)
     enrich_tokens_helius(ranking)
 
@@ -1298,6 +1793,34 @@ def aggregate_ranking(
 
     # Algorithm v3.1: Bubblemaps enrichment (wallet clustering + decentralization score)
     enrich_tokens_bubblemaps(ranking)
+
+    # === Algorithm v4: Birdeye OHLCV enrichment (top 5 survivors) ===
+    enrich_tokens_ohlcv(ranking)
+
+    # === Algorithm v4: Price Action scoring ===
+    for token in ranking:
+        pa = compute_price_action_score(token)
+        token.update(pa)
+
+        # === Harvard adaptations: Volume Squeeze + Trend Strength ===
+        squeeze_state, squeeze_score = _detect_volume_squeeze(token)
+        token["squeeze_state"] = squeeze_state
+        token["squeeze_score"] = round(squeeze_score, 3)
+
+        trend_strength = _compute_trend_strength(token)
+        token["trend_strength"] = round(trend_strength, 3)
+
+        # Algorithm v7: Recalculate balanced score with renormalization
+        # Now price_action_score is available (or still None if no OHLCV)
+        new_raw, data_conf = _compute_score_with_renormalization(token)
+        token["score"] = min(100, max(0, int(new_raw * 100)))
+        token["data_confidence"] = data_conf
+
+        # Algorithm v7: Weakest component + interpretation
+        wk_name, wk_val = _identify_weakest_component(token)
+        token["weakest_component"] = wk_name
+        token["weakest_component_value"] = wk_val
+        token["score_interpretation"] = _interpret_score(token["score"])
 
     # === Algorithm v3 C: ME2F-inspired ML features (computed from existing data) ===
     for token in ranking:
@@ -1323,20 +1846,6 @@ def aggregate_ranking(
         pc24 = abs(token.get("price_change_24h") or 0)
         if sent_std > 0 and pc24 > 0:
             token["sentiment_amplification"] = round(sent_std * (pc24 / 100), 4)
-
-    # === Algorithm v2: Hard gates (remove dangerous tokens entirely) ===
-    ranking = _apply_hard_gates(ranking)
-
-    # === Algorithm v2: Wash trading score (before multipliers) ===
-    wash_gated = 0
-    for token in ranking:
-        token["wash_trading_score"] = round(_compute_wash_trading_score(token), 3)
-    # Hard gate: wash_score > 0.8 = almost certainly fake volume
-    before_wash = len(ranking)
-    ranking = [t for t in ranking if t.get("wash_trading_score", 0) <= 0.8]
-    wash_gated = before_wash - len(ranking)
-    if wash_gated:
-        logger.info("Wash trading gate removed %d tokens (score > 0.8)", wash_gated)
 
     # Algorithm v3 A5: Flag artificial pumps
     for token in ranking:
@@ -1366,31 +1875,83 @@ def aggregate_ranking(
         wash_pen = max(0.3, 1.0 - wash_score)
 
         # PVP penalty: same-name tokens launched within 4h = copycat confusion
-        pvp_recent = token.get("pvp_recent_count", 0)
+        pvp_recent = token.get("pvp_recent_count") or 0
         pvp_pen = 1.0 / (1 + 0.2 * pvp_recent)
 
-        # Algorithm v3 A5: Artificial pump severe penalty
-        pump_pen = 0.2 if token.get("is_artificial_pump") else 1.0
+        # Algorithm v4: Degressive artificial pump penalty (was binary 0.2)
+        pump_pen = 1.0
+        if token.get("is_artificial_pump"):
+            ap_pc24 = token.get("price_change_24h") or 0
+            if ap_pc24 > 400:
+                pump_pen = 0.3
+            elif ap_pc24 > 200:
+                pump_pen = 0.5
+            elif ap_pc24 > 100:
+                pump_pen = 0.7
+            else:
+                pump_pen = 0.7
 
-        # Algorithm v3.1: "Already pumped" penalty — diminishing upside
-        # Token that already did +200%: risk/reward for another 2x is worse
-        # Degressive: 200% → 1.0, 350% → 0.7, 500%+ → 0.4 (floor)
-        already_pumped_pen = 1.0
-        pc24 = token.get("price_change_24h")
-        if pc24 is not None and pc24 > 200:
-            already_pumped_pen = max(0.4, 1.0 - (pc24 - 200) / 500)
-        token["already_pumped_penalty"] = round(already_pumped_pen, 3)
+        # Algorithm v7: Minsky lifecycle phase classification
+        # Replaces flat already_pumped_penalty with 5-phase model
+        phase, phase_pen = _classify_lifecycle_phase(token)
+        token["lifecycle_phase"] = phase
+        token["already_pumped_penalty"] = round(phase_pen, 3)  # backward compat field name
+        already_pumped_pen = phase_pen
 
-        combined = onchain_mult * safety_pen * pump_bonus * narr_bonus * wash_pen * pvp_pen * pump_pen * already_pumped_pen
+        # Algorithm v4: Price action multiplier from OHLCV analysis
+        pa_mult = token.get("price_action_mult", 1.0)
+
+        # Harvard adaptation: Volume squeeze bonus (firing squeeze = pre-breakout)
+        sq_state = token.get("squeeze_state", "none")
+        sq_score = token.get("squeeze_score", 0)
+        squeeze_mult = 1.0
+        if sq_state == "firing":
+            squeeze_mult = 1.0 + sq_score * 0.2  # up to 1.2x for strong squeeze fire
+        elif sq_state == "squeezing":
+            squeeze_mult = 1.05  # mild bonus: compression building, breakout imminent
+
+        # Harvard adaptation: Trend strength bonus (strong directional move)
+        ts = token.get("trend_strength", 0)
+        trend_mult = 1.0
+        if ts >= 0.7:
+            trend_mult = 1.15  # strong trend across all timeframes
+        elif ts >= 0.4:
+            trend_mult = 1.07  # moderate trend
+
+        combined = onchain_mult * safety_pen * pump_bonus * narr_bonus * wash_pen * pvp_pen * pump_pen * already_pumped_pen * pa_mult * squeeze_mult * trend_mult
 
         # Apply to all three scoring modes
         token["score"] = min(100, max(0, int(token["score"] * combined)))
         token["score_conviction"] = min(100, max(0, int(token["score_conviction"] * combined)))
         token["score_momentum"] = min(100, max(0, int(token["score_momentum"] * combined)))
 
+        # Harvard adaptation: Multi-indicator confirmation gate
+        # Require at least 2 of 3 "pillars" above minimum thresholds
+        pillars = 0
+        consensus_val = _get_component_value(token, "consensus")
+        pa_val = _get_component_value(token, "price_action")
+        breadth_val = _get_component_value(token, "breadth")
+        if consensus_val is not None and consensus_val >= 0.3:
+            pillars += 1  # Social confirmed
+        if pa_val is not None and pa_val >= 0.4:
+            pillars += 1  # Price confirmed
+        if breadth_val is not None and breadth_val >= 0.3:
+            pillars += 1  # Distribution confirmed
+        token["confirmation_pillars"] = pillars
+        if pillars < 2:
+            token["score"] = int(token["score"] * 0.7)
+            token["score_conviction"] = int(token["score_conviction"] * 0.7)
+            token["score_momentum"] = int(token["score_momentum"] * 0.7)
+
+        # Update interpretation band after final score
+        token["score_interpretation"] = _interpret_score(token["score"])
+
+    squeeze_firing = sum(1 for t in ranking if t.get("squeeze_state") == "firing")
+    unconfirmed = sum(1 for t in ranking if t.get("confirmation_pillars", 0) < 2)
     logger.info(
-        "Applied on-chain multipliers & safety penalties to %d tokens",
-        len(ranking),
+        "Applied on-chain multipliers & safety penalties to %d tokens "
+        "(squeeze firing: %d, unconfirmed: %d)",
+        len(ranking), squeeze_firing, unconfirmed,
     )
 
     # Apply ML scoring if model is available (overrides manual score)

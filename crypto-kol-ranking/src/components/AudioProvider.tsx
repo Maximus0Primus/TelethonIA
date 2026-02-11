@@ -34,8 +34,10 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
   // Create audio elements once, persist across navigations
   useEffect(() => {
     startRef.current = new Audio("/audio/start.wav");
+    startRef.current.preload = "auto";
     loopRef.current = new Audio("/audio/loop.wav");
     loopRef.current.loop = true;
+    loopRef.current.preload = "auto";
 
     return () => {
       startRef.current?.pause();
@@ -70,8 +72,10 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
   const playLoop = useCallback(() => {
     if (!loopRef.current) return;
     if (loopRef.current.paused) {
-      loopRef.current.play().catch(() => {});
-      setLoopPlaying(true);
+      loopRef.current
+        .play()
+        .then(() => setLoopPlaying(true))
+        .catch(() => setLoopPlaying(false));
     }
   }, []);
 
@@ -91,8 +95,10 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
     }
 
     if (loopRef.current.paused) {
-      loopRef.current.play().catch(() => {});
-      setLoopPlaying(true);
+      loopRef.current
+        .play()
+        .then(() => setLoopPlaying(true))
+        .catch(() => setLoopPlaying(false));
     } else {
       loopRef.current.pause();
       setLoopPlaying(false);

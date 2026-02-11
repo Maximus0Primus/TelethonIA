@@ -69,7 +69,7 @@ export async function POST(req: NextRequest) {
   let password: string;
   try {
     const body = await req.json();
-    password = typeof body.password === "string" ? body.password : "";
+    password = typeof body.password === "string" ? body.password.trim() : "";
   } catch {
     return NextResponse.json({ error: "Invalid request" }, { status: 400 });
   }

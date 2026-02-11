@@ -12,10 +12,12 @@ interface RankingRow {
   sentiment: number;
   trend: string;
   change_24h: number;
+  weakest_component: string | null;
+  score_interpretation: string | null;
+  data_confidence: number | null;
 }
 
 async function callRpc(
-  blend: number,
   limit: number,
   offset: number,
 ): Promise<{ data: RankingRow[] | null; error: string | null }> {
@@ -37,7 +39,7 @@ async function callRpc(
       p_time_window: "7d",
       p_limit: limit,
       p_offset: offset,
-      p_blend: blend,
+      p_blend: 0,
     }),
     cache: "no-store",
   });
@@ -54,8 +56,6 @@ async function callRpc(
 export async function GET(request: NextRequest) {
   const searchParams = request.nextUrl.searchParams;
 
-  // Parse and validate query parameters
-  const blend = Math.max(0, Math.min(100, parseInt(searchParams.get("blend") || "0", 10)));
   const limit = parseInt(searchParams.get("limit") || "10", 10);
   const offset = parseInt(searchParams.get("offset") || "0", 10);
 
@@ -78,7 +78,7 @@ export async function GET(request: NextRequest) {
     const supabase = createServiceRoleClient();
 
     // Fetch ranked tokens via the locked-down RPC (direct REST call)
-    const { data: tokens, error: rpcError } = await callRpc(blend, limit, offset);
+    const { data: tokens, error: rpcError } = await callRpc(limit, offset);
 
     if (rpcError || !tokens) {
       console.error("RPC error:", rpcError);
@@ -97,7 +97,6 @@ export async function GET(request: NextRequest) {
     const total = count ?? 0;
 
     // Map DB column names to camelCase for frontend
-    // The RPC already returns the blended score as `score`
     const mappedTokens = tokens.map((t) => ({
       rank: Number(t.rank),
       symbol: t.symbol,
@@ -107,6 +106,9 @@ export async function GET(request: NextRequest) {
       sentiment: Number(t.sentiment),
       trend: t.trend,
       change24h: Number(t.change_24h ?? 0),
+      weakestComponent: t.weakest_component ?? null,
+      scoreInterpretation: t.score_interpretation ?? null,
+      dataConfidence: t.data_confidence != null ? Number(t.data_confidence) : null,
     }));
 
     // Fetch stats from scrape_metadata (use REST to avoid type issues)
@@ -148,7 +150,6 @@ export async function GET(request: NextRequest) {
         total,
         hasMore: total > offset + limit,
       },
-      blend,
       stats: metaStats,
       updated_at: metaUpdatedAt,
     });

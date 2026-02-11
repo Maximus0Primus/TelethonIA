@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 BUBBLEMAPS_API_URL = "https://api.bubblemaps.io/maps/solana/{address}"
 CACHE_FILE = Path(__file__).parent / "bubblemaps_cache.json"
-CACHE_TTL_SECONDS = 30 * 60  # 30 minutes
+CACHE_TTL_SECONDS = 4 * 3600  # 4 hours — wallet clusters are very stable
 
 # Only enrich top N tokens per cycle (conserve quota)
 BUBBLEMAPS_TOP_N = 10

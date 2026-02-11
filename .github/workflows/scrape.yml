@@ -2,14 +2,14 @@ name: Scrape Telegram KOLs
 
 on:
   schedule:
-    # Every 3 hours (8 runs/day × 30 = ~1680 min/month, under 2000 free)
-    - cron: '0 */3 * * *'
+    # Every hour — optimal: 20-min job + 40-min gap. KOL messages accumulate meaningfully.
+    - cron: '0 * * * *'
   workflow_dispatch: {} # Manual trigger from GitHub UI
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
 
     steps:
       - name: Checkout repository
@@ -27,6 +27,14 @@ jobs:
           key: ${{ runner.os }}-pip-${{ hashFiles('scraper/requirements.txt') }}
           restore-keys: |
             ${{ runner.os }}-pip-
+
+      # Persist group_cache.json (access_hash) between runs — avoids get_entity API calls
+      - name: Restore group cache
+        uses: actions/cache@v4
+        with:
+          path: group_cache.json
+          key: group-cache-${{ github.run_id }}
+          restore-keys: group-cache-
 
       - name: Install dependencies
         run: pip install -r scraper/requirements.txt

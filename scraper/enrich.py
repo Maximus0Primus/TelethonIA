@@ -21,15 +21,18 @@ import requests
 logger = logging.getLogger(__name__)
 
 CACHE_FILE = Path(__file__).parent / "enrich_cache.json"
-CACHE_TTL_SECONDS = 30 * 60  # 30 minutes (same as scraper cycle)
+# Per-source TTLs: only re-fetch when data is actually stale
+TTL_DEXSCREENER = 5 * 60     # 5 min — prices change fast
+TTL_RUGCHECK = 2 * 60 * 60   # 2 hours — risk flags rarely change
+TTL_BIRDEYE = 60 * 60        # 1 hour — holder counts change slowly
 
 DEXSCREENER_SEARCH_URL = "https://api.dexscreener.com/latest/dex/search"
 RUGCHECK_REPORT_URL = "https://api.rugcheck.xyz/v1/tokens/{mint}/report"
 BIRDEYE_TOKEN_OVERVIEW_URL = "https://public-api.birdeye.so/defi/token_overview"
 BIRDEYE_TOKEN_SECURITY_URL = "https://public-api.birdeye.so/defi/token_security"
 
-# Max tokens to enrich via Birdeye per cycle (conserve CUs)
-BIRDEYE_TOP_N = 10
+# Max tokens to enrich via Birdeye per cycle (free tier = 30K CUs/month)
+BIRDEYE_TOP_N = 5
 
 
 def _load_cache() -> dict:
@@ -46,10 +49,6 @@ def _save_cache(cache: dict) -> None:
     with open(CACHE_FILE, "w") as f:
         json.dump(cache, f, indent=2)
 
-
-def _is_cache_fresh(entry: dict) -> bool:
-    ts = entry.get("_cached_at", 0)
-    return (time.time() - ts) < CACHE_TTL_SECONDS
 
 
 def _safe_float(val, default=None) -> float | None:
@@ -83,17 +82,12 @@ def _fetch_dexscreener(symbol: str) -> dict | None:
         if not pairs:
             return None
 
-        # Prefer Solana pairs with exact symbol match
+        # Solana-only: all downstream APIs (RugCheck, Helius, Jupiter, Birdeye) are Solana-specific
         sol_pairs = [
             p for p in pairs
             if p.get("baseToken", {}).get("symbol", "").upper() == raw
             and p.get("chainId") == "solana"
         ]
-        if not sol_pairs:
-            sol_pairs = [
-                p for p in pairs
-                if p.get("baseToken", {}).get("symbol", "").upper() == raw
-            ]
         if not sol_pairs:
             return None
 
@@ -249,10 +243,15 @@ def _fetch_dexscreener(symbol: str) -> dict | None:
 
 def _fetch_rugcheck(mint: str) -> dict | None:
     """
-    Fetch RugCheck full report for a token mint address.
+    Fetch RugCheck full report for a Solana token mint address.
     Extracts risk score, holder distribution, and security flags.
     """
     if not mint:
+        return None
+
+    # RugCheck is Solana-only — skip Ethereum/EVM addresses (0x prefix)
+    if mint.startswith("0x"):
+        logger.debug("Skipping RugCheck for non-Solana address %s", mint)
         return None
 
     try:
@@ -410,46 +409,56 @@ def _empty_result() -> dict:
 
 def enrich_token(symbol: str, cache: dict, birdeye_key: str | None = None) -> dict:
     """
-    Enrich a single token with on-chain data from DexScreener + RugCheck.
-    Birdeye is called only if birdeye_key is provided.
+    Enrich a single token with on-chain data from DexScreener + RugCheck + Birdeye.
+    Uses per-source TTLs: only re-fetches data that is actually stale.
     """
     raw = symbol.lstrip("$")
+    now = time.time()
 
-    # Check cache
-    if raw in cache and _is_cache_fresh(cache[raw]):
-        logger.debug("Cache hit for %s", symbol)
-        cached = dict(cache[raw])
-        cached.pop("_cached_at", None)
-        return cached
-
+    entry = cache.get(raw, {})
     result = _empty_result()
 
-    # DexScreener (free, 300/min)
-    dex_data = _fetch_dexscreener(symbol)
-    if dex_data:
-        result.update(dex_data)
-        time.sleep(0.2)
+    # Start with any cached data
+    for k, v in entry.items():
+        if not k.startswith("_") and k in result:
+            result[k] = v
 
-        mint = dex_data.get("token_address")
-        if mint:
-            # RugCheck (free, ~60/min)
+    # --- DexScreener (5 min TTL, free, 300/min) ---
+    if now - entry.get("_dex_at", 0) > TTL_DEXSCREENER:
+        dex_data = _fetch_dexscreener(symbol)
+        if dex_data:
+            result.update(dex_data)
+            entry["_dex_at"] = now
+        time.sleep(0.2)
+    else:
+        logger.debug("DexScreener cache hit for %s", symbol)
+
+    mint = result.get("token_address")
+
+    if mint:
+        # --- RugCheck (2h TTL, free, ~60/min) ---
+        if now - entry.get("_rug_at", 0) > TTL_RUGCHECK:
             rug_data = _fetch_rugcheck(mint)
             if rug_data:
                 result.update(rug_data)
+                entry["_rug_at"] = now
+            time.sleep(1.0)
+        else:
+            logger.debug("RugCheck cache hit for %s", symbol)
+
+        # --- Birdeye (1h TTL, optional, 30 CUs per call) ---
+        if birdeye_key and now - entry.get("_bird_at", 0) > TTL_BIRDEYE:
+            bird_data = _fetch_birdeye(mint, birdeye_key)
+            if bird_data:
+                result.update(bird_data)
+                entry["_bird_at"] = now
             time.sleep(1.0)
 
-            # Birdeye (optional, 30 CUs per call)
-            if birdeye_key:
-                bird_data = _fetch_birdeye(mint, birdeye_key)
-                if bird_data:
-                    result.update(bird_data)
-                time.sleep(1.0)
-    else:
-        time.sleep(0.2)
-
-    # Update cache
+    # Update cache with all data + per-source timestamps
     cache_entry = dict(result)
-    cache_entry["_cached_at"] = time.time()
+    cache_entry["_dex_at"] = entry.get("_dex_at", 0)
+    cache_entry["_rug_at"] = entry.get("_rug_at", 0)
+    cache_entry["_bird_at"] = entry.get("_bird_at", 0)
     cache[raw] = cache_entry
 
     return result
