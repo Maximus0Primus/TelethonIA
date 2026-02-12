@@ -49,7 +49,7 @@ export async function generateMetadata({
   if (!tokenData) {
     return {
       title: `$${normalized} Analysis`,
-      description: `View real-time KOL sentiment analysis and conviction score for $${normalized} on Cryptosensus.`,
+      description: `View real-time KOL onchain analysis and conviction score for $${normalized} on Cryptosensus.`,
       alternates: { canonical: `/token/${canonicalSymbol}` },
       robots: { index: false, follow: false },
     };

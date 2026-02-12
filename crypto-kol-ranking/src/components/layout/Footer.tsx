@@ -8,7 +8,7 @@ export function Footer() {
         <div className="mb-10 rounded-2xl border border-white/5 bg-white/[0.02] p-6">
           <p className="text-[13px] leading-relaxed text-white/40">
             <span className="font-medium text-white/60">Disclaimer:</span>{" "}
-            Cryptosensus provides data-driven sentiment analysis for informational
+            Cryptosensus provides data-driven onchain analysis for informational
             purposes only. This is not financial advice. Cryptocurrency trading
             involves substantial risk of loss. Past performance does not guarantee
             future results. Always do your own research (DYOR) and consult a

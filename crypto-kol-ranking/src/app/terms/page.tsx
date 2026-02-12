@@ -34,7 +34,7 @@ export default function TermsPage() {
               Service Description
             </h2>
             <p>
-              Cryptosensus is a crypto sentiment analysis platform that
+              Cryptosensus is a crypto onchain analysis platform that
               aggregates and analyzes data from publicly available sources to
               generate token rankings and conviction scores. The Platform
               provides data-driven insights for informational purposes. It does
