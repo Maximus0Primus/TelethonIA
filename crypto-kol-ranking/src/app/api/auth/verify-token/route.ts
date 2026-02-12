@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createHmac, timingSafeEqual } from "crypto";
 
 export async function POST(req: NextRequest) {
-  const ACCESS_TOKEN_SECRET = process.env.ACCESS_TOKEN_SECRET;
+  const ACCESS_TOKEN_SECRET = process.env.ACCESS_TOKEN_SECRET?.trim();
 
   if (!ACCESS_TOKEN_SECRET) {
     return NextResponse.json(

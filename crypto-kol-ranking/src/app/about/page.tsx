@@ -6,39 +6,21 @@ import { motion } from "framer-motion";
 import Link from "next/link";
 import { useAudio } from "@/components/AudioProvider";
 
-const ACCESS_TOKEN_KEY = "cryptosensus_access_token";
+const STORAGE_KEY = "cryptosensus_intro_seen_v4";
 
 export default function AboutPage() {
   const { toggleLoop, loopPlaying } = useAudio();
   const router = useRouter();
   const [authChecked, setAuthChecked] = useState(false);
 
-  // Verify token on mount — redirect to / if not authenticated
+  // Redirect to / if user hasn't been through the intro (same gate as homepage)
   useEffect(() => {
-    const token = localStorage.getItem(ACCESS_TOKEN_KEY);
-    if (!token) {
+    const seen = localStorage.getItem(STORAGE_KEY);
+    if (!seen) {
       router.replace("/");
-      return;
+    } else {
+      setAuthChecked(true);
     }
-
-    fetch("/api/auth/verify-token", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ token }),
-    })
-      .then((res) => res.json())
-      .then((data) => {
-        if (!data.valid) {
-          localStorage.removeItem(ACCESS_TOKEN_KEY);
-          router.replace("/");
-        } else {
-          setAuthChecked(true);
-        }
-      })
-      .catch(() => {
-        // Network error — graceful degradation
-        setAuthChecked(true);
-      });
   }, [router]);
 
   if (!authChecked) {

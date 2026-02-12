@@ -33,9 +33,9 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
 
   // Create audio elements once, persist across navigations
   useEffect(() => {
-    startRef.current = new Audio("/audio/start.wav");
+    startRef.current = new Audio("/audio/start.mp3");
     startRef.current.preload = "auto";
-    loopRef.current = new Audio("/audio/loop.wav");
+    loopRef.current = new Audio("/audio/loop.mp3");
     loopRef.current.loop = true;
     loopRef.current.preload = "auto";
 

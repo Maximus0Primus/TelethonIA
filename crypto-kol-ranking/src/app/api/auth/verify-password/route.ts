@@ -55,8 +55,8 @@ function passwordMatches(input: string, expected: string): boolean {
 // POST handler
 // ---------------------------------------------------------------------------
 export async function POST(req: NextRequest) {
-  const ACCESS_PASSWORD = process.env.ACCESS_PASSWORD;
-  const ACCESS_TOKEN_SECRET = process.env.ACCESS_TOKEN_SECRET;
+  const ACCESS_PASSWORD = process.env.ACCESS_PASSWORD?.trim();
+  const ACCESS_TOKEN_SECRET = process.env.ACCESS_TOKEN_SECRET?.trim();
 
   if (!ACCESS_PASSWORD || !ACCESS_TOKEN_SECRET) {
     return NextResponse.json(
