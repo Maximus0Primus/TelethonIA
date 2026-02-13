@@ -12,9 +12,11 @@ Usage:
 
 import os
 import json
+import math
 import time
 import logging
 import argparse
+from datetime import datetime, timezone
 from pathlib import Path
 
 from supabase import create_client
@@ -22,7 +24,7 @@ from supabase import create_client
 logger = logging.getLogger(__name__)
 
 CACHE_FILE = Path(__file__).parent / "kol_scores.json"
-CACHE_TTL = 24 * 3600  # Refresh once per day
+CACHE_TTL = 6 * 3600  # Refresh every 6h — faster iteration on algo changes
 
 
 def _get_client():
@@ -66,7 +68,7 @@ def compute_kol_scores(min_calls: int = 10) -> dict[str, float]:
     client = _get_client()
 
     # Fetch snapshots that have both outcomes and KOL data
-    # Paginate in case of large dataset (Supabase default limit = 1000)
+    # v10: include snapshot_at for temporal decay
     all_rows = []
     page_size = 1000
     offset = 0
@@ -74,7 +76,7 @@ def compute_kol_scores(min_calls: int = 10) -> dict[str, float]:
     while True:
         result = (
             client.table("token_snapshots")
-            .select("top_kols, did_2x_12h")
+            .select("top_kols, did_2x_12h, snapshot_at")
             .not_.is_("did_2x_12h", "null")
             .not_.is_("top_kols", "null")
             .range(offset, offset + page_size - 1)
@@ -92,9 +94,16 @@ def compute_kol_scores(min_calls: int = 10) -> dict[str, float]:
 
     logger.info("Processing %d snapshots with KOL data", len(all_rows))
 
-    # Count hits and total calls per KOL
-    kol_calls: dict[str, int] = {}
-    kol_hits: dict[str, int] = {}
+    now = datetime.now(timezone.utc)
+
+    # v13: Exponential decay — half-life of 10 days
+    # A call from 10 days ago has weight 0.5, 20 days ago 0.25, 30 days ago ~0.12
+    # Was 3 days (too aggressive — 2-week-old track record had zero weight)
+    HALF_LIFE_DAYS = 10.0
+
+    # Weighted hits and calls per KOL
+    kol_calls: dict[str, float] = {}
+    kol_hits: dict[str, float] = {}
 
     for row in all_rows:
         kols = row.get("top_kols")
@@ -110,14 +119,30 @@ def compute_kol_scores(min_calls: int = 10) -> dict[str, float]:
         if not isinstance(kols, list):
             continue
 
+        # Compute temporal decay weight
+        snap_at = row.get("snapshot_at", "")
+        weight = 1.0
+        if snap_at:
+            try:
+                if snap_at.endswith("Z"):
+                    snap_dt = datetime.fromisoformat(snap_at.replace("Z", "+00:00"))
+                elif "+" in snap_at:
+                    snap_dt = datetime.fromisoformat(snap_at)
+                else:
+                    snap_dt = datetime.fromisoformat(snap_at).replace(tzinfo=timezone.utc)
+                days_ago = (now - snap_dt).total_seconds() / 86400
+                weight = math.exp(-0.693 * days_ago / HALF_LIFE_DAYS)  # ln(2) ≈ 0.693
+            except (ValueError, AttributeError):
+                weight = 0.1  # Old/unparseable → minimal weight
+
         for kol in kols:
             if not isinstance(kol, str):
                 continue
-            kol_calls[kol] = kol_calls.get(kol, 0) + 1
+            kol_calls[kol] = kol_calls.get(kol, 0) + weight
             if did_2x:
-                kol_hits[kol] = kol_hits.get(kol, 0) + 1
+                kol_hits[kol] = kol_hits.get(kol, 0) + weight
 
-    # Compute hit rates (only for KOLs with enough calls)
+    # Compute hit rates (only for KOLs with enough weighted calls)
     scores = {}
     for kol, total in kol_calls.items():
         if total >= min_calls:
@@ -164,7 +189,12 @@ def main():
     parser = argparse.ArgumentParser(description="Compute KOL reputation scores")
     parser.add_argument("--verbose", action="store_true", help="Show per-KOL breakdown")
     parser.add_argument("--min-calls", type=int, default=3, help="Minimum calls to score a KOL")
+    parser.add_argument("--force", action="store_true", help="Force recompute (ignore cache)")
     args = parser.parse_args()
+
+    if args.force and CACHE_FILE.exists():
+        CACHE_FILE.unlink()
+        logger.info("Cache cleared — forcing recompute")
 
     scores = compute_kol_scores(min_calls=args.min_calls)
 

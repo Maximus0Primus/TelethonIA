@@ -13,15 +13,27 @@ multipliers are recalculated with fresh price data.
 """
 
 import os
+import math
 import time
 import logging
 from datetime import datetime, timezone
 
 import requests
 from supabase import create_client
-from price_action import compute_price_action_score
 
 logger = logging.getLogger(__name__)
+
+def _two_phase_decay(hours_ago: float) -> float:
+    """
+    Two-phase exponential decay (mirrors pipeline._two_phase_decay).
+    Phase 1 (0-6h): lambda=0.15, half-life ~4.6h
+    Phase 2 (6h+):  lambda=0.5, half-life ~1.4h
+    """
+    if hours_ago <= 6:
+        return math.exp(-0.15 * hours_ago)
+    else:
+        return math.exp(-0.9) * math.exp(-0.5 * (hours_ago - 6))
+
 
 DEXSCREENER_TOKEN_URL = "https://api.dexscreener.com/tokens/v1/solana/{address}"
 DEXSCREENER_BATCH_URL = "https://api.dexscreener.com/tokens/v1/solana/{addresses}"
@@ -153,21 +165,24 @@ def _fetch_dexscreener_by_address(address: str) -> dict | None:
 
 def _compute_refresh_multiplier(market_data: dict) -> float:
     """
-    Full price-action + market multiplier using fresh DexScreener data.
-    Runs compute_price_action_score for chart analysis, then layers market checks.
+    Market-condition multiplier using fresh DexScreener data.
+    Does NOT apply pa_mult (price_action already at 30% in base_score).
+    Instead applies: death detection + already-pumped + buy/sell pressure.
     Returns combined multiplier [0.2, 1.5].
     """
-    # Approximate ath_ratio from 24h price change for price_action scoring
-    # If pc24=-60% → price is at 40% of recent high → ath_ratio ≈ 0.40
     pc24 = market_data.get("price_change_24h")
-    if pc24 is not None and pc24 < 0:
-        market_data["ath_ratio"] = max(0.01, 1.0 + pc24 / 100)
-    elif pc24 is not None and pc24 >= 0:
-        market_data["ath_ratio"] = 1.0  # At or near 24h high
 
-    # Run full price action scoring (position, direction, volume confirm, support)
-    pa = compute_price_action_score(market_data)
-    pa_mult = pa.get("price_action_mult", 1.0)
+    # v9: Death/rug detection (mirrors pipeline._detect_death_penalty logic)
+    death_pen = 1.0
+    if pc24 is not None:
+        if pc24 < -80:
+            death_pen = 0.1
+        elif pc24 < -70:
+            death_pen = 0.2
+        elif pc24 < -50:
+            death_pen = 0.4
+        elif pc24 < -30:
+            death_pen = 0.7
 
     # Already pumped penalty (aggressive tiers, matches pipeline v5)
     already_pumped = 1.0
@@ -190,7 +205,7 @@ def _compute_refresh_multiplier(market_data: dict) -> float:
         elif bsr < 0.3:
             bsr_mult = 0.8
 
-    combined = pa_mult * already_pumped * bsr_mult
+    combined = death_pen * already_pumped * bsr_mult
     return max(0.2, min(1.5, combined))
 
 
@@ -206,7 +221,7 @@ def refresh_top_tokens(n: int = REFRESH_TOP_N) -> int:
     # 1. Fetch top N tokens from Supabase (7d window, by score DESC)
     result = (
         client.table("tokens")
-        .select("symbol, score, base_score, base_score_conviction, base_score_momentum, change_24h")
+        .select("symbol, score, base_score, base_score_conviction, base_score_momentum, change_24h, freshest_mention_hours")
         .eq("time_window", "7d")
         .order("score", desc=True)
         .limit(n)
@@ -246,6 +261,23 @@ def refresh_top_tokens(n: int = REFRESH_TOP_N) -> int:
     updated = 0
     update_rows = []
 
+    # v11: Compute elapsed time since last full scrape for social decay
+    # Use scrape_metadata to find when the last full cycle ran
+    try:
+        meta_result = client.table("scrape_metadata").select("updated_at").eq("id", 1).execute()
+        last_scrape_at = meta_result.data[0]["updated_at"] if meta_result.data else None
+    except Exception:
+        last_scrape_at = None
+
+    minutes_since_scrape = 3  # default: assume 1 refresh interval
+    if last_scrape_at:
+        try:
+            last_dt = datetime.fromisoformat(last_scrape_at.replace("Z", "+00:00"))
+            delta = datetime.now(timezone.utc) - last_dt
+            minutes_since_scrape = max(0, delta.total_seconds() / 60)
+        except Exception:
+            pass
+
     for token in tokens:
         symbol = token["symbol"]
         base_score = token.get("base_score") or token["score"]
@@ -262,9 +294,23 @@ def refresh_top_tokens(n: int = REFRESH_TOP_N) -> int:
 
         refresh_mult = _compute_refresh_multiplier(market_data)
 
-        new_score = min(100, max(0, int(base_score * refresh_mult)))
-        new_conv = min(100, max(0, int(base_conv * refresh_mult)))
-        new_mom = min(100, max(0, int(base_mom * refresh_mult)))
+        # v11: Social decay — scores decay between full scrape cycles
+        # for tokens with no new mentions
+        freshest_hours = _safe_float(token.get("freshest_mention_hours"), 0)
+        elapsed_hours = minutes_since_scrape / 60
+        effective_freshest = freshest_hours + elapsed_hours
+        decay_at_scrape = _two_phase_decay(freshest_hours)
+        decay_now = _two_phase_decay(effective_freshest)
+        social_decay = decay_now / max(0.01, decay_at_scrape) if decay_at_scrape > 0.01 else 1.0
+        # Clamp: never boost (>1.0), floor at 0.3 to avoid total zeroing
+        social_decay = max(0.3, min(1.0, social_decay))
+
+        # v15: Removed staleness_pen — price action + volume already handle dead tokens
+        # via death_penalty (volume death, price crash) and social_decay handles gradual aging.
+
+        new_score = min(100, max(0, int(base_score * refresh_mult * social_decay)))
+        new_conv = min(100, max(0, int(base_conv * refresh_mult * social_decay)))
+        new_mom = min(100, max(0, int(base_mom * refresh_mult * social_decay)))
         new_change = market_data.get("price_change_24h") or token.get("change_24h", 0)
 
         update_rows.append({

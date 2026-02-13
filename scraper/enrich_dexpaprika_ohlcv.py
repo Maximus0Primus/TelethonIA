@@ -26,7 +26,7 @@ from enrich_birdeye_ohlcv import (
 logger = logging.getLogger(__name__)
 
 DEXPAPRIKA_BASE = "https://api.dexpaprika.com"
-OHLCV_TOP_N = 15       # DexPaprika is free — enrich more tokens than Birdeye's 5
+OHLCV_TOP_N = 50       # DexPaprika is free (10K req/day) — enrich all viable tokens
 OHLCV_CACHE_FILE = Path(__file__).parent / "ohlcv_cache.json"
 OHLCV_CACHE_TTL = 60 * 60  # 1 hour
 
@@ -222,14 +222,14 @@ def enrich_tokens_ohlcv(ranking: list[dict]) -> list[dict]:
             token["resistance_level"] = ohlcv["resistance_level"]
             enriched += 1
 
-            # Cache (keep last 10 candles to save disk)
+            # Cache (keep last 50 candles — RSI needs 15+, MACD 35+, BBands 20+)
             cache[cache_key] = {
                 "ath_24h": ohlcv["ath_24h"],
                 "atl_24h": ohlcv["atl_24h"],
                 "ath_ratio": ohlcv["ath_ratio"],
                 "support_level": ohlcv["support_level"],
                 "resistance_level": ohlcv["resistance_level"],
-                "candle_data": ohlcv["candle_data"][-10:],
+                "candle_data": ohlcv["candle_data"][-50:],
                 "_cached_at": time.time(),
             }
 

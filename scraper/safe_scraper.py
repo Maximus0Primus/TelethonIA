@@ -26,8 +26,9 @@ from telethon.tl.types import PeerChannel, InputPeerChannel
 from telethon.errors import FloodWaitError
 
 from pipeline import aggregate_ranking
-from push_to_supabase import upsert_tokens, insert_snapshots
+from push_to_supabase import upsert_tokens, insert_snapshots, insert_kol_mentions, _get_client as _get_supabase
 from outcome_tracker import fill_outcomes
+from auto_backtest import run_auto_backtest
 from price_refresh import refresh_top_tokens
 from debug_dump import dump_debug_data
 
@@ -135,6 +136,7 @@ GROUPS_DATA = {
     "shmooscasino": {"conviction": 7, "tier": "A"},
     "AnimeGems": {"conviction": 7, "tier": "A"},
     "veigarcalls": {"conviction": 7, "tier": "A"},
+    "papicall": {"conviction": 7, "tier": "A"},
 }
 
 GROUPS_CONVICTION = {k: v["conviction"] for k, v in GROUPS_DATA.items()}
@@ -181,8 +183,19 @@ async def _fetch_messages(client: TelegramClient, peer, count: int) -> list[dict
                 break
             if not message.message:
                 continue
+
+            # Extract URLs hidden in Telegram entities (hyperlinked text, buttons)
+            text = message.message.strip()
+            if message.entities:
+                entity_urls = []
+                for entity in message.entities:
+                    if hasattr(entity, 'url') and entity.url:
+                        entity_urls.append(entity.url)
+                if entity_urls:
+                    text += "\n" + "\n".join(entity_urls)
+
             all_msgs.append({
-                "text": message.message.strip(),
+                "text": text,
                 "date": message.date.isoformat(),
             })
 
@@ -317,13 +330,17 @@ async def scrape_groups(client: TelegramClient) -> dict[str, list[dict]]:
 def process_and_push(messages_data: dict[str, list[dict]], dump: bool = False) -> None:
     """Run the pipeline and push results to Supabase."""
     ranking_by_window: dict[str, list[dict]] = {}
+    all_raw_mentions: list[dict] = []
 
     for window_name, hours in TIME_WINDOWS.items():
-        ranking = aggregate_ranking(
+        ranking, raw_mentions = aggregate_ranking(
             messages_data, GROUPS_CONVICTION, hours,
             groups_tier=GROUPS_TIER, tier_weights=TIER_WEIGHTS,
         )
         ranking_by_window[window_name] = ranking
+        # v10: Keep mentions from the largest window only (7d) to avoid duplicates
+        if window_name == "7d":
+            all_raw_mentions = raw_mentions
         logger.info("Window %s: %d tokens ranked", window_name, len(ranking))
 
     # Debug dump (before push, so we capture pre-Supabase state)
@@ -363,11 +380,47 @@ def process_and_push(messages_data: dict[str, list[dict]], dump: bool = False) -
             insert_snapshots(extra_7d)
             logger.info("Inserted %d extra snapshots from 7d window", len(extra_7d))
 
+    # v10: Store raw KOL mention texts for NLP analysis
+    if all_raw_mentions:
+        try:
+            insert_kol_mentions(all_raw_mentions)
+        except Exception as e:
+            logger.error("KOL mentions insert failed: %s", e)
+
     # Fill outcome labels for old snapshots
     try:
         fill_outcomes()
     except Exception as e:
         logger.error("Outcome tracker failed: %s", e)
+
+    # Run automated backtest diagnosis (only if enough labeled data)
+    try:
+        report = run_auto_backtest()
+        if report:
+            ds = report.get("data_summary", {})
+            recs = report.get("recommendations", [])
+            logger.info(
+                "Auto-backtest: %d snapshots, hit_rate_12h=%.1f%%, %d recommendations",
+                ds.get("labeled_12h", 0),
+                ds.get("hit_rate_12h", 0) * 100,
+                len(recs),
+            )
+    except Exception as e:
+        logger.error("Auto-backtest failed: %s", e)
+
+    # v10: Cleanup old data (>90 days) to prevent unbounded growth
+    try:
+        sb = _get_supabase()
+        result = sb.rpc("cleanup_old_snapshots").execute()
+        deleted = result.data if result.data else 0
+        if deleted and deleted > 0:
+            logger.info("Snapshot retention: cleaned %d rows older than 90 days", deleted)
+        result2 = sb.rpc("cleanup_old_kol_mentions").execute()
+        deleted2 = result2.data if result2.data else 0
+        if deleted2 and deleted2 > 0:
+            logger.info("KOL mentions retention: cleaned %d rows older than 90 days", deleted2)
+    except Exception as e:
+        logger.debug("Retention cleanup skipped: %s", e)
 
 
 async def run_one_cycle(client: TelegramClient, dump: bool = False) -> None:

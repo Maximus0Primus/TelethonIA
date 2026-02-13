@@ -211,7 +211,11 @@ def compute_price_action_score(token: dict) -> dict:
             elif momentum_direction in ("pumping", "hard_pumping") and macd_hist < 0:
                 direction_mult = max(0.2, direction_mult - 0.1)  # Divergence warning
     else:
-        # Fallback: raw DexScreener price change thresholds
+        # Fallback: multi-signal DexScreener heuristics (no OHLCV candles)
+        # Uses price changes, buy/sell ratios, and volume concentration
+        bsr_5m = token.get("buy_sell_ratio_5m") or 0.5
+        bsr_1h = token.get("buy_sell_ratio_1h") or 0.5
+
         is_hard_pumping = pc_1h > 50 or pc_5m > 25
         is_pumping = pc_1h > 20 or pc_5m > 10
         is_dying = pc_1h < -10 and pc_6h < -30
@@ -242,6 +246,46 @@ def compute_price_action_score(token: dict) -> dict:
             direction_mult = 1.1
             momentum_direction = "plateau"
 
+        # Buy/sell ratio confirmation: adjust direction_mult based on order flow
+        if momentum_direction in ("bouncing", "strong_bounce") and bsr_1h > 0.6:
+            direction_mult = min(1.5, direction_mult + 0.1)  # buyers confirm bounce
+        elif momentum_direction in ("bouncing", "strong_bounce") and bsr_1h < 0.4:
+            direction_mult = max(0.5, direction_mult - 0.2)  # sellers = dead cat bounce
+        elif momentum_direction in ("pumping", "hard_pumping") and bsr_5m < 0.45:
+            direction_mult = max(0.2, direction_mult - 0.1)  # pump losing steam
+
+    # v9: When fallback leaves momentum "neutral", use pc24h as tiebreaker
+    pc_24h = token.get("price_change_24h") or 0
+    if rsi is None and momentum_direction == "neutral" and pc_24h:
+        if pc_24h < -60:
+            direction_mult = 0.3
+            momentum_direction = "freefall"
+        elif pc_24h < -40:
+            direction_mult = 0.5
+            momentum_direction = "dying"
+        elif pc_24h < -20:
+            direction_mult = 0.7
+            momentum_direction = "bleeding"
+        elif pc_24h > 100:
+            direction_mult = 0.5
+            momentum_direction = "pumping"
+        elif pc_24h > 50:
+            direction_mult = 0.7
+            momentum_direction = "pumping"
+
+    # v9: When ath_ratio is missing, use pc24h as proxy for position
+    if ath_ratio is None and pc_24h:
+        if pc_24h < -70:
+            position_mult = 0.4
+        elif pc_24h < -50:
+            position_mult = 0.6
+        elif pc_24h < -30:
+            position_mult = 0.8
+        elif pc_24h > 200:
+            position_mult = 0.5
+        elif pc_24h > 100:
+            position_mult = 0.6
+
     # Derive boolean flags from momentum_direction for use in vol_confirm/support
     is_bouncing = momentum_direction in ("bouncing", "strong_bounce")
     is_pumping = momentum_direction in ("pumping", "hard_pumping")
@@ -266,24 +310,57 @@ def compute_price_action_score(token: dict) -> dict:
         elif is_deep_dip and obv_slope > 1.0:
             vol_confirm = 1.2    # Accumulation at bottom
     else:
-        # Fallback: ultra_short_heat ratio
-        ultra_short_heat = token.get("ultra_short_heat") or 0
-        if ultra_short_heat == 0:
-            vol_5m = token.get("volume_5m") or 0
-            vol_1h = token.get("volume_1h") or 0
-            if vol_1h > 0:
-                ultra_short_heat = (vol_5m * 12) / vol_1h
+        # Fallback: multi-signal volume confirmation from DexScreener
+        vol_5m = token.get("volume_5m") or 0
+        vol_1h = token.get("volume_1h") or 0
+        vol_6h = token.get("volume_6h") or 0
+        vol_24h = token.get("volume_24h") or 0
+        bsr_1h_vol = token.get("buy_sell_ratio_1h") or 0.5
 
-        if is_bouncing and ultra_short_heat > 2.0:
-            vol_confirm = 1.3
-        elif is_bouncing and ultra_short_heat > 1.5:
-            vol_confirm = 1.2
-        elif is_bouncing and ultra_short_heat < 0.5:
-            vol_confirm = 0.6
-        elif is_pumping and ultra_short_heat < 0.8:
-            vol_confirm = 0.7
-        elif is_deep_dip and ultra_short_heat > 1.5:
-            vol_confirm = 1.2
+        # Ultra-short heat: is volume accelerating right now?
+        ultra_short_heat = token.get("ultra_short_heat") or 0
+        if ultra_short_heat == 0 and vol_1h > 0:
+            ultra_short_heat = (vol_5m * 12) / vol_1h
+
+        # Volume concentration: what % of 24h volume happened in last hour?
+        vol_concentration = (vol_1h / vol_24h) if vol_24h > 0 else 0
+
+        # Composite volume signal: heat + concentration + buy pressure
+        vol_signals = []
+
+        # Signal 1: Ultra-short heat (is volume accelerating?)
+        if ultra_short_heat > 2.0:
+            vol_signals.append(1.3)
+        elif ultra_short_heat > 1.2:
+            vol_signals.append(1.1)
+        elif ultra_short_heat < 0.3:
+            vol_signals.append(0.6)
+        else:
+            vol_signals.append(1.0)
+
+        # Signal 2: Volume concentration (is activity happening NOW?)
+        if vol_concentration > 0.3:    # >30% of daily vol in last hour
+            vol_signals.append(1.2)
+        elif vol_concentration > 0.1:
+            vol_signals.append(1.05)
+        elif vol_concentration < 0.02 and vol_24h > 0:  # <2% = dead
+            vol_signals.append(0.6)
+        else:
+            vol_signals.append(1.0)
+
+        # Signal 3: Buy pressure alignment with momentum
+        if is_bouncing and bsr_1h_vol > 0.6:
+            vol_signals.append(1.2)   # buyers confirm bounce
+        elif is_bouncing and bsr_1h_vol < 0.4:
+            vol_signals.append(0.6)   # dead cat bounce
+        elif is_pumping and bsr_1h_vol < 0.45:
+            vol_signals.append(0.7)   # pump exhaustion
+        elif is_deep_dip and bsr_1h_vol > 0.6:
+            vol_signals.append(1.2)   # accumulation at bottom
+        else:
+            vol_signals.append(1.0)
+
+        vol_confirm = sum(vol_signals) / len(vol_signals)
 
     # ===================================================================
     # 4. Support Detection — BBands %B + candle clustering
@@ -317,8 +394,12 @@ def compute_price_action_score(token: dict) -> dict:
     price_action_mult = (position_mult + direction_mult + vol_confirm + support_mult) / 4.0
     price_action_mult = max(0.4, min(1.3, price_action_mult))
 
-    # Normalized score [0, 1] for use as a base score component
-    price_action_score = (price_action_mult - 0.4) / 0.9
+    # Normalized score [0, 1] — neutral (all sub-mults=1.0) maps to 0.5
+    # v10: piecewise normalization so neutral=0.5 (was 0.667 with linear)
+    if price_action_mult <= 1.0:
+        price_action_score = (price_action_mult - 0.4) / 1.2   # [0.4,1.0] → [0,0.5]
+    else:
+        price_action_score = 0.5 + (price_action_mult - 1.0) / 0.6  # [1.0,1.3] → [0.5,1.0]
 
     result = {
         "price_action_mult": round(price_action_mult, 3),

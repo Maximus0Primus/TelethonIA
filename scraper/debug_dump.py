@@ -16,6 +16,8 @@ from pipeline import (
     CA_REGEX,
     DEXSCREENER_URL_REGEX,
     PUMP_FUN_URL_REGEX,
+    GMGN_URL_REGEX,
+    PHOTON_URL_REGEX,
     KNOWN_PROGRAM_ADDRESSES,
     EXCLUDED_TOKENS,
     _resolve_ca_to_symbol,
@@ -81,6 +83,14 @@ def dump_debug_data(
                 resolved = _resolve_ca_to_symbol(pump_addr, ca_cache)
                 if resolved and resolved not in EXCLUDED_TOKENS:
                     confirmed_symbols.add(resolved)
+            for gmgn_addr in GMGN_URL_REGEX.findall(text):
+                resolved = _resolve_ca_to_symbol(gmgn_addr, ca_cache)
+                if resolved and resolved not in EXCLUDED_TOKENS:
+                    confirmed_symbols.add(resolved)
+            for photon_addr in PHOTON_URL_REGEX.findall(text):
+                resolved = _resolve_pair_to_symbol("solana", photon_addr, ca_cache)
+                if resolved and resolved not in EXCLUDED_TOKENS:
+                    confirmed_symbols.add(resolved)
 
     # 3. Extracted tokens per message (with confirmation gate)
     extracted = []
@@ -89,7 +99,7 @@ def dump_debug_data(
             text = msg.get("text", "")
             if not text or len(text) < 3:
                 continue
-            tokens = extract_tokens(text, confirmed_symbols=confirmed_symbols)
+            tokens = extract_tokens(text, ca_cache=ca_cache, confirmed_symbols=confirmed_symbols)
             sentiment = calculate_sentiment(text)
             conv = _compute_message_conviction(text)
             extracted.append({

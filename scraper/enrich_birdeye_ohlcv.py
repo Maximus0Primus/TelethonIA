@@ -286,7 +286,7 @@ def enrich_tokens_ohlcv(ranking: list[dict]) -> list[dict]:
                 "ath_ratio": ohlcv["ath_ratio"],
                 "support_level": ohlcv["support_level"],
                 "resistance_level": ohlcv["resistance_level"],
-                "candle_data": ohlcv["candle_data"][-10:],  # Keep last 10 candles only
+                "candle_data": ohlcv["candle_data"][-50:],  # v10: keep 50 for RSI/MACD/BBands
                 "_cached_at": time.time(),
             }
 

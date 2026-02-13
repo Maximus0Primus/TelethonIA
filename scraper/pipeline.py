@@ -33,8 +33,12 @@ BARE_TOKEN_REGEX = re.compile(r"\b([A-Z][A-Z0-9]{2,14})\b")
 # Solana base58 addresses (32-44 chars, no 0/O/I/l)
 CA_REGEX = re.compile(r"\b([1-9A-HJ-NP-Za-km-z]{32,44})\b")
 # URL-based token discovery (DexScreener links + pump.fun links)
-DEXSCREENER_URL_REGEX = re.compile(r"dexscreener\.com/(\w+)/([a-zA-Z0-9]{20,50})")
+DEXSCREENER_URL_REGEX = re.compile(r"dexscreener\.com/(\w+)/([a-zA-Z0-9]{20,70})")
 PUMP_FUN_URL_REGEX = re.compile(r"pump\.fun/(?:coin/)?([a-zA-Z0-9]{20,50})")
+# GMGN URLs: gmgn.ai/sol/token/papi_<CA> or gmgn.ai/sol/token/<prefix>_<CA>
+GMGN_URL_REGEX = re.compile(r"gmgn\.ai/sol/token/\w+_([a-zA-Z0-9]{32,50})")
+# Photon-sol URLs: photon-sol.tinyastro.io/en/lp/<pair_address>
+PHOTON_URL_REGEX = re.compile(r"photon-sol\.\w+\.io/en/lp/([a-zA-Z0-9]{32,50})")
 
 # Well-known Solana program addresses — never actual tokens
 KNOWN_PROGRAM_ADDRESSES = {
@@ -120,117 +124,47 @@ CRYPTO_LEXICON = {
     "rekt": -0.5, "exit": -0.4,
 }
 
-# === NARRATIVE/META CLASSIFICATION ===
-
-NARRATIVE_KEYWORDS = {
-    "ai_agent": ["agent", "ai", "gpt", "llm", "neural", "brain", "compute", "gpu", "inference"],
-    "animal": ["dog", "cat", "pepe", "frog", "shib", "inu", "doge", "bonk", "wif", "penguin", "hippo"],
-    "politics": ["trump", "biden", "maga", "election", "political", "president", "vote", "democrat", "republican"],
-    "gaming": ["game", "play", "nft", "metaverse", "virtual", "pixel", "quest", "rpg"],
-    "defi": ["swap", "yield", "stake", "lend", "borrow", "vault", "protocol", "liquidity"],
-    "celebrity": ["elon", "musk", "kanye", "drake", "celebrity", "famous"],
-    "culture": ["meme", "wojak", "chad", "sigma", "based", "viral", "tiktok"],
-    "rwa": ["rwa", "real world", "tokenize", "asset", "property", "real estate", "commodity"],
-    "social_fi": ["socialfi", "social", "creator", "content", "influence", "follow", "friend.tech"],
-    "layer2": ["layer2", "l2", "rollup", "zk", "optimistic", "bridge", "scaling"],
-    "privacy": ["privacy", "private", "anonymous", "zero knowledge", "zk-snark", "mixnet"],
-    "infra": ["infrastructure", "oracle", "indexer", "rpc", "node", "validator", "middleware"],
-}
-
-# Rich descriptions for semantic matching (used by sentence-transformers)
-NARRATIVE_DESCRIPTIONS = {
-    "ai_agent": "AI agent, artificial intelligence, machine learning, GPT, LLM, neural network, autonomous trading bot, compute, GPU inference",
-    "animal": "Animal-themed memecoin, dog, cat, pepe frog, shiba inu, doge, bonk, penguin, hippo, cute animal mascot",
-    "politics": "Political memecoin, Trump, Biden, MAGA, election, political candidate, president, voting, democrat, republican",
-    "gaming": "Gaming token, play-to-earn, NFT game, metaverse, virtual world, pixel art, quest RPG, GameFi",
-    "defi": "DeFi protocol, decentralized finance, swap, yield farming, staking, lending, borrowing, vault, liquidity",
-    "celebrity": "Celebrity-themed token, Elon Musk, Kanye, Drake, famous person, influencer coin",
-    "culture": "Internet culture memecoin, meme, wojak, chad, sigma, based, viral trend, tiktok, internet humor",
-    "rwa": "Real world asset tokenization, RWA, property, real estate, commodities, tokenized assets",
-    "social_fi": "Social finance, SocialFi, creator economy, content monetization, influencer platform, friend.tech",
-    "layer2": "Layer 2 scaling, L2, rollup, ZK proof, optimistic rollup, bridge, blockchain scaling solution",
-    "privacy": "Privacy coin, anonymous transactions, zero knowledge proof, ZK-SNARK, mixnet, private blockchain",
-    "infra": "Blockchain infrastructure, oracle, indexer, RPC node, validator, middleware, developer tooling",
-}
-
-# Semantic narrative classifier (lazy-loaded)
-_narrative_model = None
-_narrative_embeddings = None
-_USE_SEMANTIC_NARRATIVES = None
-
-
-def _get_narrative_model():
-    """Lazy-load sentence-transformers model for semantic narrative classification."""
-    global _narrative_model, _narrative_embeddings, _USE_SEMANTIC_NARRATIVES
-    if _USE_SEMANTIC_NARRATIVES is not None:
-        return _narrative_model, _narrative_embeddings
-    try:
-        from sentence_transformers import SentenceTransformer, util as st_util
-        _narrative_model = SentenceTransformer("all-MiniLM-L6-v2")
-        # Pre-encode narrative descriptions
-        labels = list(NARRATIVE_DESCRIPTIONS.keys())
-        descriptions = [NARRATIVE_DESCRIPTIONS[k] for k in labels]
-        embeddings = _narrative_model.encode(descriptions, convert_to_tensor=True)
-        _narrative_embeddings = (labels, embeddings, st_util)
-        _USE_SEMANTIC_NARRATIVES = True
-        logger.info("Semantic narrative classifier loaded (all-MiniLM-L6-v2, %d narratives)", len(labels))
-    except ImportError:
-        _USE_SEMANTIC_NARRATIVES = False
-        logger.info("sentence-transformers not installed — using keyword fallback for narratives")
-    except Exception as e:
-        _USE_SEMANTIC_NARRATIVES = False
-        logger.warning("Semantic narrative model failed: %s — using keyword fallback", e)
-    return _narrative_model, _narrative_embeddings
-
-
-def _classify_narrative_semantic(text: str) -> tuple[str | None, float]:
-    """Classify narrative using sentence-transformers cosine similarity."""
-    model, emb_data = _get_narrative_model()
-    if model is None or emb_data is None:
-        return None, 0.0
-
-    labels, label_embeddings, st_util = emb_data
-    try:
-        text_embedding = model.encode(text[:256], convert_to_tensor=True)
-        similarities = st_util.cos_sim(text_embedding, label_embeddings)[0]
-        best_idx = int(similarities.argmax())
-        best_score = float(similarities[best_idx])
-        if best_score >= 0.3:
-            return labels[best_idx], round(best_score, 3)
-        return None, round(best_score, 3)
-    except Exception:
-        return None, 0.0
-
-
-def _classify_narrative_keywords(text: str, symbol: str) -> tuple[str | None, float]:
-    """Keyword-based narrative fallback."""
-    text_lower = (text + " " + symbol).lower()
-    scores = {}
-    for narrative, keywords in NARRATIVE_KEYWORDS.items():
-        hits = sum(1 for kw in keywords if kw in text_lower)
-        if hits > 0:
-            scores[narrative] = hits
-    if scores:
-        best = max(scores, key=scores.get)
-        # Approximate confidence from keyword hit ratio
-        confidence = min(1.0, scores[best] / 3.0)
-        return best, round(confidence, 3)
-    return None, 0.0
-
-
-def classify_narrative(text: str, symbol: str) -> tuple[str | None, float]:
-    """
-    Return (dominant_narrative, confidence) or (None, 0.0).
-    Uses semantic matching if sentence-transformers is available, else keyword fallback.
-    """
-    # Try semantic first
-    model, _ = _get_narrative_model()
-    if model is not None:
-        return _classify_narrative_semantic(text + " " + symbol)
-    return _classify_narrative_keywords(text, symbol)
-
-
 # === PER-MESSAGE CONVICTION NLP ===
+
+# === UPDATE/BRAG MESSAGE DETECTION ===
+# These patterns detect retrospective messages (KOL bragging, scorecards, updates)
+# that should NOT count as fresh calls. Matches get 0.3x weight in consensus/breadth.
+_UPDATE_BRAG_PATTERNS = [
+    re.compile(r"(?:called\s+at|entry\s+was|we\s+gave|we\s+caught)", re.I),
+    re.compile(r"(?:now\s+at|currently\s+at|sitting\s+at|still\s+holding)", re.I),
+    re.compile(r"(?:took\s+profit|closed|cashed\s+out|already\s+up)", re.I),
+    re.compile(r"(?:\d+x\s+done|\d+x\s+hit|hit\s+\d+x|made\s+a?\s*x?\d+)", re.I),
+    re.compile(r"\d+x\s*[-–—]\s*\$", re.I),  # scorecard: "9x - $TOILET"
+]
+
+
+def _is_update_or_brag(text: str) -> bool:
+    """Detect if a message is an update/brag rather than a fresh call."""
+    return any(p.search(text) for p in _UPDATE_BRAG_PATTERNS)
+
+
+# === ENTRY MARKET CAP EXTRACTION ===
+# Captures KOL-stated entry prices like "at 500k", "aped at 1.2m", "called at 3m"
+_ENTRY_MCAP_REGEX = re.compile(
+    r"(?:at|@|called\s+at|aped\s+at|bought\s+at|entry)\s*\$?"
+    r"(\d+(?:\.\d+)?)\s*(k|m|mil|million)",
+    re.I,
+)
+
+
+def _extract_entry_mcap(text: str) -> float | None:
+    """Extract entry market cap from message text. Returns value in USD or None."""
+    match = _ENTRY_MCAP_REGEX.search(text)
+    if not match:
+        return None
+    value = float(match.group(1))
+    unit = match.group(2).lower()
+    if unit == "k":
+        return value * 1_000
+    elif unit in ("m", "mil", "million"):
+        return value * 1_000_000
+    return None
+
 
 _CONVICTION_PATTERNS = {
     # Price targets (strong conviction)
@@ -586,94 +520,212 @@ def verify_tokens_exist(symbols: list[str]) -> set[str]:
 
 # === ML MODEL (lazy-loaded) ===
 
-_ML_MODEL_PATH = Path(__file__).parent / "model_12h.json"
-_ML_META_PATH = Path(__file__).parent / "model_12h_meta.json"
-_ml_model = None
-_ml_features = None
+_ML_MODEL_DIR = Path(__file__).parent
+_ml_model = None          # XGBoost model (regressor or classifier)
+_ml_lgb_model = None      # LightGBM model (regressor or classifier)
+_ml_features = None       # Feature list
+_ml_meta = None           # Full metadata dict (mode, weights, quality gate)
+_ml_loaded = False         # Prevent repeated load attempts
+
+# Quality gate: refuse to load models below this threshold
+_MIN_PRECISION_AT_5 = 0.40
 
 
-def _load_ml_model():
-    """Lazy-load XGBoost model if available."""
-    global _ml_model, _ml_features
-    if _ml_model is not None:
-        return _ml_model, _ml_features
+def _load_ml_model(horizon: str = "12h"):
+    """
+    Lazy-load ML ensemble (XGBoost + LightGBM) if available and quality gate passes.
+    Supports both regression and classification models based on metadata 'mode' field.
+    Returns (xgb_model, lgb_model, features, meta) or (None, None, None, None).
+    """
+    global _ml_model, _ml_lgb_model, _ml_features, _ml_meta, _ml_loaded
+    if _ml_loaded:
+        return _ml_model, _ml_lgb_model, _ml_features, _ml_meta
 
-    if not _ML_MODEL_PATH.exists():
-        return None, None
+    _ml_loaded = True  # Don't retry on failure
+
+    xgb_path = _ML_MODEL_DIR / f"model_{horizon}.json"
+    lgb_path = _ML_MODEL_DIR / f"model_{horizon}_lgb.txt"
+    meta_path = _ML_MODEL_DIR / f"model_{horizon}_meta.json"
+
+    if not xgb_path.exists():
+        return None, None, None, None
+
+    # Load metadata first — check quality gate BEFORE loading models
+    if not meta_path.exists():
+        logger.warning("ML metadata not found at %s — refusing to load model without quality gate", meta_path)
+        return None, None, None, None
+
+    try:
+        with open(meta_path, "r") as f:
+            meta = json.load(f)
+    except Exception as e:
+        logger.warning("Failed to read ML metadata: %s", e)
+        return None, None, None, None
+
+    # Quality gate check
+    p_at_5 = meta.get("metrics", {}).get("precision_at_5", 0)
+    if meta.get("quality_gate") != "PASSED" or p_at_5 < _MIN_PRECISION_AT_5:
+        logger.warning(
+            "ML quality gate REJECTED: precision@5=%.3f (need >=%.2f), gate=%s. Using manual scores only.",
+            p_at_5, _MIN_PRECISION_AT_5, meta.get("quality_gate", "UNKNOWN"),
+        )
+        return None, None, None, None
+
+    mode = meta.get("mode", "classification")
+    features = meta.get("features", [])
+    if not features:
+        logger.warning("ML metadata has empty feature list — refusing to load")
+        return None, None, None, None
 
     try:
         import xgboost as xgb
-        _ml_model = xgb.XGBClassifier()
-        _ml_model.load_model(str(_ML_MODEL_PATH))
-
-        # Load feature list from metadata
-        if _ML_META_PATH.exists():
-            with open(_ML_META_PATH, "r") as f:
-                meta = json.load(f)
-            _ml_features = meta.get("features", [])
+        if mode == "regression":
+            _ml_model = xgb.XGBRegressor()
         else:
-            _ml_features = [
-                "mentions", "sentiment", "breadth", "avg_conviction", "recency_score",
-                "volume_24h_log", "liquidity_usd_log", "market_cap_log",
-                "txn_count_24h", "price_change_1h",
-                "risk_score", "top10_holder_pct", "insider_pct",
-            ]
-
-        logger.info("ML model loaded from %s (%d features)", _ML_MODEL_PATH, len(_ml_features))
-        return _ml_model, _ml_features
+            _ml_model = xgb.XGBClassifier()
+        _ml_model.load_model(str(xgb_path))
+        logger.info("XGBoost %s loaded from %s", mode, xgb_path)
     except Exception as e:
-        logger.warning("Failed to load ML model: %s — using manual scores", e)
+        logger.warning("Failed to load XGBoost model: %s", e)
         _ml_model = None
-        _ml_features = None
-        return None, None
+
+    # Load LightGBM if available
+    if lgb_path.exists():
+        try:
+            import lightgbm as lgb_lib
+            _ml_lgb_model = lgb_lib.Booster(model_file=str(lgb_path))
+            logger.info("LightGBM %s loaded from %s", mode, lgb_path)
+        except Exception as e:
+            logger.warning("Failed to load LightGBM model: %s — using XGBoost only", e)
+            _ml_lgb_model = None
+
+    if _ml_model is None and _ml_lgb_model is None:
+        return None, None, None, None
+
+    _ml_features = features
+    _ml_meta = meta
+    logger.info(
+        "ML ensemble loaded: mode=%s, %d features, precision@5=%.3f, ensemble_weights=%s",
+        mode, len(features), p_at_5, meta.get("ensemble_weights", {}),
+    )
+    return _ml_model, _ml_lgb_model, _ml_features, _ml_meta
+
+
+def _build_feature_row(token: dict, features: list[str]) -> dict:
+    """Build a single feature row for ML prediction from a token dict."""
+    # Features that need log-scaling
+    log_map = {
+        "volume_24h_log": "volume_24h",
+        "volume_6h_log": "volume_6h",
+        "volume_1h_log": "volume_1h",
+        "volume_5m_log": "volume_5m",
+        "liquidity_usd_log": "liquidity_usd",
+        "market_cap_log": "market_cap",
+        "holder_count_log": "holder_count",
+        "v_buy_24h_usd_log": "v_buy_24h_usd",
+        "v_sell_24h_usd_log": "v_sell_24h_usd",
+        "helius_holder_count_log": "helius_holder_count",
+    }
+
+    row = {}
+    for feat in features:
+        if feat in log_map:
+            raw = token.get(log_map[feat])
+            row[feat] = np.log1p(float(raw)) if raw is not None and float(raw) > 0 else np.nan
+        elif feat == "breadth":
+            uk = token.get("unique_kols", 0)
+            tk = token.get("_total_kols", 50)
+            row[feat] = uk / max(1, tk)
+        elif feat == "pump_graduated":
+            status = token.get("pump_graduation_status")
+            row[feat] = 1.0 if status == "graduated" else 0.0
+        elif feat == "birdeye_buy_sell_ratio":
+            b = token.get("buy_24h")
+            s = token.get("sell_24h")
+            if b is not None and s is not None:
+                row[feat] = float(b) / max(1, float(b) + float(s))
+            else:
+                row[feat] = np.nan
+        else:
+            val = token.get(feat)
+            row[feat] = float(val) if val is not None else np.nan
+    return row
 
 
 def _apply_ml_scores(ranking: list[dict]) -> None:
     """
-    If an XGBoost model is available, compute ML-based scores and override manual scores.
-    Falls back silently to manual scores if model is not available.
+    ML as MULTIPLIER: predictions scale the manual score within [0.5, 1.5].
+    This preserves manual penalties (safety, death, crash) while letting ML boost/dampen.
+
+    Regression mode: raw prediction → percentile rank → scale to [0.5, 1.5]
+    Classification mode: predict_proba → scale to [0.5, 1.5]
     """
-    model, features = _load_ml_model()
-    if model is None or not features:
+    xgb_model, lgb_model, features, meta = _load_ml_model()
+    if (xgb_model is None and lgb_model is None) or not features or not meta:
         return
 
+    mode = meta.get("mode", "classification")
+    weights = meta.get("ensemble_weights", {"xgboost": 0.5, "lightgbm": 0.5})
+    xgb_w = weights.get("xgboost", 0.5)
+    lgb_w = weights.get("lightgbm", 0.5)
+
     # Build feature matrix
-    rows = []
-    for token in ranking:
-        row = {}
-        for feat in features:
-            if feat == "volume_24h_log":
-                v = token.get("volume_24h")
-                row[feat] = np.log1p(float(v)) if v is not None and float(v) > 0 else np.nan
-            elif feat == "liquidity_usd_log":
-                v = token.get("liquidity_usd")
-                row[feat] = np.log1p(float(v)) if v is not None and float(v) > 0 else np.nan
-            elif feat == "market_cap_log":
-                v = token.get("market_cap")
-                row[feat] = np.log1p(float(v)) if v is not None and float(v) > 0 else np.nan
-            elif feat == "breadth":
-                uk = token.get("unique_kols", 0)
-                tk = token.get("_total_kols", 50)
-                row[feat] = uk / max(1, tk)
-            else:
-                val = token.get(feat)
-                row[feat] = float(val) if val is not None else np.nan
-        rows.append(row)
+    rows = [_build_feature_row(token, features) for token in ranking]
 
     try:
         import pandas as pd
         X = pd.DataFrame(rows, columns=features)
-        probas = model.predict_proba(X)[:, 1]
 
-        for token, prob in zip(ranking, probas):
-            ml_score = int(prob * 100)
-            token["score_ml"] = ml_score
-            # Algorithm v3 B1: Blend ML (70%) + manual (30%) instead of pure override
-            token["score"] = int(0.7 * ml_score + 0.3 * token["score"])
-            token["score_conviction"] = int(0.7 * ml_score + 0.3 * token["score_conviction"])
-            token["score_momentum"] = int(0.7 * ml_score + 0.3 * token["score_momentum"])
+        # Get raw predictions from each model
+        preds = None
 
-        logger.info("ML scores blended (70/30) for %d tokens", len(ranking))
+        if mode == "regression":
+            # Regression: predict log_return, then use percentile-based scaling
+            xgb_preds = xgb_model.predict(X) if xgb_model is not None else None
+            lgb_preds = lgb_model.predict(X.values) if lgb_model is not None else None
+
+            if xgb_preds is not None and lgb_preds is not None:
+                preds = xgb_w * xgb_preds + lgb_w * lgb_preds
+            elif xgb_preds is not None:
+                preds = xgb_preds
+            else:
+                preds = lgb_preds
+
+            # Convert to percentile ranks (0-1), then scale to [0.5, 1.5]
+            from scipy.stats import rankdata
+            ranks = rankdata(preds) / len(preds)  # 0..1 percentile
+            ml_multipliers = 0.5 + ranks  # [0.5, 1.5]
+
+        else:
+            # Classification: predict_proba → [0.5, 1.5]
+            xgb_proba = xgb_model.predict_proba(X)[:, 1] if xgb_model is not None else None
+            lgb_proba = None
+            if lgb_model is not None:
+                # LightGBM Booster.predict returns raw probabilities directly
+                lgb_proba = lgb_model.predict(X.values)
+
+            if xgb_proba is not None and lgb_proba is not None:
+                proba = xgb_w * xgb_proba + lgb_w * lgb_proba
+            elif xgb_proba is not None:
+                proba = xgb_proba
+            else:
+                proba = lgb_proba
+
+            # Scale probability to multiplier: p=0 → 0.5x, p=0.5 → 1.0x, p=1 → 1.5x
+            ml_multipliers = 0.5 + np.clip(proba, 0, 1)
+
+        # Apply multiplier to all score variants
+        for token, ml_mult in zip(ranking, ml_multipliers):
+            ml_mult = float(np.clip(ml_mult, 0.5, 1.5))
+            token["ml_multiplier"] = round(ml_mult, 3)
+            token["score"] = int(token["score"] * ml_mult)
+            token["score_conviction"] = int(token["score_conviction"] * ml_mult)
+            token["score_momentum"] = int(token["score_momentum"] * ml_mult)
+
+        logger.info(
+            "ML multiplier applied (%s mode) for %d tokens [%.2f - %.2f]",
+            mode, len(ranking), float(ml_multipliers.min()), float(ml_multipliers.max()),
+        )
     except Exception as e:
         logger.warning("ML scoring failed: %s — keeping manual scores", e)
 
@@ -712,32 +764,23 @@ def extract_tokens(
             tokens.append(symbol)
             seen.add(symbol)
 
-    # 2) Bare ALL-CAPS tokens: only accept if confirmed elsewhere
-    for match in BARE_TOKEN_REGEX.findall(text):
-        if match != match.upper():
-            continue
-        if not match.isascii():
-            continue
-        # Gate: bare ALLCAPS must be confirmed by $-prefix or CA in another message
-        if confirmed_symbols is not None:
-            if match not in confirmed_symbols:
-                continue
-            # Extra gate: even if "confirmed", common English words as bare ALLCAPS
-            # are almost always noise (e.g. someone wrote "$NEVER" once as slang)
-            if match in BARE_WORD_SUSPECTS:
-                continue
-        symbol = f"${match}"
-        if match not in EXCLUDED_TOKENS and symbol not in seen:
-            tokens.append(symbol)
-            seen.add(symbol)
+    # v15: Bare ALLCAPS detection REMOVED.
+    # When a KOL writes $DOG, "DOG" becomes confirmed, then every bare "DOG"
+    # in other chats counts as a mention → massive false positives for common
+    # English words (DOG, CAT, MOON, ROCK, SHOT, TOKEN, COW, JUICE...).
+    # Real KOL calls always use $ prefix or post CA/URLs. Bare words = noise.
 
     # 3) Solana contract addresses → resolve to symbol (definitive proof)
-    #    Skip addresses that are part of DexScreener/pump.fun URLs (handled in step 4)
+    #    Skip addresses that are part of DexScreener/pump.fun/GMGN/Photon URLs (handled in step 4)
     url_addresses = set()
     for _, pair_addr in DEXSCREENER_URL_REGEX.findall(text):
         url_addresses.add(pair_addr)
     for pump_addr in PUMP_FUN_URL_REGEX.findall(text):
         url_addresses.add(pump_addr)
+    for gmgn_addr in GMGN_URL_REGEX.findall(text):
+        url_addresses.add(gmgn_addr)
+    for photon_addr in PHOTON_URL_REGEX.findall(text):
+        url_addresses.add(photon_addr)
 
     if ca_cache is not None:
         for match in CA_REGEX.findall(text):
@@ -766,6 +809,24 @@ def extract_tokens(
         # pump.fun: token CA directly → resolve via tokens API
         for pump_addr in PUMP_FUN_URL_REGEX.findall(text):
             resolved = _resolve_ca_to_symbol(pump_addr, ca_cache)
+            if resolved:
+                symbol = f"${resolved}"
+                if resolved not in EXCLUDED_TOKENS and symbol not in seen:
+                    tokens.append(symbol)
+                    seen.add(symbol)
+
+        # GMGN: token CA directly (same as pump.fun — CA in URL)
+        for gmgn_addr in GMGN_URL_REGEX.findall(text):
+            resolved = _resolve_ca_to_symbol(gmgn_addr, ca_cache)
+            if resolved:
+                symbol = f"${resolved}"
+                if resolved not in EXCLUDED_TOKENS and symbol not in seen:
+                    tokens.append(symbol)
+                    seen.add(symbol)
+
+        # Photon-sol: LP pair address → resolve via pairs API (same as DexScreener)
+        for photon_addr in PHOTON_URL_REGEX.findall(text):
+            resolved = _resolve_pair_to_symbol("solana", photon_addr, ca_cache)
             if resolved:
                 symbol = f"${resolved}"
                 if resolved not in EXCLUDED_TOKENS and symbol not in seen:
@@ -861,6 +922,142 @@ def _compute_wash_trading_score(token: dict) -> float:
     return max(0.0, min(1.0, sum(scores) / len(scores)))
 
 
+def _get_price_from_candles(token: dict, hours: float) -> float | None:
+    """
+    Get the REAL historical price from OHLCV candle data.
+    Uses only actual chart data — no interpolation, no estimation.
+    Returns the close price of the nearest candle, or None if no data.
+
+    Candles are 15-min intervals from DexPaprika (~24h of history).
+    Only matches if a candle exists within 15 min of the target time.
+    """
+    candles = token.get("candle_data")
+    if not candles or len(candles) < 2:
+        return None
+
+    target_ts = time.time() - hours * 3600
+
+    # Find closest candle by timestamp
+    best_candle = None
+    best_diff = float("inf")
+    for c in candles:
+        diff = abs(c["timestamp"] - target_ts)
+        if diff < best_diff:
+            best_diff = diff
+            best_candle = c
+
+    # Only accept if within 15 min (one candle interval) — no guessing
+    if best_candle and best_diff <= 900:
+        close = best_candle.get("close", 0)
+        if close > 0:
+            return close
+
+    return None
+
+
+def _compute_kol_entry_premium(token: dict) -> tuple[float, float]:
+    """
+    Compute how much the price has moved since KOLs called the token.
+    Returns (entry_premium, entry_premium_mult) where:
+    - entry_premium = current_price / decay-weighted avg entry price
+    - entry_premium_mult = penalty multiplier [0.25, 1.1]
+
+    ONLY uses real OHLCV candle data — no interpolation, no estimation.
+    If no candle data exists for a token, returns neutral (1.0, 1.0).
+    Scales penalty by how long the pump has been running (duration factor).
+    """
+    current_price = token.get("price_usd")
+    current_mcap = token.get("market_cap") or token.get("fdv")
+    hours_ago_list = token.get("_hours_ago", [])
+
+    # v14: Primary source — KOL-stated entry mcap (more accurate than OHLCV interpolation)
+    stated_mcaps = token.get("kol_stated_entry_mcaps", [])
+    if stated_mcaps and current_mcap and current_mcap > 0:
+        avg_stated = sum(stated_mcaps) / len(stated_mcaps)
+        if avg_stated > 0:
+            entry_premium = current_mcap / avg_stated
+            if entry_premium < 1.0:
+                mult = 1.1
+            elif entry_premium <= 1.2:
+                mult = 1.0
+            elif entry_premium <= 2.0:
+                mult = 0.9
+            elif entry_premium <= 4.0:
+                mult = 0.9 - (entry_premium - 2.0) * (0.2 / 2.0)
+            elif entry_premium <= 8.0:
+                mult = 0.7 - (entry_premium - 4.0) * (0.2 / 4.0)
+            elif entry_premium <= 20.0:
+                mult = 0.5 - (entry_premium - 8.0) * (0.15 / 12.0)
+            else:
+                mult = 0.25
+            return round(entry_premium, 3), round(mult, 3)
+
+    # Fallback: OHLCV candle data
+    # Need both price and candle data — no candles = can't compute = neutral
+    if not current_price or current_price <= 0 or not hours_ago_list:
+        return 1.0, 1.0
+    if not token.get("candle_data"):
+        return 1.0, 1.0
+
+    # Only consider mentions > 5 min old (too fresh = no meaningful price diff)
+    valid_hours = [h for h in hours_ago_list if h > 5 / 60]
+    if not valid_hours:
+        return 1.0, 1.0
+
+    # Compute decay-weighted average entry price from REAL candle data
+    weighted_sum = 0.0
+    weight_sum = 0.0
+    matched_count = 0
+    for h in valid_hours:
+        real_price = _get_price_from_candles(token, h)
+        if real_price is not None and real_price > 0:
+            decay = _two_phase_decay(h)
+            weighted_sum += real_price * decay
+            weight_sum += decay
+            matched_count += 1
+
+    # Need at least 1 real candle match to compute anything meaningful
+    if matched_count == 0 or weight_sum == 0:
+        return 1.0, 1.0
+
+    avg_entry = weighted_sum / weight_sum
+    entry_premium = current_price / avg_entry
+
+    # Duration scaling: longer pumps = more dangerous
+    oldest_mention = max(valid_hours)
+    if oldest_mention > 48:
+        duration_factor = 1.5
+    elif oldest_mention > 24:
+        duration_factor = 1.3
+    elif oldest_mention > 12:
+        duration_factor = 1.15
+    else:
+        duration_factor = 1.0
+
+    effective_premium = entry_premium ** duration_factor
+
+    # Tier-based multiplier
+    if effective_premium < 1.0:
+        mult = 1.1  # dip buy — mild bonus
+    elif effective_premium <= 1.2:
+        mult = 1.0  # buying at KOL price — neutral
+    elif effective_premium <= 2.0:
+        mult = 0.9  # slight premium
+    elif effective_premium <= 4.0:
+        # Linear: 2.0→0.9, 4.0→0.7
+        mult = 0.9 - (effective_premium - 2.0) * (0.2 / 2.0)
+    elif effective_premium <= 8.0:
+        # Linear: 4.0→0.7, 8.0→0.5
+        mult = 0.7 - (effective_premium - 4.0) * (0.2 / 4.0)
+    elif effective_premium <= 20.0:
+        # Linear: 8.0→0.5, 20.0→0.35
+        mult = 0.5 - (effective_premium - 8.0) * (0.15 / 12.0)
+    else:
+        mult = 0.25  # chasing — near certain loss
+
+    return round(entry_premium, 3), round(mult, 3)
+
+
 def _detect_artificial_pump(token: dict) -> bool:
     """
     Algorithm v3 A5: Flag tokens with price pump but no organic growth behind it.
@@ -887,6 +1084,82 @@ def _detect_artificial_pump(token: dict) -> bool:
         if vol / max(1, liq) > 50:  # volume dwarfs liquidity (wash trading pump)
             return True
     return False
+
+
+def _detect_death_penalty(token: dict, freshest_mention_hours: float) -> float:
+    """
+    v11: Detect dead/rugged tokens. Returns penalty multiplier [0.1, 1.0].
+    Combines price collapse + volume death + social abandonment.
+    Takes the MINIMUM (most pessimistic) of all death signals to catch tokens
+    rugged 3+ days ago where 24h price change is near 0 but volume is dead.
+    """
+    penalties = []
+
+    # --- Signal 1: Price collapse (original v9 logic) ---
+    pc24 = token.get("price_change_24h")
+    if pc24 is not None:
+        pc24 = float(pc24)
+
+        if pc24 < -80:
+            penalties.append(0.1)
+        elif pc24 < -70:
+            penalties.append(0.15 if freshest_mention_hours > 3 else 0.3)
+        elif pc24 < -50:
+            va = token.get("volume_acceleration")
+            volume_alive = va is not None and float(va) > 0.5
+            social_alive = freshest_mention_hours < 6
+            if volume_alive and social_alive:
+                penalties.append(0.6)
+            elif volume_alive or social_alive:
+                penalties.append(0.4)
+            else:
+                penalties.append(0.2)
+        elif pc24 < -30:
+            if freshest_mention_hours > 24:
+                penalties.append(0.4)
+            else:
+                penalties.append(0.8)
+
+    # --- Signal 2: Volume death (catches tokens rugged days ago with stable price) ---
+    vol_24h = token.get("volume_24h") or 0
+    vol_1h = token.get("volume_1h") or 0
+    if vol_24h < 5000 and vol_1h < 500:
+        penalties.append(0.15)  # practically dead volume
+    elif vol_24h < 1000:
+        penalties.append(0.1)   # absolute volume floor — no trading happening
+
+    # --- Signal 3 (v15): Social staleness — volume-modulated ---
+    # User guidance: "after 12h without mentions, start losing, but mostly look at PA + volume"
+    # Time-based decay that's SOFTENED by healthy volume (token still actively traded).
+    if freshest_mention_hours > 12:
+        if freshest_mention_hours > 72:
+            stale_base = 0.15    # 3+ days = very stale
+        elif freshest_mention_hours > 48:
+            stale_base = 0.25    # 2+ days = stale
+        elif freshest_mention_hours > 24:
+            stale_base = 0.45    # 1+ day = aging
+        else:
+            stale_base = 0.7     # 12-24h = mildly stale
+
+        # Volume modulator: healthy trading proves the token is still alive
+        vol_24h = token.get("volume_24h") or 0
+        if vol_24h > 1_000_000:
+            stale_pen = min(0.95, stale_base + 0.45)   # massive volume = barely penalized
+        elif vol_24h > 500_000:
+            stale_pen = min(0.9, stale_base + 0.35)
+        elif vol_24h > 100_000:
+            stale_pen = min(0.85, stale_base + 0.25)
+        elif vol_24h > 50_000:
+            stale_pen = min(0.8, stale_base + 0.15)
+        else:
+            stale_pen = stale_base
+
+        penalties.append(stale_pen)
+
+    # Return the most pessimistic signal (lowest penalty = harshest)
+    if not penalties:
+        return 1.0
+    return min(penalties)
 
 
 def _apply_hard_gates(ranking: list[dict]) -> list[dict]:
@@ -1007,10 +1280,7 @@ def _compute_onchain_multiplier(token: dict) -> float:
     if vmr is not None:
         factors.append(min(1.5, 0.5 + vmr * 2))
 
-    # 2. Buy pressure (buy_sell_ratio > 0.6 = bullish)
-    bsr = token.get("buy_sell_ratio_1h")
-    if bsr is not None:
-        factors.append(0.5 + bsr)  # 0.5-1.5
+    # 2. Buy pressure — REMOVED (v10: already in price_action.py direction_mult + vol_confirm)
 
     # 3. Liquidity adequacy (liq/mcap > 0.05 = healthy)
     lmr = token.get("liq_mcap_ratio")
@@ -1022,10 +1292,7 @@ def _compute_onchain_multiplier(token: dict) -> float:
         else:
             factors.append(0.8 + lmr * 4)
 
-    # 4. Volume acceleration (6h vol * 4 vs 24h vol)
-    va = token.get("volume_acceleration")
-    if va is not None:
-        factors.append(min(1.5, 0.5 + va * 0.5))
+    # 4. Volume acceleration — REMOVED (v10: already in price_action.py vol_confirm)
 
     # 5. Token age penalty (v4: 6-48h optimal window)
     age = token.get("token_age_hours")
@@ -1082,20 +1349,18 @@ def _compute_onchain_multiplier(token: dict) -> float:
         elif whale_change < 0:
             factors.append(0.8)
 
-    # 10. Algorithm v3 A1: Short-term volume heat (1h vs 6h acceleration)
+    # 10. Short-term volume heat — compute for data but NOT in factors
+    # v10: volume already counted in price_action.py vol_confirm + _detect_volume_squeeze
     vol_1h = token.get("volume_1h")
     vol_6h = token.get("volume_6h")
     if vol_1h and vol_6h and vol_6h > 0:
-        short_heat = (vol_1h * 6) / vol_6h  # 1.0=uniform, >1=accelerating, <1=dying
+        short_heat = (vol_1h * 6) / vol_6h
         token["short_term_heat"] = round(short_heat, 3)
-        factors.append(min(1.5, 0.5 + short_heat * 0.5))
 
-    # 12. Algorithm v3.1: Ultra-short heat (5m vs 1h — real-time momentum)
     vol_5m = token.get("volume_5m")
     if vol_5m and vol_1h and vol_1h > 0:
-        ultra_heat = (vol_5m * 12) / vol_1h  # 1.0=stable, >2.0=explosion, <0.5=dying
+        ultra_heat = (vol_5m * 12) / vol_1h
         token["ultra_short_heat"] = round(ultra_heat, 3)
-        factors.append(min(1.5, 0.5 + ultra_heat * 0.5))
 
     # 11. Algorithm v3 A2: Transaction velocity (txn/holder — activity density)
     txn_count = token.get("txn_count_24h")
@@ -1120,8 +1385,28 @@ def _compute_onchain_multiplier(token: dict) -> float:
     if whale_dir == "accumulating":
         factors.append(1.15)  # Whales consistently buying = bullish
 
+    # v13: New whale entries — smart money entering (guide principle #8)
+    wne = token.get("whale_new_entries")
+    if wne is not None:
+        if wne >= 3:
+            factors.append(1.25)  # multiple new whales = strong signal
+        elif wne >= 1:
+            factors.append(1.1)   # at least 1 new whale
+
+    # v13: Unique wallet growth — "who buys after me" (guide principle #5)
+    uw_change = token.get("unique_wallet_24h_change")
+    if uw_change is not None:
+        if uw_change > 20:
+            factors.append(1.3)   # >20% wallet growth = strong demand
+        elif uw_change > 5:
+            factors.append(1.15)
+        elif uw_change < -20:
+            factors.append(0.6)   # wallets leaving = dying
+        elif uw_change < -5:
+            factors.append(0.8)
+
     if not factors:
-        return 0.85  # v7: milder penalty — renormalization handles the base score
+        return 1.0  # v10: no data = neutral, not a penalty
 
     return max(0.3, min(1.5, sum(factors) / len(factors)))
 
@@ -1213,17 +1498,29 @@ def _compute_safety_penalty(token: dict) -> float:
     elif whale_dir == "dumping":
         penalty *= 0.65   # Consistent selling = bearish
 
+    # v13: LP lock — unlocked LP = rug vector (guide principle #7)
+    lp_locked = token.get("lp_locked_pct")
+    if lp_locked is not None:
+        if lp_locked == 0:
+            penalty *= 0.6    # LP not locked = rug risk
+        elif lp_locked < 50:
+            penalty *= 0.85   # partially locked
+
+    # v13: CEX supply pressure (guide principle #13)
+    cex_pct = token.get("bubblemaps_cex_pct")
+    if cex_pct is not None and cex_pct > 20:
+        penalty *= max(0.7, 1.0 - (cex_pct - 20) / 100)
+
     # FLOOR: never destroy a token completely — let the user decide
     return max(0.3, penalty)
 
 
 # === SCORE COMPUTATION WEIGHTS ===
 BALANCED_WEIGHTS = {
-    "consensus": 0.25,
-    "sentiment": 0.05,
+    "consensus": 0.30,
     "conviction": 0.15,
-    "breadth": 0.15,
-    "price_action": 0.40,
+    "breadth": 0.25,     # v13: was 0.20; absorbed sentiment's 5% (guide doesn't use NLP sentiment)
+    "price_action": 0.30,
 }
 
 
@@ -1233,11 +1530,15 @@ def _get_component_value(token: dict, component: str) -> float | None:
     Returns None if data is genuinely missing.
     """
     if component == "consensus":
+        # v9: Use pre-computed recency-decayed consensus (avoids recomputing without decay)
+        decayed = token.get("_decayed_consensus")
+        if decayed is not None:
+            return decayed
+        # Fallback for tokens without decay data (e.g. price_refresh path)
         uk = token.get("unique_kols")
         if uk is None:
             return None
         tk = token.get("_total_kols", 50)
-        # Use tier-weighted if available
         kol_tiers = token.get("kol_tiers", {})
         if kol_tiers:
             tw_func = token.get("_tw_func")
@@ -1256,7 +1557,8 @@ def _get_component_value(token: dict, component: str) -> float | None:
         ac = token.get("avg_conviction")
         if ac is None:
             return None
-        return max(0, min(1, (ac - 5) / 5))
+        # v14: Compressed range — 7→0.25, 8→0.5, 10→1.0
+        return max(0, min(1, (ac - 6) / 4))
     elif component == "breadth":
         bs = token.get("breadth_score")
         if bs is not None:
@@ -1264,7 +1566,8 @@ def _get_component_value(token: dict, component: str) -> float | None:
         m = token.get("mentions")
         if m is None:
             return None
-        return min(1.0, m / 30)
+        # v14: Recalibrated from /30 → /12
+        return min(1.0, m / 12)
     elif component == "price_action":
         pa = token.get("price_action_score")
         return pa  # None if no OHLCV data
@@ -1276,9 +1579,8 @@ def _compute_score_with_renormalization(token: dict) -> tuple[float, float]:
     Compute balanced score with weight renormalization for missing components.
     Returns (raw_score_0_to_1, data_confidence).
 
-    data_confidence = sum(available_weights) / sum(all_weights)
-    - 1.0 = all 5 components have data
-    - 0.6 = only 60% of weighted components available (e.g. missing price_action)
+    v14: data_confidence now reflects actual data quality, not just component presence.
+    Factors: component availability, unique KOL count, breadth value, enrichment data.
     """
     available = {}
     for comp, weight in BALANCED_WEIGHTS.items():
@@ -1291,7 +1593,19 @@ def _compute_score_with_renormalization(token: dict) -> tuple[float, float]:
         return 0.0, 0.0
 
     renormalized_score = sum(v * (w / total_available_weight) for v, w in available.values())
-    data_confidence = total_available_weight / sum(BALANCED_WEIGHTS.values())
+
+    # v14: Multi-factor data confidence
+    component_conf = total_available_weight / sum(BALANCED_WEIGHTS.values())
+    # KOL coverage: 1 KOL = low confidence, 3+ KOLs = full
+    uk = token.get("unique_kols", 1)
+    kol_conf = min(1.0, uk / 3)
+    # Breadth quality: near-zero breadth = low confidence
+    breadth = token.get("breadth_score", 0) or 0
+    breadth_conf = min(1.0, breadth / 0.15) if breadth > 0 else 0.3
+    # Enrichment: has on-chain data?
+    enrichment_conf = 1.0 if token.get("token_address") else 0.5
+
+    data_confidence = component_conf * 0.4 + kol_conf * 0.3 + breadth_conf * 0.2 + enrichment_conf * 0.1
 
     return renormalized_score, round(data_confidence, 3)
 
@@ -1447,6 +1761,16 @@ def aggregate_ranking(
                 resolved = _resolve_ca_to_symbol(pump_addr, ca_cache)
                 if resolved and resolved not in EXCLUDED_TOKENS:
                     confirmed_symbols.add(resolved)
+            # GMGN URLs → confirmed
+            for gmgn_addr in GMGN_URL_REGEX.findall(text):
+                resolved = _resolve_ca_to_symbol(gmgn_addr, ca_cache)
+                if resolved and resolved not in EXCLUDED_TOKENS:
+                    confirmed_symbols.add(resolved)
+            # Photon-sol URLs → confirmed
+            for photon_addr in PHOTON_URL_REGEX.findall(text):
+                resolved = _resolve_pair_to_symbol("solana", photon_addr, ca_cache)
+                if resolved and resolved not in EXCLUDED_TOKENS:
+                    confirmed_symbols.add(resolved)
 
     logger.info(
         "Phase 1: %d confirmed symbols from $-prefix, CA, and URL resolution",
@@ -1461,14 +1785,16 @@ def aggregate_ranking(
         "groups": set(),
         "convictions": [],
         "hours_ago": [],
-        "narratives": [],             # per-message narrative classification
-        "narrative_confidences": [],  # per-message confidence scores
-        "texts": [],                  # raw texts for narrative aggregation
         "msg_conviction_scores": [],  # per-message NLP conviction scores
         "price_target_count": 0,      # messages with price targets
         "hedging_count": 0,           # messages with hedging language
         "kol_mention_counts": {},     # per-KOL mention count for quality weighting
+        "hours_ago_by_group": defaultdict(list),  # v9: group_name → [hours_ago, ...] for recency decay
+        "kol_stated_entry_mcaps": [],  # v14: entry mcap stated by KOLs in message text
     })
+
+    # v10: Collect raw KOL mentions for NLP storage
+    raw_kol_mentions: list[dict] = []
 
     for group_name, msgs in messages_dict.items():
         conviction = groups_conviction.get(group_name, 7)
@@ -1493,17 +1819,45 @@ def aggregate_ranking(
             if not text or len(text) < 3:
                 continue
 
+            # v14: Cap tickers per message — scorecard/DCA-list posts
+            # inflate many tickers at once. Keep first 3 only.
             tokens = extract_tokens(text, ca_cache=ca_cache, confirmed_symbols=confirmed_symbols)
             if not tokens:
                 continue
+            if len(tokens) > 3:
+                tokens = tokens[:3]
 
             sentiment = calculate_sentiment(text)
             hours_ago = (now - date).total_seconds() / 3600
 
-            narrative, narr_conf = classify_narrative(text, "")
+            # v14: Detect update/brag messages — weight reduction
+            is_update = _is_update_or_brag(text)
+            # v14: Message length as confidence signal
+            msg_len = len(text)
+            length_weight = 1.2 if msg_len > 150 else (0.5 if msg_len < 20 else 1.0)
+            # Combined mention weight: updates get 0.3x, length modulates
+            mention_weight = (0.3 if is_update else 1.0) * length_weight
 
             # Per-message conviction NLP (Sprint 6)
             msg_conv = _compute_message_conviction(text)
+
+            # v14: Extract entry market cap from message text
+            stated_mcap = _extract_entry_mcap(text)
+
+            # v10: Store raw mention for each token in this message
+            for token in tokens:
+                raw_kol_mentions.append({
+                    "symbol": token,
+                    "kol_group": group_name,
+                    "message_text": text[:2000],  # cap at 2000 chars
+                    "message_date": date.isoformat(),
+                    "sentiment": round(sentiment, 3),
+                    "msg_conviction_score": round(msg_conv["msg_conviction_score"], 3),
+                    "hours_ago": round(hours_ago, 2),
+                    "is_positive": sentiment >= -0.3,
+                    "narrative": None,
+                    "tokens_in_message": list(tokens),
+                })
 
             for token in tokens:
                 # Always track sentiment (negative views are useful signal)
@@ -1516,71 +1870,74 @@ def aggregate_ranking(
                 is_positive_mention = sentiment >= -0.3
 
                 if is_positive_mention:
-                    token_data[token]["mentions"] += 1
+                    # v14: Weighted mentions — updates/brags count 0.3x, short msgs 0.5x
+                    token_data[token]["mentions"] += mention_weight
                     token_data[token]["groups"].add(group_name)
                     token_data[token]["convictions"].append(conviction)
-                    # Track per-KOL mention counts for quality-weighted breadth
+                    # Track per-KOL mention counts (weighted) for quality-weighted breadth
                     kol_counts = token_data[token]["kol_mention_counts"]
-                    kol_counts[group_name] = kol_counts.get(group_name, 0) + 1
+                    kol_counts[group_name] = kol_counts.get(group_name, 0) + mention_weight
+                    # v9: Track hours_ago per group for recency-weighted consensus/breadth
+                    token_data[token]["hours_ago_by_group"][group_name].append(hours_ago)
                     if msg_conv["has_price_target"]:
                         token_data[token]["price_target_count"] += 1
+                    # v14: Store KOL-stated entry mcap
+                    if stated_mcap is not None:
+                        token_data[token]["kol_stated_entry_mcaps"].append(stated_mcap)
 
                 if msg_conv["has_hedging"]:
                     token_data[token]["hedging_count"] += 1
-                if narrative:
-                    token_data[token]["narratives"].append(narrative)
-                    token_data[token]["narrative_confidences"].append(narr_conf)
-
     # Persist CA cache after processing all messages
     _save_ca_cache(ca_cache)
 
     # Score & rank
     ranking: list[TokenRanking] = []
 
-    # Collect narrative counts across all tokens to detect "hot" narratives this cycle
-    global_narrative_counts: dict[str, int] = defaultdict(int)
-    for data in token_data.values():
-        for n in data["narratives"]:
-            global_narrative_counts[n] += 1
-
-    # Hot narrative = the narrative with most mentions this cycle (if >= 5 mentions)
-    hot_narrative = None
-    if global_narrative_counts:
-        top_narr = max(global_narrative_counts, key=global_narrative_counts.get)
-        if global_narrative_counts[top_narr] >= 5:
-            hot_narrative = top_narr
-            logger.info("Hot narrative this cycle: %s (%d mentions)", hot_narrative, global_narrative_counts[top_narr])
-
     for symbol, data in token_data.items():
         if data["mentions"] == 0:
             continue
 
         unique_kols = len(data["groups"])
-        weighted_unique = sum(tw(g) for g in data["groups"])
-        kol_consensus = min(1.0, weighted_unique / (total_kols * 0.15))
+        # v9: Recency-weighted consensus — fresh mentions matter, stale ones decay
+        recency_weighted_unique = 0
+        for g in data["groups"]:
+            group_hours = data["hours_ago_by_group"].get(g, [])
+            freshest = min(group_hours) if group_hours else 999
+            decay = _two_phase_decay(freshest)
+            recency_weighted_unique += tw(g) * decay
+        kol_consensus = min(1.0, recency_weighted_unique / (total_kols * 0.15))
 
         avg_sentiment = sum(data["sentiments"]) / len(data["sentiments"])
         sentiment_score = (avg_sentiment + 1) / 2
 
         # --- Dynamic conviction: hit_rate replaces static conviction ---
+        # v11: Recency-weighted conviction — recent KOL mentions weigh more
         group_list = list(data["groups"])
 
-        # For each KOL: use dynamic hit_rate if available, else static conviction
-        kol_conv_values = []
+        weighted_conv_sum = 0.0
+        conv_weight_sum = 0.0
         kol_rep_values = []
         for g in group_list:
+            # Temporal decay per KOL based on their freshest mention
+            group_hours = data["hours_ago_by_group"].get(g, [])
+            freshest = min(group_hours) if group_hours else 48
+            decay = _two_phase_decay(freshest)
+
             hit_rate = kol_scores.get(g)  # None if < min_calls data
             if hit_rate is not None:
                 # Dynamic: hit_rate 0.0→conv 5, hit_rate 0.5→conv 8, hit_rate 1.0→conv 10
-                kol_conv_values.append(5.0 + hit_rate * 5.0)
+                base_conv = 5.0 + hit_rate * 5.0
                 kol_rep_values.append(hit_rate)
             else:
                 # Fallback: static conviction until enough data
-                kol_conv_values.append(groups_conviction.get(g, 7))
+                base_conv = groups_conviction.get(g, 7)
                 kol_rep_values.append(0.5)
 
+            weighted_conv_sum += base_conv * decay
+            conv_weight_sum += decay
+
         kol_reputation_avg = sum(kol_rep_values) / max(1, len(kol_rep_values))
-        effective_conviction = sum(kol_conv_values) / max(1, len(kol_conv_values))
+        effective_conviction = weighted_conv_sum / max(0.01, conv_weight_sum)
 
         # Per-message NLP conviction amplifier/dampener (Sprint 6)
         msg_convictions = data.get("msg_conviction_scores", [])
@@ -1588,36 +1945,27 @@ def aggregate_ranking(
         effective_conviction *= avg_msg_conv  # amplifies (>1.0) or dampens (<1.0)
 
         avg_conviction = sum(data["convictions"]) / len(data["convictions"])
-        conviction_score = max(0, min(1, (effective_conviction - 5) / 5))  # Scale 5-10 → 0-1
+        # v14: Compressed range — 7→0.25, 8→0.5, 10→1.0 (was 5-10→0-1, clustering at 0.4-1.0)
+        conviction_score = max(0, min(1, (effective_conviction - 6) / 4))
 
-        # Algorithm v4: Quality-weighted breadth (KOL reputation * tier weight * mention count)
+        # v9: Recency-weighted breadth (KOL reputation * tier * count * freshness decay)
         kol_mention_counts = data.get("kol_mention_counts", {})
         if kol_mention_counts and kol_scores:
-            weighted_mentions = sum(
-                kol_scores.get(kol, 0.5) * tw(kol) * count
-                for kol, count in kol_mention_counts.items()
-            )
-            breadth_score = min(1.0, weighted_mentions / 20)
+            weighted_mentions = 0
+            for kol, count in kol_mention_counts.items():
+                group_hours = data["hours_ago_by_group"].get(kol, [])
+                freshest = min(group_hours) if group_hours else 24
+                decay = _two_phase_decay(freshest)
+                weighted_mentions += kol_scores.get(kol, 0.5) * tw(kol) * count * decay
+            # v14: Recalibrated from /20 → /8. In memecoin reality, 3-4 KOLs
+            # mentioning a token IS strong breadth. Old formula needed 9+ KOLs for 0.5.
+            breadth_score = min(1.0, weighted_mentions / 8)
         else:
-            breadth_score = min(1.0, data["mentions"] / 30)
-
-        # --- Narrative classification ---
-        token_narrative = None
-        narrative_confidence = 0.0
-        if data["narratives"]:
-            narr_counts = defaultdict(int)
-            for n in data["narratives"]:
-                narr_counts[n] += 1
-            token_narrative = max(narr_counts, key=narr_counts.get)
-            # Average confidence across messages with the dominant narrative
-            matching_confs = [
-                c for n, c in zip(data["narratives"], data["narrative_confidences"])
-                if n == token_narrative
-            ]
-            if matching_confs:
-                narrative_confidence = round(sum(matching_confs) / len(matching_confs), 3)
-
-        narrative_is_hot = 1 if (token_narrative and token_narrative == hot_narrative) else 0
+            # Fallback: decay total mentions by freshest overall mention
+            # v14: Recalibrated from /30 → /12
+            freshest_overall = min(data["hours_ago"]) if data["hours_ago"] else 999
+            decay = _two_phase_decay(freshest_overall)
+            breadth_score = min(1.0, (data["mentions"] * decay) / 12)
 
         # --- Algorithm v3 A3: Sentiment consistency (low std = consensus) ---
         sentiment_consistency = 1.0
@@ -1665,9 +2013,15 @@ def aggregate_ranking(
         )
         score_conviction = min(100, max(0, int(raw_conviction * 100)))
 
-        # Recency score: two-phase decay — gentle first 6h, aggressive after
+        # v11: Recency score — max + sustained hybrid (freshest mention dominates)
+        # Fixes: 20 old decayed mentions no longer beat 2 fresh ones
         recency_weights = [_two_phase_decay(h) for h in data["hours_ago"]]
-        recency_score = min(1.0, sum(recency_weights) / 10)
+        if recency_weights:
+            max_recency = max(recency_weights)
+            avg_top3 = sum(sorted(recency_weights, reverse=True)[:3]) / min(3, len(recency_weights))
+            recency_score = 0.6 * max_recency + 0.4 * avg_top3
+        else:
+            recency_score = 0.0
 
         # Momentum mode: what's trending NOW — driven by recency + KOL quality
         raw_momentum = (
@@ -1677,6 +2031,9 @@ def aggregate_ranking(
             + 0.10 * breadth_score
         )
         score_momentum = min(100, max(0, int(raw_momentum * 100)))
+
+        # v9: Freshest mention age for death detection
+        freshest_mention_hours = min(data["hours_ago"]) if data["hours_ago"] else 999
 
         trend = "up" if avg_sentiment > 0.15 else ("down" if avg_sentiment < -0.15 else "stable")
 
@@ -1705,24 +2062,30 @@ def aggregate_ranking(
             "_total_kols": total_kols,
             # Phase 2: KOL reputation
             "kol_reputation_avg": round(kol_reputation_avg, 3),
-            # Phase 2: Narrative
-            "narrative": token_narrative,
-            "narrative_is_hot": narrative_is_hot,
-            # Phase 3B: Narrative confidence
-            "narrative_confidence": narrative_confidence,
+            "narrative": None,
+            "narrative_is_hot": 0,
+            "narrative_confidence": 0.0,
             # Algorithm v2: Per-message conviction NLP (Sprint 6)
             "msg_conviction_avg": round(avg_msg_conv, 2),
             "price_target_count": data.get("price_target_count", 0),
             "hedging_count": data.get("hedging_count", 0),
             # Algorithm v3 A3: Sentiment consistency
             "sentiment_consistency": round(sentiment_consistency, 3),
+            # v9: Freshest mention age for death detection
+            "freshest_mention_hours": round(freshest_mention_hours, 2),
             # Breadth score for upsert and price action recalculation
             "breadth_score": round(breadth_score, 3),
+            # v9: Store recency-decayed consensus for _get_component_value
+            "_decayed_consensus": round(kol_consensus, 4),
             # KOL tier info (for debugging/dashboard)
             "kol_tiers": {g: groups_tier.get(g, "A") for g in data["groups"]} if groups_tier else {},
             # Algorithm v7: Weight renormalization
             "_tw_func": tw,
             "data_confidence": data_conf,
+            # v11: Raw hours_ago list for activity ratio multiplier
+            "_hours_ago": list(data["hours_ago"]),
+            # v14: KOL-stated entry mcaps for entry premium calculation
+            "kol_stated_entry_mcaps": data.get("kol_stated_entry_mcaps", []),
         })
 
     # Verify tokens exist on-chain via DexScreener (filters false positives)
@@ -1867,16 +2230,21 @@ def aggregate_ranking(
             pump_bonus = 1.1
         token["pump_graduated"] = 1 if token.get("pump_graduation_status") == "graduated" else 0
 
-        # Hot narrative bonus
-        narr_bonus = 1.05 if token.get("narrative_is_hot") else 1.0
+        # v9: Death/rug penalty (price collapse + social silence + volume death)
+        death_pen = _detect_death_penalty(token, token.get("freshest_mention_hours", 999))
+        token["death_penalty"] = round(death_pen, 3)
 
         # Wash trading soft penalty (tokens with score 0-0.8 that passed hard gate)
         wash_score = token.get("wash_trading_score", 0)
         wash_pen = max(0.3, 1.0 - wash_score)
 
-        # PVP penalty: same-name tokens launched within 4h = copycat confusion
+        # PVP penalty: same-name tokens — softer on pump.fun where copycats are inevitable
         pvp_recent = token.get("pvp_recent_count") or 0
-        pvp_pen = 1.0 / (1 + 0.2 * pvp_recent)
+        if token.get("is_pump_fun"):
+            # pump.fun: copycats are normal, scraper already resolves to highest-volume pair
+            pvp_pen = max(0.7, 1.0 / (1 + 0.05 * pvp_recent))
+        else:
+            pvp_pen = max(0.5, 1.0 / (1 + 0.1 * pvp_recent))
 
         # Algorithm v4: Degressive artificial pump penalty (was binary 0.2)
         pump_pen = 1.0
@@ -1898,8 +2266,9 @@ def aggregate_ranking(
         token["already_pumped_penalty"] = round(phase_pen, 3)  # backward compat field name
         already_pumped_pen = phase_pen
 
-        # Algorithm v4: Price action multiplier from OHLCV analysis
-        pa_mult = token.get("price_action_mult", 1.0)
+        # v9: pa_mult REMOVED from multiplier chain — price_action already has 40% weight
+        # in base score via renormalization. Applying pa_mult here double-counted it,
+        # making price_action control ~60% instead of the intended 40%.
 
         # Harvard adaptation: Volume squeeze bonus (firing squeeze = pre-breakout)
         sq_state = token.get("squeeze_state", "none")
@@ -1918,7 +2287,67 @@ def aggregate_ranking(
         elif ts >= 0.4:
             trend_mult = 1.07  # moderate trend
 
-        combined = onchain_mult * safety_pen * pump_bonus * narr_bonus * wash_pen * pvp_pen * pump_pen * already_pumped_pen * pa_mult * squeeze_mult * trend_mult
+        # v15.1: Activity ratio — bonus for fresh buzz, NO penalty for quiet periods.
+        # Staleness is already handled by death_penalty (volume-modulated).
+        # activity_mult should only BOOST tokens that are buzzing now, not punish tokens
+        # that had mentions 2 days ago but are still trading well.
+        recent_6h_count = sum(1 for h in token.get("_hours_ago", []) if h <= 6)
+        total_mention_count = len(token.get("_hours_ago", []))
+        if total_mention_count > 0:
+            activity_ratio = recent_6h_count / total_mention_count
+            if activity_ratio > 0.6:
+                activity_mult = 1.15  # most mentions are fresh — bonus
+            elif activity_ratio > 0.3:
+                activity_mult = 1.07  # decent fresh activity
+            else:
+                activity_mult = 1.0   # no penalty — staleness handled by death_penalty
+        else:
+            activity_mult = 1.0
+
+        # v15: Breadth floor — low KOL count is a mild flag, not a death sentence
+        breadth_raw = float(token.get("breadth_score", 0) or 0)
+        if breadth_raw < 0.033:    # ~2 KOLs or fewer
+            breadth_pen = 0.75
+        elif breadth_raw < 0.05:   # ~3 KOLs
+            breadth_pen = 0.85
+        elif breadth_raw < 0.08:   # ~5 KOLs
+            breadth_pen = 0.95
+        else:
+            breadth_pen = 1.0
+
+        # v12: KOL entry premium — penalize tokens that pumped far above KOL call prices
+        entry_premium, entry_premium_mult = _compute_kol_entry_premium(token)
+        token["entry_premium"] = entry_premium
+        token["entry_premium_mult"] = entry_premium_mult
+
+        # v14: Hard stale-mention cutoff — tokens with old mentions shouldn't rank high
+        freshest_h = token.get("freshest_mention_hours", 0)
+        stale_pen = 1.0
+        if freshest_h > 72:
+            stale_pen = 0.3  # 3+ days old = nearly dead
+        elif freshest_h > 48:
+            stale_pen = 0.5  # 2+ days old = very stale
+        token["stale_pen"] = stale_pen
+
+        # v9+v12: Use min(lifecycle, death, entry_premium) — no double-penalizing pump signals
+        crash_pen = min(already_pumped_pen, death_pen, entry_premium_mult)
+
+        # Tuning platform: store ALL multiplier values for client-side re-scoring
+        token["pump_bonus"] = pump_bonus
+        token["wash_pen"] = round(wash_pen, 3)
+        token["pvp_pen"] = round(pvp_pen, 3)
+        token["pump_pen"] = pump_pen
+        token["breadth_pen"] = breadth_pen
+        token["activity_mult"] = activity_mult
+        token["crash_pen"] = crash_pen
+        token["_consensus_val"] = _get_component_value(token, "consensus")
+        token["_sentiment_val"] = (token.get("sentiment", 0) + 1) / 2 if token.get("sentiment") is not None else None
+        # v14: Use same compressed range as _get_component_value
+        token["_conviction_val"] = max(0, min(1, (token.get("avg_conviction", 6) - 6) / 4)) if token.get("avg_conviction") is not None else None
+        token["_breadth_val"] = _get_component_value(token, "breadth")
+        token["_price_action_val"] = _get_component_value(token, "price_action")
+
+        combined = onchain_mult * safety_pen * pump_bonus * wash_pen * pvp_pen * pump_pen * crash_pen * squeeze_mult * trend_mult * activity_mult * breadth_pen * stale_pen
 
         # Apply to all three scoring modes
         token["score"] = min(100, max(0, int(token["score"] * combined)))
@@ -1931,17 +2360,19 @@ def aggregate_ranking(
         consensus_val = _get_component_value(token, "consensus")
         pa_val = _get_component_value(token, "price_action")
         breadth_val = _get_component_value(token, "breadth")
-        if consensus_val is not None and consensus_val >= 0.3:
+        if consensus_val is not None and consensus_val >= 0.2:
             pillars += 1  # Social confirmed
-        if pa_val is not None and pa_val >= 0.4:
+        if pa_val is not None and pa_val >= 0.35:
             pillars += 1  # Price confirmed
-        if breadth_val is not None and breadth_val >= 0.3:
+        # v14: lowered from 0.1 to 0.08 — with recalibrated breadth, 2 KOLs ≈ 0.1
+        if breadth_val is not None and breadth_val >= 0.08:
             pillars += 1  # Distribution confirmed
         token["confirmation_pillars"] = pillars
         if pillars < 2:
-            token["score"] = int(token["score"] * 0.7)
-            token["score_conviction"] = int(token["score_conviction"] * 0.7)
-            token["score_momentum"] = int(token["score_momentum"] * 0.7)
+            # v13: softened from 0.7 to 0.8 (guide uses simpler approach: volume+dip+community)
+            token["score"] = int(token["score"] * 0.8)
+            token["score_conviction"] = int(token["score_conviction"] * 0.8)
+            token["score_momentum"] = int(token["score_momentum"] * 0.8)
 
         # Update interpretation band after final score
         token["score_interpretation"] = _interpret_score(token["score"])
@@ -1958,4 +2389,4 @@ def aggregate_ranking(
     _apply_ml_scores(ranking)
 
     ranking.sort(key=lambda x: (x["score"], x["mentions"]), reverse=True)
-    return ranking
+    return ranking, raw_kol_mentions

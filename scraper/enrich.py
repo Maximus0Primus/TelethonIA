@@ -196,6 +196,22 @@ def _fetch_dexscreener(symbol: str) -> dict | None:
         else:
             pump_graduation_status = None
 
+        # v10: Extract boosts (paid promotion), socials, websites
+        boosts_active = 0
+        boosts_data = best.get("boosts") or {}
+        if isinstance(boosts_data, dict):
+            boosts_active = int(boosts_data.get("active", 0) or 0)
+        elif isinstance(boosts_data, int):
+            boosts_active = boosts_data
+
+        info = best.get("info") or {}
+        socials = info.get("socials") or []
+        websites = info.get("websites") or []
+        has_twitter = 1 if any(s.get("type") == "twitter" for s in socials if isinstance(s, dict)) else 0
+        has_telegram = 1 if any(s.get("type") == "telegram" for s in socials if isinstance(s, dict)) else 0
+        has_website = 1 if len(websites) > 0 else 0
+        social_count = len(socials)
+
         return {
             "token_address": best.get("baseToken", {}).get("address", ""),
             "pair_address": best.get("pairAddress", ""),  # Pool address for OHLCV lookups
@@ -234,6 +250,12 @@ def _fetch_dexscreener(symbol: str) -> dict | None:
             # PVP detection
             "pvp_same_name_count": pvp_same_name_count,
             "pvp_recent_count": pvp_recent_count,
+            # v10: Boosts & social signals (ML features)
+            "boosts_active": boosts_active,
+            "has_twitter": has_twitter,
+            "has_telegram": has_telegram,
+            "has_website": has_website,
+            "social_count": social_count,
         }
 
     except requests.RequestException as e:
