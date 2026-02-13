@@ -28,7 +28,6 @@ from telethon.errors import FloodWaitError
 from pipeline import aggregate_ranking
 from push_to_supabase import upsert_tokens, insert_snapshots, insert_kol_mentions, _get_client as _get_supabase
 from outcome_tracker import fill_outcomes
-from auto_backtest import run_auto_backtest
 from price_refresh import refresh_top_tokens
 from debug_dump import dump_debug_data
 
@@ -395,6 +394,7 @@ def process_and_push(messages_data: dict[str, list[dict]], dump: bool = False) -
 
     # Run automated backtest diagnosis (only if enough labeled data)
     try:
+        from auto_backtest import run_auto_backtest
         report = run_auto_backtest()
         if report:
             ds = report.get("data_summary", {})
