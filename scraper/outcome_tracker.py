@@ -48,6 +48,9 @@ HORIZONS = [
 # Max snapshots to process per cycle (generous — we need to catch up)
 BATCH_LIMIT = 150
 
+# Time budget in seconds — exit gracefully before GH Action timeout
+TIME_BUDGET_SECONDS = 10 * 60  # 10 minutes
+
 
 def _get_client() -> Client:
     url = os.environ["SUPABASE_URL"]
@@ -248,8 +251,12 @@ def fill_outcomes() -> None:
     now = datetime.now(timezone.utc)
     pool_cache = _load_pool_cache()
     stats = {"updated": 0, "ohlcv": 0, "skipped": 0, "no_price": 0, "consistent": 0}
+    start_time = time.time()
+    budget_exceeded = False
 
     for horizon in HORIZONS:
+        if budget_exceeded:
+            break
         hours = horizon["hours"]
         price_col = horizon["price_col"]
         flag_col = horizon["flag_col"]
@@ -280,6 +287,13 @@ def fill_outcomes() -> None:
         logger.info("Processing %d snapshots for %dh horizon", len(snapshots), hours)
 
         for snap in snapshots:
+            # Check time budget before each snapshot
+            if time.time() - start_time > TIME_BUDGET_SECONDS:
+                logger.warning("Outcome tracker: time budget exceeded (%.0fs), stopping gracefully",
+                               time.time() - start_time)
+                budget_exceeded = True
+                break
+
             snap_id = snap["id"]
             symbol = snap["symbol"]
             price_at = snap.get("price_at_snapshot")

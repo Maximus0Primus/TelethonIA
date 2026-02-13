@@ -90,6 +90,7 @@ NUMERIC_LIMITS = {
     "pvp_pen": 1.0,
     "pump_pen": 1.0,
     "breadth_pen": 1.0,
+    "stale_pen": 1.0,
 }
 
 
@@ -527,6 +528,7 @@ def insert_snapshots(ranking: list[dict]) -> None:
             "breadth_pen": t.get("breadth_pen"),
             "activity_mult": t.get("activity_mult"),
             "crash_pen": t.get("crash_pen"),
+            "stale_pen": t.get("stale_pen"),
             # ML temporal features: cross-snapshot deltas
             "score_at_snapshot": deltas.get("score_at_snapshot"),
             "score_delta": deltas.get("score_delta"),

@@ -1,3 +1,62 @@
+# Pipeline Coherence Audit — Phase 1 DONE
+
+## Phase 1: Foundation Fixes (Feb 13)
+
+### C1: Price refresh in --once mode [x]
+- `safe_scraper.py:434-441` — Added `refresh_top_tokens()` at end of `run_one_cycle()`
+- GH Action now gets fresh DexScreener prices before exiting
+
+### I2: Fix breadth threshold in rescorer.ts [x]
+- `rescorer.ts:154,321` — Changed `0.1` -> `0.08` (matches pipeline.py v14 line 2368)
+
+### I3: Add stale_pen to snapshots + rescorer [x]
+- Migration: `stale_pen numeric(4,3)` on token_snapshots
+- `push_to_supabase.py` — Added `stale_pen` to insert_snapshots + NUMERIC_LIMITS
+- `rescorer.ts` — Added to ScoringConfig, TokenSnapshot, multiplier chain, estimateProdScore
+- `MultiplierToggles.tsx` — Added "Stale Token Penalty" toggle
+- Both API routes (`/api/tuning/snapshots`, `/api/tuning/backtest`) — Added stale_pen to column list
+
+### I1: Fix auto_backtest scoring drift [x]
+- `auto_backtest.py:_compute_score()` — Complete rewrite:
+  - Fixed conviction: `(ac-5)/5` -> `(ac-6)/4` (matches v14)
+  - Added 7 missing multipliers: pump_bonus, wash_pen, pvp_pen, pump_pen, activity_mult, breadth_pen, stale_pen
+  - Prefers stored component values (consensus_val etc.) when available
+  - Added SNAPSHOT_COLUMNS for new fields
+  - New `_safe_mult()` helper for clean multiplier reading
+
+### C3: Diagnose snapshot accumulation [x]
+- Diagnosis: 204 snapshots (was 145 during planning), 50 labeled for 12h, 0 for 24h
+- System running for ~24h, producing ~60 tokens/cycle, ~15 cycles/day = ~900/day
+- No silent failures detected. Low count is expected for 1-day operation.
+
+### C5: Outcome tracker in separate GH Action [x]
+- `outcome_tracker.py` — Added 10min TIME_BUDGET_SECONDS with graceful exit
+- `.github/workflows/outcomes.yml` — New workflow: every 2h, 15min timeout
+- Main scrape.yml still runs fill_outcomes too (dual-path for faster labeling)
+
+### I4: Multi-window price refresh [x]
+- `price_refresh.py` — Now refreshes ALL time windows (3h/6h/12h/24h/48h/7d)
+- Pre-fetches which symbols exist in each window to avoid orphan upserts
+- Same DexScreener data, just more DB upserts
+
+## Phase 2: Fiabiliser la boucle (next)
+- [ ] 2.1: C4 — Verify backtest_reports populate after 30+ labeled snapshots
+- [ ] 2.2: D1 — Table token_candles + store OHLCV for charts
+- [ ] 2.3: D2 — Extract additional DexScreener fields (pairCreatedAt, fdv, full social URLs)
+
+## Phase 3: ML Intelligence (after 500+ snapshots)
+- [ ] 3.1: C2 Phase B — ML inference in pipeline.py with ml_score blend
+- [ ] 3.2: Training weekly GH Action
+- [ ] 3.3: D4 — KOL scores table + frontend leaderboard
+
+## Verification Checklist
+- [ ] After 1 scrape cycle: `SELECT COUNT(*) FROM token_snapshots WHERE stale_pen IS NOT NULL` > 0
+- [ ] Compare rescorer score vs DB score for 10 tokens: delta < 2 pts
+- [ ] After 48h: `SELECT COUNT(*) FROM backtest_reports` > 0
+- [ ] After 7 days: 500+ snapshots, ML training possible
+
+---
+
 # Algorithm v4 Implementation — COMPLETE
 
 ## Sprint 1: Price Action Analysis via Birdeye OHLCV ✅

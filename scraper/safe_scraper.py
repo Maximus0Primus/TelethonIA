@@ -433,6 +433,14 @@ async def run_one_cycle(client: TelegramClient, dump: bool = False) -> None:
 
     if total_msgs > 0:
         process_and_push(messages_data, dump=dump)
+
+        # C1 fix: Run price refresh at end of cycle so --once mode
+        # (GH Action) also gets fresh DexScreener prices before exiting.
+        try:
+            updated = refresh_top_tokens()
+            logger.info("Post-cycle price refresh: %d tokens updated", updated)
+        except Exception as e:
+            logger.error("Post-cycle price refresh failed: %s", e)
     else:
         logger.warning("No messages scraped — skipping push")
 

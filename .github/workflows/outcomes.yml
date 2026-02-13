@@ -1,0 +1,47 @@
+name: Fill Outcome Labels
+
+on:
+  schedule:
+    # Every 2 hours — labels snapshots whose time windows have elapsed
+    - cron: '15 */2 * * *'
+  workflow_dispatch: {} # Manual trigger
+
+jobs:
+  fill-outcomes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('scraper/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      # Persist pool address cache between runs (token -> pool mapping, very stable)
+      - name: Restore pool address cache
+        uses: actions/cache@v4
+        with:
+          path: scraper/pool_address_cache.json
+          key: pool-cache-${{ github.run_id }}
+          restore-keys: pool-cache-
+
+      - name: Install dependencies
+        run: pip install -r scraper/requirements.txt
+
+      - name: Fill outcome labels
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        working-directory: scraper
+        run: python -c "from outcome_tracker import fill_outcomes; fill_outcomes()"

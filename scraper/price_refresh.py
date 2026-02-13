@@ -261,6 +261,9 @@ def refresh_top_tokens(n: int = REFRESH_TOP_N) -> int:
     updated = 0
     update_rows = []
 
+    # All time windows to refresh (same DexScreener data, just more upserts)
+    ALL_WINDOWS = ["3h", "6h", "12h", "24h", "48h", "7d"]
+
     # v11: Compute elapsed time since last full scrape for social decay
     # Use scrape_metadata to find when the last full cycle ran
     try:
@@ -277,6 +280,21 @@ def refresh_top_tokens(n: int = REFRESH_TOP_N) -> int:
             minutes_since_scrape = max(0, delta.total_seconds() / 60)
         except Exception:
             pass
+
+    # Pre-fetch which symbols exist in which windows (avoid upserting to windows that don't have the token)
+    existing_by_window: dict[str, set[str]] = {}
+    for window in ALL_WINDOWS:
+        try:
+            wr = (
+                client.table("tokens")
+                .select("symbol")
+                .eq("time_window", window)
+                .in_("symbol", symbols)
+                .execute()
+            )
+            existing_by_window[window] = {r["symbol"] for r in (wr.data or [])}
+        except Exception:
+            existing_by_window[window] = set()
 
     for token in tokens:
         symbol = token["symbol"]
@@ -305,22 +323,22 @@ def refresh_top_tokens(n: int = REFRESH_TOP_N) -> int:
         # Clamp: never boost (>1.0), floor at 0.3 to avoid total zeroing
         social_decay = max(0.3, min(1.0, social_decay))
 
-        # v15: Removed staleness_pen — price action + volume already handle dead tokens
-        # via death_penalty (volume death, price crash) and social_decay handles gradual aging.
-
         new_score = min(100, max(0, int(base_score * refresh_mult * social_decay)))
         new_conv = min(100, max(0, int(base_conv * refresh_mult * social_decay)))
         new_mom = min(100, max(0, int(base_mom * refresh_mult * social_decay)))
         new_change = market_data.get("price_change_24h") or token.get("change_24h", 0)
 
-        update_rows.append({
-            "symbol": symbol,
-            "time_window": "7d",
-            "score": new_score,
-            "score_conviction": new_conv,
-            "score_momentum": new_mom,
-            "change_24h": round(new_change, 2) if new_change else 0,
-        })
+        # Update ALL time windows that have this symbol (not just 7d)
+        for window in ALL_WINDOWS:
+            if symbol in existing_by_window.get(window, set()):
+                update_rows.append({
+                    "symbol": symbol,
+                    "time_window": window,
+                    "score": new_score,
+                    "score_conviction": new_conv,
+                    "score_momentum": new_mom,
+                    "change_24h": round(new_change, 2) if new_change else 0,
+                })
 
         updated += 1
 
