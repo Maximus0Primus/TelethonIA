@@ -55,4 +55,5 @@ desktop.ini
 # === BINARY ASSETS ===
 *.wav
 *.png
+!crypto-kol-ranking/public/logo.png
 *.pem

@@ -15,43 +15,32 @@ export default function Icon() {
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
-          position: "relative",
         }}
       >
-        {/* Circle */}
-        <div
-          style={{
-            width: 24,
-            height: 24,
-            borderRadius: "50%",
-            border: "2px solid #fff",
-            display: "flex",
-          }}
-        />
-        {/* Horizontal line */}
-        <div
-          style={{
-            position: "absolute",
-            top: 15,
-            left: 2,
-            width: 28,
-            height: 2,
-            background: "#fff",
-            display: "flex",
-          }}
-        />
-        {/* Vertical line */}
-        <div
-          style={{
-            position: "absolute",
-            top: 2,
-            left: 15,
-            width: 2,
-            height: 28,
-            background: "#fff",
-            display: "flex",
-          }}
-        />
+        <svg
+          width="28"
+          height="20"
+          viewBox="0 0 100 60"
+          fill="none"
+          xmlns="http://www.w3.org/2000/svg"
+        >
+          {/* Outer eye shape - diamond/angular */}
+          <path
+            d="M50 2 L95 30 L50 58 L5 30 Z"
+            stroke="white"
+            strokeWidth="5"
+            fill="none"
+          />
+          {/* Inner eye shape - slightly smaller */}
+          <path
+            d="M50 10 L85 30 L50 50 L15 30 Z"
+            stroke="white"
+            strokeWidth="4"
+            fill="none"
+          />
+          {/* Pupil circle */}
+          <circle cx="50" cy="30" r="10" stroke="white" strokeWidth="4" fill="none" />
+        </svg>
       </div>
     ),
     { ...size }

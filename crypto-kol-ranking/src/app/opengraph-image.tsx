@@ -1,7 +1,7 @@
 import { ImageResponse } from "next/og";
 
 export const runtime = "edge";
-export const alt = "Cryptosensus — First Real-Time Crypto Lowcap Buy Score";
+export const alt = "Cryptosensus — Real-Time Lowcap Crypto Buy Indicator";
 export const size = { width: 1200, height: 630 };
 export const contentType = "image/png";
 
@@ -41,13 +41,37 @@ export default function OGImage() {
             height: 500,
             borderRadius: "50%",
             background:
-              "radial-gradient(circle, rgba(138,43,226,0.15) 0%, transparent 70%)",
+              "radial-gradient(circle, rgba(255,255,255,0.06) 0%, transparent 70%)",
             top: "50%",
             left: "50%",
             transform: "translate(-50%, -50%)",
             display: "flex",
           }}
         />
+
+        {/* Eye logo */}
+        <svg
+          width="120"
+          height="85"
+          viewBox="0 0 100 60"
+          fill="none"
+          xmlns="http://www.w3.org/2000/svg"
+          style={{ marginBottom: 30 }}
+        >
+          <path
+            d="M50 2 L95 30 L50 58 L5 30 Z"
+            stroke="white"
+            strokeWidth="4"
+            fill="none"
+          />
+          <path
+            d="M50 10 L85 30 L50 50 L15 30 Z"
+            stroke="white"
+            strokeWidth="3"
+            fill="none"
+          />
+          <circle cx="50" cy="30" r="10" stroke="white" strokeWidth="3.5" fill="none" />
+        </svg>
 
         {/* Title */}
         <div
@@ -76,7 +100,7 @@ export default function OGImage() {
             style={{
               width: 120,
               height: 2,
-              background: "linear-gradient(90deg, transparent, #8a2be2, transparent)",
+              background: "linear-gradient(90deg, transparent, rgba(255,255,255,0.4), transparent)",
               display: "flex",
             }}
           />
@@ -84,13 +108,13 @@ export default function OGImage() {
           <div
             style={{
               fontSize: 28,
-              color: "rgba(255,255,255,0.6)",
+              color: "rgba(255,255,255,0.5)",
               letterSpacing: "4px",
               textTransform: "uppercase",
               display: "flex",
             }}
           >
-            Real-Time Lowcap Buy Score
+            Real-Time Lowcap Buy Indicator
           </div>
         </div>
 
@@ -106,17 +130,8 @@ export default function OGImage() {
         >
           <div
             style={{
-              width: 8,
-              height: 8,
-              borderRadius: "50%",
-              background: "#00ff88",
-              display: "flex",
-            }}
-          />
-          <div
-            style={{
               fontSize: 18,
-              color: "rgba(255,255,255,0.4)",
+              color: "rgba(255,255,255,0.3)",
               letterSpacing: "2px",
               display: "flex",
             }}

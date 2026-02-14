@@ -15,43 +15,32 @@ export default function AppleIcon() {
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
-          position: "relative",
         }}
       >
-        {/* Circle */}
-        <div
-          style={{
-            width: 130,
-            height: 130,
-            borderRadius: "50%",
-            border: "8px solid #fff",
-            display: "flex",
-          }}
-        />
-        {/* Horizontal line */}
-        <div
-          style={{
-            position: "absolute",
-            top: 86,
-            left: 10,
-            width: 160,
-            height: 8,
-            background: "#fff",
-            display: "flex",
-          }}
-        />
-        {/* Vertical line */}
-        <div
-          style={{
-            position: "absolute",
-            top: 10,
-            left: 86,
-            width: 8,
-            height: 160,
-            background: "#fff",
-            display: "flex",
-          }}
-        />
+        <svg
+          width="140"
+          height="100"
+          viewBox="0 0 100 60"
+          fill="none"
+          xmlns="http://www.w3.org/2000/svg"
+        >
+          {/* Outer eye shape */}
+          <path
+            d="M50 2 L95 30 L50 58 L5 30 Z"
+            stroke="white"
+            strokeWidth="4"
+            fill="none"
+          />
+          {/* Inner eye shape */}
+          <path
+            d="M50 10 L85 30 L50 50 L15 30 Z"
+            stroke="white"
+            strokeWidth="3"
+            fill="none"
+          />
+          {/* Pupil circle */}
+          <circle cx="50" cy="30" r="10" stroke="white" strokeWidth="3.5" fill="none" />
+        </svg>
       </div>
     ),
     { ...size }

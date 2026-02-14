@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { motion } from "framer-motion";
 import Link from "next/link";
+import Image from "next/image";
 import { useAudio } from "@/components/AudioProvider";
 import { ContactModal } from "@/components/layout/ContactModal";
 
@@ -30,8 +31,16 @@ export function Header() {
         <div className="mx-auto flex h-20 max-w-7xl items-center justify-between px-4 sm:px-8">
           <Link
             href="/"
-            className="pointer-events-auto"
+            className="pointer-events-auto flex items-center gap-2.5"
           >
+            <Image
+              src="/logo.png"
+              alt="Cryptosensus"
+              width={32}
+              height={32}
+              className="size-8"
+              priority
+            />
             <h1 className="text-xl font-bold tracking-tight text-white hover:text-white/80 transition-colors">
               Cryptosensus
             </h1>
