@@ -62,12 +62,11 @@ export default async function HomePage() {
     <>
       {/* Static SEO content — crawlable by search engines, visually hidden */}
       <div className="sr-only" aria-hidden="false">
-        <h2>Real-Time Crypto Lowcap Buy Score — Powered by KOL Sentiment</h2>
+        <h2>Real-Time Lowcap Crypto Buy Indicator</h2>
         <p>
-          Cryptosensus analyzes sentiment from 50+ crypto KOL Telegram groups in
-          real-time to score lowcap tokens by conviction, mentions, and community
-          sentiment. Find trending memecoins and high-conviction plays before the
-          crowd. Data-driven crypto trading signals updated every 30 minutes.
+          Cryptosensus brings clarity to the noise. We score lowcap tokens so
+          you know what to buy before the crowd does. Stop guessing. Start
+          winning. Data-driven onchain analysis updated every 15 minutes.
         </p>
         {initialTokens.length > 0 && (
           <>
