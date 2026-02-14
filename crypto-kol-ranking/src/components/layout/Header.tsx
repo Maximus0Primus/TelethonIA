@@ -36,12 +36,12 @@ export function Header() {
             <Image
               src="/logo.png"
               alt="Cryptosensus"
-              width={36}
-              height={32}
-              className="h-8 w-auto"
+              width={160}
+              height={142}
+              className="h-7 w-auto shrink-0"
               priority
             />
-            <h1 className="text-xl font-bold tracking-tight text-white hover:text-white/80 transition-colors">
+            <h1 className="text-xl font-bold tracking-tight text-white hover:text-white/80 transition-colors leading-none">
               Cryptosensus
             </h1>
           </Link>
