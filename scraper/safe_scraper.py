@@ -347,6 +347,13 @@ def _fetch_sol_price() -> float | None:
 
 def process_and_push(messages_data: dict[str, list[dict]], dump: bool = False) -> None:
     """Run the pipeline and push results to Supabase."""
+    # Load dynamic scoring weights from Supabase (auto-learning loop)
+    try:
+        from pipeline import load_scoring_config
+        load_scoring_config()
+    except Exception as e:
+        logger.warning("Failed to load scoring config: %s (using defaults)", e)
+
     ranking_by_window: dict[str, list[dict]] = {}
     all_enriched_by_window: dict[str, list[dict]] = {}
     all_raw_mentions: list[dict] = []
@@ -440,6 +447,46 @@ def process_and_push(messages_data: dict[str, list[dict]], dump: bool = False) -
             )
     except Exception as e:
         logger.error("Auto-backtest failed: %s", e)
+
+    # Auto-retrain ML model when enough labeled data accumulated
+    # Conditions: 500+ labeled samples AND >7 days since last training
+    try:
+        from train_model import auto_train, MODEL_DIR
+        meta_path = MODEL_DIR / "model_12h_meta.json"
+        should_train = False
+        if not meta_path.exists():
+            # No model yet — train if we have enough data
+            should_train = True
+        else:
+            import json as _json
+            with open(meta_path) as _f:
+                meta = _json.load(_f)
+            trained_at = meta.get("auto_trained_at") or meta.get("trained_at", "")
+            if trained_at:
+                from datetime import datetime as _dt
+                try:
+                    last_dt = _dt.fromisoformat(trained_at)
+                    days_since = (datetime.now(timezone.utc).replace(tzinfo=None) - last_dt).days
+                    if days_since >= 7:
+                        should_train = True
+                        logger.info("Auto-retrain: %d days since last train, triggering", days_since)
+                except Exception:
+                    should_train = True
+            else:
+                should_train = True
+
+        if should_train:
+            result = auto_train(horizon="12h", min_samples=500, trials=50)
+            if result:
+                logger.info(
+                    "Auto-retrain: SUCCESS — spearman=%.3f, p@5=%.3f",
+                    result.get("metrics", {}).get("spearman", 0),
+                    result.get("metrics", {}).get("precision_at_5", 0),
+                )
+            else:
+                logger.info("Auto-retrain: skipped (not enough data or no improvement)")
+    except Exception as e:
+        logger.error("Auto-retrain failed: %s", e)
 
     # v10: Cleanup old data (>90 days) to prevent unbounded growth
     try:

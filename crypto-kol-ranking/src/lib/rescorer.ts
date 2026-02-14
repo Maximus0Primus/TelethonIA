@@ -31,6 +31,7 @@ export interface ScoringConfig {
     pump_pen: { enabled: boolean };
     breadth_pen: { enabled: boolean };
     stale_pen: { enabled: boolean };
+    pump_momentum_pen: { enabled: boolean };
   };
   confirmation_gate: {
     enabled: boolean;
@@ -80,6 +81,7 @@ export interface TokenSnapshot {
   stale_pen: number | null;
   size_mult: number | null;
   s_tier_mult: number | null;
+  pump_momentum_pen: number | null;
   // v15: KOL counts
   unique_kols: number | null;
   s_tier_count: number | null;
@@ -139,6 +141,7 @@ export interface ScoredToken {
     breadth_pen: number;
     stale_pen: number;
     size_mult: number;
+    pump_momentum_pen: number;
     s_tier_bonus: number;
     freshness_cutoff: number;
     confirmation_gate: number;
@@ -147,7 +150,37 @@ export interface ScoredToken {
   snapshot: TokenSnapshot;
 }
 
-// ─── Default Config (production values) ──────────────────────────────────────
+// ─── Production Config (loaded from scoring_config table) ────────────────────
+
+/**
+ * Fetch current production scoring config from the API.
+ * Returns a ScoringConfig with weights from scoring_config table,
+ * merged with DEFAULT_CONFIG for multiplier toggles (which are not stored in DB).
+ */
+export async function fetchProductionConfig(): Promise<ScoringConfig> {
+  try {
+    const res = await fetch("/api/tuning/config");
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (data.weights) {
+      return {
+        ...DEFAULT_CONFIG,
+        weights: {
+          ...DEFAULT_CONFIG.weights,
+          consensus: data.weights.consensus ?? DEFAULT_CONFIG.weights.consensus,
+          conviction: data.weights.conviction ?? DEFAULT_CONFIG.weights.conviction,
+          breadth: data.weights.breadth ?? DEFAULT_CONFIG.weights.breadth,
+          price_action: data.weights.price_action ?? DEFAULT_CONFIG.weights.price_action,
+        },
+      };
+    }
+  } catch {
+    // Fall through to default
+  }
+  return { ...DEFAULT_CONFIG };
+}
+
+// ─── Default Config (hardcoded fallback) ─────────────────────────────────────
 
 export const DEFAULT_CONFIG: ScoringConfig = {
   weights: {
@@ -172,7 +205,8 @@ export const DEFAULT_CONFIG: ScoringConfig = {
     pvp_pen: { enabled: true },
     pump_pen: { enabled: true },
     breadth_pen: { enabled: true },
-    stale_pen: { enabled: true },
+    stale_pen: { enabled: false },  // v17: disabled — death_penalty handles staleness
+    pump_momentum_pen: { enabled: true },
   },
   confirmation_gate: {
     enabled: false,  // v15.3: removed — backtest shows gate penalizes winners
@@ -187,7 +221,7 @@ export const DEFAULT_CONFIG: ScoringConfig = {
   kol_tuning: {
     conviction_dampening: { enabled: true, min_kols: 2 },
     s_tier_bonus: { enabled: true, bonus: 1.2 },
-    freshness_cutoff: { enabled: true, max_hours: 24, penalty: 0.5 },
+    freshness_cutoff: { enabled: false, max_hours: 24, penalty: 0.5 },  // v17: disabled — death_penalty handles staleness
   },
   extraction_mode: "both",
 };
@@ -224,11 +258,18 @@ export function rescore(snapshot: TokenSnapshot, config: ScoringConfig): ScoredT
   const w = config.weights;
 
   // 1. Component values (with fallbacks)
-  const cv = snapshot.consensus_val ?? 0;
+  let cv = snapshot.consensus_val ?? 0;
   const sv = snapshot.sentiment_val ?? 0;
   let kv = snapshot.conviction_val ?? 0;
   const bv = snapshot.breadth_val ?? 0;
   const pv = snapshot.price_action_val ?? 0.5;
+
+  // v17: Consensus pump discount — late KOL mentions after pump are worth less
+  const pc24 = snapshot.price_change_24h;
+  if (pc24 !== null && pc24 !== undefined && pc24 > 50) {
+    const consensusDiscount = Math.max(0.5, 1.0 - (pc24 / 400));
+    cv *= consensusDiscount;
+  }
 
   // v15: Conviction dampening by KOL count
   const kt = config.kol_tuning;
@@ -313,9 +354,15 @@ export function rescore(snapshot: TokenSnapshot, config: ScoringConfig): ScoredT
   // derives from s_tier_count. Don't also multiply by stored s_tier_mult to avoid
   // double-counting.
 
+  // v17: Pump momentum penalty
+  const pumpMomentumPen = m.pump_momentum_pen.enabled ? (snapshot.pump_momentum_pen ?? 1.0) : 1.0;
+
+  // v17: stale_pen REMOVED from default chain — death_penalty Signal 3 already
+  // handles staleness with volume modulation. Toggle still available for experimentation.
   mult = safetyMult * onchainMult * crashMult * activityMult * squeezeMult * trendMult
-    * pumpBonusMult * washMult * pvpMult * pumpPenMult * breadthPenMult * stalePenMult
-    * sTierMult * freshnessMult * sizeMult;
+    * pumpBonusMult * washMult * pvpMult * pumpPenMult * breadthPenMult
+    * stalePenMult  // v17: disabled by default, kept for Tuning Lab toggle
+    * sTierMult * freshnessMult * sizeMult * pumpMomentumPen;
 
   // 3. Confirmation gate
   let gateMult = 1.0;
@@ -328,8 +375,8 @@ export function rescore(snapshot: TokenSnapshot, config: ScoringConfig): ScoredT
     if (pillars < cg.min_pillars) gateMult = cg.penalty;
   }
 
-  // v16: Floor raised from 0.15 to 0.25 — decompresses scores out of 0-14 band
-  const combined = Math.max(0.25, mult * gateMult);
+  // v17: Floor 0.25, Cap 2.0 — prevents multiplier stacking from inflating scores
+  const combined = Math.max(0.25, Math.min(2.0, mult * gateMult));
   const newScore = Math.min(100, Math.max(0, Math.round(raw * combined)));
 
   // Estimate production score: same formula with default config
@@ -364,6 +411,7 @@ export function rescore(snapshot: TokenSnapshot, config: ScoringConfig): ScoredT
       breadth_pen: breadthPenMult,
       stale_pen: stalePenMult,
       size_mult: sizeMult,
+      pump_momentum_pen: pumpMomentumPen,
       s_tier_bonus: sTierMult,
       freshness_cutoff: freshnessMult,
       confirmation_gate: gateMult,
@@ -376,11 +424,17 @@ export function rescore(snapshot: TokenSnapshot, config: ScoringConfig): ScoredT
 function estimateProdScore(snapshot: TokenSnapshot): number {
   // Re-score with default config to get a comparable production score
   const w = DEFAULT_CONFIG.weights;
-  const cv = snapshot.consensus_val ?? 0;
+  let cv = snapshot.consensus_val ?? 0;
   const sv = snapshot.sentiment_val ?? 0;
   const kv = snapshot.conviction_val ?? 0;
   const bv = snapshot.breadth_val ?? 0;
   const pv = snapshot.price_action_val ?? 0.5;
+
+  // v17: Consensus pump discount (mirrors rescore)
+  const pc24 = snapshot.price_change_24h;
+  if (pc24 !== null && pc24 !== undefined && pc24 > 50) {
+    cv *= Math.max(0.5, 1.0 - (pc24 / 400));
+  }
 
   const available: { value: number; weight: number }[] = [];
   if (snapshot.consensus_val !== null) available.push({ value: cv, weight: w.consensus });
@@ -396,6 +450,7 @@ function estimateProdScore(snapshot: TokenSnapshot): number {
 
   const raw = weightedSum * 100;
 
+  // v17: stale_pen removed from prod chain (death_penalty handles staleness)
   let mult = (snapshot.safety_penalty ?? 1.0)
     * (snapshot.onchain_multiplier ?? 1.0)
     * (snapshot.crash_pen ?? 1.0)
@@ -405,12 +460,12 @@ function estimateProdScore(snapshot: TokenSnapshot): number {
     * (snapshot.pvp_pen ?? 1.0)
     * (snapshot.pump_pen ?? 1.0)
     * (snapshot.breadth_pen ?? 1.0)
-    * (snapshot.stale_pen ?? 1.0)
     * (snapshot.size_mult ?? 1.0)
-    * (snapshot.s_tier_mult ?? 1.0);
+    * (snapshot.s_tier_mult ?? 1.0)
+    * (snapshot.pump_momentum_pen ?? 1.0);
 
-  // v16: squeeze and trend disabled (anti-predictive), combined floor raised to 0.25
-  mult = Math.max(0.25, mult);
+  // v17: Floor 0.25, Cap 2.0 (squeeze and trend still disabled)
+  mult = Math.max(0.25, Math.min(2.0, mult));
 
   return Math.min(100, Math.max(0, Math.round(raw * mult)));
 }

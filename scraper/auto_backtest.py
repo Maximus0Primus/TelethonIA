@@ -33,14 +33,39 @@ except ImportError:
 
 from supabase import create_client
 
-# --- Constants (mirror pipeline.py v16) ---
+# --- Constants (fallback, overridden by scoring_config table) ---
 
-BALANCED_WEIGHTS = {
-    "consensus": 0.30,      # v16
-    "conviction": 0.05,     # v16
-    "breadth": 0.10,        # v16
-    "price_action": 0.55,   # v16
+_DEFAULT_WEIGHTS = {
+    "consensus": 0.30,
+    "conviction": 0.05,
+    "breadth": 0.10,
+    "price_action": 0.55,
 }
+
+BALANCED_WEIGHTS = _DEFAULT_WEIGHTS.copy()
+
+
+def _load_current_weights(client) -> dict:
+    """Load current production weights from scoring_config table."""
+    global BALANCED_WEIGHTS
+    try:
+        result = client.table("scoring_config").select("*").eq("id", 1).execute()
+        if result.data:
+            row = result.data[0]
+            weights = {
+                "consensus": float(row["w_consensus"]),
+                "conviction": float(row["w_conviction"]),
+                "breadth": float(row["w_breadth"]),
+                "price_action": float(row["w_price_action"]),
+            }
+            total = sum(weights.values())
+            if abs(total - 1.0) < 0.02:
+                BALANCED_WEIGHTS.update(weights)
+                logger.info("auto_backtest: loaded weights from scoring_config: %s", weights)
+                return weights
+    except Exception as e:
+        logger.debug("auto_backtest: scoring_config load failed: %s", e)
+    return BALANCED_WEIGHTS.copy()
 
 TOTAL_KOLS = 60
 
@@ -85,7 +110,7 @@ SNAPSHOT_COLUMNS = (
     "whale_dominance, already_pumped_penalty, squeeze_score, squeeze_state, "
     "trend_strength, confirmation_pillars, data_confidence, "
     "rsi_14, macd_histogram, bb_width, obv_slope_norm, "
-    "price_at_snapshot, price_after_1h, price_after_6h, price_after_12h, price_after_24h, "
+    "price_change_24h, price_at_snapshot, price_after_1h, price_after_6h, price_after_12h, price_after_24h, "
     "price_after_48h, price_after_72h, price_after_7d, "
     "max_price_1h, max_price_6h, max_price_12h, max_price_24h, max_price_48h, max_price_72h, max_price_7d, "
     "did_2x_1h, did_2x_6h, did_2x_12h, did_2x_24h, did_2x_48h, did_2x_72h, did_2x_7d, mentions, "
@@ -95,7 +120,7 @@ SNAPSHOT_COLUMNS = (
     "unique_wallet_24h_change, whale_new_entries, "
     "consensus_val, conviction_val, breadth_val, price_action_val, "
     "pump_bonus, wash_pen, pvp_pen, pump_pen, activity_mult, breadth_pen, crash_pen, stale_pen, size_mult, "
-    "s_tier_mult, s_tier_count, unique_kols, "
+    "s_tier_mult, s_tier_count, unique_kols, pump_momentum_pen, "
     "ca_mention_count, ticker_mention_count, url_mention_count, has_ca_mention"
 )
 
@@ -156,6 +181,12 @@ def _compute_score(row: pd.Series, weights: dict) -> int:
     if not pd.notna(row.get("consensus_val")):
         b_raw = row.get("breadth")
         consensus = min(1.0, float(b_raw) / 0.15) if pd.notna(b_raw) else None
+
+    # v17: Consensus pump discount — late KOL mentions after pump are worth less
+    pc24_raw = row.get("price_change_24h") if "price_change_24h" in row.index else None
+    if consensus is not None and pd.notna(pc24_raw) and float(pc24_raw) > 50:
+        consensus_discount = max(0.5, 1.0 - (float(pc24_raw) / 400))
+        consensus *= consensus_discount
 
     conviction_val = _safe_mult(row, "conviction_val", default=0)
     if not pd.notna(row.get("conviction_val")):
@@ -241,12 +272,17 @@ def _compute_score(row: pd.Series, weights: dict) -> int:
         s_tier_count = int(row.get("s_tier_count") or 0) if pd.notna(row.get("s_tier_count")) else 0
         s_tier_mult = 1.2 if s_tier_count > 0 else 1.0
 
+    # v17: Pump momentum penalty
+    pump_momentum_pen = _safe_mult(row, "pump_momentum_pen")
+
+    # v17: stale_pen REMOVED from chain — death_penalty Signal 3 already
+    # handles staleness with volume modulation. Keeping both was double-penalizing.
     combined_raw = (onchain * safety * crash_pen * squeeze_mult * trend_mult
                     * pump_bonus * wash_pen * pvp_pen * pump_pen
-                    * activity_mult * breadth_pen * stale_pen * size_mult
-                    * s_tier_mult)
-    # v16: Floor at 0.25 to decompress low-score band
-    combined = max(0.25, combined_raw)
+                    * activity_mult * breadth_pen * size_mult
+                    * s_tier_mult * pump_momentum_pen)
+    # v17: Floor at 0.25, Cap at 2.0 to prevent multiplier stacking
+    combined = max(0.25, min(2.0, combined_raw))
     score = base_score * combined
 
     return min(100, max(0, int(score)))
@@ -733,6 +769,152 @@ def _walk_forward(df: pd.DataFrame, horizon_col: str = "did_2x_12h") -> list[dic
     return folds
 
 
+def _find_optimal_weights(df: pd.DataFrame, horizon_col: str = "did_2x_12h") -> dict | None:
+    """
+    Grid search for weight combination that maximizes #1 token hit rate.
+    Returns best weights dict or None if no improvement found.
+    """
+    first = df.sort_values("snapshot_at").drop_duplicates(subset=["symbol"], keep="first")
+    labeled = first[first[horizon_col].notna()].copy()
+    if len(labeled) < 50:
+        return None
+
+    # Generate candidate weight combinations (step=0.05, sum=1.0)
+    best_hr = -1
+    best_weights = None
+    step = 0.05
+    components = list(BALANCED_WEIGHTS.keys())
+
+    # Score the current weights first as baseline
+    labeled["base_score"] = labeled.apply(lambda r: _compute_score(r, BALANCED_WEIGHTS), axis=1)
+    # Use top1 metric: per-cycle #1 token hit rate
+    labeled["cycle"] = labeled["snapshot_at"].dt.floor("15min")
+
+    def _top1_hr_for_weights(weights: dict) -> float:
+        labeled["test_score"] = labeled.apply(lambda r: _compute_score(r, weights), axis=1)
+        hits = 0
+        tested = 0
+        seen = set()
+        for _, group in labeled.sort_values("snapshot_at").groupby("cycle"):
+            lbl = group[group[horizon_col].notna()]
+            if lbl.empty:
+                continue
+            top1 = lbl.loc[lbl["test_score"].idxmax()]
+            sym = top1["symbol"]
+            if sym in seen:
+                continue
+            seen.add(sym)
+            tested += 1
+            if bool(top1[horizon_col]):
+                hits += 1
+        return hits / max(1, tested)
+
+    baseline_hr = _top1_hr_for_weights(BALANCED_WEIGHTS)
+
+    # Smart grid: vary each component around current value
+    import itertools
+    ranges = {}
+    for comp in components:
+        current = BALANCED_WEIGHTS[comp]
+        vals = [max(0.0, current + d) for d in [-0.10, -0.05, 0.0, 0.05, 0.10]]
+        ranges[comp] = sorted(set(round(v, 2) for v in vals if 0.0 <= v <= 0.80))
+
+    for combo in itertools.product(*[ranges[c] for c in components]):
+        total = sum(combo)
+        if abs(total - 1.0) > 0.02:
+            continue
+        # Normalize to exactly 1.0
+        weights = {c: round(v / total, 3) for c, v in zip(components, combo)}
+        hr = _top1_hr_for_weights(weights)
+        if hr > best_hr:
+            best_hr = hr
+            best_weights = weights
+
+    if best_weights is None or best_hr <= baseline_hr:
+        return None
+
+    # Require >5pp improvement to justify a change
+    improvement = best_hr - baseline_hr
+    if improvement < 0.05:
+        logger.info("auto_apply: best improvement %.1f%% < 5pp threshold, skipping", improvement * 100)
+        return None
+
+    return {
+        "weights": best_weights,
+        "hit_rate": best_hr,
+        "baseline_hr": baseline_hr,
+        "improvement": improvement,
+    }
+
+
+def _auto_apply_weights(client, df: pd.DataFrame, horizon_col: str = "did_2x_12h") -> dict | None:
+    """
+    Find optimal weights and write to scoring_config if improvement is significant.
+
+    Guard-rails:
+    - Requires 100+ unique labeled tokens
+    - No weight can change by >0.10 from current production value
+    - Improvement must be >5pp in #1 token hit rate
+    - Weights must sum to 1.0
+    """
+    first = df.sort_values("snapshot_at").drop_duplicates(subset=["symbol"], keep="first")
+    n_labeled = len(first[first[horizon_col].notna()])
+
+    if n_labeled < 100:
+        return None
+
+    logger.info("auto_apply: searching optimal weights with %d labeled tokens", n_labeled)
+    result = _find_optimal_weights(df, horizon_col)
+    if result is None:
+        logger.info("auto_apply: no improvement found, keeping current weights")
+        return None
+
+    new_weights = result["weights"]
+
+    # Guard-rail: no weight change >0.10 from current
+    for comp in BALANCED_WEIGHTS:
+        delta = abs(new_weights[comp] - BALANCED_WEIGHTS[comp])
+        if delta > 0.10:
+            logger.warning(
+                "auto_apply: %s change %.3f > 0.10 max, clamping",
+                comp, delta,
+            )
+            direction = 1 if new_weights[comp] > BALANCED_WEIGHTS[comp] else -1
+            new_weights[comp] = round(BALANCED_WEIGHTS[comp] + direction * 0.10, 3)
+
+    # Re-normalize after clamping
+    total = sum(new_weights.values())
+    new_weights = {k: round(v / total, 3) for k, v in new_weights.items()}
+
+    # Write to scoring_config
+    try:
+        reason = (
+            f"auto_backtest: {n_labeled} labeled tokens, "
+            f"#1 hit rate {result['baseline_hr']*100:.0f}% -> {result['hit_rate']*100:.0f}% "
+            f"(+{result['improvement']*100:.0f}pp)"
+        )
+        client.table("scoring_config").update({
+            "w_consensus": new_weights["consensus"],
+            "w_conviction": new_weights["conviction"],
+            "w_breadth": new_weights["breadth"],
+            "w_price_action": new_weights["price_action"],
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_by": "auto_backtest",
+            "change_reason": reason,
+        }).eq("id", 1).execute()
+
+        logger.info("auto_apply: weights updated! %s — %s", new_weights, reason)
+        return {
+            "applied": True,
+            "new_weights": new_weights,
+            "reason": reason,
+            **result,
+        }
+    except Exception as e:
+        logger.error("auto_apply: failed to write scoring_config: %s", e)
+        return None
+
+
 def _generate_recommendations(report: dict) -> list[str]:
     """Generate actionable text recommendations from analysis results."""
     recs = []
@@ -895,6 +1077,9 @@ def run_auto_backtest() -> dict | None:
     if not client:
         return None
 
+    # Load current production weights from scoring_config
+    _load_current_weights(client)
+
     df = _fetch_snapshots(client)
     if df.empty:
         logger.info("Auto-backtest: no snapshots found")
@@ -963,6 +1148,18 @@ def run_auto_backtest() -> dict | None:
         logger.info("Auto-backtest: running weight sensitivity + optimal threshold")
         report["weight_sensitivity"] = _weight_sensitivity(df, horizon_col)
         report["optimal_threshold"] = _optimal_threshold(df, horizon_col)
+
+        # Auto-apply optimal weights if improvement is significant
+        try:
+            apply_result = _auto_apply_weights(client, df, horizon_col)
+            if apply_result:
+                report["auto_applied_weights"] = apply_result
+                logger.info("Auto-backtest: weights auto-applied! %s", apply_result.get("reason", ""))
+            else:
+                report["auto_applied_weights"] = {"applied": False, "reason": "no significant improvement"}
+        except Exception as e:
+            logger.error("Auto-apply weights failed: %s", e)
+            report["auto_applied_weights"] = {"applied": False, "error": str(e)}
 
     # Tier 4: 200+ labeled
     if n_labeled >= 200:

@@ -280,6 +280,9 @@ CREATE TABLE IF NOT EXISTS token_snapshots (
   price_at_snapshot DECIMAL(18,10),
   token_address VARCHAR(60),
 
+  -- v17: Pump momentum penalty (active pump detection)
+  pump_momentum_pen DECIMAL(4,3) DEFAULT 1.0,
+
   -- Outcome labels (filled later by outcome_tracker)
   price_after_6h DECIMAL(18,10),
   price_after_12h DECIMAL(18,10),
@@ -297,3 +300,46 @@ CREATE INDEX IF NOT EXISTS idx_snapshots_labeled ON token_snapshots(snapshot_at)
 CREATE INDEX IF NOT EXISTS idx_snapshots_symbol ON token_snapshots(symbol);
 
 ALTER TABLE token_snapshots ENABLE ROW LEVEL SECURITY;
+
+-- ============================================
+-- SCORING_CONFIG TABLE
+-- Single-row table for dynamic scoring weights (auto-learning loop)
+-- Written by: auto_backtest.py, tuning lab API, manual
+-- Read by: pipeline.py, price_refresh.py, rescorer.ts
+-- ============================================
+CREATE TABLE IF NOT EXISTS scoring_config (
+  id INTEGER PRIMARY KEY DEFAULT 1,
+  w_consensus NUMERIC(4,3) NOT NULL DEFAULT 0.30,
+  w_conviction NUMERIC(4,3) NOT NULL DEFAULT 0.05,
+  w_breadth NUMERIC(4,3) NOT NULL DEFAULT 0.10,
+  w_price_action NUMERIC(4,3) NOT NULL DEFAULT 0.55,
+  combined_floor NUMERIC(4,3) NOT NULL DEFAULT 0.25,
+  combined_cap NUMERIC(4,3) NOT NULL DEFAULT 2.0,
+  safety_floor NUMERIC(4,3) NOT NULL DEFAULT 0.75,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_by TEXT NOT NULL DEFAULT 'manual',
+  change_reason TEXT,
+  CONSTRAINT scoring_config_single_row CHECK (id = 1),
+  CONSTRAINT scoring_config_weights_sum CHECK (
+    ABS((w_consensus + w_conviction + w_breadth + w_price_action) - 1.0) < 0.01
+  )
+);
+
+ALTER TABLE scoring_config ENABLE ROW LEVEL SECURITY;
+
+-- Audit trail for weight changes
+CREATE TABLE IF NOT EXISTS scoring_config_history (
+  id SERIAL PRIMARY KEY,
+  changed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  changed_by TEXT NOT NULL,
+  change_reason TEXT,
+  w_consensus NUMERIC(4,3),
+  w_conviction NUMERIC(4,3),
+  w_breadth NUMERIC(4,3),
+  w_price_action NUMERIC(4,3),
+  combined_floor NUMERIC(4,3),
+  combined_cap NUMERIC(4,3),
+  safety_floor NUMERIC(4,3)
+);
+
+ALTER TABLE scoring_config_history ENABLE ROW LEVEL SECURITY;

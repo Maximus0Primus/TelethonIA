@@ -39,7 +39,20 @@ export default function TuningPage() {
   const [presets, setPresets] = useState<Preset[]>([]);
   const [currentCycle, setCurrentCycle] = useState<string | null>(null);
   const [configApplied, setConfigApplied] = useState(false);
+  const [applyingToProd, setApplyingToProd] = useState(false);
+  const [prodPushStatus, setProdPushStatus] = useState<"idle" | "success" | "error">("idle");
+  const [prodConfig, setProdConfig] = useState<{ updated_by?: string; updated_at?: string } | null>(null);
   const appliedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Load current production config on mount
+  useEffect(() => {
+    fetch("/api/tuning/config")
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.updated_by) setProdConfig(data);
+      })
+      .catch(() => {});
+  }, []);
 
   // Load presets from localStorage
   useEffect(() => {
@@ -119,6 +132,38 @@ export default function TuningPage() {
     if (appliedTimerRef.current) clearTimeout(appliedTimerRef.current);
     appliedTimerRef.current = setTimeout(() => setConfigApplied(false), 3000);
   }, []);
+
+  const handlePushToProduction = useCallback(async () => {
+    if (applyingToProd) return;
+    setApplyingToProd(true);
+    setProdPushStatus("idle");
+    try {
+      const res = await fetch("/api/tuning/config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          weights: {
+            consensus: config.weights.consensus,
+            conviction: config.weights.conviction,
+            breadth: config.weights.breadth,
+            price_action: config.weights.price_action,
+          },
+          reason: "Tuning Lab manual push",
+        }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+      setProdPushStatus("success");
+      setProdConfig({ updated_by: "tuning_lab", updated_at: new Date().toISOString() });
+      setTimeout(() => setProdPushStatus("idle"), 4000);
+    } catch (e) {
+      console.error("Push to prod failed:", e);
+      setProdPushStatus("error");
+      setTimeout(() => setProdPushStatus("idle"), 4000);
+    } finally {
+      setApplyingToProd(false);
+    }
+  }, [config, applyingToProd]);
 
   const isCustomConfig = configDiffersFromDefault(config);
 
@@ -259,6 +304,44 @@ export default function TuningPage() {
                   </div>
                 )}
               </div>
+
+              {/* Apply to Production */}
+              {isCustomConfig && (
+                <div className="rounded-xl border border-orange-500/20 bg-orange-500/[0.03] p-4 space-y-3">
+                  <h3 className="text-sm font-semibold text-orange-400/90 uppercase tracking-wider">
+                    Production
+                  </h3>
+                  <p className="text-[11px] text-white/40 leading-relaxed">
+                    Push current weights to production. The scraper will pick them up on its next cycle (~15 min).
+                  </p>
+                  {prodConfig && (
+                    <p className="text-[10px] text-white/25">
+                      Last update: {prodConfig.updated_by} @ {prodConfig.updated_at ? new Date(prodConfig.updated_at).toLocaleString("fr-FR") : "?"}
+                    </p>
+                  )}
+                  <button
+                    onClick={handlePushToProduction}
+                    disabled={applyingToProd}
+                    className={cn(
+                      "w-full px-4 py-2 text-sm font-medium rounded-lg transition-all",
+                      prodPushStatus === "success"
+                        ? "bg-green-600 text-white"
+                        : prodPushStatus === "error"
+                          ? "bg-red-600 text-white"
+                          : "bg-orange-500/20 text-orange-400 hover:bg-orange-500/30 border border-orange-500/20",
+                      applyingToProd && "opacity-50 cursor-wait",
+                    )}
+                  >
+                    {applyingToProd
+                      ? "Applying..."
+                      : prodPushStatus === "success"
+                        ? "Applied!"
+                        : prodPushStatus === "error"
+                          ? "Failed"
+                          : "Apply to Production"}
+                  </button>
+                </div>
+              )}
             </motion.div>
 
             {/* Ranking preview — loading indicator stays here */}

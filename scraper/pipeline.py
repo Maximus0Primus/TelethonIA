@@ -13,6 +13,7 @@ from collections import defaultdict
 from typing import TypedDict
 from pathlib import Path
 
+import os
 import numpy as np
 import requests
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
@@ -1518,16 +1519,77 @@ def _compute_safety_penalty(token: dict) -> float:
 
     # FLOOR: v16 raised from 0.6 to 0.75. Safety is still anti-predictive
     # (winners 0.930, losers 0.897 in 131 labeled v15.3 snapshots).
-    return max(0.75, penalty)
+    return max(SCORING_PARAMS["safety_floor"], penalty)
 
 
 # === SCORE COMPUTATION WEIGHTS ===
-BALANCED_WEIGHTS = {
+# Hardcoded fallback — overridden by scoring_config table when available
+_DEFAULT_WEIGHTS = {
     "consensus": 0.30,      # v16: was 0.25; best component (0.072 corr)
     "conviction": 0.05,     # v16: was 0.10; near noise (0.025 corr)
     "breadth": 0.10,        # v16: was 0.20; essentially random (0.003 corr)
     "price_action": 0.55,   # v16: was 0.45; dominant signal (0.062 corr)
 }
+
+_DEFAULT_SCORING_PARAMS = {
+    "combined_floor": 0.25,
+    "combined_cap": 2.0,
+    "safety_floor": 0.75,
+}
+
+# Module-level cache: refreshed once per scrape cycle via load_scoring_config()
+BALANCED_WEIGHTS = _DEFAULT_WEIGHTS.copy()
+SCORING_PARAMS = _DEFAULT_SCORING_PARAMS.copy()
+
+
+def load_scoring_config() -> None:
+    """
+    Load scoring weights + params from Supabase scoring_config table.
+    Called once at the start of each scrape cycle.
+    Falls back to hardcoded defaults on any error.
+    """
+    global BALANCED_WEIGHTS, SCORING_PARAMS
+    try:
+        from supabase import create_client
+        url = os.environ.get("SUPABASE_URL")
+        key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+        if not url or not key:
+            logger.debug("scoring_config: no Supabase credentials, using defaults")
+            return
+
+        client = create_client(url, key)
+        result = client.table("scoring_config").select("*").eq("id", 1).execute()
+        if not result.data:
+            logger.debug("scoring_config: table empty, using defaults")
+            return
+
+        row = result.data[0]
+        new_weights = {
+            "consensus": float(row["w_consensus"]),
+            "conviction": float(row["w_conviction"]),
+            "breadth": float(row["w_breadth"]),
+            "price_action": float(row["w_price_action"]),
+        }
+        # Validate sum ≈ 1.0
+        total = sum(new_weights.values())
+        if abs(total - 1.0) > 0.02:
+            logger.warning("scoring_config: weights sum %.3f != 1.0, using defaults", total)
+            return
+
+        BALANCED_WEIGHTS.update(new_weights)
+        SCORING_PARAMS["combined_floor"] = float(row.get("combined_floor", 0.25))
+        SCORING_PARAMS["combined_cap"] = float(row.get("combined_cap", 2.0))
+        SCORING_PARAMS["safety_floor"] = float(row.get("safety_floor", 0.75))
+
+        logger.info(
+            "scoring_config loaded: consensus=%.2f conviction=%.2f breadth=%.2f PA=%.2f "
+            "(updated_by=%s, %s)",
+            new_weights["consensus"], new_weights["conviction"],
+            new_weights["breadth"], new_weights["price_action"],
+            row.get("updated_by", "?"), row.get("change_reason", ""),
+        )
+    except Exception as e:
+        logger.warning("scoring_config: failed to load (%s), using defaults", e)
 
 
 def _get_component_value(token: dict, component: str) -> float | None:
@@ -1594,6 +1656,17 @@ def _compute_score_with_renormalization(token: dict) -> tuple[float, float]:
         if value is not None:
             available[comp] = (value, weight)
 
+    # v17: Consensus discount when token already pumped — late KOL mentions
+    # (arriving after the pump) are worth less than early calls.
+    pc24 = token.get("price_change_24h")
+    if "consensus" in available and pc24 is not None and pc24 > 50:
+        consensus_discount = max(0.5, 1.0 - (pc24 / 400))
+        old_val, old_weight = available["consensus"]
+        available["consensus"] = (old_val * consensus_discount, old_weight)
+        token["_consensus_pump_discount"] = round(consensus_discount, 3)
+    else:
+        token["_consensus_pump_discount"] = 1.0
+
     total_available_weight = sum(w for _, w in available.values())
     if total_available_weight == 0:
         return 0.0, 0.0
@@ -1645,7 +1718,8 @@ def _classify_lifecycle_phase(token: dict) -> tuple[str, float]:
             return "profit_taking", 0.35
 
     # Euphoria: over-saturated, most KOLs already in
-    if uk >= 5 and pc24 is not None and pc24 > 200 and sent > 0.3:
+    # v17: Lowered thresholds — 4 KOLs at +150% is clearly euphoria, not boom
+    if uk >= 3 and pc24 is not None and pc24 > 100 and sent > 0.2:
         return "euphoria", 0.5
 
     # Boom: sweet spot — growing interest + price confirming
@@ -2364,6 +2438,14 @@ def aggregate_ranking(
         else:
             activity_mult = 1.0
 
+        # v17: Activity_mult cap when token already pumped — buzz peaks during
+        # pumps but that's exactly when 2x potential is LOWEST.
+        pc24_act = token.get("price_change_24h")
+        if pc24_act is not None and pc24_act > 80:
+            activity_mult = min(activity_mult, 1.0)   # No bonus if already pumped hard
+        elif pc24_act is not None and pc24_act > 50:
+            activity_mult = min(activity_mult, 1.10)  # Reduced bonus
+
         # v15: Breadth floor — low KOL count is a mild flag, not a death sentence
         breadth_raw = float(token.get("breadth_score", 0) or 0)
         if breadth_raw < 0.033:    # ~2 KOLs or fewer
@@ -2375,19 +2457,35 @@ def aggregate_ranking(
         else:
             breadth_pen = 1.0
 
+        # v17: Pump momentum penalty — penalize tokens actively pumping RIGHT NOW
+        # This is NOT a duplicate of price_action (which averages 4 sub-components).
+        # This multiplier acts on the FINAL score to directly penalize active pumps.
+        pc_1h = token.get("price_change_1h")
+        pc_5m = token.get("price_change_5m")
+        pump_momentum_pen = 1.0
+        if (pc_1h is not None and pc_1h > 30) or (pc_5m is not None and pc_5m > 15):
+            pump_momentum_pen = 0.5   # active pump
+        elif (pc_1h is not None and pc_1h > 15) or (pc_5m is not None and pc_5m > 8):
+            pump_momentum_pen = 0.7   # moderate pump
+        elif pc_1h is not None and pc_1h > 8:
+            pump_momentum_pen = 0.85  # light pump
+        token["pump_momentum_pen"] = pump_momentum_pen
+
         # v12: KOL entry premium — penalize tokens that pumped far above KOL call prices
         entry_premium, entry_premium_mult = _compute_kol_entry_premium(token)
         token["entry_premium"] = entry_premium
         token["entry_premium_mult"] = entry_premium_mult
 
-        # v14: Hard stale-mention cutoff — tokens with old mentions shouldn't rank high
+        # v14: Hard stale-mention cutoff — kept for data/ML but REMOVED from
+        # multiplier chain in v17. death_penalty Signal 3 already handles staleness
+        # with volume modulation, so stale_pen was double-penalizing.
         freshest_h = token.get("freshest_mention_hours", 0)
         stale_pen = 1.0
         if freshest_h > 72:
             stale_pen = 0.3  # 3+ days old = nearly dead
         elif freshest_h > 48:
             stale_pen = 0.5  # 2+ days old = very stale
-        token["stale_pen"] = stale_pen
+        token["stale_pen"] = stale_pen  # stored for ML/data, NOT in multiplier chain
 
         # v15.2: Size opportunity multiplier — backtest-proven signal.
         # Winners avg 4.1M mcap vs losers 21.4M. Fresh (<12h) + small (<500K) = 30% precision.
@@ -2440,14 +2538,17 @@ def aggregate_ranking(
         token["_breadth_val"] = _get_component_value(token, "breadth")
         token["_price_action_val"] = _get_component_value(token, "price_action")
 
+        # v17: stale_pen REMOVED from chain — death_penalty Signal 3 already
+        # handles staleness with volume modulation. Keeping both was double-penalizing.
         combined_raw = (onchain_mult * safety_pen * pump_bonus * wash_pen
                         * pvp_pen * pump_pen * crash_pen * squeeze_mult
                         * trend_mult * activity_mult * breadth_pen
-                        * stale_pen * size_mult * s_tier_mult)
-        # v16: Floor raised from 0.15 to 0.25. Score compression analysis shows
-        # most tokens hit the old floor. Raising it decompresses the 0-14 band
-        # where 97% of tokens were stuck, without affecting high-multiplier tokens.
-        combined = max(0.25, combined_raw)
+                        * size_mult * s_tier_mult
+                        * pump_momentum_pen)
+        # v16: Floor at 0.25 decompresses the 0-14 band where 97% of tokens stuck.
+        # v17: Cap at 2.0 prevents multiplier stacking (activity*s_tier*size)
+        # from inflating mediocre base scores beyond 100.
+        combined = max(SCORING_PARAMS["combined_floor"], min(SCORING_PARAMS["combined_cap"], combined_raw))
 
         # Apply to all three scoring modes
         token["score"] = min(100, max(0, int(token["score"] * combined)))
