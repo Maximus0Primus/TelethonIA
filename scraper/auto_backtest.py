@@ -105,7 +105,7 @@ NUMERIC_FEATURES = [
 
 # Columns to fetch from token_snapshots
 SNAPSHOT_COLUMNS = (
-    "id, symbol, snapshot_at, mentions, sentiment, breadth, avg_conviction, "
+    "id, symbol, token_address, snapshot_at, mentions, sentiment, breadth, avg_conviction, "
     "recency_score, price_action_score, volume_24h, volume_1h, volume_6h, "
     "liquidity_usd, market_cap, txn_count_24h, buy_sell_ratio_24h, "
     "buy_sell_ratio_1h, short_term_heat, txn_velocity, ultra_short_heat, "
@@ -248,7 +248,7 @@ def _compute_score(row: pd.Series, weights: dict) -> int:
     squeeze_mult = 1.0
     trend_mult = 1.0
 
-    # v15.2: Size opportunity multiplier (mcap + freshness)
+    # v19: Size opportunity multiplier — progressive large-cap penalty
     size_mult = _safe_mult(row, "size_mult")
     if not pd.notna(row.get("size_mult")):
         t_mcap = float(row.get("market_cap") or 0) if pd.notna(row.get("market_cap")) else 0
@@ -263,15 +263,24 @@ def _compute_score(row: pd.Series, weights: dict) -> int:
             mcap_f = 1.0
         elif t_mcap < 20_000_000:
             mcap_f = 0.85
+        elif t_mcap < 50_000_000:
+            mcap_f = 0.70
+        elif t_mcap < 200_000_000:
+            mcap_f = 0.50
+        elif t_mcap < 500_000_000:
+            mcap_f = 0.35
         else:
-            mcap_f = 0.7
-        if fmh < 4:
+            mcap_f = 0.25
+        # v19: No freshness boost for large caps
+        if t_mcap >= 50_000_000:
+            fresh_f = 1.0
+        elif fmh < 4:
             fresh_f = 1.2
         elif fmh < 12:
             fresh_f = 1.1
         else:
             fresh_f = 1.0
-        size_mult = max(0.6, min(1.5, mcap_f * fresh_f))
+        size_mult = max(0.25, min(1.5, mcap_f * fresh_f))
 
     # v15.3: S-tier bonus
     s_tier_mult = _safe_mult(row, "s_tier_mult")
@@ -331,7 +340,7 @@ def _top1_hit_rate(df: pd.DataFrame) -> dict:
         tokens_tested = 0
         tokens_hit = 0
         top1_details = []
-        seen_symbols = set()  # dedup: same token as #1 counted once
+        seen_addresses = set()  # dedup: same token as #1 counted once
 
         for cycle_ts, group in df.sort_values("snapshot_at").groupby("cycle"):
             labeled = group[group[flag_col].notna()]
@@ -340,14 +349,14 @@ def _top1_hit_rate(df: pd.DataFrame) -> dict:
 
             # #1 token = highest score in this cycle
             top1 = labeled.loc[labeled["score"].idxmax()]
-            symbol = top1["symbol"]
+            addr = top1.get("token_address") or top1["symbol"]
             did_2x = bool(top1[flag_col])
             ret = _compute_return(top1, horizon)
 
             # Skip if this token was already #1 in a previous cycle
-            if symbol in seen_symbols:
+            if addr in seen_addresses:
                 continue
-            seen_symbols.add(symbol)
+            seen_addresses.add(addr)
 
             tokens_tested += 1
             if did_2x:
@@ -355,7 +364,7 @@ def _top1_hit_rate(df: pd.DataFrame) -> dict:
 
             top1_details.append({
                 "cycle": str(cycle_ts),
-                "symbol": symbol,
+                "symbol": top1["symbol"],
                 "score": int(top1["score"]),
                 "did_2x": did_2x,
                 "max_return": round(ret, 2) if ret else None,
@@ -383,7 +392,7 @@ def _score_calibration(df: pd.DataFrame, horizon_col: str = "did_2x_12h") -> dic
     horizon_suffix = horizon_col.replace("did_2x_", "")
 
     # First-appearance: each token counted once (earliest snapshot)
-    first = df.sort_values("snapshot_at").drop_duplicates(subset=["symbol"], keep="first").copy()
+    first = df.sort_values("snapshot_at").drop_duplicates(subset=["token_address"], keep="first").copy()
     first["max_return"] = first.apply(lambda r: _compute_return(r, horizon_suffix), axis=1)
 
     result = {}
@@ -414,7 +423,7 @@ def _score_calibration(df: pd.DataFrame, horizon_col: str = "did_2x_12h") -> dic
 
 def _feature_correlation(df: pd.DataFrame, horizon_col: str = "did_2x_12h") -> dict:
     """Pearson correlation of each numeric feature with the 2x outcome (first-appearance)."""
-    first = df.sort_values("snapshot_at").drop_duplicates(subset=["symbol"], keep="first")
+    first = df.sort_values("snapshot_at").drop_duplicates(subset=["token_address"], keep="first")
     labeled = first[first[horizon_col].notna()].copy()
     if labeled.empty:
         return {}
@@ -442,7 +451,7 @@ def _feature_correlation(df: pd.DataFrame, horizon_col: str = "did_2x_12h") -> d
 
 def _gate_autopsy(df: pd.DataFrame, horizon_col: str = "did_2x_12h") -> dict:
     """For tokens that DID 2x: identify what penalties/gates reduced their score (first-appearance)."""
-    first = df.sort_values("snapshot_at").drop_duplicates(subset=["symbol"], keep="first")
+    first = df.sort_values("snapshot_at").drop_duplicates(subset=["token_address"], keep="first")
     winners = first[(first[horizon_col] == True)].copy()
     if winners.empty:
         return {"missed_winners": [], "total_winners": 0}
@@ -495,7 +504,7 @@ def _gate_autopsy(df: pd.DataFrame, horizon_col: str = "did_2x_12h") -> dict:
 
 def _false_positive_autopsy(df: pd.DataFrame, horizon_col: str = "did_2x_12h") -> dict:
     """For high-scoring tokens that did NOT 2x: what components were misleading? (first-appearance)"""
-    first = df.sort_values("snapshot_at").drop_duplicates(subset=["symbol"], keep="first").copy()
+    first = df.sort_values("snapshot_at").drop_duplicates(subset=["token_address"], keep="first").copy()
     first["score"] = first.apply(lambda r: _compute_score(r, BALANCED_WEIGHTS), axis=1)
 
     labeled = first[first[horizon_col].notna()]
@@ -541,7 +550,7 @@ def _false_positive_autopsy(df: pd.DataFrame, horizon_col: str = "did_2x_12h") -
 
 def _weight_sensitivity(df: pd.DataFrame, horizon_col: str = "did_2x_12h") -> dict:
     """Vary each BALANCED_WEIGHTS component +/-25%, measure hit rate delta (first-appearance)."""
-    first = df.sort_values("snapshot_at").drop_duplicates(subset=["symbol"], keep="first")
+    first = df.sort_values("snapshot_at").drop_duplicates(subset=["token_address"], keep="first")
     labeled = first[first[horizon_col].notna()].copy()
     if labeled.empty:
         return {}
@@ -585,7 +594,7 @@ def _weight_sensitivity(df: pd.DataFrame, horizon_col: str = "did_2x_12h") -> di
 
 def _v8_signal_validation(df: pd.DataFrame, horizon_col: str = "did_2x_12h") -> dict:
     """Do v8 signals (squeeze, trend, confirmation) correlate with 2x? (first-appearance)"""
-    first = df.sort_values("snapshot_at").drop_duplicates(subset=["symbol"], keep="first")
+    first = df.sort_values("snapshot_at").drop_duplicates(subset=["token_address"], keep="first")
     labeled = first[first[horizon_col].notna()].copy()
     if labeled.empty:
         return {}
@@ -626,7 +635,7 @@ def _v8_signal_validation(df: pd.DataFrame, horizon_col: str = "did_2x_12h") -> 
 
 def _extraction_analysis(df: pd.DataFrame, horizon_col: str = "did_2x_12h") -> dict:
     """Analyze extraction method (CA vs ticker) correlation with 2x outcomes (first-appearance)."""
-    first = df.sort_values("snapshot_at").drop_duplicates(subset=["symbol"], keep="first")
+    first = df.sort_values("snapshot_at").drop_duplicates(subset=["token_address"], keep="first")
     labeled = first[first[horizon_col].notna()].copy()
     if labeled.empty or "has_ca_mention" not in labeled.columns:
         return {}
@@ -674,7 +683,7 @@ def _extraction_analysis(df: pd.DataFrame, horizon_col: str = "did_2x_12h") -> d
 
 def _optimal_threshold(df: pd.DataFrame, horizon_col: str = "did_2x_12h") -> dict:
     """Find score threshold that maximizes F1 for 2x prediction (first-appearance)."""
-    first = df.sort_values("snapshot_at").drop_duplicates(subset=["symbol"], keep="first")
+    first = df.sort_values("snapshot_at").drop_duplicates(subset=["token_address"], keep="first")
     labeled = first[first[horizon_col].notna()].copy()
     if labeled.empty:
         return {}
@@ -720,7 +729,7 @@ def _optimal_threshold(df: pd.DataFrame, horizon_col: str = "did_2x_12h") -> dic
 
 def _walk_forward(df: pd.DataFrame, horizon_col: str = "did_2x_12h") -> list[dict]:
     """Time-based train/test split validation (first-appearance)."""
-    first = df.sort_values("snapshot_at").drop_duplicates(subset=["symbol"], keep="first")
+    first = df.sort_values("snapshot_at").drop_duplicates(subset=["token_address"], keep="first")
     labeled = first[first[horizon_col].notna()].copy()
     if labeled.empty:
         return []
@@ -781,7 +790,7 @@ def _find_optimal_weights(df: pd.DataFrame, horizon_col: str = "did_2x_12h") -> 
     Grid search for weight combination that maximizes #1 token hit rate.
     Returns best weights dict or None if no improvement found.
     """
-    first = df.sort_values("snapshot_at").drop_duplicates(subset=["symbol"], keep="first")
+    first = df.sort_values("snapshot_at").drop_duplicates(subset=["token_address"], keep="first")
     labeled = first[first[horizon_col].notna()].copy()
     if len(labeled) < 50:
         return None
@@ -807,10 +816,10 @@ def _find_optimal_weights(df: pd.DataFrame, horizon_col: str = "did_2x_12h") -> 
             if lbl.empty:
                 continue
             top1 = lbl.loc[lbl["test_score"].idxmax()]
-            sym = top1["symbol"]
-            if sym in seen:
+            addr = top1.get("token_address") or top1["symbol"]
+            if addr in seen:
                 continue
-            seen.add(sym)
+            seen.add(addr)
             tested += 1
             if bool(top1[horizon_col]):
                 hits += 1
@@ -864,7 +873,7 @@ def _auto_apply_weights(client, df: pd.DataFrame, horizon_col: str = "did_2x_12h
     - Improvement must be >5pp in #1 token hit rate
     - Weights must sum to 1.0
     """
-    first = df.sort_values("snapshot_at").drop_duplicates(subset=["symbol"], keep="first")
+    first = df.sort_values("snapshot_at").drop_duplicates(subset=["token_address"], keep="first")
     n_labeled = len(first[first[horizon_col].notna()])
 
     if n_labeled < 100:
@@ -1097,7 +1106,7 @@ def run_auto_backtest() -> dict | None:
     ALL_HORIZONS = ["12h", "24h", "48h", "72h", "7d"]
 
     # First-appearance dedup: each token counted once (earliest snapshot)
-    first = df.sort_values("snapshot_at").drop_duplicates(subset=["symbol"], keep="first")
+    first = df.sort_values("snapshot_at").drop_duplicates(subset=["token_address"], keep="first")
     unique_tokens = len(first)
 
     # Use 12h as primary horizon (faster feedback loop)

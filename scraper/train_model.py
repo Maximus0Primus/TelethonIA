@@ -38,6 +38,11 @@ from sklearn.metrics import (
 from sklearn.calibration import CalibratedClassifierCV
 from supabase import create_client
 
+try:
+    from pipeline import SCORING_PARAMS
+except ImportError:
+    SCORING_PARAMS = {"stale_hours_severe": 48}
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -160,6 +165,7 @@ ALL_FEATURE_COLS = [
 ]
 
 HORIZONS = {
+    "1h": "did_2x_1h",
     "6h": "did_2x_6h",
     "12h": "did_2x_12h",
     "24h": "did_2x_24h",
@@ -167,6 +173,7 @@ HORIZONS = {
 
 # Return columns for regression target
 RETURN_COLS = {
+    "1h": ("max_price_1h", "price_at_snapshot"),
     "6h": ("max_price_6h", "price_at_snapshot"),
     "12h": ("max_price_12h", "price_at_snapshot"),
     "24h": ("max_price_24h", "price_at_snapshot"),
@@ -196,25 +203,86 @@ def _select_feature_tier(n_samples: int) -> list[str]:
 
 
 def load_labeled_data(horizon: str = "12h") -> pd.DataFrame:
-    """Load all labeled snapshots from Supabase."""
+    """Load all labeled snapshots from Supabase with pagination (supabase-py defaults to 1000 row limit)."""
     client = _get_client()
     label_col = HORIZONS[horizon]
 
-    result = (
-        client.table("token_snapshots")
-        .select("*")
-        .not_.is_(label_col, "null")
-        .order("snapshot_at")
-        .execute()
-    )
+    all_data = []
+    page_size = 1000
+    offset = 0
 
-    if not result.data:
+    while True:
+        result = (
+            client.table("token_snapshots")
+            .select("*")
+            .not_.is_(label_col, "null")
+            .order("snapshot_at")
+            .range(offset, offset + page_size - 1)
+            .execute()
+        )
+
+        if not result.data:
+            break
+
+        all_data.extend(result.data)
+        if len(result.data) < page_size:
+            break
+        offset += page_size
+
+    if not all_data:
         logger.error("No labeled data found for horizon %s", horizon)
         return pd.DataFrame()
 
-    df = pd.DataFrame(result.data)
+    df = pd.DataFrame(all_data)
     logger.info("Loaded %d labeled snapshots for %s horizon", len(df), horizon)
     return df
+
+
+def deduplicate_snapshots(df: pd.DataFrame, label_col: str) -> pd.DataFrame:
+    """
+    Deduplicate to ONE snapshot per unique token (by token_address or symbol).
+    Keeps the FIRST snapshot per token (earliest call = least biased).
+    Also filters out zombie tokens (freshest_mention > stale_hours_severe) which are noise.
+
+    Without this, the same token appears ~5x in training data, causing:
+    - Autocorrelation (correlated samples treated as independent)
+    - Inflated sample count (29 "winners" = only 14 unique tokens)
+    - Data leakage between train/test splits
+    """
+    before = len(df)
+
+    # Sort by time to keep earliest snapshot
+    df = df.sort_values("snapshot_at").reset_index(drop=True)
+
+    # Deduplicate by token_address first (most reliable), fallback to symbol
+    if "token_address" in df.columns and df["token_address"].notna().any():
+        dedup_col = "token_address"
+        # For rows without token_address, use symbol
+        df["_dedup_key"] = df["token_address"].fillna(df["symbol"])
+    else:
+        dedup_col = "symbol"
+        df["_dedup_key"] = df["symbol"]
+
+    df = df.drop_duplicates(subset=["_dedup_key"], keep="first")
+    df = df.drop(columns=["_dedup_key"])
+
+    # Filter zombie snapshots: tokens with very stale mentions are noise
+    # v20: threshold from SCORING_PARAMS (dynamic)
+    stale_cutoff = SCORING_PARAMS.get("stale_hours_severe", 48)
+    if "freshest_mention_hours" in df.columns:
+        stale_mask = pd.to_numeric(df["freshest_mention_hours"], errors="coerce") > stale_cutoff
+        stale_count = stale_mask.sum()
+        if stale_count > 0:
+            df = df[~stale_mask]
+            logger.info("Filtered %d zombie snapshots (freshest_mention > %.0fh)", stale_count, stale_cutoff)
+
+    after = len(df)
+    winners_after = df[label_col].sum() if label_col in df.columns else "?"
+    logger.info(
+        "Deduplicated: %d → %d snapshots (%d unique tokens, %s winners)",
+        before, after, after, winners_after
+    )
+    return df.reset_index(drop=True)
 
 
 def prepare_features(df: pd.DataFrame, feature_pool: list[str]) -> tuple[pd.DataFrame, list[str]]:
@@ -312,7 +380,7 @@ def _optimize_xgb_regressor(X_train, y_train, X_test, y_test, n_trials):
             "gamma": trial.suggest_float("gamma", 0.0, 5.0),
             "reg_alpha": trial.suggest_float("reg_alpha", 1e-8, 10.0, log=True),
             "reg_lambda": trial.suggest_float("reg_lambda", 1e-8, 10.0, log=True),
-            "objective": "reg:squaredlogerror",
+            "objective": "reg:squarederror",
             "verbosity": 0,
         }
         model = xgb.XGBRegressor(**params)
@@ -325,7 +393,7 @@ def _optimize_xgb_regressor(X_train, y_train, X_test, y_test, n_trials):
     logger.info("XGBoost regressor best Spearman: %.3f", study.best_value)
 
     best_params = study.best_params
-    best_params.update({"objective": "reg:squaredlogerror", "verbosity": 0})
+    best_params.update({"objective": "reg:squarederror", "verbosity": 0})
 
     model = xgb.XGBRegressor(**best_params)
     model.fit(X_train, y_train, eval_set=[(X_test, y_test)], verbose=False)
@@ -1120,8 +1188,15 @@ def auto_train(
     logger.info("=== AUTO-TRAIN: horizon=%s, min_samples=%d, trials=%d ===", horizon, min_samples, trials)
 
     df = load_labeled_data(horizon)
-    if df.empty or len(df) < min_samples:
-        logger.info("auto_train: only %d samples (need %d), skipping", len(df), min_samples)
+    if df.empty:
+        logger.info("auto_train: no data, skipping")
+        return None
+
+    # Deduplicate: one snapshot per token to prevent autocorrelation
+    df = deduplicate_snapshots(df, HORIZONS[horizon])
+
+    if len(df) < min_samples:
+        logger.info("auto_train: only %d unique tokens (need %d), skipping", len(df), min_samples)
         return None
 
     # Load existing model metadata for A/B comparison
@@ -1217,7 +1292,7 @@ def main():
 
     parser = argparse.ArgumentParser(description="Train ML ensemble for memecoin 2x prediction")
     parser.add_argument(
-        "--horizon", choices=["6h", "12h", "24h"], default="12h",
+        "--horizon", choices=["1h", "6h", "12h", "24h"], default="12h",
         help="Prediction horizon (default: 12h)",
     )
     parser.add_argument(
@@ -1269,6 +1344,8 @@ def main():
         logger.info("\n%s\n=== Training %s %s ===\n%s", "=" * 60, horizon, args.mode, "=" * 60)
         df = load_labeled_data(horizon)
         if not df.empty:
+            # Deduplicate: one snapshot per token to prevent autocorrelation
+            df = deduplicate_snapshots(df, HORIZONS[horizon])
             result = train_fn(df, horizon, n_trials=args.trials, min_samples=args.min_samples)
             if result and result.get("quality_gate") == "FAILED":
                 logger.warning("Model for %s failed quality gate — not deployed.", horizon)

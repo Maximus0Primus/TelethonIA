@@ -24,6 +24,7 @@ const MULT_LABELS: Record<string, string> = {
   pump_pen: "Artificial Pump",
   breadth_pen: "Breadth Floor",
   stale_pen: "Stale Token Penalty",
+  pump_momentum_pen: "Pump Momentum",
 };
 
 export function MultiplierToggles({ config, onChange }: MultiplierTogglesProps) {

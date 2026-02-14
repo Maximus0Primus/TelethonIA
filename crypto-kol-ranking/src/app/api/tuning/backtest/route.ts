@@ -29,6 +29,7 @@ export async function GET(request: NextRequest) {
 
   const columns = [
     "symbol",
+    "token_address",
     "snapshot_at",
     // 5 component values
     "consensus_val",
@@ -54,6 +55,7 @@ export async function GET(request: NextRequest) {
     "pump_pen",
     "breadth_pen",
     "stale_pen",
+    "pump_momentum_pen",
     // Extraction source counts
     "ca_mention_count",
     "ticker_mention_count",
@@ -85,10 +87,11 @@ export async function GET(request: NextRequest) {
   ].join(",");
 
   try {
-    // Only fetch snapshots where the relevant outcome column is NOT null
-    // (meaning outcome_tracker has already labeled them)
+    // Fetch all labeled snapshots (outcome_tracker has filled did_2x).
+    // No consensus_val filter: the rescorer handles null values with defaults,
+    // and removing this filter recovers ~70% of winners from older snapshots.
     const res = await fetch(
-      `${url}/rest/v1/token_snapshots?select=${columns}&${outcomeCol}=not.is.null&consensus_val=not.is.null&order=snapshot_at.desc&limit=5000`,
+      `${url}/rest/v1/token_snapshots?select=${columns}&${outcomeCol}=not.is.null&order=snapshot_at.desc&limit=5000`,
       {
         headers: {
           apikey: key,

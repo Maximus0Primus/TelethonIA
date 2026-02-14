@@ -2,16 +2,35 @@ import { NextRequest, NextResponse } from "next/server";
 
 /**
  * GET /api/tuning/config
- * Returns current production scoring_config (weights, floors, caps).
+ * Returns current production scoring_config (weights, floors, caps, dynamic constants).
  *
  * POST /api/tuning/config
- * Updates production scoring_config. Body: { weights, combined_floor?, combined_cap?, safety_floor?, reason? }
+ * Updates production scoring_config. Body: { weights, combined_floor?, combined_cap?, safety_floor?, ...15 dynamic constants, reason? }
  * Requires valid TUNING_SECRET header for auth.
  */
 
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const TUNING_SECRET = process.env.TUNING_SECRET; // optional auth for POST
+
+// v20: 15 dynamic scoring constants (key in DB → key in API response)
+const DYNAMIC_CONSTANT_KEYS = [
+  "decay_lambda",
+  "activity_mult_floor",
+  "activity_mult_cap",
+  "pa_norm_floor",
+  "pa_norm_cap",
+  "onchain_mult_floor",
+  "onchain_mult_cap",
+  "death_pc24_severe",
+  "death_pc24_moderate",
+  "pump_pc1h_hard",
+  "pump_pc5m_hard",
+  "stale_hours_severe",
+  "gate_top10_pct",
+  "gate_min_liquidity",
+  "gate_min_holders",
+] as const;
 
 function supabaseHeaders() {
   return {
@@ -46,6 +65,13 @@ export async function GET() {
     }
 
     const row = rows[0];
+
+    // Build dynamic constants object
+    const constants: Record<string, number> = {};
+    for (const key of DYNAMIC_CONSTANT_KEYS) {
+      constants[key] = parseFloat(row[key]);
+    }
+
     return NextResponse.json({
       weights: {
         consensus: parseFloat(row.w_consensus),
@@ -56,6 +82,7 @@ export async function GET() {
       combined_floor: parseFloat(row.combined_floor),
       combined_cap: parseFloat(row.combined_cap),
       safety_floor: parseFloat(row.safety_floor),
+      constants,
       updated_at: row.updated_at,
       updated_by: row.updated_by,
       change_reason: row.change_reason,
@@ -78,6 +105,7 @@ interface ConfigBody {
   combined_floor?: number;
   combined_cap?: number;
   safety_floor?: number;
+  constants?: Partial<Record<(typeof DYNAMIC_CONSTANT_KEYS)[number], number>>;
   reason?: string;
 }
 
@@ -151,6 +179,15 @@ export async function POST(request: NextRequest) {
   if (body.combined_floor !== undefined) update.combined_floor = body.combined_floor;
   if (body.combined_cap !== undefined) update.combined_cap = body.combined_cap;
   if (body.safety_floor !== undefined) update.safety_floor = body.safety_floor;
+
+  // v20: 15 dynamic scoring constants
+  if (body.constants) {
+    for (const key of DYNAMIC_CONSTANT_KEYS) {
+      if (body.constants[key] !== undefined) {
+        update[key] = body.constants[key];
+      }
+    }
+  }
 
   try {
     const res = await fetch(

@@ -21,18 +21,17 @@ from datetime import datetime, timezone
 import requests
 from supabase import create_client
 
+from pipeline import SCORING_PARAMS
+
 logger = logging.getLogger(__name__)
 
 def _two_phase_decay(hours_ago: float) -> float:
     """
-    Two-phase exponential decay (mirrors pipeline._two_phase_decay).
-    Phase 1 (0-6h): lambda=0.15, half-life ~4.6h
-    Phase 2 (6h+):  lambda=0.5, half-life ~1.4h
+    Single-phase exponential decay (mirrors pipeline._two_phase_decay).
+    v20: lambda from SCORING_PARAMS["decay_lambda"] (shared with pipeline).
+    Default lambda=0.12, half-life ~5.8h.
     """
-    if hours_ago <= 6:
-        return math.exp(-0.15 * hours_ago)
-    else:
-        return math.exp(-0.9) * math.exp(-0.5 * (hours_ago - 6))
+    return math.exp(-SCORING_PARAMS["decay_lambda"] * hours_ago)
 
 
 DEXSCREENER_TOKEN_URL = "https://api.dexscreener.com/tokens/v1/solana/{address}"
@@ -163,38 +162,49 @@ def _fetch_dexscreener_by_address(address: str) -> dict | None:
         return None
 
 
-def _compute_refresh_multiplier(market_data: dict) -> float:
+def _compute_refresh_multiplier(market_data: dict, stored_lifecycle_pen: float = 1.0) -> float:
     """
     Market-condition multiplier using fresh DexScreener data.
     Does NOT apply pa_mult (price_action already at 30% in base_score).
-    Instead applies: death detection + already-pumped + buy/sell pressure.
+    Applies: death detection + already-pumped + buy/sell pressure + mcap penalty.
     Returns combined multiplier [0.2, 1.5].
+
+    v17: Uses stored lifecycle penalty from last full pipeline cycle as baseline
+    for already_pumped. Only overrides with fresh price-based penalty if it's
+    WORSE (lower). This preserves the lifecycle model's context-aware detection
+    (euphoria, boom, profit_taking) between full cycles.
     """
     pc24 = market_data.get("price_change_24h")
 
     # v9: Death/rug detection (mirrors pipeline._detect_death_penalty logic)
+    # v20: thresholds from SCORING_PARAMS (shared single source of truth)
+    death_severe = SCORING_PARAMS["death_pc24_severe"]    # default -80
+    death_moderate = SCORING_PARAMS["death_pc24_moderate"]  # default -50
     death_pen = 1.0
     if pc24 is not None:
-        if pc24 < -80:
+        if pc24 < death_severe:
             death_pen = 0.1
-        elif pc24 < -70:
+        elif pc24 < (death_severe + 10):  # -70 at default
             death_pen = 0.2
-        elif pc24 < -50:
+        elif pc24 < death_moderate:
             death_pen = 0.4
         elif pc24 < -30:
             death_pen = 0.7
 
-    # Already pumped penalty (aggressive tiers, matches pipeline v5)
-    already_pumped = 1.0
+    # v17: Already pumped — use stored lifecycle penalty from pipeline as base.
+    # Only compute fresh price-based penalty and take the WORSE of the two.
+    # This preserves euphoria/boom/profit_taking context from full cycle.
+    fresh_pump_pen = 1.0
     if pc24 is not None and pc24 > 100:
         if pc24 > 700:
-            already_pumped = 0.2
+            fresh_pump_pen = 0.2
         elif pc24 > 400:
-            already_pumped = 0.35
+            fresh_pump_pen = 0.35
         elif pc24 > 200:
-            already_pumped = 0.6
+            fresh_pump_pen = 0.6
         else:
-            already_pumped = 0.85
+            fresh_pump_pen = 0.85
+    already_pumped = min(stored_lifecycle_pen, fresh_pump_pen)
 
     # Buy/sell ratio pressure
     bsr_mult = 1.0
@@ -205,7 +215,42 @@ def _compute_refresh_multiplier(market_data: dict) -> float:
         elif bsr < 0.3:
             bsr_mult = 0.8
 
-    combined = death_pen * already_pumped * bsr_mult
+    # v17: Pump momentum penalty — penalize tokens actively pumping RIGHT NOW
+    # v20: thresholds from SCORING_PARAMS (shared with pipeline)
+    pump_1h_hard = SCORING_PARAMS["pump_pc1h_hard"]  # default 30
+    pump_5m_hard = SCORING_PARAMS["pump_pc5m_hard"]  # default 15
+    pump_1h_mod = pump_1h_hard * 0.5   # 15 at default
+    pump_5m_mod = pump_5m_hard * 0.533  # ~8 at default
+    pump_1h_light = pump_1h_hard * 0.267  # ~8 at default
+    pc_1h = market_data.get("price_change_1h")
+    pc_5m = market_data.get("price_change_5m")
+    pump_momentum_pen = 1.0
+    if (pc_1h is not None and pc_1h > pump_1h_hard) or (pc_5m is not None and pc_5m > pump_5m_hard):
+        pump_momentum_pen = 0.5
+    elif (pc_1h is not None and pc_1h > pump_1h_mod) or (pc_5m is not None and pc_5m > pump_5m_mod):
+        pump_momentum_pen = 0.7
+    elif pc_1h is not None and pc_1h > pump_1h_light:
+        pump_momentum_pen = 0.85
+
+    # v19: Market cap size penalty — large caps can't 2x easily.
+    # Mirrors pipeline.py size_mult thresholds (without freshness boost).
+    t_mcap = market_data.get("market_cap") or 0
+    if t_mcap <= 0:
+        mcap_pen = 1.0
+    elif t_mcap < 5_000_000:
+        mcap_pen = 1.0   # small/mid cap — no penalty
+    elif t_mcap < 20_000_000:
+        mcap_pen = 0.85
+    elif t_mcap < 50_000_000:
+        mcap_pen = 0.70
+    elif t_mcap < 200_000_000:
+        mcap_pen = 0.50
+    elif t_mcap < 500_000_000:
+        mcap_pen = 0.35
+    else:
+        mcap_pen = 0.25
+
+    combined = death_pen * already_pumped * bsr_mult * pump_momentum_pen * mcap_pen
     return max(0.2, min(1.5, combined))
 
 
@@ -233,11 +278,11 @@ def refresh_top_tokens(n: int = REFRESH_TOP_N) -> int:
         logger.info("Price refresh: no tokens to update")
         return 0
 
-    # We need token addresses. Fetch from the most recent snapshots.
+    # We need token addresses + stored lifecycle penalty from last full cycle.
     symbols = [t["symbol"] for t in tokens]
     snap_result = (
         client.table("token_snapshots")
-        .select("symbol, token_address")
+        .select("symbol, token_address, already_pumped_penalty")
         .in_("symbol", symbols)
         .not_.is_("token_address", "null")
         .order("snapshot_at", desc=True)
@@ -247,11 +292,13 @@ def refresh_top_tokens(n: int = REFRESH_TOP_N) -> int:
 
     # Deduplicate: latest snapshot per symbol
     address_map: dict[str, str] = {}
+    stored_lifecycle_pen: dict[str, float] = {}
     for row in (snap_result.data or []):
         sym = row.get("symbol")
         addr = row.get("token_address")
         if sym and addr and sym not in address_map:
             address_map[sym] = addr
+            stored_lifecycle_pen[sym] = _safe_float(row.get("already_pumped_penalty"), 1.0)
 
     # Batch fetch all token addresses in 1 DexScreener call (max 30)
     all_addresses = [addr for addr in address_map.values()]
@@ -310,7 +357,8 @@ def refresh_top_tokens(n: int = REFRESH_TOP_N) -> int:
         if not market_data:
             continue
 
-        refresh_mult = _compute_refresh_multiplier(market_data)
+        lifecycle_pen = stored_lifecycle_pen.get(symbol, 1.0)
+        refresh_mult = _compute_refresh_multiplier(market_data, lifecycle_pen)
 
         # v11: Social decay — scores decay between full scrape cycles
         # for tokens with no new mentions

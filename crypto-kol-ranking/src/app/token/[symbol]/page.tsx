@@ -93,6 +93,7 @@ interface TokenSnapshot {
   s_tier_mult: number | null;
   size_mult: number | null;
   stale_pen: number | null;
+  pump_momentum_pen: number | null;
   // Technical indicators
   rsi_14: number | null;
   macd_histogram: number | null;
@@ -371,6 +372,7 @@ const MULTIPLIER_LABELS: Record<string, string> = {
   s_tier_mult: "S-Tier",
   size_mult: "Size",
   stale_pen: "Stale",
+  pump_momentum_pen: "Pump Momentum",
 };
 
 function MultiplierChain({ snapshot }: { snapshot: TokenSnapshot }) {
@@ -385,6 +387,7 @@ function MultiplierChain({ snapshot }: { snapshot: TokenSnapshot }) {
     { key: "s_tier_mult", value: snapshot.s_tier_mult },
     { key: "size_mult", value: snapshot.size_mult },
     { key: "stale_pen", value: snapshot.stale_pen },
+    { key: "pump_momentum_pen", value: snapshot.pump_momentum_pen },
   ];
 
   const active = multipliers.filter((m) => m.value != null);

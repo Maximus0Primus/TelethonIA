@@ -316,6 +316,22 @@ CREATE TABLE IF NOT EXISTS scoring_config (
   combined_floor NUMERIC(4,3) NOT NULL DEFAULT 0.25,
   combined_cap NUMERIC(4,3) NOT NULL DEFAULT 2.0,
   safety_floor NUMERIC(4,3) NOT NULL DEFAULT 0.75,
+  -- v20: 15 dynamic scoring constants (previously hardcoded)
+  decay_lambda NUMERIC(5,4) NOT NULL DEFAULT 0.12,
+  activity_mult_floor NUMERIC(4,3) NOT NULL DEFAULT 0.80,
+  activity_mult_cap NUMERIC(4,3) NOT NULL DEFAULT 1.25,
+  pa_norm_floor NUMERIC(4,3) NOT NULL DEFAULT 0.4,
+  pa_norm_cap NUMERIC(4,3) NOT NULL DEFAULT 1.3,
+  onchain_mult_floor NUMERIC(4,3) NOT NULL DEFAULT 0.3,
+  onchain_mult_cap NUMERIC(4,3) NOT NULL DEFAULT 1.5,
+  death_pc24_severe NUMERIC(6,1) NOT NULL DEFAULT -80,
+  death_pc24_moderate NUMERIC(6,1) NOT NULL DEFAULT -50,
+  pump_pc1h_hard NUMERIC(5,1) NOT NULL DEFAULT 30,
+  pump_pc5m_hard NUMERIC(5,1) NOT NULL DEFAULT 15,
+  stale_hours_severe NUMERIC(5,1) NOT NULL DEFAULT 48,
+  gate_top10_pct NUMERIC(5,1) NOT NULL DEFAULT 70,
+  gate_min_liquidity NUMERIC(10,0) NOT NULL DEFAULT 10000,
+  gate_min_holders INTEGER NOT NULL DEFAULT 30,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_by TEXT NOT NULL DEFAULT 'manual',
   change_reason TEXT,
@@ -339,7 +355,23 @@ CREATE TABLE IF NOT EXISTS scoring_config_history (
   w_price_action NUMERIC(4,3),
   combined_floor NUMERIC(4,3),
   combined_cap NUMERIC(4,3),
-  safety_floor NUMERIC(4,3)
+  safety_floor NUMERIC(4,3),
+  -- v20: 15 dynamic scoring constants
+  decay_lambda NUMERIC(5,4),
+  activity_mult_floor NUMERIC(4,3),
+  activity_mult_cap NUMERIC(4,3),
+  pa_norm_floor NUMERIC(4,3),
+  pa_norm_cap NUMERIC(4,3),
+  onchain_mult_floor NUMERIC(4,3),
+  onchain_mult_cap NUMERIC(4,3),
+  death_pc24_severe NUMERIC(6,1),
+  death_pc24_moderate NUMERIC(6,1),
+  pump_pc1h_hard NUMERIC(5,1),
+  pump_pc5m_hard NUMERIC(5,1),
+  stale_hours_severe NUMERIC(5,1),
+  gate_top10_pct NUMERIC(5,1),
+  gate_min_liquidity NUMERIC(10,0),
+  gate_min_holders INTEGER
 );
 
 ALTER TABLE scoring_config_history ENABLE ROW LEVEL SECURITY;

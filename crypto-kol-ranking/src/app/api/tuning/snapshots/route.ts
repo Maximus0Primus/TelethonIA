@@ -65,7 +65,7 @@ export async function GET(request: NextRequest) {
     "safety_penalty", "onchain_multiplier", "death_penalty", "already_pumped_penalty",
     "crash_pen", "activity_mult", "squeeze_score", "squeeze_state", "trend_strength",
     "confirmation_pillars", "entry_premium_mult", "pump_bonus", "wash_pen", "pvp_pen",
-    "pump_pen", "breadth_pen", "stale_pen",
+    "pump_pen", "breadth_pen", "stale_pen", "pump_momentum_pen",
     "price_change_24h", "volume_24h", "liquidity_usd", "mentions",
     "freshest_mention_hours", "top_kols", "price_at_snapshot", "market_cap", "unique_kols", "s_tier_count",
     "score_at_snapshot", "breadth", "size_mult", "s_tier_mult",
@@ -92,12 +92,13 @@ export async function GET(request: NextRequest) {
       }
       const snapshots = await res.json();
 
-      // Dedupe by symbol within this cycle
+      // Dedupe by token_address within this cycle (fallback to symbol)
       const seen = new Set<string>();
       const unique = [];
       for (const snap of snapshots) {
-        if (!seen.has(snap.symbol)) {
-          seen.add(snap.symbol);
+        const key = snap.token_address || snap.symbol;
+        if (!seen.has(key)) {
+          seen.add(key);
           unique.push(snap);
         }
       }
@@ -124,8 +125,9 @@ export async function GET(request: NextRequest) {
     const seen = new Set<string>();
     const uniqueSnapshots = [];
     for (const snap of allSnapshots) {
-      if (!seen.has(snap.symbol)) {
-        seen.add(snap.symbol);
+      const key = snap.token_address || snap.symbol;
+      if (!seen.has(key)) {
+        seen.add(key);
         uniqueSnapshots.push(snap);
       }
     }

@@ -108,8 +108,9 @@ def analyze_winner_profiles(client=None) -> dict:
     df = pd.DataFrame(all_rows)
     df["snapshot_at"] = pd.to_datetime(df["snapshot_at"])
 
-    # First-appearance per token
-    first = df.sort_values("snapshot_at").drop_duplicates(subset=["symbol"], keep="first")
+    # First-appearance per token (dedup by token_address, fallback to symbol)
+    dedup_col = "token_address" if "token_address" in df.columns and df["token_address"].notna().any() else "symbol"
+    first = df.sort_values("snapshot_at").drop_duplicates(subset=[dedup_col], keep="first")
     winners = first[first["did_2x_12h"] == True].copy()
     losers = first[first["did_2x_12h"] == False].copy()
 

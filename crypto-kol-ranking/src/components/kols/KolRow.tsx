@@ -131,7 +131,7 @@ export function KolRow({ kol, rank, index }: KolRowProps) {
 
       {/* Calls */}
       <span className="text-sm text-white/50 tabular-nums font-mono text-right">
-        {kol.uniqueTokens}
+        {kol.labeledCalls}
       </span>
 
       {/* Last Active — hidden on mobile */}

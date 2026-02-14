@@ -1,6 +1,11 @@
 /**
  * Backtesting engine for the tuning platform.
- * Re-scores historical labeled snapshots and computes hit rates.
+ *
+ * Uses PER-CYCLE evaluation: groups snapshots into 15-min scrape cycles,
+ * rescores each cycle independently, computes hit rates per cycle, then averages.
+ * This prevents the same winning token from inflating top-K hit rates across
+ * multiple cycles, and respects temporal variation (same token can be a winner
+ * in cycle 1 but not in cycle 5 as its price moves).
  */
 
 import {
@@ -17,15 +22,17 @@ import {
 export type Horizon = "1h" | "6h" | "12h" | "24h" | "48h" | "72h" | "7d";
 
 export interface BacktestResult {
-  total_snapshots: number;
-  total_2x: number;
-  base_rate: number;
-  top5_hit_rate: number;
+  total_snapshots: number;      // unique tokens (deduped)
+  total_raw_snapshots: number;  // raw before dedup
+  total_2x: number;             // unique winners
+  base_rate: number;            // unique winners / unique tokens
+  top5_hit_rate: number;        // averaged across cycles
   top10_hit_rate: number;
   top20_hit_rate: number;
   avg_score_2x: number;
   avg_score_no2x: number;
   separation: number;
+  num_cycles: number;           // how many cycles contributed to hit rates
 }
 
 export interface FeatureImpact {
@@ -42,6 +49,50 @@ function deepClone<T>(obj: T): T {
   return JSON.parse(JSON.stringify(obj));
 }
 
+/** Group snapshots into scrape cycles (snapshots within 2 min of each other). */
+function groupIntoCycles(snapshots: TokenSnapshot[]): TokenSnapshot[][] {
+  if (snapshots.length === 0) return [];
+
+  const sorted = [...snapshots].sort((a, b) =>
+    (a.snapshot_at ?? "").localeCompare(b.snapshot_at ?? ""),
+  );
+
+  const cycles: TokenSnapshot[][] = [];
+  let currentCycle: TokenSnapshot[] = [sorted[0]];
+  let cycleStart = new Date(sorted[0].snapshot_at ?? 0).getTime();
+
+  for (let i = 1; i < sorted.length; i++) {
+    const ts = new Date(sorted[i].snapshot_at ?? 0).getTime();
+    if (ts - cycleStart < 2 * 60 * 1000) {
+      currentCycle.push(sorted[i]);
+    } else {
+      cycles.push(currentCycle);
+      currentCycle = [sorted[i]];
+      cycleStart = ts;
+    }
+  }
+  cycles.push(currentCycle);
+
+  return cycles;
+}
+
+/**
+ * Deduplicate snapshots: keep 1 per token_address (EARLIEST snapshot_at).
+ * Falls back to symbol when token_address is missing.
+ * Used for global stats (base_rate, avg_score, separation) but NOT for hit rates.
+ */
+function deduplicateByToken(snapshots: TokenSnapshot[]): TokenSnapshot[] {
+  const byKey = new Map<string, TokenSnapshot>();
+  for (const snap of snapshots) {
+    const key = snap.token_address || snap.symbol;
+    const existing = byKey.get(key);
+    if (!existing || (snap.snapshot_at && existing.snapshot_at && snap.snapshot_at < existing.snapshot_at)) {
+      byKey.set(key, snap);
+    }
+  }
+  return Array.from(byKey.values());
+}
+
 /** Combined optimization score: top5 dominates, top10/top20 add granularity */
 function optScore(snapshots: TokenSnapshot[], config: ScoringConfig, horizon: Horizon): number {
   const r = runBacktest(snapshots, config, horizon);
@@ -55,8 +106,12 @@ const MULTS = [
   "already_pumped", "crash_penalty", "activity_mult",
   "squeeze", "trend", "entry_premium",
   "pump_bonus", "wash_pen", "pvp_pen", "pump_pen", "breadth_pen",
-  "stale_pen",
+  "stale_pen", "pump_momentum_pen",
 ] as const;
+
+// Minimum tokens in a cycle to be included in hit rate calculation.
+// With fewer tokens, top-K is meaningless (e.g., 2 tokens → top-5 = all tokens).
+const MIN_CYCLE_SIZE = 5;
 
 // ─── Backtest Runner ─────────────────────────────────────────────────────────
 
@@ -78,44 +133,78 @@ export function runBacktest(
   horizon: Horizon
 ): BacktestResult {
   const filtered = filterByExtractionMode(snapshots, config.extraction_mode);
-  const labeled = filtered.filter((s) => getOutcome(s, horizon) !== null);
-  if (labeled.length === 0) {
+  const rawLabeled = filtered.filter((s) => getOutcome(s, horizon) !== null);
+
+  if (rawLabeled.length === 0) {
     return {
-      total_snapshots: 0, total_2x: 0, base_rate: 0,
+      total_snapshots: 0, total_raw_snapshots: 0, total_2x: 0, base_rate: 0,
       top5_hit_rate: 0, top10_hit_rate: 0, top20_hit_rate: 0,
-      avg_score_2x: 0, avg_score_no2x: 0, separation: 0,
+      avg_score_2x: 0, avg_score_no2x: 0, separation: 0, num_cycles: 0,
     };
   }
 
-  const scored = labeled
-    .map((s) => ({ score: rescore(s, config).newScore, did2x: getOutcome(s, horizon)! }))
-    .sort((a, b) => b.score - a.score);
-
-  const total = scored.length;
-  const total2x = scored.filter((s) => s.did2x).length;
-  const baseRate = total2x / total;
-
-  const hitRate = (k: number) => {
-    const topK = scored.slice(0, Math.min(k, total));
-    if (topK.length === 0) return 0;
-    return topK.filter((s) => s.did2x).length / topK.length;
-  };
-
-  const scores2x = scored.filter((s) => s.did2x).map((s) => s.score);
-  const scoresNo2x = scored.filter((s) => !s.did2x).map((s) => s.score);
+  // ── Global stats use dedup (1 per token) for honest base rate ──
+  const deduped = deduplicateByToken(rawLabeled);
+  const dedupScored = deduped
+    .map((s) => ({ score: rescore(s, config).newScore, did2x: getOutcome(s, horizon)! }));
+  const uniqueTotal = dedupScored.length;
+  const unique2x = dedupScored.filter((s) => s.did2x).length;
+  const scores2x = dedupScored.filter((s) => s.did2x).map((s) => s.score);
+  const scoresNo2x = dedupScored.filter((s) => !s.did2x).map((s) => s.score);
   const avg2x = scores2x.length > 0 ? scores2x.reduce((a, b) => a + b, 0) / scores2x.length : 0;
   const avgNo2x = scoresNo2x.length > 0 ? scoresNo2x.reduce((a, b) => a + b, 0) / scoresNo2x.length : 0;
 
+  // ── Hit rates use per-cycle evaluation ──
+  const cycles = groupIntoCycles(rawLabeled);
+  let top5Sum = 0, top10Sum = 0, top20Sum = 0;
+  let validCycles = 0;
+
+  for (const cycle of cycles) {
+    // Within a cycle, dedup by token_address (fallback to symbol)
+    const seen = new Set<string>();
+    const uniqueInCycle: TokenSnapshot[] = [];
+    for (const snap of cycle) {
+      const key = snap.token_address || snap.symbol;
+      if (!seen.has(key)) {
+        seen.add(key);
+        uniqueInCycle.push(snap);
+      }
+    }
+
+    if (uniqueInCycle.length < MIN_CYCLE_SIZE) continue;
+
+    const scored = uniqueInCycle
+      .map((s) => ({ score: rescore(s, config).newScore, did2x: getOutcome(s, horizon)! }))
+      .sort((a, b) => b.score - a.score);
+
+    const hitRate = (k: number) => {
+      const topK = scored.slice(0, Math.min(k, scored.length));
+      if (topK.length === 0) return 0;
+      return topK.filter((s) => s.did2x).length / topK.length;
+    };
+
+    top5Sum += hitRate(5);
+    top10Sum += hitRate(10);
+    top20Sum += hitRate(20);
+    validCycles++;
+  }
+
+  const avgTop5 = validCycles > 0 ? top5Sum / validCycles : 0;
+  const avgTop10 = validCycles > 0 ? top10Sum / validCycles : 0;
+  const avgTop20 = validCycles > 0 ? top20Sum / validCycles : 0;
+
   return {
-    total_snapshots: total,
-    total_2x: total2x,
-    base_rate: Math.round(baseRate * 1000) / 10,
-    top5_hit_rate: Math.round(hitRate(5) * 1000) / 10,
-    top10_hit_rate: Math.round(hitRate(10) * 1000) / 10,
-    top20_hit_rate: Math.round(hitRate(20) * 1000) / 10,
+    total_snapshots: uniqueTotal,
+    total_raw_snapshots: rawLabeled.length,
+    total_2x: unique2x,
+    base_rate: Math.round((unique2x / uniqueTotal) * 1000) / 10,
+    top5_hit_rate: Math.round(avgTop5 * 1000) / 10,
+    top10_hit_rate: Math.round(avgTop10 * 1000) / 10,
+    top20_hit_rate: Math.round(avgTop20 * 1000) / 10,
     avg_score_2x: Math.round(avg2x * 10) / 10,
     avg_score_no2x: Math.round(avgNo2x * 10) / 10,
     separation: avgNo2x > 0 ? Math.round((avg2x / avgNo2x) * 100) / 100 : 0,
+    num_cycles: validCycles,
   };
 }
 

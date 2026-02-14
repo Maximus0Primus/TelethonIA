@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 
 from supabase import create_client, Client
 
+from pipeline import SCORING_PARAMS
+
 logger = logging.getLogger(__name__)
 
 
@@ -417,7 +419,15 @@ def insert_snapshots(ranking: list[dict]) -> None:
     prev_snapshots = _fetch_previous_snapshots(client, symbols)
 
     rows = []
+    skipped_stale = 0
     for t in ranking:
+        # v19: Skip zombie tokens — stale mentions produce noise snapshots
+        # v20: threshold from SCORING_PARAMS (dynamic)
+        freshest_h = t.get("freshest_mention_hours") or 0
+        if freshest_h > SCORING_PARAMS["stale_hours_severe"]:
+            skipped_stale += 1
+            continue
+
         # Compute temporal deltas vs previous snapshot
         prev = prev_snapshots.get(t["symbol"])
         deltas = _compute_temporal_features(t, prev)
@@ -632,6 +642,13 @@ def insert_snapshots(ranking: list[dict]) -> None:
             "entry_timing_quality": t.get("entry_timing_quality"),
         }
         rows.append(_sanitize_row(row))
+
+    if skipped_stale:
+        logger.info("Skipped %d zombie snapshots (freshest_mention > 48h)", skipped_stale)
+
+    if not rows:
+        logger.info("No snapshots to insert (all filtered)")
+        return
 
     # Batch insert with row-by-row fallback on failure
     try:

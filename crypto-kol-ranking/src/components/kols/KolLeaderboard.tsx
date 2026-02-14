@@ -39,7 +39,7 @@ function compare(a: KolRowData, b: KolRowData, key: SortKey, dir: "asc" | "desc"
     case "winRate":
       return m * (((a.winRateAny ?? a.winRate24h ?? a.winRate12h) ?? -1) - ((b.winRateAny ?? b.winRate24h ?? b.winRate12h) ?? -1));
     case "calls":
-      return m * (a.uniqueTokens - b.uniqueTokens);
+      return m * (a.labeledCalls - b.labeledCalls);
     case "lastActive": {
       const ta = a.lastActive ? new Date(a.lastActive).getTime() : 0;
       const tb = b.lastActive ? new Date(b.lastActive).getTime() : 0;

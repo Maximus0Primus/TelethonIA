@@ -12,17 +12,21 @@ import {
 } from "@/lib/backtester";
 import { FeatureImportance } from "./FeatureImportance";
 
-const MIN_RELIABLE = 500;
+const MIN_RELIABLE = 200; // unique tokens needed for reliable optimization
 
 function DataHealth({
-  total,
+  uniqueTokens,
+  rawSnapshots,
   hits,
   baseRate,
+  numCycles,
   snapshots,
 }: {
-  total: number;
+  uniqueTokens: number;
+  rawSnapshots: number;
   hits: number;
   baseRate: number;
+  numCycles: number;
   snapshots: TokenSnapshot[];
 }) {
   const { oldest, newest } = useMemo(() => {
@@ -38,8 +42,8 @@ function DataHealth({
     };
   }, [snapshots]);
 
-  const pct = Math.min(100, Math.round((total / MIN_RELIABLE) * 100));
-  const ready = total >= MIN_RELIABLE;
+  const pct = Math.min(100, Math.round((uniqueTokens / MIN_RELIABLE) * 100));
+  const ready = uniqueTokens >= MIN_RELIABLE;
 
   return (
     <div className="rounded-lg border border-white/10 bg-white/[0.02] p-3 space-y-2">
@@ -70,10 +74,10 @@ function DataHealth({
         />
       </div>
 
-      <div className="grid grid-cols-4 gap-2 text-center">
+      <div className="grid grid-cols-5 gap-2 text-center">
         <div>
-          <div className="text-lg font-mono text-white">{total}</div>
-          <div className="text-[9px] text-white/30">Labeled</div>
+          <div className="text-lg font-mono text-white">{uniqueTokens}</div>
+          <div className="text-[9px] text-white/30">Unique Tokens</div>
         </div>
         <div>
           <div className="text-lg font-mono text-green-400">{hits}</div>
@@ -82,6 +86,10 @@ function DataHealth({
         <div>
           <div className="text-lg font-mono text-white/70">{baseRate}%</div>
           <div className="text-[9px] text-white/30">Base Rate</div>
+        </div>
+        <div>
+          <div className="text-lg font-mono text-cyan-400">{numCycles}</div>
+          <div className="text-[9px] text-white/30">Cycles</div>
         </div>
         <div>
           <div className="text-[11px] font-mono text-white/50 leading-tight mt-0.5">
@@ -93,10 +101,16 @@ function DataHealth({
         </div>
       </div>
 
+      {rawSnapshots > uniqueTokens && (
+        <div className="text-[10px] text-white/15">
+          {rawSnapshots} raw snapshots deduped to {uniqueTokens} unique tokens
+        </div>
+      )}
+
       {!ready && (
         <div className="text-[10px] text-white/20">
-          Need {MIN_RELIABLE - total} more labeled snapshots for reliable
-          optimization. ~{Math.ceil((MIN_RELIABLE - total) / 40)}d at current
+          Need {MIN_RELIABLE - uniqueTokens} more unique tokens for reliable
+          optimization. ~{Math.ceil((MIN_RELIABLE - uniqueTokens) / 15)}d at current
           rate.
         </div>
       )}
@@ -224,9 +238,11 @@ export function BacktestPanel({ config, onApplyBestConfig }: BacktestPanelProps)
         <div className="space-y-4">
           {/* Data Health */}
           <DataHealth
-            total={result.total_snapshots}
+            uniqueTokens={result.total_snapshots}
+            rawSnapshots={result.total_raw_snapshots}
             hits={result.total_2x}
             baseRate={result.base_rate}
+            numCycles={result.num_cycles}
             snapshots={snapshots}
           />
 
@@ -245,6 +261,12 @@ export function BacktestPanel({ config, onApplyBestConfig }: BacktestPanelProps)
               </div>
             ))}
           </div>
+
+          {result.num_cycles > 0 && (
+            <div className="text-[10px] text-white/20 -mt-2">
+              Hit rates averaged across {result.num_cycles} cycles (5+ tokens each)
+            </div>
+          )}
 
           {/* Separation */}
           <div className="flex items-center gap-4 text-xs">

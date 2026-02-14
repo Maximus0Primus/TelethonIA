@@ -9,7 +9,8 @@ Core principle from MemecoinGuide: "Buy the dip, NOT the pump"
 Uses pandas-ta (RSI, MACD, BBands, OBV) when available, with per-submultiplier
 fallback to raw DexScreener heuristics when OHLCV data or pandas-ta is missing.
 
-Returns a price_action_multiplier in [0.4, 1.3] applied to the final score.
+Returns a price_action_multiplier in [pa_norm_floor, pa_norm_cap] applied to the final score.
+Default bounds: [0.4, 1.3]. Overridable via pa_norm_floor/pa_norm_cap kwargs.
 """
 
 import logging
@@ -118,7 +119,7 @@ def _compute_ta_indicators(df: pd.DataFrame) -> dict:
     return indicators
 
 
-def compute_price_action_score(token: dict) -> dict:
+def compute_price_action_score(token: dict, *, pa_norm_floor: float = 0.4, pa_norm_cap: float = 1.3) -> dict:
     """
     Analyze price action from OHLCV candles and DexScreener price changes.
 
@@ -389,17 +390,20 @@ def compute_price_action_score(token: dict) -> dict:
                 support_mult = 1.15
 
     # ===================================================================
-    # Final: average of all 4 sub-multipliers, clamped to [0.4, 1.3]
+    # Final: average of all 4 sub-multipliers, clamped to [pa_norm_floor, pa_norm_cap]
+    # v20: bounds passed as params from pipeline (dynamic via SCORING_PARAMS)
     # ===================================================================
     price_action_mult = (position_mult + direction_mult + vol_confirm + support_mult) / 4.0
-    price_action_mult = max(0.4, min(1.3, price_action_mult))
+    price_action_mult = max(pa_norm_floor, min(pa_norm_cap, price_action_mult))
 
     # Normalized score [0, 1] — neutral (all sub-mults=1.0) maps to 0.5
-    # v10: piecewise normalization so neutral=0.5 (was 0.667 with linear)
+    # v10: piecewise normalization so neutral=0.5
+    below_range = 1.0 - pa_norm_floor  # 0.6 at default
+    above_range = pa_norm_cap - 1.0    # 0.3 at default
     if price_action_mult <= 1.0:
-        price_action_score = (price_action_mult - 0.4) / 1.2   # [0.4,1.0] → [0,0.5]
+        price_action_score = (price_action_mult - pa_norm_floor) / (below_range * 2) if below_range > 0 else 0.5
     else:
-        price_action_score = 0.5 + (price_action_mult - 1.0) / 0.6  # [1.0,1.3] → [0.5,1.0]
+        price_action_score = 0.5 + (price_action_mult - 1.0) / (above_range * 2) if above_range > 0 else 0.5
 
     result = {
         "price_action_mult": round(price_action_mult, 3),

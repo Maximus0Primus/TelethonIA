@@ -884,10 +884,11 @@ def calculate_sentiment(text: str) -> float:
 def _two_phase_decay(hours_ago: float) -> float:
     """
     Single-phase exponential decay for recency scoring.
-    lambda=0.12, half-life ~5.8h.
+    Default lambda=0.12, half-life ~5.8h.
     12h-old mention retains ~24% weight (was 2% with old two-phase).
+    v20: lambda read from SCORING_PARAMS["decay_lambda"] (dynamic).
     """
-    return math.exp(-0.12 * hours_ago)
+    return math.exp(-SCORING_PARAMS["decay_lambda"] * hours_ago)
 
 
 def _compute_wash_trading_score(token: dict) -> float:
@@ -1068,70 +1069,79 @@ def _compute_kol_entry_premium(token: dict) -> tuple[float, float]:
                 mult = 0.25
             return round(entry_premium, 3), round(mult, 3)
 
-    # Fallback: OHLCV candle data
-    # Need both price and candle data — no candles = can't compute = neutral
-    if not current_price or current_price <= 0 or not hours_ago_list:
-        return 1.0, 1.0
-    if not token.get("candle_data"):
-        return 1.0, 1.0
+    # Fallback 2: OHLCV candle data
+    # Need both price and candle data — no candles = try mcap fallback
+    candle_result = None
+    if current_price and current_price > 0 and hours_ago_list and token.get("candle_data"):
+        # Only consider mentions > 5 min old (too fresh = no meaningful price diff)
+        valid_hours = [h for h in hours_ago_list if h > 5 / 60]
+        if valid_hours:
+            # Compute decay-weighted average entry price from REAL candle data
+            weighted_sum = 0.0
+            weight_sum = 0.0
+            matched_count = 0
+            for h in valid_hours:
+                real_price = _get_price_from_candles(token, h)
+                if real_price is not None and real_price > 0:
+                    decay = _two_phase_decay(h)
+                    weighted_sum += real_price * decay
+                    weight_sum += decay
+                    matched_count += 1
 
-    # Only consider mentions > 5 min old (too fresh = no meaningful price diff)
-    valid_hours = [h for h in hours_ago_list if h > 5 / 60]
-    if not valid_hours:
-        return 1.0, 1.0
+            if matched_count > 0 and weight_sum > 0:
+                avg_entry = weighted_sum / weight_sum
+                entry_premium = current_price / avg_entry
 
-    # Compute decay-weighted average entry price from REAL candle data
-    weighted_sum = 0.0
-    weight_sum = 0.0
-    matched_count = 0
-    for h in valid_hours:
-        real_price = _get_price_from_candles(token, h)
-        if real_price is not None and real_price > 0:
-            decay = _two_phase_decay(h)
-            weighted_sum += real_price * decay
-            weight_sum += decay
-            matched_count += 1
+                # Duration scaling: longer pumps = more dangerous
+                oldest_mention = max(valid_hours)
+                if oldest_mention > 48:
+                    duration_factor = 1.5
+                elif oldest_mention > 24:
+                    duration_factor = 1.3
+                elif oldest_mention > 12:
+                    duration_factor = 1.15
+                else:
+                    duration_factor = 1.0
 
-    # Need at least 1 real candle match to compute anything meaningful
-    if matched_count == 0 or weight_sum == 0:
-        return 1.0, 1.0
+                effective_premium = entry_premium ** duration_factor
 
-    avg_entry = weighted_sum / weight_sum
-    entry_premium = current_price / avg_entry
+                # Tier-based multiplier
+                if effective_premium < 1.0:
+                    mult = 1.1  # dip buy — mild bonus
+                elif effective_premium <= 1.2:
+                    mult = 1.0  # buying at KOL price — neutral
+                elif effective_premium <= 2.0:
+                    mult = 0.9  # slight premium
+                elif effective_premium <= 4.0:
+                    mult = 0.9 - (effective_premium - 2.0) * (0.2 / 2.0)
+                elif effective_premium <= 8.0:
+                    mult = 0.7 - (effective_premium - 4.0) * (0.2 / 4.0)
+                elif effective_premium <= 20.0:
+                    mult = 0.5 - (effective_premium - 8.0) * (0.15 / 12.0)
+                else:
+                    mult = 0.25
+                candle_result = (round(entry_premium, 3), round(mult, 3))
 
-    # Duration scaling: longer pumps = more dangerous
-    oldest_mention = max(valid_hours)
-    if oldest_mention > 48:
-        duration_factor = 1.5
-    elif oldest_mention > 24:
-        duration_factor = 1.3
-    elif oldest_mention > 12:
-        duration_factor = 1.15
-    else:
-        duration_factor = 1.0
+    if candle_result is not None:
+        return candle_result
 
-    effective_premium = entry_premium ** duration_factor
+    # v19 Fallback 3: Market cap magnitude — for established tokens where
+    # KOLs don't state entry mcap AND candles don't show meaningful diff.
+    # A $700M memecoin has already pumped 700x+ from launch ($1M typical).
+    # Even if KOLs call it today at current price, the 2x potential is near zero.
+    if current_mcap and current_mcap > 50_000_000:
+        implied_premium = current_mcap / 1_000_000  # vs typical $1M launch
+        if implied_premium <= 50:
+            mult = 0.85   # $50M — established, limited upside
+        elif implied_premium <= 200:
+            mult = 0.70   # $200M — very limited
+        elif implied_premium <= 500:
+            mult = 0.50   # $500M — extremely unlikely to 2x
+        else:
+            mult = 0.35   # >$500M — near impossible
+        return round(implied_premium, 3), round(mult, 3)
 
-    # Tier-based multiplier
-    if effective_premium < 1.0:
-        mult = 1.1  # dip buy — mild bonus
-    elif effective_premium <= 1.2:
-        mult = 1.0  # buying at KOL price — neutral
-    elif effective_premium <= 2.0:
-        mult = 0.9  # slight premium
-    elif effective_premium <= 4.0:
-        # Linear: 2.0→0.9, 4.0→0.7
-        mult = 0.9 - (effective_premium - 2.0) * (0.2 / 2.0)
-    elif effective_premium <= 8.0:
-        # Linear: 4.0→0.7, 8.0→0.5
-        mult = 0.7 - (effective_premium - 4.0) * (0.2 / 4.0)
-    elif effective_premium <= 20.0:
-        # Linear: 8.0→0.5, 20.0→0.35
-        mult = 0.5 - (effective_premium - 8.0) * (0.15 / 12.0)
-    else:
-        mult = 0.25  # chasing — near certain loss
-
-    return round(entry_premium, 3), round(mult, 3)
+    return 1.0, 1.0
 
 
 def _detect_artificial_pump(token: dict) -> bool:
@@ -1172,15 +1182,18 @@ def _detect_death_penalty(token: dict, freshest_mention_hours: float) -> float:
     penalties = []
 
     # --- Signal 1: Price collapse (original v9 logic) ---
+    # v20: thresholds from SCORING_PARAMS (dynamic)
+    death_severe = SCORING_PARAMS["death_pc24_severe"]   # default -80
+    death_moderate = SCORING_PARAMS["death_pc24_moderate"]  # default -50
     pc24 = token.get("price_change_24h")
     if pc24 is not None:
         pc24 = float(pc24)
 
-        if pc24 < -80:
+        if pc24 < death_severe:
             penalties.append(0.1)
-        elif pc24 < -70:
+        elif pc24 < (death_severe + 10):  # -70 when severe=-80
             penalties.append(0.15 if freshest_mention_hours > 3 else 0.3)
-        elif pc24 < -50:
+        elif pc24 < death_moderate:
             va = token.get("volume_acceleration")
             volume_alive = va is not None and float(va) > 0.5
             social_alive = freshest_mention_hours < 6
@@ -1242,9 +1255,14 @@ def _apply_hard_gates(ranking: list[dict]) -> list[dict]:
     """
     Remove tokens that fail hard safety checks.
     These are non-negotiable: mint authority, freeze authority,
-    top10 > 70%, risk > 8000, liq < $10K, holders < 30.
+    top10 > gate_top10_pct%, risk > 8000, liq < gate_min_liquidity, holders < gate_min_holders.
     v16: marks gate_reason on ejected tokens (for snapshot backtesting).
+    v20: thresholds from SCORING_PARAMS (dynamic).
     """
+    gate_top10 = SCORING_PARAMS["gate_top10_pct"]
+    gate_liq = SCORING_PARAMS["gate_min_liquidity"]
+    gate_holders = int(SCORING_PARAMS["gate_min_holders"])
+
     passed = []
     gated = 0
     for token in ranking:
@@ -1258,9 +1276,9 @@ def _apply_hard_gates(ranking: list[dict]) -> list[dict]:
             token["gate_reason"] = "freeze_authority"
             gated += 1
             continue
-        # top10 holders own > 70% = extreme concentration
+        # top10 holders own > gate_top10_pct% = extreme concentration
         top10 = token.get("top10_holder_pct")
-        if top10 is not None and top10 > 70:
+        if top10 is not None and top10 > gate_top10:
             token["gate_reason"] = "top10_concentration"
             gated += 1
             continue
@@ -1270,22 +1288,23 @@ def _apply_hard_gates(ranking: list[dict]) -> list[dict]:
             token["gate_reason"] = "high_risk_score"
             gated += 1
             continue
-        # Algorithm v3 A4: Liquidity floor ($10K minimum — absolute dust)
+        # Liquidity floor
         liq = token.get("liquidity_usd")
-        if liq is not None and liq < 10_000:
+        if liq is not None and liq < gate_liq:
             token["gate_reason"] = "low_liquidity"
             gated += 1
             continue
-        # Algorithm v3 A4: Holder floor (need real organic community)
+        # Holder floor (need real organic community)
         hcount = token.get("helius_holder_count") or token.get("holder_count")
-        if hcount is not None and hcount < 30:
+        if hcount is not None and hcount < gate_holders:
             token["gate_reason"] = "low_holders"
             gated += 1
             continue
         passed.append(token)
 
     if gated:
-        logger.info("Hard gates removed %d tokens (mint/freeze/top10>70%%/risk>8000/liq<10K/holders<30)", gated)
+        logger.info("Hard gates removed %d tokens (mint/freeze/top10>%.0f%%/risk>8000/liq<%.0f/holders<%d)",
+                     gated, gate_top10, gate_liq, gate_holders)
     return passed
 
 
@@ -1491,7 +1510,9 @@ def _compute_onchain_multiplier(token: dict) -> float:
     if not factors:
         return 1.0  # v10: no data = neutral, not a penalty
 
-    return max(0.3, min(1.5, sum(factors) / len(factors)))
+    # v20: bounds from SCORING_PARAMS (dynamic)
+    return max(SCORING_PARAMS["onchain_mult_floor"],
+               min(SCORING_PARAMS["onchain_mult_cap"], sum(factors) / len(factors)))
 
 
 def _compute_safety_penalty(token: dict) -> float:
@@ -1612,6 +1633,22 @@ _DEFAULT_SCORING_PARAMS = {
     "combined_floor": 0.25,
     "combined_cap": 2.0,
     "safety_floor": 0.75,
+    # v20: 15 critical constants made dynamic via scoring_config table
+    "decay_lambda": 0.12,
+    "activity_mult_floor": 0.80,
+    "activity_mult_cap": 1.25,
+    "pa_norm_floor": 0.4,
+    "pa_norm_cap": 1.3,
+    "onchain_mult_floor": 0.3,
+    "onchain_mult_cap": 1.5,
+    "death_pc24_severe": -80,
+    "death_pc24_moderate": -50,
+    "pump_pc1h_hard": 30,
+    "pump_pc5m_hard": 15,
+    "stale_hours_severe": 48,
+    "gate_top10_pct": 70,
+    "gate_min_liquidity": 10000,
+    "gate_min_holders": 30,
 }
 
 # Module-level cache: refreshed once per scrape cycle via load_scoring_config()
@@ -1658,11 +1695,34 @@ def load_scoring_config() -> None:
         SCORING_PARAMS["combined_cap"] = float(row.get("combined_cap", 2.0))
         SCORING_PARAMS["safety_floor"] = float(row.get("safety_floor", 0.75))
 
+        # v20: Load 15 dynamic scoring constants (safe fallback per key)
+        _DYNAMIC_KEYS = {
+            "decay_lambda": 0.12,
+            "activity_mult_floor": 0.80,
+            "activity_mult_cap": 1.25,
+            "pa_norm_floor": 0.4,
+            "pa_norm_cap": 1.3,
+            "onchain_mult_floor": 0.3,
+            "onchain_mult_cap": 1.5,
+            "death_pc24_severe": -80,
+            "death_pc24_moderate": -50,
+            "pump_pc1h_hard": 30,
+            "pump_pc5m_hard": 15,
+            "stale_hours_severe": 48,
+            "gate_top10_pct": 70,
+            "gate_min_liquidity": 10000,
+            "gate_min_holders": 30,
+        }
+        for key, default in _DYNAMIC_KEYS.items():
+            SCORING_PARAMS[key] = float(row.get(key, default))
+
         logger.info(
             "scoring_config loaded: consensus=%.2f conviction=%.2f breadth=%.2f PA=%.2f "
-            "(updated_by=%s, %s)",
+            "decay=%.3f activity=[%.2f,%.2f] (updated_by=%s, %s)",
             new_weights["consensus"], new_weights["conviction"],
             new_weights["breadth"], new_weights["price_action"],
+            SCORING_PARAMS["decay_lambda"],
+            SCORING_PARAMS["activity_mult_floor"], SCORING_PARAMS["activity_mult_cap"],
             row.get("updated_by", "?"), row.get("change_reason", ""),
         )
     except Exception as e:
@@ -1800,10 +1860,15 @@ def _classify_lifecycle_phase(token: dict) -> tuple[str, float]:
         return "euphoria", 0.5
 
     # Boom: sweet spot — growing interest + price confirming
+    # v19: No boom bonus for large-cap tokens (>$50M). A $700M token pumping
+    # +25% is NOT a "boom" entry — it's an established token getting attention.
+    t_mcap = token.get("market_cap") or 0
     if uk >= 2 and pc24 is not None and 10 < pc24 <= 200:
         has_vol = va is not None and va > 1.0
         has_social = sv > 0.3 or ma > 0.2
         if has_vol and has_social:
+            if t_mcap > 50_000_000:
+                return "boom", 0.85  # large cap "boom" = penalty, not bonus
             return "boom", 1.1
 
     # Displacement: fresh, unproven
@@ -2392,7 +2457,11 @@ def aggregate_ranking(
 
     # === Algorithm v4: Price Action scoring ===
     for token in ranking:
-        pa = compute_price_action_score(token)
+        pa = compute_price_action_score(
+            token,
+            pa_norm_floor=SCORING_PARAMS["pa_norm_floor"],
+            pa_norm_cap=SCORING_PARAMS["pa_norm_cap"],
+        )
         token.update(pa)
 
         # === Harvard adaptations: Volume Squeeze + Trend Strength ===
@@ -2509,19 +2578,21 @@ def aggregate_ranking(
         trend_mult = 1.0
 
         # v16: Activity ratio — STRONGEST predictor (+0.212 correlation with 2x).
-        # Amplified range [0.80, 1.25] with penalty for dead activity.
+        # v20: bounds from SCORING_PARAMS (dynamic).
+        act_floor = SCORING_PARAMS["activity_mult_floor"]  # default 0.80
+        act_cap = SCORING_PARAMS["activity_mult_cap"]      # default 1.25
         recent_6h_count = sum(1 for h in token.get("_hours_ago", []) if h <= 6)
         total_mention_count = len(token.get("_hours_ago", []))
         if total_mention_count > 0:
             activity_ratio = recent_6h_count / total_mention_count
             if activity_ratio > 0.6:
-                activity_mult = 1.25  # v16: was 1.15 — most mentions are fresh
+                activity_mult = act_cap   # most mentions are fresh
             elif activity_ratio > 0.3:
-                activity_mult = 1.10  # v16: was 1.07
+                activity_mult = 1.10
             elif activity_ratio > 0.1:
-                activity_mult = 1.0   # neutral
+                activity_mult = 1.0       # neutral
             else:
-                activity_mult = 0.80  # v16: NEW penalty — dead social activity
+                activity_mult = act_floor  # dead social activity
         else:
             activity_mult = 1.0
 
@@ -2547,14 +2618,20 @@ def aggregate_ranking(
         # v17: Pump momentum penalty — penalize tokens actively pumping RIGHT NOW
         # This is NOT a duplicate of price_action (which averages 4 sub-components).
         # This multiplier acts on the FINAL score to directly penalize active pumps.
+        # v20: thresholds from SCORING_PARAMS (dynamic).
+        pump_1h_hard = SCORING_PARAMS["pump_pc1h_hard"]  # default 30
+        pump_5m_hard = SCORING_PARAMS["pump_pc5m_hard"]  # default 15
+        pump_1h_mod = pump_1h_hard * 0.5   # 15 at default
+        pump_5m_mod = pump_5m_hard * 0.533  # ~8 at default
+        pump_1h_light = pump_1h_hard * 0.267  # ~8 at default
         pc_1h = token.get("price_change_1h")
         pc_5m = token.get("price_change_5m")
         pump_momentum_pen = 1.0
-        if (pc_1h is not None and pc_1h > 30) or (pc_5m is not None and pc_5m > 15):
+        if (pc_1h is not None and pc_1h > pump_1h_hard) or (pc_5m is not None and pc_5m > pump_5m_hard):
             pump_momentum_pen = 0.5   # active pump
-        elif (pc_1h is not None and pc_1h > 15) or (pc_5m is not None and pc_5m > 8):
+        elif (pc_1h is not None and pc_1h > pump_1h_mod) or (pc_5m is not None and pc_5m > pump_5m_mod):
             pump_momentum_pen = 0.7   # moderate pump
-        elif pc_1h is not None and pc_1h > 8:
+        elif pc_1h is not None and pc_1h > pump_1h_light:
             pump_momentum_pen = 0.85  # light pump
         token["pump_momentum_pen"] = pump_momentum_pen
 
@@ -2576,29 +2653,41 @@ def aggregate_ranking(
 
         # v15.2: Size opportunity multiplier — backtest-proven signal.
         # Winners avg 4.1M mcap vs losers 21.4M. Fresh (<12h) + small (<500K) = 30% precision.
-        # mcap tier: smaller tokens need less $ to 2x
+        # v19: mcap tier — smaller tokens need less $ to 2x.
+        # A $700M token needs $700M NEW capital to 2x — nearly impossible for memecoins.
+        # Progressive penalty: micro→bonus, mid→neutral, large→heavy penalty.
         t_mcap = token.get("market_cap") or 0
         if t_mcap <= 0:
             mcap_factor = 1.0  # no data = neutral
         elif t_mcap < 300_000:
-            mcap_factor = 1.3
+            mcap_factor = 1.3   # micro cap — room to 100x
         elif t_mcap < 1_000_000:
-            mcap_factor = 1.15
+            mcap_factor = 1.15  # small cap — easy to 2x
         elif t_mcap < 5_000_000:
-            mcap_factor = 1.0
+            mcap_factor = 1.0   # mid cap — neutral
         elif t_mcap < 20_000_000:
-            mcap_factor = 0.85
+            mcap_factor = 0.85  # established — harder to 2x
+        elif t_mcap < 50_000_000:
+            mcap_factor = 0.70  # large — needs $50M+ new capital
+        elif t_mcap < 200_000_000:
+            mcap_factor = 0.50  # very large — 2x extremely rare
+        elif t_mcap < 500_000_000:
+            mcap_factor = 0.35  # mega cap — basically impossible to 2x
         else:
-            mcap_factor = 0.7
+            mcap_factor = 0.25  # >$500M — needs $500M+ to 2x, not happening
         # freshness tier: KOL just called = buy pressure incoming
         # (complementary to stale_pen which handles >48h decay)
-        if freshest_h < 4:
+        # v19: No freshness bonus for large caps — fresh call on $700M token
+        # doesn't make it easier to 2x.
+        if t_mcap >= 50_000_000:
+            fresh_factor = 1.0  # large caps: no freshness boost
+        elif freshest_h < 4:
             fresh_factor = 1.2
         elif freshest_h < 12:
             fresh_factor = 1.1
         else:
             fresh_factor = 1.0
-        size_mult = max(0.6, min(1.5, mcap_factor * fresh_factor))
+        size_mult = max(0.25, min(1.5, mcap_factor * fresh_factor))
         token["size_mult"] = round(size_mult, 3)
 
         # v15.3: S-tier KOL bonus — S-tier callers have proven track records

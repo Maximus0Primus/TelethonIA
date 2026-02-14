@@ -77,7 +77,7 @@ def compute_kol_scores(min_calls: int = 3) -> dict[str, float]:
     while True:
         result = (
             client.table("token_snapshots")
-            .select("top_kols, did_2x_12h, did_2x_24h, did_2x_48h, did_2x_72h, did_2x_7d, snapshot_at, symbol, has_ca_mention")
+            .select("top_kols, did_2x_12h, did_2x_24h, did_2x_48h, did_2x_72h, did_2x_7d, snapshot_at, symbol, token_address, has_ca_mention")
             .not_.is_("top_kols", "null")
             # Accept rows where ANY horizon has outcome data
             .or_("did_2x_12h.not.is.null,did_2x_24h.not.is.null,did_2x_48h.not.is.null,did_2x_72h.not.is.null,did_2x_7d.not.is.null")
@@ -113,9 +113,11 @@ def compute_kol_scores(min_calls: int = 3) -> dict[str, float]:
         except (ValueError, AttributeError):
             return None
 
-    # --- Step 1: For each (kol, symbol) pair, keep ONLY the earliest snapshot ---
+    # --- Step 1: For each (kol, token_address) pair, keep ONLY the earliest snapshot ---
     # A token ranked for 12h creates ~24 snapshots; we count it once.
-    first_calls: dict[tuple[str, str], dict] = {}  # (kol, symbol) -> {dt, did_2x_*}
+    # Dedup by token_address (not symbol) to avoid merging different contracts
+    # sharing the same ticker (e.g. 3 different $LUNA contracts).
+    first_calls: dict[tuple[str, str], dict] = {}  # (kol, token_address) -> {dt, did_2x_*}
 
     for row in all_rows:
         kols = row.get("top_kols")
@@ -125,6 +127,7 @@ def compute_kol_scores(min_calls: int = 3) -> dict[str, float]:
         did_2x_72h = bool(row.get("did_2x_72h")) if row.get("did_2x_72h") is not None else None
         did_2x_7d = bool(row.get("did_2x_7d")) if row.get("did_2x_7d") is not None else None
         symbol = row.get("symbol", "")
+        token_addr = row.get("token_address") or symbol  # fallback to symbol
         has_ca = bool(row.get("has_ca_mention"))
 
         if isinstance(kols, str):
@@ -133,7 +136,7 @@ def compute_kol_scores(min_calls: int = 3) -> dict[str, float]:
             except (json.JSONDecodeError, TypeError):
                 continue
 
-        if not isinstance(kols, list) or not symbol:
+        if not isinstance(kols, list) or not token_addr:
             continue
 
         snap_at = row.get("snapshot_at", "")
@@ -142,10 +145,11 @@ def compute_kol_scores(min_calls: int = 3) -> dict[str, float]:
         for kol in kols:
             if not isinstance(kol, str):
                 continue
-            key = (kol, symbol)
+            key = (kol, token_addr)
             if key not in first_calls or (snap_dt and snap_dt < first_calls[key]["dt"]):
                 first_calls[key] = {
                     "dt": snap_dt or datetime.min.replace(tzinfo=timezone.utc),
+                    "symbol": symbol,
                     "did_2x_12h": did_2x_12h,
                     "did_2x_24h": did_2x_24h,
                     "did_2x_48h": did_2x_48h,
@@ -169,7 +173,7 @@ def compute_kol_scores(min_calls: int = 3) -> dict[str, float]:
     kol_hits_by_hz: dict[str, dict[str, float]] = {hz: {} for hz in TRACKED_HORIZONS}
     kol_tokens: dict[str, list[tuple[str, bool]]] = {}  # kol -> [(symbol, hit)]
 
-    for (kol, symbol), call in first_calls.items():
+    for (kol, _token_addr), call in first_calls.items():
         # Skip if no outcome data at all
         if all(call.get(f"did_2x_{hz}") is None for hz in TRACKED_HORIZONS):
             continue
@@ -180,6 +184,7 @@ def compute_kol_scores(min_calls: int = 3) -> dict[str, float]:
         hits = {hz: call.get(f"did_2x_{hz}") is True for hz in TRACKED_HORIZONS}
         hit_any = any(hits.values())
         has_ca = call.get("has_ca", False)
+        display_symbol = call.get("symbol", _token_addr)
 
         kol_calls[kol] = kol_calls.get(kol, 0) + weight
         if hit_any:
@@ -194,7 +199,7 @@ def compute_kol_scores(min_calls: int = 3) -> dict[str, float]:
             if hit_any:
                 kol_hits_ca[kol] = kol_hits_ca.get(kol, 0) + weight
 
-        kol_tokens.setdefault(kol, []).append((symbol, hit_any))
+        kol_tokens.setdefault(kol, []).append((display_symbol, hit_any))
 
     # Compute hit rates (only for KOLs with enough weighted calls)
     raw_rates = {}
