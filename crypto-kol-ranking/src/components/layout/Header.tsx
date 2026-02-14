@@ -36,9 +36,9 @@ export function Header() {
             <Image
               src="/logo.png"
               alt="Cryptosensus"
-              width={32}
+              width={36}
               height={32}
-              className="size-8"
+              className="h-8 w-auto"
               priority
             />
             <h1 className="text-xl font-bold tracking-tight text-white hover:text-white/80 transition-colors">
