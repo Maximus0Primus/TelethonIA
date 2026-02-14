@@ -216,11 +216,11 @@ export function TokenCard({
         y: { delay: index * 0.03, duration: 0.4, ease: "easeOut" },
       }}
     >
-      <Link href={`/token/${token.symbol.replace("$", "")}`}>
+      <Link href={`/token/${encodeURIComponent(token.symbol.replace("$", ""))}`}>
         <div
           className={cn(
             "token-card group relative flex flex-col justify-between",
-            "h-[200px] sm:h-[220px] p-5",
+            "h-[200px] sm:h-[220px] p-3 sm:p-5",
             "rounded-2xl border",
             "cursor-pointer",
             podium
@@ -293,7 +293,7 @@ export function TokenCard({
           {/* Score - Large centered */}
           <div className="flex-1 flex items-center justify-center flex-col gap-1">
             <span className={cn(
-              "text-5xl sm:text-6xl font-bold tabular-nums",
+              "text-4xl sm:text-5xl md:text-6xl font-bold tabular-nums",
               podium ? podium.score : "text-white"
             )}>
               {scrambledScore}
@@ -329,7 +329,7 @@ export function TokenCard({
             </div>
 
             {token.weakestComponent && COMPONENT_LABELS[token.weakestComponent] && (
-              <div className="flex items-center gap-1 text-[10px] text-muted-foreground/60">
+              <div className="flex items-center gap-1 text-[10px] sm:text-xs text-muted-foreground/60">
                 <AlertTriangle className="h-3 w-3" />
                 <span>{COMPONENT_LABELS[token.weakestComponent]}</span>
               </div>

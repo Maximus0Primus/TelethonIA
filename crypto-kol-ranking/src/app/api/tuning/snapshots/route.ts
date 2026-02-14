@@ -2,8 +2,12 @@ import { NextRequest, NextResponse } from "next/server";
 
 /**
  * GET /api/tuning/snapshots
- * Fetches the latest token_snapshots with all component values for client-side re-scoring.
- * Returns one snapshot per symbol (most recent).
+ * Fetches token_snapshots with all component values for client-side re-scoring.
+ *
+ * Query params:
+ *   ?cycle=<ISO timestamp>  — return snapshots from that specific scrape cycle
+ *   ?cycles=true            — return list of available scrape cycle timestamps
+ *   (no params)             — return latest snapshot per symbol (default)
  */
 export async function GET(request: NextRequest) {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -16,72 +20,107 @@ export async function GET(request: NextRequest) {
     );
   }
 
-  // Fetch recent snapshots — get enough to deduplicate by symbol
-  // PostgREST doesn't support DISTINCT ON, so we fetch extras and dedupe in JS
+  const headers = {
+    apikey: key,
+    Authorization: `Bearer ${key}`,
+  };
+
+  const { searchParams } = request.nextUrl;
+
+  // --- Mode 1: List available scrape cycles ---
+  if (searchParams.get("cycles") === "true") {
+    try {
+      const res = await fetch(
+        `${url}/rest/v1/token_snapshots?select=snapshot_at&order=snapshot_at.desc&limit=2000`,
+        { headers, cache: "no-store" },
+      );
+      if (!res.ok) {
+        return NextResponse.json({ error: await res.text() }, { status: res.status });
+      }
+      const rows: { snapshot_at: string }[] = await res.json();
+
+      // Group by scrape cycle: snapshots within 2 minutes are the same cycle
+      const cycles: { ts: string; count: number }[] = [];
+      for (const row of rows) {
+        const ts = new Date(row.snapshot_at).getTime();
+        const last = cycles[cycles.length - 1];
+        if (last && Math.abs(ts - new Date(last.ts).getTime()) < 2 * 60 * 1000) {
+          last.count++;
+        } else {
+          cycles.push({ ts: row.snapshot_at, count: 1 });
+        }
+      }
+
+      return NextResponse.json({ cycles });
+    } catch (error) {
+      console.error("Cycles API error:", error);
+      return NextResponse.json({ error: "Internal server error" }, { status: 500 });
+    }
+  }
+
+  // --- Columns for snapshot queries ---
   const columns = [
-    "symbol",
-    "token_address",
-    "snapshot_at",
-    // 5 component values
-    "consensus_val",
-    "sentiment_val",
-    "conviction_val",
-    "breadth_val",
-    "price_action_val",
-    // Multipliers
-    "safety_penalty",
-    "onchain_multiplier",
-    "death_penalty",
-    "already_pumped_penalty",
-    "crash_pen",
-    "activity_mult",
-    "squeeze_score",
-    "squeeze_state",
-    "trend_strength",
-    "confirmation_pillars",
-    "entry_premium_mult",
-    "pump_bonus",
-    "wash_pen",
-    "pvp_pen",
-    "pump_pen",
-    "breadth_pen",
-    "stale_pen",
-    // Raw data for context
-    "price_change_24h",
-    "volume_24h",
-    "liquidity_usd",
-    "mentions",
-    "freshest_mention_hours",
-    "top_kols",
-    "price_at_snapshot",
-    "market_cap",
-    // Scores (original production scores)
-    "score",
-    "breadth",
+    "symbol", "token_address", "snapshot_at",
+    "consensus_val", "sentiment_val", "conviction_val", "breadth_val", "price_action_val",
+    "safety_penalty", "onchain_multiplier", "death_penalty", "already_pumped_penalty",
+    "crash_pen", "activity_mult", "squeeze_score", "squeeze_state", "trend_strength",
+    "confirmation_pillars", "entry_premium_mult", "pump_bonus", "wash_pen", "pvp_pen",
+    "pump_pen", "breadth_pen", "stale_pen",
+    "price_change_24h", "volume_24h", "liquidity_usd", "mentions",
+    "freshest_mention_hours", "top_kols", "price_at_snapshot", "market_cap", "unique_kols", "s_tier_count",
+    "score_at_snapshot", "breadth", "size_mult", "s_tier_mult",
+    "ca_mention_count", "ticker_mention_count", "url_mention_count", "has_ca_mention",
+    "did_2x_1h", "did_2x_6h", "did_2x_12h", "did_2x_24h", "did_2x_48h", "did_2x_72h", "did_2x_7d",
   ].join(",");
 
+  // --- Mode 2: Snapshots for a specific cycle ---
+  const cycleParam = searchParams.get("cycle");
+  if (cycleParam) {
+    try {
+      const cycleTs = new Date(cycleParam);
+      const windowStart = new Date(cycleTs.getTime() - 2 * 60 * 1000).toISOString();
+      const windowEnd = new Date(cycleTs.getTime() + 2 * 60 * 1000).toISOString();
+
+      const res = await fetch(
+        `${url}/rest/v1/token_snapshots?select=${columns}` +
+        `&snapshot_at=gte.${windowStart}&snapshot_at=lte.${windowEnd}` +
+        `&order=snapshot_at.desc&limit=200`,
+        { headers, cache: "no-store" },
+      );
+      if (!res.ok) {
+        return NextResponse.json({ error: await res.text() }, { status: res.status });
+      }
+      const snapshots = await res.json();
+
+      // Dedupe by symbol within this cycle
+      const seen = new Set<string>();
+      const unique = [];
+      for (const snap of snapshots) {
+        if (!seen.has(snap.symbol)) {
+          seen.add(snap.symbol);
+          unique.push(snap);
+        }
+      }
+
+      return NextResponse.json({ data: unique, total: unique.length });
+    } catch (error) {
+      console.error("Cycle snapshots API error:", error);
+      return NextResponse.json({ error: "Internal server error" }, { status: 500 });
+    }
+  }
+
+  // --- Mode 3: Latest snapshots (default) ---
   try {
-    // We need the score field — it's stored in tokens table, not snapshots.
-    // Instead, fetch snapshots and sort by snapshot_at desc, dedupe by symbol.
     const res = await fetch(
       `${url}/rest/v1/token_snapshots?select=${columns}&order=snapshot_at.desc&limit=200`,
-      {
-        headers: {
-          apikey: key,
-          Authorization: `Bearer ${key}`,
-        },
-        cache: "no-store",
-      }
+      { headers, cache: "no-store" },
     );
-
     if (!res.ok) {
-      const errText = await res.text();
-      return NextResponse.json({ error: errText }, { status: res.status });
+      return NextResponse.json({ error: await res.text() }, { status: res.status });
     }
 
     const allSnapshots = await res.json();
 
-    // Deduplicate: keep only the most recent snapshot per symbol
     const seen = new Set<string>();
     const uniqueSnapshots = [];
     for (const snap of allSnapshots) {
@@ -97,9 +136,6 @@ export async function GET(request: NextRequest) {
     });
   } catch (error) {
     console.error("Tuning snapshots API error:", error);
-    return NextResponse.json(
-      { error: "Internal server error" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }

@@ -1,6 +1,6 @@
 """
 Outcome tracker: fills price labels in token_snapshots after sufficient time has passed.
-Checks 4 horizons (1h, 6h, 12h, 24h) and marks whether each token did a 2x.
+Checks 7 horizons (1h, 6h, 12h, 24h, 48h, 72h, 7d) and marks whether each token did a 2x.
 
 Uses OHLCV candle data to find the MAX PRICE during the window, not just the
 price at a single point in time. This prevents false negatives where a token
@@ -39,10 +39,13 @@ _POOL_CACHE_TTL = 7 * 24 * 3600  # 7 days -- pool addresses are very stable
 # Process horizons from shortest to longest — shorter windows are nested in longer ones
 # so we can enforce consistency (if 1h did 2x, all longer horizons must too)
 HORIZONS = [
-    {"hours": 1, "price_col": "price_after_1h", "flag_col": "did_2x_1h", "max_col": "max_price_1h"},
-    {"hours": 6, "price_col": "price_after_6h", "flag_col": "did_2x_6h", "max_col": "max_price_6h"},
-    {"hours": 12, "price_col": "price_after_12h", "flag_col": "did_2x_12h", "max_col": "max_price_12h"},
-    {"hours": 24, "price_col": "price_after_24h", "flag_col": "did_2x_24h", "max_col": "max_price_24h"},
+    {"hours": 1, "price_col": "price_after_1h", "flag_col": "did_2x_1h", "max_col": "max_price_1h", "peak_col": "peak_hour_1h", "min_col": "min_price_1h", "t2x_col": "time_to_2x_1h"},
+    {"hours": 6, "price_col": "price_after_6h", "flag_col": "did_2x_6h", "max_col": "max_price_6h", "peak_col": "peak_hour_6h", "min_col": "min_price_6h", "t2x_col": "time_to_2x_6h"},
+    {"hours": 12, "price_col": "price_after_12h", "flag_col": "did_2x_12h", "max_col": "max_price_12h", "peak_col": "peak_hour_12h", "min_col": "min_price_12h", "t2x_col": "time_to_2x_12h"},
+    {"hours": 24, "price_col": "price_after_24h", "flag_col": "did_2x_24h", "max_col": "max_price_24h", "peak_col": "peak_hour_24h", "min_col": "min_price_24h", "t2x_col": "time_to_2x_24h"},
+    {"hours": 48, "price_col": "price_after_48h", "flag_col": "did_2x_48h", "max_col": "max_price_48h", "peak_col": "peak_hour_48h", "min_col": "min_price_48h", "t2x_col": "time_to_2x_48h"},
+    {"hours": 72, "price_col": "price_after_72h", "flag_col": "did_2x_72h", "max_col": "max_price_72h", "peak_col": "peak_hour_72h", "min_col": "min_price_72h", "t2x_col": "time_to_2x_72h"},
+    {"hours": 168, "price_col": "price_after_7d", "flag_col": "did_2x_7d", "max_col": "max_price_7d", "peak_col": "peak_hour_7d", "min_col": "min_price_7d", "t2x_col": "time_to_2x_7d"},
 ]
 
 # Max snapshots to process per cycle (generous — we need to catch up)
@@ -50,6 +53,12 @@ BATCH_LIMIT = 150
 
 # Time budget in seconds — exit gracefully before GH Action timeout
 TIME_BUDGET_SECONDS = 10 * 60  # 10 minutes
+
+# Sanity check: max plausible price ratio per horizon.
+# If OHLCV returns max_price/price_at > this, the data is likely wrong
+# (e.g. GeckoTerminal returning SOL price ~$85 instead of token price).
+# Even for memecoins, 200x in 24h is extraordinary — anything above is a data bug.
+MAX_PLAUSIBLE_RATIO = {1: 50, 6: 100, 12: 200, 24: 500, 48: 1000, 72: 2000, 168: 5000}
 
 
 def _get_client() -> Client:
@@ -119,15 +128,18 @@ def _get_max_price_gecko(
     pool_address: str,
     snapshot_ts: float,
     window_hours: int,
-) -> tuple[float | None, float | None]:
+    price_at: float | None = None,
+) -> tuple[float | None, float | None, float | None, float | None, float | None]:
     """
-    Get the max high price AND the close of the last candle during a time window
-    using GeckoTerminal OHLCV (5-min candles).
+    Get the max high price, min low price, and the close of the last candle
+    during a time window using GeckoTerminal OHLCV (5-min candles).
 
-    Returns (max_high, last_close) or (None, None) if API fails.
+    Returns (max_high, min_low, last_close, peak_ts, time_to_2x_hours) or all Nones.
+    peak_ts is the Unix timestamp of the candle with the highest price.
+    time_to_2x_hours is hours after snapshot when price first reached 2x.
     """
     if not pool_address:
-        return None, None
+        return None, None, None, None, None
 
     window_start_ts = int(snapshot_ts)
     window_end_ts = int(snapshot_ts + window_hours * 3600)
@@ -147,43 +159,66 @@ def _get_max_price_gecko(
         )
         if resp.status_code == 429:
             logger.warning("GeckoTerminal rate limited on OHLCV")
-            return None, None
+            return None, None, None, None, None
         if resp.status_code != 200:
-            return None, None
+            return None, None, None, None, None
 
         ohlcv_list = resp.json().get("data", {}).get("attributes", {}).get("ohlcv_list") or []
         if not ohlcv_list:
-            return None, None
+            return None, None, None, None, None
 
         max_high = 0.0
+        min_low = float('inf')
+        peak_ts = None
+        time_to_2x_ts = None
+        target_2x = price_at * 2.0 if price_at and price_at > 0 else None
         last_close = None
         last_ts = 0
         candles_in_window = 0
 
-        for candle in ohlcv_list:
+        # Sort chronologically for time_to_2x (first candle that hits 2x)
+        sorted_candles = sorted(ohlcv_list, key=lambda c: c[0])
+        for candle in sorted_candles:
             candle_ts = candle[0]
             if window_start_ts <= candle_ts <= window_end_ts:
                 high = float(candle[2])
+                low = float(candle[3])
                 close = float(candle[4])
                 if high > max_high:
                     max_high = high
+                    peak_ts = candle_ts
+                if low < min_low:
+                    min_low = low
+                if target_2x and time_to_2x_ts is None and high >= target_2x:
+                    time_to_2x_ts = candle_ts
                 if candle_ts > last_ts:
                     last_ts = candle_ts
                     last_close = close
                 candles_in_window += 1
 
         if candles_in_window == 0:
-            return None, None
+            return None, None, None, None, None
+
+        time_to_2x_hours = None
+        if time_to_2x_ts:
+            time_to_2x_hours = round((time_to_2x_ts - snapshot_ts) / 3600, 2)
+            time_to_2x_hours = max(0, min(window_hours, time_to_2x_hours))
 
         logger.debug(
-            "GeckoOHLCV: %d candles in %dh window, max=%.10f, close=%.10f",
-            candles_in_window, window_hours, max_high, last_close or 0,
+            "GeckoOHLCV: %d candles in %dh window, max=%.10f, min=%.10f, close=%.10f",
+            candles_in_window, window_hours, max_high, min_low if min_low < float('inf') else 0, last_close or 0,
         )
-        return (max_high if max_high > 0 else None, last_close)
+        return (
+            max_high if max_high > 0 else None,
+            min_low if min_low < float('inf') else None,
+            last_close,
+            peak_ts,
+            time_to_2x_hours,
+        )
 
     except requests.RequestException as e:
         logger.debug("GeckoTerminal OHLCV failed: %s", e)
-        return None, None
+        return None, None, None, None, None
 
 
 # === DexPaprika Fallback (free, 10K req/day) ===
@@ -192,13 +227,14 @@ def _get_max_price_dexpaprika(
     pool_address: str,
     snapshot_ts: float,
     window_hours: int,
-) -> tuple[float | None, float | None]:
+    price_at: float | None = None,
+) -> tuple[float | None, float | None, float | None, float | None, float | None]:
     """
-    Fallback: get max high + last close via DexPaprika OHLCV (free, no auth, 15-min candles).
-    Returns (max_high, last_close) or (None, None).
+    Fallback: get max high, min low, last close via DexPaprika OHLCV (free, no auth, 15-min candles).
+    Returns (max_high, min_low, last_close, peak_ts, time_to_2x_hours) or all Nones.
     """
     if not pool_address:
-        return None, None
+        return None, None, None, None, None
 
     start_dt = datetime.fromtimestamp(snapshot_ts, tz=timezone.utc)
     end_dt = start_dt + timedelta(hours=window_hours)
@@ -215,25 +251,57 @@ def _get_max_price_dexpaprika(
             timeout=15,
         )
         if resp.status_code != 200:
-            return None, None
+            return None, None, None, None, None
 
         items = resp.json()
         if not isinstance(items, list) or not items:
-            return None, None
+            return None, None, None, None, None
 
         max_high = 0.0
+        min_low = float('inf')
+        peak_ts = None
+        time_to_2x_ts = None
+        target_2x = price_at * 2.0 if price_at and price_at > 0 else None
         last_close = None
+
         for item in items:
             h = float(item.get("high", 0) or 0)
+            lo = float(item.get("low", 0) or 0)
             c = float(item.get("close", 0) or 0)
+
+            # Parse candle timestamp
+            candle_ts = None
+            ts_str = item.get("time_open") or item.get("time_close") or ""
+            if ts_str:
+                try:
+                    candle_ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00")).timestamp()
+                except (ValueError, AttributeError):
+                    pass
+
             if h > max_high:
                 max_high = h
+                peak_ts = candle_ts
+            if lo > 0 and lo < min_low:
+                min_low = lo
+            if target_2x and time_to_2x_ts is None and h >= target_2x and candle_ts:
+                time_to_2x_ts = candle_ts
             last_close = c  # items are chronological, last one is the most recent
 
-        return (max_high if max_high > 0 else None, last_close)
+        time_to_2x_hours = None
+        if time_to_2x_ts:
+            time_to_2x_hours = round((time_to_2x_ts - snapshot_ts) / 3600, 2)
+            time_to_2x_hours = max(0, min(window_hours, time_to_2x_hours))
+
+        return (
+            max_high if max_high > 0 else None,
+            min_low if min_low < float('inf') else None,
+            last_close,
+            peak_ts,
+            time_to_2x_hours,
+        )
 
     except requests.RequestException:
-        return None, None
+        return None, None, None, None, None
 
 
 # === Main ===
@@ -261,6 +329,9 @@ def fill_outcomes() -> None:
         price_col = horizon["price_col"]
         flag_col = horizon["flag_col"]
         max_col = horizon["max_col"]
+        peak_col = horizon["peak_col"]
+        min_col = horizon["min_col"]
+        t2x_col = horizon["t2x_col"]
 
         cutoff = (now - timedelta(hours=hours)).isoformat()
 
@@ -268,8 +339,8 @@ def fill_outcomes() -> None:
             result = (
                 client.table("token_snapshots")
                 .select("id, symbol, price_at_snapshot, snapshot_at, token_address, pair_address, "
-                        "max_price_1h, max_price_6h, max_price_12h, max_price_24h, "
-                        "did_2x_1h, did_2x_6h, did_2x_12h, did_2x_24h")
+                        "max_price_1h, max_price_6h, max_price_12h, max_price_24h, max_price_48h, max_price_72h, max_price_7d, "
+                        "did_2x_1h, did_2x_6h, did_2x_12h, did_2x_24h, did_2x_48h, did_2x_72h, did_2x_7d")
                 .is_(flag_col, "null")
                 .lt("snapshot_at", cutoff)
                 .limit(BATCH_LIMIT)
@@ -341,7 +412,10 @@ def fill_outcomes() -> None:
                 snapshot_ts = None
 
             max_price = None
+            min_price = None
             last_close = None
+            peak_ts = None
+            time_to_2x_hours = None
             source = "none"
 
             if snapshot_ts:
@@ -354,14 +428,18 @@ def fill_outcomes() -> None:
 
                 if pool_addr:
                     # Try GeckoTerminal OHLCV first
-                    max_price, last_close = _get_max_price_gecko(pool_addr, snapshot_ts, hours)
+                    max_price, min_price, last_close, peak_ts, time_to_2x_hours = _get_max_price_gecko(
+                        pool_addr, snapshot_ts, hours, price_at=price_at,
+                    )
                     time.sleep(2.1)
                     if max_price is not None:
                         source = "gecko_ohlcv"
 
                     # Fallback: DexPaprika OHLCV
                     if max_price is None:
-                        max_price, last_close = _get_max_price_dexpaprika(pool_addr, snapshot_ts, hours)
+                        max_price, min_price, last_close, peak_ts, time_to_2x_hours = _get_max_price_dexpaprika(
+                            pool_addr, snapshot_ts, hours, price_at=price_at,
+                        )
                         time.sleep(0.3)
                         if max_price is not None:
                             source = "dexpaprika_ohlcv"
@@ -375,6 +453,20 @@ def fill_outcomes() -> None:
 
             if max_price is None:
                 # No OHLCV data — skip and retry next cycle (DON'T use current price)
+                stats["skipped"] += 1
+                continue
+
+            # Sanity check: reject OHLCV data that is wildly implausible.
+            # GeckoTerminal/DexPaprika sometimes return the SOL price (~$85)
+            # instead of the token price due to base/quote token mismatch.
+            ratio = max_price / price_at if price_at > 0 else 0
+            max_ratio = MAX_PLAUSIBLE_RATIO.get(hours, 500)
+            if ratio > max_ratio:
+                logger.warning(
+                    "Implausible OHLCV for %s/%dh: %.6f -> %.6f (%.0fx) — "
+                    "likely SOL price, not token price. Skipping.",
+                    symbol, hours, price_at, max_price, ratio,
+                )
                 stats["skipped"] += 1
                 continue
 
@@ -396,10 +488,31 @@ def fill_outcomes() -> None:
                     symbol, hours,
                 )
 
+            # Validate last_close against ratio check before storing
+            safe_close = last_close
+            if safe_close and price_at > 0:
+                close_ratio = safe_close / price_at
+                if close_ratio > max_ratio:
+                    logger.warning(
+                        "Implausible last_close for %s/%dh: %.6f -> %.6f (%.0fx), using max_price",
+                        symbol, hours, price_at, safe_close, close_ratio,
+                    )
+                    safe_close = None
+
+            # v16: Compute peak_hour — how many hours after snapshot the peak occurred
+            peak_hour = None
+            if peak_ts and snapshot_ts:
+                peak_hour = round((peak_ts - snapshot_ts) / 3600, 2)
+                # Clamp to window (candle timestamps can be slightly off)
+                peak_hour = max(0, min(hours, peak_hour))
+
             update_data = {
-                price_col: last_close if last_close else max_price,
+                price_col: safe_close if safe_close else max_price,
                 flag_col: did_2x,
                 max_col: max_price,
+                peak_col: peak_hour,
+                min_col: min_price,
+                t2x_col: time_to_2x_hours,
             }
 
             try:
@@ -424,6 +537,9 @@ def fill_outcomes() -> None:
     # Second pass: fix existing inconsistencies in already-labeled data
     _fix_existing_inconsistencies(client)
 
+    # Third pass: fill price_at_first_call for snapshots with oldest_mention_hours
+    _fill_first_call_prices(client, pool_cache)
+
 
 def _fix_existing_inconsistencies(client: Client) -> None:
     """
@@ -434,8 +550,8 @@ def _fix_existing_inconsistencies(client: Client) -> None:
         result = (
             client.table("token_snapshots")
             .select("id, symbol, price_at_snapshot, "
-                    "max_price_1h, max_price_6h, max_price_12h, max_price_24h, "
-                    "did_2x_1h, did_2x_6h, did_2x_12h, did_2x_24h")
+                    "max_price_1h, max_price_6h, max_price_12h, max_price_24h, max_price_48h, max_price_72h, max_price_7d, "
+                    "did_2x_1h, did_2x_6h, did_2x_12h, did_2x_24h, did_2x_48h, did_2x_72h, did_2x_7d")
             .not_.is_("max_price_6h", "null")
             .not_.is_("max_price_12h", "null")
             .limit(500)
@@ -452,27 +568,33 @@ def _fix_existing_inconsistencies(client: Client) -> None:
             continue
 
         # Collect all known max prices
-        maxes = {
-            1: float(snap["max_price_1h"]) if snap.get("max_price_1h") else None,
-            6: float(snap["max_price_6h"]) if snap.get("max_price_6h") else None,
-            12: float(snap["max_price_12h"]) if snap.get("max_price_12h") else None,
-            24: float(snap["max_price_24h"]) if snap.get("max_price_24h") else None,
-        }
+        maxes = {h["hours"]: float(snap[h["max_col"]]) if snap.get(h["max_col"]) else None for h in HORIZONS}
 
         # Compute running max (longer window must be >= shorter window)
         running_max = 0.0
         updates = {}
-        horizon_map = {1: HORIZONS[0], 6: HORIZONS[1], 12: HORIZONS[2], 24: HORIZONS[3]}
+        horizon_map = {h["hours"]: h for h in HORIZONS}
 
-        for h in [1, 6, 12, 24]:
+        for h in [hz["hours"] for hz in HORIZONS]:
             val = maxes[h]
             if val is not None:
+                # Sanity check: reject implausible values (SOL price leak)
+                max_ratio = MAX_PLAUSIBLE_RATIO.get(h, 500)
+                if price_at > 0 and val / price_at > max_ratio:
+                    logger.warning(
+                        "Implausible consistency val for %s/%dh: %.6f -> %.6f (%.0fx), nullifying",
+                        snap["symbol"], h, price_at, val, val / price_at,
+                    )
+                    hz = horizon_map[h]
+                    updates[hz["max_col"]] = None
+                    updates[hz["price_col"]] = None
+                    updates[hz["flag_col"]] = None
+                    continue
                 if val < running_max:
-                    # Bug: shorter window had higher max -> fix this
                     hz = horizon_map[h]
                     new_did_2x = running_max >= (price_at * 2.0)
                     updates[hz["max_col"]] = running_max
-                    updates[hz["price_col"]] = running_max  # also fix price_after
+                    updates[hz["price_col"]] = running_max
                     updates[hz["flag_col"]] = new_did_2x
                 else:
                     running_max = val
@@ -487,3 +609,104 @@ def _fix_existing_inconsistencies(client: Client) -> None:
 
     if fixed > 0:
         logger.info("Fixed %d snapshots with window inconsistencies", fixed)
+
+
+def _fill_first_call_prices(client: Client, pool_cache: dict) -> None:
+    """
+    For snapshots with oldest_mention_hours but no price_at_first_call,
+    look up OHLCV candle data to find the price when the first KOL called.
+    Uses DexPaprika (free) to fetch candles around the first-call timestamp.
+    Limited to 20 per cycle to stay within rate limits.
+    """
+    try:
+        result = (
+            client.table("token_snapshots")
+            .select("id, symbol, snapshot_at, oldest_mention_hours, pair_address, token_address")
+            .is_("price_at_first_call", "null")
+            .not_.is_("oldest_mention_hours", "null")
+            .not_.is_("pair_address", "null")
+            .limit(20)
+            .execute()
+        )
+    except Exception as e:
+        logger.warning("Failed to query for first_call_prices: %s", e)
+        return
+
+    snapshots = result.data or []
+    if not snapshots:
+        return
+
+    filled = 0
+    for snap in snapshots:
+        snap_at_str = snap.get("snapshot_at", "")
+        oldest_h = float(snap.get("oldest_mention_hours") or 0)
+        pool_addr = snap.get("pair_address")
+
+        if not pool_addr or oldest_h <= 0:
+            continue
+
+        try:
+            if snap_at_str.endswith("Z"):
+                snap_dt = datetime.fromisoformat(snap_at_str.replace("Z", "+00:00"))
+            elif "+" in snap_at_str:
+                snap_dt = datetime.fromisoformat(snap_at_str)
+            else:
+                snap_dt = datetime.fromisoformat(snap_at_str).replace(tzinfo=timezone.utc)
+            snapshot_ts = snap_dt.timestamp()
+        except (ValueError, AttributeError):
+            continue
+
+        # First call happened at snapshot_ts - oldest_mention_hours * 3600
+        first_call_ts = snapshot_ts - oldest_h * 3600
+        # Fetch a small window of candles around the first call time
+        start_dt = datetime.fromtimestamp(first_call_ts - 900, tz=timezone.utc)  # 15min before
+        end_dt = datetime.fromtimestamp(first_call_ts + 900, tz=timezone.utc)    # 15min after
+
+        try:
+            resp = requests.get(
+                f"{DEXPAPRIKA_BASE}/networks/solana/pools/{pool_addr}/ohlcv",
+                params={
+                    "start": start_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "end": end_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "limit": 4,
+                    "interval": "15m",
+                },
+                timeout=10,
+            )
+            time.sleep(0.3)
+            if resp.status_code != 200:
+                continue
+
+            items = resp.json()
+            if not isinstance(items, list) or not items:
+                continue
+
+            # Use close of the candle closest to first_call_ts
+            best_candle = None
+            best_diff = float('inf')
+            for item in items:
+                ts_str = item.get("time_open") or item.get("time_close") or ""
+                if not ts_str:
+                    continue
+                try:
+                    candle_ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00")).timestamp()
+                except (ValueError, AttributeError):
+                    continue
+                diff = abs(candle_ts - first_call_ts)
+                if diff < best_diff:
+                    best_diff = diff
+                    best_candle = item
+
+            if best_candle:
+                close_price = float(best_candle.get("close", 0) or 0)
+                if close_price > 0:
+                    client.table("token_snapshots").update({
+                        "price_at_first_call": close_price,
+                    }).eq("id", snap["id"]).execute()
+                    filled += 1
+
+        except Exception as e:
+            logger.debug("first_call_price failed for %s: %s", snap["symbol"], e)
+
+    if filled > 0:
+        logger.info("Filled price_at_first_call for %d snapshots", filled)

@@ -7,6 +7,8 @@ import { cn } from "@/lib/utils";
 
 const navItems = [
   { href: "/", label: "Tokens" },
+  { href: "/kols", label: "KOLs" },
+  { href: "/tuning", label: "Tuning" },
   { href: "/about", label: "About" },
 ];
 
@@ -20,7 +22,7 @@ export function FloatingNav() {
       transition={{ duration: 0.5, delay: 0.5 }}
       className="fixed bottom-8 left-1/2 -translate-x-1/2 z-50"
     >
-      <div className="glass-nav flex items-center gap-1 rounded-full px-2 py-2">
+      <div className="glass-nav flex items-center gap-0.5 sm:gap-1 rounded-full px-1.5 sm:px-2 py-2">
         {navItems.map((item) => {
           const isActive = pathname === item.href;
           return (
@@ -28,7 +30,7 @@ export function FloatingNav() {
               key={item.href}
               href={item.href}
               className={cn(
-                "relative px-5 py-2 text-sm font-medium rounded-full transition-colors",
+                "relative px-3 sm:px-5 py-2 text-xs sm:text-sm font-medium rounded-full transition-colors",
                 isActive
                   ? "text-black"
                   : "text-white/70 hover:text-white"

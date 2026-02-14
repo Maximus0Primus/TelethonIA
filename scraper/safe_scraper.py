@@ -27,7 +27,7 @@ from telethon.errors import FloodWaitError
 
 from pipeline import aggregate_ranking
 from push_to_supabase import upsert_tokens, insert_snapshots, insert_kol_mentions, _get_client as _get_supabase
-from outcome_tracker import fill_outcomes
+# fill_outcomes is handled by dedicated outcomes.yml workflow (every 2h)
 from price_refresh import refresh_top_tokens
 from debug_dump import dump_debug_data
 
@@ -326,21 +326,43 @@ async def scrape_groups(client: TelegramClient) -> dict[str, list[dict]]:
     return messages_data
 
 
+def _fetch_sol_price() -> float | None:
+    """Fetch current SOL/USD price from CoinGecko (free, no auth). Returns None on failure."""
+    import requests as _req
+    try:
+        resp = _req.get(
+            "https://api.coingecko.com/api/v3/simple/price",
+            params={"ids": "solana", "vs_currencies": "usd"},
+            timeout=5,
+        )
+        if resp.status_code == 200:
+            price = resp.json().get("solana", {}).get("usd")
+            if price and float(price) > 0:
+                logger.info("SOL price: $%.2f", float(price))
+                return round(float(price), 2)
+    except Exception as e:
+        logger.warning("Failed to fetch SOL price: %s", e)
+    return None
+
+
 def process_and_push(messages_data: dict[str, list[dict]], dump: bool = False) -> None:
     """Run the pipeline and push results to Supabase."""
     ranking_by_window: dict[str, list[dict]] = {}
+    all_enriched_by_window: dict[str, list[dict]] = {}
     all_raw_mentions: list[dict] = []
 
     for window_name, hours in TIME_WINDOWS.items():
-        ranking, raw_mentions = aggregate_ranking(
+        ranking, raw_mentions, all_enriched = aggregate_ranking(
             messages_data, GROUPS_CONVICTION, hours,
             groups_tier=GROUPS_TIER, tier_weights=TIER_WEIGHTS,
         )
         ranking_by_window[window_name] = ranking
+        all_enriched_by_window[window_name] = all_enriched
         # v10: Keep mentions from the largest window only (7d) to avoid duplicates
         if window_name == "7d":
             all_raw_mentions = raw_mentions
-        logger.info("Window %s: %d tokens ranked", window_name, len(ranking))
+        gated = sum(1 for t in all_enriched if t.get("gate_reason"))
+        logger.info("Window %s: %d survivors, %d gated (total %d)", window_name, len(ranking), gated, len(all_enriched))
 
     # Debug dump (before push, so we capture pre-Supabase state)
     if dump:
@@ -365,17 +387,30 @@ def process_and_push(messages_data: dict[str, list[dict]], dump: bool = False) -
     upsert_tokens(ranking_by_window, stats)
     logger.info("Pushed to Supabase: %d tokens (24h)", len(data_24h))
 
-    # Insert snapshots for ML training data (24h window)
-    if data_24h:
-        insert_snapshots(data_24h)
+    # v16: Fetch SOL price once per cycle for market context in backtesting
+    sol_price = _fetch_sol_price()
 
-    # Also insert snapshots for 7d window (most complete data, covers tokens not in 24h)
-    data_7d = ranking_by_window.get("7d", [])
-    if data_7d:
-        # Only insert 7d tokens that aren't already in the 24h snapshot
-        symbols_24h = {t["symbol"] for t in data_24h}
-        extra_7d = [t for t in data_7d if t["symbol"] not in symbols_24h]
+    # v16: Insert snapshots for ALL tokens (survivors + gated) for backtesting.
+    # Gated tokens have gate_reason set; survivors have gate_reason=None.
+    all_24h = all_enriched_by_window.get("24h", [])
+    if sol_price and all_24h:
+        for t in all_24h:
+            t["sol_price_at_snapshot"] = sol_price
+    if all_24h:
+        gated_24h = sum(1 for t in all_24h if t.get("gate_reason"))
+        insert_snapshots(all_24h)
+        logger.info("Inserted %d snapshots (24h): %d survivors + %d gated",
+                     len(all_24h), len(all_24h) - gated_24h, gated_24h)
+
+    # Also insert snapshots for 7d window (covers tokens not in 24h)
+    all_7d = all_enriched_by_window.get("7d", [])
+    if all_7d:
+        symbols_24h = {t["symbol"] for t in all_24h}
+        extra_7d = [t for t in all_7d if t["symbol"] not in symbols_24h]
         if extra_7d:
+            if sol_price:
+                for t in extra_7d:
+                    t["sol_price_at_snapshot"] = sol_price
             insert_snapshots(extra_7d)
             logger.info("Inserted %d extra snapshots from 7d window", len(extra_7d))
 
@@ -386,11 +421,9 @@ def process_and_push(messages_data: dict[str, list[dict]], dump: bool = False) -
         except Exception as e:
             logger.error("KOL mentions insert failed: %s", e)
 
-    # Fill outcome labels for old snapshots
-    try:
-        fill_outcomes()
-    except Exception as e:
-        logger.error("Outcome tracker failed: %s", e)
+    # Outcome labels are filled by the dedicated outcomes.yml workflow (every 2h).
+    # Running fill_outcomes() here was causing GeckoTerminal rate-limit stalls
+    # that pushed the scraper past its 25-min GitHub Actions timeout.
 
     # Run automated backtest diagnosis (only if enough labeled data)
     try:

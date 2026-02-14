@@ -29,7 +29,7 @@ CACHE_FILE = Path(__file__).parent / "helius_cache.json"
 CACHE_TTL_SECONDS = 2 * 3600  # 2 hours (on-chain data changes slower than social)
 
 # How many tokens to enrich per cycle
-HELIUS_TOP_N = 10          # getTokenAccounts (holder analysis + bundles)
+HELIUS_TOP_N = 20          # getTokenAccounts (holder analysis + bundles)
 HELIUS_SMART_MONEY_N = 5   # getSignaturesForAddress (transaction analysis)
 
 # Rate limiting

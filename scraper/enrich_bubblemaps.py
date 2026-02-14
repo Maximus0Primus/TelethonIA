@@ -125,7 +125,7 @@ def enrich_tokens_bubblemaps(ranking: list[dict]) -> None:
     """
     api_key = os.environ.get("BUBBLEMAPS_API_KEY")
     if not api_key:
-        logger.debug("BUBBLEMAPS_API_KEY not set — skipping Bubblemaps enrichment")
+        logger.warning("BUBBLEMAPS_API_KEY not set — skipping Bubblemaps enrichment (email api@bubblemaps.io for access)")
         return
 
     cache = _load_cache()

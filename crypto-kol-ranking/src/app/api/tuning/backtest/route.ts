@@ -17,7 +17,7 @@ export async function GET(request: NextRequest) {
   }
 
   const horizon = request.nextUrl.searchParams.get("horizon") || "12h";
-  const validHorizons = ["1h", "6h", "12h", "24h"];
+  const validHorizons = ["1h", "6h", "12h", "24h", "48h", "72h", "7d"];
   if (!validHorizons.includes(horizon)) {
     return NextResponse.json(
       { error: `Invalid horizon. Use: ${validHorizons.join(", ")}` },
@@ -54,27 +54,41 @@ export async function GET(request: NextRequest) {
     "pump_pen",
     "breadth_pen",
     "stale_pen",
-    // Outcomes
+    // Extraction source counts
+    "ca_mention_count",
+    "ticker_mention_count",
+    "url_mention_count",
+    "has_ca_mention",
+    // Outcomes (all 7 horizons)
     "did_2x_1h",
     "did_2x_6h",
     "did_2x_12h",
     "did_2x_24h",
+    "did_2x_48h",
+    "did_2x_72h",
+    "did_2x_7d",
     "price_at_snapshot",
     "price_after_1h",
     "price_after_6h",
     "price_after_12h",
     "price_after_24h",
+    "price_after_48h",
+    "price_after_72h",
+    "price_after_7d",
     "max_price_1h",
     "max_price_6h",
     "max_price_12h",
     "max_price_24h",
+    "max_price_48h",
+    "max_price_72h",
+    "max_price_7d",
   ].join(",");
 
   try {
     // Only fetch snapshots where the relevant outcome column is NOT null
     // (meaning outcome_tracker has already labeled them)
     const res = await fetch(
-      `${url}/rest/v1/token_snapshots?select=${columns}&${outcomeCol}=not.is.null&consensus_val=not.is.null&order=snapshot_at.desc&limit=2000`,
+      `${url}/rest/v1/token_snapshots?select=${columns}&${outcomeCol}=not.is.null&consensus_val=not.is.null&order=snapshot_at.desc&limit=5000`,
       {
         headers: {
           apikey: key,

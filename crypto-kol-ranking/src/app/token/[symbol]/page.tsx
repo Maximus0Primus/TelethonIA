@@ -17,6 +17,12 @@ import {
   Minus,
   Zap,
   Clock,
+  Star,
+  Globe,
+  Twitter,
+  Activity,
+  BarChart3,
+  Gauge,
 } from "lucide-react";
 import Link from "next/link";
 import { Header } from "@/components/layout/Header";
@@ -70,6 +76,47 @@ interface TokenSnapshot {
   top_kols: string[] | null;
   narrative: string | null;
   bubblemaps_score: number | null;
+  // Score components
+  consensus_val: number | null;
+  conviction_val: number | null;
+  breadth_val: number | null;
+  price_action_val: number | null;
+  // Multipliers
+  safety_penalty: number | null;
+  onchain_multiplier: number | null;
+  crash_pen: number | null;
+  activity_mult: number | null;
+  squeeze_score: number | null;
+  squeeze_state: string | null;
+  trend_strength: number | null;
+  entry_premium_mult: number | null;
+  s_tier_mult: number | null;
+  size_mult: number | null;
+  stale_pen: number | null;
+  // Technical indicators
+  rsi_14: number | null;
+  macd_histogram: number | null;
+  bb_width: number | null;
+  bb_pct_b: number | null;
+  // Social presence
+  has_twitter: boolean | null;
+  has_telegram: boolean | null;
+  has_website: boolean | null;
+  boosts_active: number | null;
+  social_count: number | null;
+  // Lifecycle
+  lifecycle_phase: string | null;
+  weakest_component: string | null;
+  score_interpretation: string | null;
+  data_confidence: number | null;
+  // Advanced on-chain
+  unique_wallet_24h_change: number | null;
+  v_buy_24h_usd: number | null;
+  v_sell_24h_usd: number | null;
+  whale_new_entries: number | null;
+  // Freshness
+  freshest_mention_hours: number | null;
+  s_tier_count: number | null;
 }
 
 interface ApiResponse {
@@ -254,6 +301,202 @@ function SafetyRow({
   );
 }
 
+// ─── Score Breakdown ─────────────────────────────────────────────────────────
+
+const COMPONENT_LABELS: Record<string, { label: string; abbr: string; color: string }> = {
+  consensus: { label: "Consensus", abbr: "CONS", color: "bg-blue-400" },
+  conviction: { label: "Conviction", abbr: "CONV", color: "bg-purple-400" },
+  breadth: { label: "Breadth", abbr: "BRDH", color: "bg-cyan-400" },
+  price_action: { label: "Price Action", abbr: "PA", color: "bg-amber-400" },
+};
+
+function ScoreBreakdown({
+  snapshot,
+}: {
+  snapshot: TokenSnapshot;
+}) {
+  const components = [
+    { key: "consensus", value: snapshot.consensus_val },
+    { key: "conviction", value: snapshot.conviction_val },
+    { key: "breadth", value: snapshot.breadth_val },
+    { key: "price_action", value: snapshot.price_action_val },
+  ];
+
+  const hasData = components.some((c) => c.value != null);
+  if (!hasData) return null;
+
+  const weakest = snapshot.weakest_component;
+
+  return (
+    <div className="space-y-3">
+      {components.map(({ key, value }) => {
+        if (value == null) return null;
+        const meta = COMPONENT_LABELS[key];
+        const pct = Math.min(100, Math.max(0, Number(value) * 100));
+        const isWeakest = weakest === key;
+        return (
+          <div key={key}>
+            <div className="flex items-center justify-between mb-1">
+              <span className={cn("text-xs", isWeakest ? "text-red-400" : "text-zinc-400")}>
+                {meta.label}
+                {isWeakest && <span className="ml-1 text-[10px] text-red-400/60">(weakest)</span>}
+              </span>
+              <span className="text-xs font-mono text-zinc-300 tabular-nums">
+                {pct.toFixed(0)}%
+              </span>
+            </div>
+            <div className="h-1.5 rounded-full bg-white/[0.06] overflow-hidden">
+              <div
+                className={cn("h-full rounded-full transition-all", meta.color)}
+                style={{ width: `${pct}%` }}
+              />
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ─── Multiplier Chain ────────────────────────────────────────────────────────
+
+const MULTIPLIER_LABELS: Record<string, string> = {
+  safety_penalty: "Safety",
+  onchain_multiplier: "On-Chain",
+  crash_pen: "Crash",
+  activity_mult: "Activity",
+  squeeze_score: "Squeeze",
+  trend_strength: "Trend",
+  entry_premium_mult: "Entry Premium",
+  s_tier_mult: "S-Tier",
+  size_mult: "Size",
+  stale_pen: "Stale",
+};
+
+function MultiplierChain({ snapshot }: { snapshot: TokenSnapshot }) {
+  const multipliers = [
+    { key: "safety_penalty", value: snapshot.safety_penalty },
+    { key: "onchain_multiplier", value: snapshot.onchain_multiplier },
+    { key: "crash_pen", value: snapshot.crash_pen },
+    { key: "activity_mult", value: snapshot.activity_mult },
+    { key: "squeeze_score", value: snapshot.squeeze_score },
+    { key: "trend_strength", value: snapshot.trend_strength },
+    { key: "entry_premium_mult", value: snapshot.entry_premium_mult },
+    { key: "s_tier_mult", value: snapshot.s_tier_mult },
+    { key: "size_mult", value: snapshot.size_mult },
+    { key: "stale_pen", value: snapshot.stale_pen },
+  ];
+
+  const active = multipliers.filter((m) => m.value != null);
+  if (active.length === 0) return null;
+
+  const combined = active.reduce((acc, m) => acc * Number(m.value), 1);
+
+  return (
+    <div>
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+        {active.map(({ key, value }) => {
+          const v = Number(value);
+          const isNeutral = Math.abs(v - 1.0) < 0.005;
+          const isBuff = v > 1.0;
+          return (
+            <div
+              key={key}
+              className={cn(
+                "flex items-center justify-between px-2.5 py-1.5 rounded-lg border text-xs",
+                isNeutral
+                  ? "border-white/[0.04] bg-white/[0.01] text-zinc-500"
+                  : isBuff
+                    ? "border-emerald-400/20 bg-emerald-400/5 text-emerald-400"
+                    : "border-red-400/20 bg-red-400/5 text-red-400"
+              )}
+            >
+              <span className="text-zinc-400 text-[10px]">{MULTIPLIER_LABELS[key] ?? key}</span>
+              <span className="font-mono font-medium">{v.toFixed(3)}</span>
+            </div>
+          );
+        })}
+      </div>
+      <div className="mt-2 text-right">
+        <span className="text-[10px] text-zinc-500">Combined: </span>
+        <span
+          className={cn(
+            "text-xs font-mono font-semibold",
+            combined >= 1.0 ? "text-emerald-400" : "text-red-400"
+          )}
+        >
+          {combined.toFixed(3)}x
+        </span>
+      </div>
+    </div>
+  );
+}
+
+// ─── Technical Indicators ────────────────────────────────────────────────────
+
+function TechnicalIndicators({ snapshot }: { snapshot: TokenSnapshot }) {
+  const hasRsi = snapshot.rsi_14 != null;
+  const hasMacd = snapshot.macd_histogram != null;
+  const hasBB = snapshot.bb_pct_b != null || snapshot.bb_width != null;
+
+  if (!hasRsi && !hasMacd && !hasBB) return null;
+
+  const rsi = Number(snapshot.rsi_14);
+  const rsiZone =
+    rsi > 70
+      ? { label: "Overbought", color: "text-red-400" }
+      : rsi < 30
+        ? { label: "Oversold", color: "text-emerald-400" }
+        : { label: "Neutral", color: "text-zinc-400" };
+
+  const macd = Number(snapshot.macd_histogram);
+  const macdDir = macd > 0 ? "Bullish" : macd < 0 ? "Bearish" : "Neutral";
+
+  return (
+    <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+      {hasRsi && (
+        <div>
+          <p className="text-[10px] text-zinc-500 mb-1">RSI (14)</p>
+          <p className={cn("text-lg font-bold tabular-nums", rsiZone.color)}>
+            {rsi.toFixed(1)}
+          </p>
+          <p className={cn("text-[10px]", rsiZone.color)}>{rsiZone.label}</p>
+        </div>
+      )}
+      {hasMacd && (
+        <div>
+          <p className="text-[10px] text-zinc-500 mb-1">MACD</p>
+          <p
+            className={cn(
+              "text-lg font-bold tabular-nums",
+              macd > 0 ? "text-emerald-400" : macd < 0 ? "text-red-400" : "text-zinc-400"
+            )}
+          >
+            {macd > 0 ? "+" : ""}
+            {macd.toFixed(4)}
+          </p>
+          <p className="text-[10px] text-zinc-500">{macdDir}</p>
+        </div>
+      )}
+      {hasBB && (
+        <div>
+          <p className="text-[10px] text-zinc-500 mb-1">BB Position</p>
+          {snapshot.bb_pct_b != null && (
+            <p className="text-lg font-bold tabular-nums text-white">
+              {(Number(snapshot.bb_pct_b) * 100).toFixed(0)}%
+            </p>
+          )}
+          {snapshot.bb_width != null && (
+            <p className="text-[10px] text-zinc-500">
+              Width: {Number(snapshot.bb_width).toFixed(4)}
+            </p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Loading Skeleton ────────────────────────────────────────────────────────
 
 function LoadingSkeleton() {
@@ -262,7 +505,7 @@ function LoadingSkeleton() {
       <div className="fixed inset-0 bg-grid-pattern pointer-events-none" />
       <Header />
       <FloatingNav />
-      <main className="relative z-10 mx-auto max-w-5xl px-6 pt-24 pb-32">
+      <main className="relative z-10 mx-auto max-w-5xl px-4 sm:px-6 pt-24 pb-32">
         <div className="mb-8">
           <div className="h-4 w-32 bg-white/5 rounded animate-pulse" />
         </div>
@@ -300,7 +543,7 @@ function TokenNotFound({ symbol }: { symbol: string }) {
       <div className="fixed inset-0 bg-grid-pattern pointer-events-none" />
       <Header />
       <FloatingNav />
-      <main className="relative z-10 mx-auto max-w-5xl px-6 pt-24 pb-32">
+      <main className="relative z-10 mx-auto max-w-5xl px-4 sm:px-6 pt-24 pb-32">
         <Link
           href="/"
           className="inline-flex items-center gap-2 text-sm text-zinc-500 hover:text-white transition-colors mb-12"
@@ -373,7 +616,7 @@ export default function TokenDetailPage({
       <Header />
       <FloatingNav />
 
-      <main className="relative z-10 mx-auto max-w-5xl px-6 pt-24 pb-32">
+      <main className="relative z-10 mx-auto max-w-5xl px-4 sm:px-6 pt-24 pb-32">
         {/* Back */}
         <motion.div
           initial={{ opacity: 0, x: -12 }}
@@ -407,9 +650,14 @@ export default function TokenDetailPage({
                     Pump.fun
                   </span>
                 )}
-                {snapshot?.narrative && (
-                  <span className="px-2 py-0.5 rounded-md text-[10px] font-medium bg-violet-500/10 text-violet-400 border border-violet-500/20">
-                    {snapshot.narrative}
+                {snapshot?.lifecycle_phase && (
+                  <span className="px-2 py-0.5 rounded-md text-[10px] font-semibold uppercase tracking-wider bg-violet-500/10 text-violet-400 border border-violet-500/20">
+                    {snapshot.lifecycle_phase}
+                  </span>
+                )}
+                {snapshot?.score_interpretation && (
+                  <span className="px-2 py-0.5 rounded-md text-[10px] font-medium bg-white/[0.04] text-zinc-400 border border-white/[0.06]">
+                    {snapshot.score_interpretation}
                   </span>
                 )}
               </div>
@@ -425,13 +673,28 @@ export default function TokenDetailPage({
                 <PriceChangePill value={snapshot?.price_change_24h ?? null} label="24h" />
               </div>
 
-              {/* CA + Age */}
+              {/* CA + Age + Confidence */}
               <div className="flex items-center gap-3 mt-3">
                 {address && <CopyButton text={address} />}
                 {snapshot?.token_age_hours != null && (
                   <span className="inline-flex items-center gap-1 text-xs text-zinc-500">
                     <Clock className="h-3 w-3" />
                     {formatAge(snapshot.token_age_hours)}
+                  </span>
+                )}
+                {snapshot?.data_confidence != null && (
+                  <span
+                    className={cn(
+                      "inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-md border",
+                      Number(snapshot.data_confidence) >= 0.7
+                        ? "text-emerald-400 bg-emerald-400/5 border-emerald-400/20"
+                        : Number(snapshot.data_confidence) >= 0.4
+                          ? "text-amber-400 bg-amber-400/5 border-amber-400/20"
+                          : "text-red-400 bg-red-400/5 border-red-400/20"
+                    )}
+                  >
+                    <Gauge className="h-3 w-3" />
+                    {(Number(snapshot.data_confidence) * 100).toFixed(0)}% confidence
                   </span>
                 )}
               </div>
@@ -442,7 +705,7 @@ export default function TokenDetailPage({
               <p className="text-[10px] text-zinc-500 uppercase tracking-widest mb-1">
                 Score
               </p>
-              <p className="text-6xl sm:text-7xl font-bold text-white tabular-nums leading-none">
+              <p className="text-5xl sm:text-6xl md:text-7xl font-bold text-white tabular-nums leading-none">
                 {token.score}
               </p>
               <div className="flex items-center justify-end gap-1 mt-1">
@@ -511,6 +774,33 @@ export default function TokenDetailPage({
                   {link.name}
                 </a>
               ))}
+
+            {/* Social presence indicators */}
+            {(snapshot?.has_twitter || snapshot?.has_telegram || snapshot?.has_website || (snapshot?.boosts_active != null && snapshot.boosts_active > 0)) && (
+              <div className="flex items-center gap-1.5 ml-2 border-l border-white/[0.06] pl-3">
+                {snapshot?.has_twitter && (
+                  <span className="inline-flex items-center gap-1 px-2 py-1.5 rounded-lg bg-sky-400/5 border border-sky-400/10 text-sky-400 text-[10px]">
+                    <Twitter className="h-3 w-3" />
+                  </span>
+                )}
+                {snapshot?.has_telegram && (
+                  <span className="inline-flex items-center gap-1 px-2 py-1.5 rounded-lg bg-blue-400/5 border border-blue-400/10 text-blue-400 text-[10px]">
+                    <MessageSquare className="h-3 w-3" />
+                  </span>
+                )}
+                {snapshot?.has_website && (
+                  <span className="inline-flex items-center gap-1 px-2 py-1.5 rounded-lg bg-zinc-400/5 border border-zinc-400/10 text-zinc-400 text-[10px]">
+                    <Globe className="h-3 w-3" />
+                  </span>
+                )}
+                {snapshot?.boosts_active != null && snapshot.boosts_active > 0 && (
+                  <span className="inline-flex items-center gap-1 px-2 py-1.5 rounded-lg bg-amber-400/5 border border-amber-400/10 text-amber-400 text-[10px] font-medium">
+                    <Zap className="h-3 w-3" />
+                    {snapshot.boosts_active}
+                  </span>
+                )}
+              </div>
+            )}
           </motion.div>
         )}
 
@@ -524,7 +814,7 @@ export default function TokenDetailPage({
           >
             <iframe
               src={`https://dexscreener.com/solana/${address}?embed=1&theme=dark&info=0`}
-              className="w-full h-[420px] bg-black"
+              className="w-full h-[280px] sm:h-[350px] md:h-[420px] bg-black"
               title={`${token.symbol} chart`}
               loading="lazy"
               allowFullScreen
@@ -561,13 +851,106 @@ export default function TokenDetailPage({
           />
         </motion.div>
 
-        {/* ─── Section 5 + 6: Safety & KOL Intel (2 columns) ─────────── */}
+        {/* ─── Section 4b: Advanced Metrics ─────────────────────────────── */}
+        {(snapshot?.v_buy_24h_usd != null || snapshot?.unique_wallet_24h_change != null) && (
+          <motion.div
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={stagger(3.5)}
+            className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-6"
+          >
+            {snapshot?.v_buy_24h_usd != null && (
+              <MetricCard
+                label="Buy Vol 24h"
+                value={formatNumber(snapshot.v_buy_24h_usd)}
+              />
+            )}
+            {snapshot?.v_sell_24h_usd != null && (
+              <MetricCard
+                label="Sell Vol 24h"
+                value={formatNumber(snapshot.v_sell_24h_usd)}
+                subtext={
+                  snapshot?.v_buy_24h_usd != null && snapshot.v_sell_24h_usd > 0
+                    ? `B/S ratio: ${(Number(snapshot.v_buy_24h_usd) / Number(snapshot.v_sell_24h_usd)).toFixed(2)}`
+                    : undefined
+                }
+              />
+            )}
+            {snapshot?.unique_wallet_24h_change != null && (
+              <MetricCard
+                label="Wallet Growth 24h"
+                value={`${Number(snapshot.unique_wallet_24h_change) > 0 ? "+" : ""}${Number(snapshot.unique_wallet_24h_change).toFixed(1)}%`}
+              />
+            )}
+            {snapshot?.whale_new_entries != null && (
+              <MetricCard
+                label="New Whales"
+                value={String(snapshot.whale_new_entries)}
+              />
+            )}
+          </motion.div>
+        )}
+
+        {/* ─── Section 5: Score Breakdown + Multipliers ────────────────── */}
+        {snapshot && (snapshot.consensus_val != null || snapshot.safety_penalty != null) && (
+          <div className="grid lg:grid-cols-2 gap-4 mb-6">
+            {/* Score Breakdown */}
+            {snapshot.consensus_val != null && (
+              <motion.div
+                initial={{ opacity: 0, y: 12 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={stagger(4)}
+                className="rounded-2xl border border-white/[0.06] bg-white/[0.01] p-5"
+              >
+                <div className="flex items-center gap-2 mb-4">
+                  <BarChart3 className="h-4 w-4 text-blue-400" />
+                  <h2 className="text-sm font-semibold text-white">Score Breakdown</h2>
+                </div>
+                <ScoreBreakdown snapshot={snapshot} />
+              </motion.div>
+            )}
+
+            {/* Multiplier Chain */}
+            {snapshot.safety_penalty != null && (
+              <motion.div
+                initial={{ opacity: 0, y: 12 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={stagger(4.5)}
+                className="rounded-2xl border border-white/[0.06] bg-white/[0.01] p-5"
+              >
+                <div className="flex items-center gap-2 mb-4">
+                  <Activity className="h-4 w-4 text-violet-400" />
+                  <h2 className="text-sm font-semibold text-white">Multiplier Chain</h2>
+                </div>
+                <MultiplierChain snapshot={snapshot} />
+              </motion.div>
+            )}
+          </div>
+        )}
+
+        {/* ─── Section 5b: Technical Indicators ──────────────────────────── */}
+        {snapshot && (snapshot.rsi_14 != null || snapshot.macd_histogram != null) && (
+          <motion.div
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={stagger(5)}
+            className="rounded-2xl border border-white/[0.06] bg-white/[0.01] p-5 mb-6"
+          >
+            <div className="flex items-center gap-2 mb-4">
+              <Gauge className="h-4 w-4 text-cyan-400" />
+              <h2 className="text-sm font-semibold text-white">Technical Indicators</h2>
+            </div>
+            <TechnicalIndicators snapshot={snapshot} />
+          </motion.div>
+        )}
+
+        {/* ─── Section 6 + 7: Safety & KOL Intel (2 columns) ─────────── */}
         <div className="grid lg:grid-cols-2 gap-4">
           {/* Safety & On-Chain */}
           <motion.div
             initial={{ opacity: 0, y: 12 }}
             animate={{ opacity: 1, y: 0 }}
-            transition={stagger(4)}
+            transition={stagger(6)}
             className="rounded-2xl border border-white/[0.06] bg-white/[0.01] p-5"
           >
             <div className="flex items-center gap-2 mb-4">
@@ -678,12 +1061,20 @@ export default function TokenDetailPage({
           <motion.div
             initial={{ opacity: 0, y: 12 }}
             animate={{ opacity: 1, y: 0 }}
-            transition={stagger(5)}
+            transition={stagger(7)}
             className="rounded-2xl border border-white/[0.06] bg-white/[0.01] p-5"
           >
-            <h2 className="text-sm font-semibold text-white mb-4">
-              KOL Intelligence
-            </h2>
+            <div className="flex items-center gap-2 mb-4">
+              <h2 className="text-sm font-semibold text-white">
+                KOL Intelligence
+              </h2>
+              {snapshot?.s_tier_count != null && snapshot.s_tier_count > 0 && (
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold bg-yellow-400/10 text-yellow-400 border border-yellow-400/20">
+                  <Star className="h-3 w-3" />
+                  {snapshot.s_tier_count} S-tier
+                </span>
+              )}
+            </div>
 
             {/* Stats row */}
             <div className="grid grid-cols-3 gap-3 mb-4">
@@ -767,6 +1158,44 @@ export default function TokenDetailPage({
                   ATH Ratio:{" "}
                   <span className="text-zinc-300 font-medium">
                     {(Number(snapshot.ath_ratio) * 100).toFixed(0)}%
+                  </span>
+                </span>
+              )}
+              {snapshot?.freshest_mention_hours != null && (
+                <span className="text-[10px] text-zinc-500">
+                  Called{" "}
+                  <span className="text-zinc-300 font-medium">
+                    {Number(snapshot.freshest_mention_hours) < 1
+                      ? `${Math.round(Number(snapshot.freshest_mention_hours) * 60)}m`
+                      : `${Number(snapshot.freshest_mention_hours).toFixed(1)}h`}
+                  </span>{" "}
+                  ago
+                </span>
+              )}
+              {snapshot?.squeeze_state && snapshot.squeeze_state !== "none" && (
+                <span
+                  className={cn(
+                    "px-2 py-0.5 rounded-md text-[10px] font-medium border",
+                    snapshot.squeeze_state === "firing"
+                      ? "bg-emerald-400/10 text-emerald-400 border-emerald-400/20"
+                      : snapshot.squeeze_state === "squeezing"
+                        ? "bg-amber-400/10 text-amber-400 border-amber-400/20"
+                        : "bg-zinc-500/10 text-zinc-400 border-zinc-500/20"
+                  )}
+                >
+                  Squeeze: {snapshot.squeeze_state}
+                </span>
+              )}
+              {snapshot?.trend_strength != null && Number(snapshot.trend_strength) > 0.3 && (
+                <span className="text-[10px] text-zinc-500">
+                  Trend:{" "}
+                  <span
+                    className={cn(
+                      "font-medium",
+                      Number(snapshot.trend_strength) >= 0.5 ? "text-emerald-400" : "text-zinc-300"
+                    )}
+                  >
+                    {(Number(snapshot.trend_strength) * 100).toFixed(0)}%
                   </span>
                 </span>
               )}

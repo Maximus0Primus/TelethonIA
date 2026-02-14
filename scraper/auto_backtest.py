@@ -33,13 +33,13 @@ except ImportError:
 
 from supabase import create_client
 
-# --- Constants (mirror pipeline.py v13) ---
+# --- Constants (mirror pipeline.py v16) ---
 
 BALANCED_WEIGHTS = {
-    "consensus": 0.30,
-    "conviction": 0.15,
-    "breadth": 0.25,
-    "price_action": 0.30,
+    "consensus": 0.30,      # v16
+    "conviction": 0.05,     # v16
+    "breadth": 0.10,        # v16
+    "price_action": 0.55,   # v16
 }
 
 TOTAL_KOLS = 60
@@ -69,6 +69,8 @@ NUMERIC_FEATURES = [
     # v12/v13 features
     "entry_premium", "entry_premium_mult",
     "lp_locked_pct", "unique_wallet_24h_change", "whale_new_entries",
+    # Extraction mode features
+    "ca_mention_count", "ticker_mention_count", "url_mention_count",
 ]
 
 # Columns to fetch from token_snapshots
@@ -84,14 +86,17 @@ SNAPSHOT_COLUMNS = (
     "trend_strength, confirmation_pillars, data_confidence, "
     "rsi_14, macd_histogram, bb_width, obv_slope_norm, "
     "price_at_snapshot, price_after_1h, price_after_6h, price_after_12h, price_after_24h, "
-    "max_price_1h, max_price_6h, max_price_12h, max_price_24h, "
-    "did_2x_1h, did_2x_6h, did_2x_12h, did_2x_24h, mentions, "
+    "price_after_48h, price_after_72h, price_after_7d, "
+    "max_price_1h, max_price_6h, max_price_12h, max_price_24h, max_price_48h, max_price_72h, max_price_7d, "
+    "did_2x_1h, did_2x_6h, did_2x_12h, did_2x_24h, did_2x_48h, did_2x_72h, did_2x_7d, mentions, "
     "freshest_mention_hours, death_penalty, lifecycle_phase, "
     "boosts_active, has_twitter, has_telegram, has_website, social_count, "
     "entry_premium, entry_premium_mult, lp_locked_pct, "
     "unique_wallet_24h_change, whale_new_entries, "
     "consensus_val, conviction_val, breadth_val, price_action_val, "
-    "pump_bonus, wash_pen, pvp_pen, pump_pen, activity_mult, breadth_pen, crash_pen, stale_pen"
+    "pump_bonus, wash_pen, pvp_pen, pump_pen, activity_mult, breadth_pen, crash_pen, stale_pen, size_mult, "
+    "s_tier_mult, s_tier_count, unique_kols, "
+    "ca_mention_count, ticker_mention_count, url_mention_count, has_ca_mention"
 )
 
 
@@ -105,18 +110,31 @@ def _get_client():
 
 
 def _fetch_snapshots(client) -> pd.DataFrame:
-    """Fetch all snapshots (up to 2000) with outcome labels and features."""
-    result = (
-        client.table("token_snapshots")
-        .select(SNAPSHOT_COLUMNS)
-        .order("snapshot_at", desc=True)
-        .limit(2000)
-        .execute()
-    )
-    if not result.data:
+    """Fetch all snapshots with pagination (PostgREST caps at 1000/page)."""
+    all_rows = []
+    page_size = 1000
+    offset = 0
+    while True:
+        result = (
+            client.table("token_snapshots")
+            .select(SNAPSHOT_COLUMNS)
+            .order("snapshot_at", desc=True)
+            .range(offset, offset + page_size - 1)
+            .execute()
+        )
+        if not result.data:
+            break
+        all_rows.extend(result.data)
+        if len(result.data) < page_size:
+            break  # last page
+        offset += page_size
+        if offset >= 10000:  # safety cap
+            break
+
+    if not all_rows:
         return pd.DataFrame()
 
-    df = pd.DataFrame(result.data)
+    df = pd.DataFrame(all_rows)
     df["snapshot_at"] = pd.to_datetime(df["snapshot_at"])
     return df
 
@@ -188,31 +206,48 @@ def _compute_score(row: pd.Series, weights: dict) -> int:
     breadth_pen = _safe_mult(row, "breadth_pen")
     stale_pen = _safe_mult(row, "stale_pen")
 
-    # Squeeze + trend from v8
-    sq_score = float(row.get("squeeze_score") or 0) if pd.notna(row.get("squeeze_score")) else 0
-    sq_state = row.get("squeeze_state") or "none"
+    # Squeeze + trend: disabled in v16 (anti-predictive in memecoins)
     squeeze_mult = 1.0
-    if sq_state == "firing":
-        squeeze_mult = 1.0 + sq_score * 0.2
-    elif sq_state == "squeezing":
-        squeeze_mult = 1.05
-
-    ts = float(row.get("trend_strength") or 0) if pd.notna(row.get("trend_strength")) else 0
     trend_mult = 1.0
-    if ts >= 0.7:
-        trend_mult = 1.15
-    elif ts >= 0.4:
-        trend_mult = 1.07
 
-    combined = (onchain * safety * crash_pen * squeeze_mult * trend_mult
-                * pump_bonus * wash_pen * pvp_pen * pump_pen
-                * activity_mult * breadth_pen * stale_pen)
+    # v15.2: Size opportunity multiplier (mcap + freshness)
+    size_mult = _safe_mult(row, "size_mult")
+    if not pd.notna(row.get("size_mult")):
+        t_mcap = float(row.get("market_cap") or 0) if pd.notna(row.get("market_cap")) else 0
+        fmh = float(row.get("freshest_mention_hours") or 999) if pd.notna(row.get("freshest_mention_hours")) else 999
+        if t_mcap <= 0:
+            mcap_f = 1.0
+        elif t_mcap < 300_000:
+            mcap_f = 1.3
+        elif t_mcap < 1_000_000:
+            mcap_f = 1.15
+        elif t_mcap < 5_000_000:
+            mcap_f = 1.0
+        elif t_mcap < 20_000_000:
+            mcap_f = 0.85
+        else:
+            mcap_f = 0.7
+        if fmh < 4:
+            fresh_f = 1.2
+        elif fmh < 12:
+            fresh_f = 1.1
+        else:
+            fresh_f = 1.0
+        size_mult = max(0.6, min(1.5, mcap_f * fresh_f))
+
+    # v15.3: S-tier bonus
+    s_tier_mult = _safe_mult(row, "s_tier_mult")
+    if not pd.notna(row.get("s_tier_mult")):
+        s_tier_count = int(row.get("s_tier_count") or 0) if pd.notna(row.get("s_tier_count")) else 0
+        s_tier_mult = 1.2 if s_tier_count > 0 else 1.0
+
+    combined_raw = (onchain * safety * crash_pen * squeeze_mult * trend_mult
+                    * pump_bonus * wash_pen * pvp_pen * pump_pen
+                    * activity_mult * breadth_pen * stale_pen * size_mult
+                    * s_tier_mult)
+    # v16: Floor at 0.25 to decompress low-score band
+    combined = max(0.25, combined_raw)
     score = base_score * combined
-
-    # v13: Confirmation gate softened to 0.8
-    pillars = int(row.get("confirmation_pillars") or 3) if pd.notna(row.get("confirmation_pillars")) else 3
-    if pillars < 2:
-        score *= 0.8
 
     return min(100, max(0, int(score)))
 
@@ -231,9 +266,11 @@ def _compute_return(row: pd.Series, horizon: str = "12h") -> float | None:
 def _top1_hit_rate(df: pd.DataFrame) -> dict:
     """
     THE key metric: does the #1 ranked token 2x?
-    Target = 100% hit rate for the top-scored token in each scrape cycle.
-    Groups snapshots by snapshot_at (same cycle = same timestamp batch),
-    picks the highest-scoring token, checks if it 2x'd.
+
+    Groups snapshots by cycle, picks the highest-scoring token per cycle.
+    Deduplicates: if the same token is #1 across consecutive cycles, it's
+    counted only ONCE (first occurrence). This prevents $LARRY being #1 for
+    4 cycles from inflating the test count.
     """
     df = df.copy()
     df["score"] = df.apply(lambda r: _compute_score(r, BALANCED_WEIGHTS), axis=1)
@@ -241,44 +278,51 @@ def _top1_hit_rate(df: pd.DataFrame) -> dict:
     # Group snapshots into cycles (same minute = same cycle)
     df["cycle"] = df["snapshot_at"].dt.floor("15min")
 
-    results = {"1h": {}, "6h": {}, "12h": {}, "24h": {}}
+    results = {"1h": {}, "6h": {}, "12h": {}, "24h": {}, "48h": {}, "72h": {}, "7d": {}}
 
-    for horizon in ["1h", "6h", "12h", "24h"]:
+    for horizon in ["1h", "6h", "12h", "24h", "48h", "72h", "7d"]:
         flag_col = f"did_2x_{horizon}"
         if flag_col not in df.columns:
             continue
 
-        cycles_tested = 0
-        cycles_hit = 0
+        tokens_tested = 0
+        tokens_hit = 0
         top1_details = []
+        seen_symbols = set()  # dedup: same token as #1 counted once
 
-        for cycle_ts, group in df.groupby("cycle"):
+        for cycle_ts, group in df.sort_values("snapshot_at").groupby("cycle"):
             labeled = group[group[flag_col].notna()]
             if labeled.empty:
                 continue
 
             # #1 token = highest score in this cycle
             top1 = labeled.loc[labeled["score"].idxmax()]
+            symbol = top1["symbol"]
             did_2x = bool(top1[flag_col])
             ret = _compute_return(top1, horizon)
 
-            cycles_tested += 1
+            # Skip if this token was already #1 in a previous cycle
+            if symbol in seen_symbols:
+                continue
+            seen_symbols.add(symbol)
+
+            tokens_tested += 1
             if did_2x:
-                cycles_hit += 1
+                tokens_hit += 1
 
             top1_details.append({
                 "cycle": str(cycle_ts),
-                "symbol": top1["symbol"],
+                "symbol": symbol,
                 "score": int(top1["score"]),
                 "did_2x": did_2x,
                 "max_return": round(ret, 2) if ret else None,
             })
 
-        if cycles_tested > 0:
+        if tokens_tested > 0:
             results[horizon] = {
-                "cycles_tested": cycles_tested,
-                "cycles_hit": cycles_hit,
-                "hit_rate": round(cycles_hit / cycles_tested, 4),
+                "tokens_tested": tokens_tested,
+                "tokens_hit": tokens_hit,
+                "hit_rate": round(tokens_hit / tokens_tested, 4),
                 "target": 1.0,
                 "details": top1_details,
             }
@@ -289,16 +333,19 @@ def _top1_hit_rate(df: pd.DataFrame) -> dict:
 # ---- Analysis functions ----
 
 def _score_calibration(df: pd.DataFrame, horizon_col: str = "did_2x_12h") -> dict:
-    """Hit rate and return stats by score band."""
+    """Hit rate and return stats by score band (first-appearance per token)."""
     df = df.copy()
     df["score"] = df.apply(lambda r: _compute_score(r, BALANCED_WEIGHTS), axis=1)
 
     horizon_suffix = horizon_col.replace("did_2x_", "")
-    df["max_return"] = df.apply(lambda r: _compute_return(r, horizon_suffix), axis=1)
+
+    # First-appearance: each token counted once (earliest snapshot)
+    first = df.sort_values("snapshot_at").drop_duplicates(subset=["symbol"], keep="first").copy()
+    first["max_return"] = first.apply(lambda r: _compute_return(r, horizon_suffix), axis=1)
 
     result = {}
     for band_name, lo, hi in SCORE_BANDS:
-        band = df[(df["score"] >= lo) & (df["score"] < hi)]
+        band = first[(first["score"] >= lo) & (first["score"] < hi)]
         if band.empty:
             result[band_name] = {"count": 0, "hits": 0, "hit_rate": 0, "avg_return": None, "median_return": None}
             continue
@@ -321,9 +368,11 @@ def _score_calibration(df: pd.DataFrame, horizon_col: str = "did_2x_12h") -> dic
     return result
 
 
+
 def _feature_correlation(df: pd.DataFrame, horizon_col: str = "did_2x_12h") -> dict:
-    """Pearson correlation of each numeric feature with the 2x outcome."""
-    labeled = df[df[horizon_col].notna()].copy()
+    """Pearson correlation of each numeric feature with the 2x outcome (first-appearance)."""
+    first = df.sort_values("snapshot_at").drop_duplicates(subset=["symbol"], keep="first")
+    labeled = first[first[horizon_col].notna()].copy()
     if labeled.empty:
         return {}
 
@@ -349,8 +398,9 @@ def _feature_correlation(df: pd.DataFrame, horizon_col: str = "did_2x_12h") -> d
 
 
 def _gate_autopsy(df: pd.DataFrame, horizon_col: str = "did_2x_12h") -> dict:
-    """For tokens that DID 2x: identify what penalties/gates reduced their score."""
-    winners = df[(df[horizon_col] == True)].copy()
+    """For tokens that DID 2x: identify what penalties/gates reduced their score (first-appearance)."""
+    first = df.sort_values("snapshot_at").drop_duplicates(subset=["symbol"], keep="first")
+    winners = first[(first[horizon_col] == True)].copy()
     if winners.empty:
         return {"missed_winners": [], "total_winners": 0}
 
@@ -401,11 +451,11 @@ def _gate_autopsy(df: pd.DataFrame, horizon_col: str = "did_2x_12h") -> dict:
 
 
 def _false_positive_autopsy(df: pd.DataFrame, horizon_col: str = "did_2x_12h") -> dict:
-    """For high-scoring tokens that did NOT 2x: what components were misleading?"""
-    df = df.copy()
-    df["score"] = df.apply(lambda r: _compute_score(r, BALANCED_WEIGHTS), axis=1)
+    """For high-scoring tokens that did NOT 2x: what components were misleading? (first-appearance)"""
+    first = df.sort_values("snapshot_at").drop_duplicates(subset=["symbol"], keep="first").copy()
+    first["score"] = first.apply(lambda r: _compute_score(r, BALANCED_WEIGHTS), axis=1)
 
-    labeled = df[df[horizon_col].notna()]
+    labeled = first[first[horizon_col].notna()]
     high_score_losers = labeled[(labeled["score"] >= 60) & (labeled[horizon_col] == False)]
 
     if high_score_losers.empty:
@@ -447,8 +497,9 @@ def _false_positive_autopsy(df: pd.DataFrame, horizon_col: str = "did_2x_12h") -
 
 
 def _weight_sensitivity(df: pd.DataFrame, horizon_col: str = "did_2x_12h") -> dict:
-    """Vary each BALANCED_WEIGHTS component +/-25%, measure hit rate delta."""
-    labeled = df[df[horizon_col].notna()].copy()
+    """Vary each BALANCED_WEIGHTS component +/-25%, measure hit rate delta (first-appearance)."""
+    first = df.sort_values("snapshot_at").drop_duplicates(subset=["symbol"], keep="first")
+    labeled = first[first[horizon_col].notna()].copy()
     if labeled.empty:
         return {}
 
@@ -490,8 +541,9 @@ def _weight_sensitivity(df: pd.DataFrame, horizon_col: str = "did_2x_12h") -> di
 
 
 def _v8_signal_validation(df: pd.DataFrame, horizon_col: str = "did_2x_12h") -> dict:
-    """Do v8 signals (squeeze, trend, confirmation) correlate with 2x?"""
-    labeled = df[df[horizon_col].notna()].copy()
+    """Do v8 signals (squeeze, trend, confirmation) correlate with 2x? (first-appearance)"""
+    first = df.sort_values("snapshot_at").drop_duplicates(subset=["symbol"], keep="first")
+    labeled = first[first[horizon_col].notna()].copy()
     if labeled.empty:
         return {}
 
@@ -529,9 +581,58 @@ def _v8_signal_validation(df: pd.DataFrame, horizon_col: str = "did_2x_12h") -> 
     return result
 
 
+def _extraction_analysis(df: pd.DataFrame, horizon_col: str = "did_2x_12h") -> dict:
+    """Analyze extraction method (CA vs ticker) correlation with 2x outcomes (first-appearance)."""
+    first = df.sort_values("snapshot_at").drop_duplicates(subset=["symbol"], keep="first")
+    labeled = first[first[horizon_col].notna()].copy()
+    if labeled.empty or "has_ca_mention" not in labeled.columns:
+        return {}
+
+    result = {}
+
+    # Encode has_ca_mention as boolean
+    ca_col = labeled["has_ca_mention"]
+    ca_count_col = pd.to_numeric(labeled.get("ca_mention_count"), errors="coerce")
+    tick_count_col = pd.to_numeric(labeled.get("ticker_mention_count"), errors="coerce")
+
+    # CA-only tokens: has_ca_mention=true AND ticker_mention_count=0
+    ca_only = labeled[(ca_col == True) & (tick_count_col.fillna(0) == 0)]
+    # Ticker-only: has_ca_mention=false (or null) AND ca_mention_count=0
+    ticker_only = labeled[(ca_col != True) & (ca_count_col.fillna(0) == 0)]
+    # Both: has both CA and ticker mentions
+    both = labeled[(ca_col == True) & (tick_count_col.fillna(0) > 0)]
+
+    for label, subset in [("ca_only", ca_only), ("ticker_only", ticker_only), ("both", both)]:
+        n = len(subset)
+        if n == 0:
+            result[label] = {"count": 0, "hits": 0, "hit_rate": None}
+            continue
+        hits = int(subset[horizon_col].sum())
+        result[label] = {
+            "count": n,
+            "hits": hits,
+            "hit_rate": round(hits / n, 4),
+        }
+
+    # has_ca_mention correlation with 2x (as 0/1)
+    ca_binary = ca_col.map({True: 1, False: 0}).fillna(0).astype(float)
+    target = labeled[horizon_col].astype(float)
+    valid = ca_binary.notna() & target.notna()
+    if valid.sum() >= 10:
+        try:
+            r = float(np.corrcoef(ca_binary[valid], target[valid])[0, 1])
+            if not math.isnan(r):
+                result["has_ca_mention_correlation"] = round(r, 4)
+        except Exception:
+            pass
+
+    return result
+
+
 def _optimal_threshold(df: pd.DataFrame, horizon_col: str = "did_2x_12h") -> dict:
-    """Find score threshold that maximizes F1 for 2x prediction."""
-    labeled = df[df[horizon_col].notna()].copy()
+    """Find score threshold that maximizes F1 for 2x prediction (first-appearance)."""
+    first = df.sort_values("snapshot_at").drop_duplicates(subset=["symbol"], keep="first")
+    labeled = first[first[horizon_col].notna()].copy()
     if labeled.empty:
         return {}
 
@@ -575,8 +676,9 @@ def _optimal_threshold(df: pd.DataFrame, horizon_col: str = "did_2x_12h") -> dic
 
 
 def _walk_forward(df: pd.DataFrame, horizon_col: str = "did_2x_12h") -> list[dict]:
-    """Time-based train/test split validation."""
-    labeled = df[df[horizon_col].notna()].copy()
+    """Time-based train/test split validation (first-appearance)."""
+    first = df.sort_values("snapshot_at").drop_duplicates(subset=["symbol"], keep="first")
+    labeled = first[first[horizon_col].notna()].copy()
     if labeled.empty:
         return []
 
@@ -734,18 +836,18 @@ def _generate_recommendations(report: dict) -> list[str]:
 
     # === PRIMARY TARGET: #1 token must always 2x ===
     top1 = report.get("top1_hit_rate", {})
-    for horizon in ["12h", "6h", "24h"]:
+    for horizon in ["12h", "6h", "24h", "48h", "72h", "7d"]:
         t1 = top1.get(horizon, {})
-        if t1.get("cycles_tested", 0) > 0:
+        if t1.get("tokens_tested", 0) > 0:
             hr = t1["hit_rate"]
-            tested = t1["cycles_tested"]
-            hits = t1["cycles_hit"]
+            tested = t1["tokens_tested"]
+            hits = t1["tokens_hit"]
             if hr >= 1.0:
-                recs.append(f"TARGET MET ({horizon}): #1 token 2x'd in {hits}/{tested} cycles (100%)")
+                recs.append(f"TARGET MET ({horizon}): #1 token 2x'd {hits}/{tested} unique tokens (100%)")
             elif hr >= 0.5:
-                recs.append(f"CLOSE ({horizon}): #1 token 2x'd in {hits}/{tested} cycles ({hr*100:.0f}%). Target: 100%")
+                recs.append(f"CLOSE ({horizon}): #1 token 2x'd {hits}/{tested} unique tokens ({hr*100:.0f}%). Target: 100%")
             else:
-                recs.append(f"NEEDS WORK ({horizon}): #1 token 2x'd in {hits}/{tested} cycles ({hr*100:.0f}%). Target: 100%")
+                recs.append(f"NEEDS WORK ({horizon}): #1 token 2x'd {hits}/{tested} unique tokens ({hr*100:.0f}%). Target: 100%")
             # Show which #1 tokens failed
             for d in t1.get("details", []):
                 if not d["did_2x"]:
@@ -753,6 +855,24 @@ def _generate_recommendations(report: dict) -> list[str]:
                     ret_str = f"{ret}x" if ret else "?"
                     recs.append(f"  MISS: {d['symbol']} score={d['score']} return={ret_str}")
             break  # Only show primary horizon
+
+    # Extraction analysis insights
+    ext = report.get("extraction_analysis", {})
+    ca_only = ext.get("ca_only", {})
+    ticker_only = ext.get("ticker_only", {})
+    if ca_only.get("count", 0) >= 5 and ticker_only.get("count", 0) >= 5:
+        ca_hr = ca_only["hit_rate"]
+        tick_hr = ticker_only["hit_rate"]
+        if ca_hr > tick_hr * 1.5:
+            recs.append(f"EXTRACTION: CA-only calls ({ca_hr*100:.0f}% hit rate) outperform "
+                       f"ticker-only ({tick_hr*100:.0f}%) by {ca_hr/max(0.001, tick_hr):.1f}x. "
+                       "Consider weighting CA-extracted tokens higher.")
+        elif tick_hr > ca_hr * 1.5:
+            recs.append(f"EXTRACTION: Ticker-only calls ({tick_hr*100:.0f}% hit rate) outperform "
+                       f"CA-only ({ca_hr*100:.0f}%). Unexpected — investigate data quality.")
+        else:
+            recs.append(f"EXTRACTION: CA-only ({ca_hr*100:.0f}%) and ticker-only ({tick_hr*100:.0f}%) "
+                       "have similar hit rates. Extraction mode is not a strong differentiator.")
 
     # Overall hit rate
     data = report.get("data_summary", {})
@@ -782,35 +902,41 @@ def run_auto_backtest() -> dict | None:
 
     total = len(df)
 
-    # Count labeled snapshots per horizon
-    labeled_12h = df[df["did_2x_12h"].notna()]
-    labeled_24h = df[df["did_2x_24h"].notna()]
-    n_labeled_12h = len(labeled_12h)
-    n_labeled_24h = len(labeled_24h)
+    ALL_HORIZONS = ["12h", "24h", "48h", "72h", "7d"]
+
+    # First-appearance dedup: each token counted once (earliest snapshot)
+    first = df.sort_values("snapshot_at").drop_duplicates(subset=["symbol"], keep="first")
+    unique_tokens = len(first)
 
     # Use 12h as primary horizon (faster feedback loop)
-    n_labeled = n_labeled_12h
     horizon_col = "did_2x_12h"
+    n_labeled = len(first[first[horizon_col].notna()])
 
     if n_labeled < 30:
-        logger.info("Auto-backtest: waiting for data (%d/30 labeled snapshots)", n_labeled)
+        logger.info("Auto-backtest: waiting for data (%d/30 labeled tokens)", n_labeled)
         return None
 
-    # Data summary
+    # Data summary — per-token (first appearance), not per-snapshot
     date_range = (df["snapshot_at"].max() - df["snapshot_at"].min()).days
-    hit_rate_12h = float(labeled_12h[horizon_col].sum()) / max(1, n_labeled_12h)
-    hit_rate_24h = float(labeled_24h["did_2x_24h"].sum()) / max(1, n_labeled_24h) if n_labeled_24h > 0 else None
+
+    ds = {
+        "total_snapshots": total,
+        "unique_tokens": unique_tokens,
+        "dedup_ratio": round(total / max(1, unique_tokens), 1),
+        "date_range_days": date_range,
+    }
+    for hz in ALL_HORIZONS:
+        col = f"did_2x_{hz}"
+        if col not in first.columns:
+            continue
+        lbl = first[first[col].notna()]
+        n = len(lbl)
+        ds[f"labeled_{hz}"] = n
+        ds[f"hit_rate_{hz}"] = round(float(lbl[col].sum()) / max(1, n), 4) if n > 0 else None
 
     report = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "data_summary": {
-            "total_snapshots": total,
-            "labeled_12h": n_labeled_12h,
-            "labeled_24h": n_labeled_24h,
-            "hit_rate_12h": round(hit_rate_12h, 4),
-            "hit_rate_24h": round(hit_rate_24h, 4) if hit_rate_24h is not None else None,
-            "date_range_days": date_range,
-        },
+        "data_summary": ds,
     }
 
     # === TOP 1 TOKEN HIT RATE (the primary target) ===
@@ -830,6 +956,7 @@ def run_auto_backtest() -> dict | None:
         report["gate_autopsy"] = _gate_autopsy(df, horizon_col)
         report["false_positive_autopsy"] = _false_positive_autopsy(df, horizon_col)
         report["v8_signals"] = _v8_signal_validation(df, horizon_col)
+        report["extraction_analysis"] = _extraction_analysis(df, horizon_col)
 
     # Tier 3: 100+ labeled
     if n_labeled >= 100:
@@ -847,7 +974,7 @@ def run_auto_backtest() -> dict | None:
 
     # Push to Supabase
     try:
-        _insert_backtest_report(client, report, total, n_labeled, hit_rate_12h)
+        _insert_backtest_report(client, report, total, n_labeled, ds.get("hit_rate_12h", 0))
     except Exception as e:
         logger.error("Failed to insert backtest report to Supabase: %s", e, exc_info=True)
 
@@ -895,22 +1022,27 @@ def main():
     print("=" * 60)
 
     ds = report["data_summary"]
-    print(f"\nData: {ds['total_snapshots']} snapshots, "
-          f"{ds['labeled_12h']} labeled (12h), "
+    print(f"\nData: {ds['total_snapshots']} snapshots -> {ds.get('unique_tokens', '?')} unique tokens "
+          f"(dedup {ds.get('dedup_ratio', '?')}x), "
+          f"{ds.get('labeled_12h', 0)} labeled (12h), "
           f"{ds['date_range_days']} days")
-    print(f"Hit rate: 12h={ds['hit_rate_12h']*100:.1f}%"
-          + (f", 24h={ds['hit_rate_24h']*100:.1f}%" if ds.get('hit_rate_24h') else ""))
+    hr_parts = []
+    for hz in ["12h", "24h", "48h", "72h", "7d"]:
+        val = ds.get(f"hit_rate_{hz}")
+        if val is not None:
+            hr_parts.append(f"{hz}={val*100:.1f}%")
+    print(f"Hit rate: {', '.join(hr_parts)}")
 
     # #1 Token hit rate (PRIMARY TARGET)
     top1 = report.get("top1_hit_rate", {})
     if top1:
         print(f"\n#1 Token Hit Rate (TARGET = 100%):")
-        for horizon in ["1h", "6h", "12h", "24h"]:
+        for horizon in ["1h", "6h", "12h", "24h", "48h", "72h", "7d"]:
             t1 = top1.get(horizon, {})
-            if t1.get("cycles_tested", 0) > 0:
+            if t1.get("tokens_tested", 0) > 0:
                 hr = t1["hit_rate"]
                 marker = "OK" if hr >= 1.0 else "MISS"
-                print(f"  {horizon}: {t1['cycles_hit']}/{t1['cycles_tested']} = "
+                print(f"  {horizon}: {t1['tokens_hit']}/{t1['tokens_tested']} = "
                       f"{hr*100:.0f}% [{marker}]")
                 for d in t1.get("details", []):
                     status = "2x" if d["did_2x"] else "FAIL"
@@ -921,7 +1053,7 @@ def main():
     # Score calibration
     cal = report.get("score_calibration", {})
     if cal:
-        print(f"\nScore Calibration:")
+        print(f"\nScore Calibration (1 entry per token):")
         for band_name, lo, hi in SCORE_BANDS:
             b = cal.get(band_name, {})
             if b.get("count", 0) > 0:
@@ -936,6 +1068,22 @@ def main():
         for feat, r in list(corr.items())[:8]:
             bar = "+" * max(0, int(abs(r) * 20)) if r > 0 else "-" * max(0, int(abs(r) * 20))
             print(f"  {feat:30s} {r:+.3f} {bar}")
+
+    # Extraction analysis
+    ext = report.get("extraction_analysis", {})
+    if ext:
+        print(f"\nExtraction Analysis (CA vs Ticker):")
+        for mode in ["ca_only", "ticker_only", "both"]:
+            m = ext.get(mode, {})
+            if m.get("count", 0) > 0:
+                hr = m["hit_rate"]
+                print(f"  {mode:15s}: {m['hits']}/{m['count']} = "
+                      f"{hr*100:.1f}% hit rate")
+            else:
+                print(f"  {mode:15s}: no data")
+        corr = ext.get("has_ca_mention_correlation")
+        if corr is not None:
+            print(f"  has_ca_mention correlation: {corr:+.3f}")
 
     # v8 signals
     v8 = report.get("v8_signals", {})

@@ -55,7 +55,7 @@ export function TokenGrid({
       <LayoutGroup>
         <motion.div
           style={{ rotateX }}
-          className="grid-3d grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4 px-4 sm:px-6"
+          className="grid-3d grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-2 sm:gap-4 px-3 sm:px-4 md:px-6"
         >
           {tokens.map((token, index) => (
             <TokenCard

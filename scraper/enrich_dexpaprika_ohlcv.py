@@ -26,7 +26,7 @@ from enrich_birdeye_ohlcv import (
 logger = logging.getLogger(__name__)
 
 DEXPAPRIKA_BASE = "https://api.dexpaprika.com"
-OHLCV_TOP_N = 50       # DexPaprika is free (10K req/day) — enrich all viable tokens
+OHLCV_TOP_N = 100      # DexPaprika is free (10K req/day) — enrich all viable tokens
 OHLCV_CACHE_FILE = Path(__file__).parent / "ohlcv_cache.json"
 OHLCV_CACHE_TTL = 60 * 60  # 1 hour
 

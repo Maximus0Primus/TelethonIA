@@ -1,91 +1,278 @@
 {
-  "missorplays": 2243200666,
+  "missorplays": {
+    "id": 2243200666,
+    "access_hash": -1939740908801005979
+  },
   "slingdeez": 3617930008,
   "overdose_gems_calls": 1444337124,
-  "marcellcooks": 2049726578,
-  "shahlito": 2137342141,
-  "sadcatgamble": 2088887132,
-  "ghastlygems": 1937478270,
-  "archercallz": 1854608645,
-  "LevisAlpha": 1924457034,
+  "marcellcooks": {
+    "id": 2049726578,
+    "access_hash": -6342595579328981938
+  },
+  "shahlito": {
+    "id": 2137342141,
+    "access_hash": 7577374537105290798
+  },
+  "sadcatgamble": {
+    "id": 2088887132,
+    "access_hash": 6418803694579926376
+  },
+  "ghastlygems": {
+    "id": 1937478270,
+    "access_hash": -7867030144388280385
+  },
+  "archercallz": {
+    "id": 1854608645,
+    "access_hash": -8796388393050558248
+  },
+  "LevisAlpha": {
+    "id": 1924457034,
+    "access_hash": 1620731487123971310
+  },
   "MarkDegens": 1763265784,
-  "darkocalls": 2251470602,
-  "kweensjournal": 1823659062,
-  "explorer_gems": 1628177089,
+  "darkocalls": {
+    "id": 2251470602,
+    "access_hash": -2914135715429846536
+  },
+  "kweensjournal": {
+    "id": 1823659062,
+    "access_hash": -6437472405725487788
+  },
+  "explorer_gems": {
+    "id": 1628177089,
+    "access_hash": 1027736850995486909
+  },
   "ArcaneGems": 1662041785,
-  "veigarcalls": 1620856213,
+  "veigarcalls": {
+    "id": 1620856213,
+    "access_hash": -3908945242678089681
+  },
   "watisdes": 1870127953,
-  "Luca_Apes": 1988248231,
-  "wuziemakesmoney": 2059346442,
+  "Luca_Apes": {
+    "id": 1988248231,
+    "access_hash": 3896583998017037912
+  },
+  "wuziemakesmoney": {
+    "id": 2059346442,
+    "access_hash": -610690463098461924
+  },
   "BatmanSafuCalls": 1677625475,
   "chiggajogambles": 1927494975,
-  "dylansdegens": 2026330056,
-  "AnimeGems": 1676655571,
-  "robogems": 1712204022,
-  "ALSTEIN_GEMCLUB": 2091543803,
+  "dylansdegens": {
+    "id": 2026330056,
+    "access_hash": -8999529211518868218
+  },
+  "AnimeGems": {
+    "id": 1676655571,
+    "access_hash": -6438740605602140981
+  },
+  "robogems": {
+    "id": 1712204022,
+    "access_hash": -5683211579628434424
+  },
+  "ALSTEIN_GEMCLUB": {
+    "id": 2091543803,
+    "access_hash": -8497685821925587724
+  },
   "PoseidonTAA": 6360426059,
   "canisprintoooors": 2888370436,
   "jsdao": 2067695602,
-  "MaybachCalls": 1627588799,
+  "MaybachCalls": {
+    "id": 1627588799,
+    "access_hash": 1832605106210349788
+  },
   "slingTA": 2874661824,
-  "MaybachGambleCalls": 1970908575,
+  "MaybachGambleCalls": {
+    "id": 1970908575,
+    "access_hash": 7044804106917502488
+  },
   "cryptorugmuncher": 2056885429,
   "inside_calls": 1468580992,
-  "BossmanCallsOfficial": 1835320066,
-  "bounty_journal": 2149162808,
+  "BossmanCallsOfficial": {
+    "id": 1835320066,
+    "access_hash": 5213865621224797547
+  },
+  "bounty_journal": {
+    "id": 2149162808,
+    "access_hash": -7731622842106438676
+  },
   "cryptotalkwithfrog": 2038729708,
   "StereoCalls": 2243814203,
-  "CarnagecallsGambles": 1696188050,
-  "PowsGemCalls": 1198046393,
+  "CarnagecallsGambles": {
+    "id": 1696188050,
+    "access_hash": -8964611323415342255
+  },
+  "PowsGemCalls": {
+    "id": 1198046393,
+    "access_hash": -2196563781939471613
+  },
   "houseofdegeneracy": 1819368322,
-  "CatfishcallsbyPoe": 1594723240,
-  "spidersjournal": 1164734593,
-  "KittysKasino": 2899207905,
+  "CatfishcallsbyPoe": {
+    "id": 1594723240,
+    "access_hash": -1859539572841313215
+  },
+  "spidersjournal": {
+    "id": 1164734593,
+    "access_hash": 6913008329139196491
+  },
+  "KittysKasino": {
+    "id": 2899207905,
+    "access_hash": 4138983427331744685
+  },
   "cryptolyxecalls": 2138178253,
   "izzycooks": 3058818590,
   "cryptowhalecalls7": 1850979374,
   "Carnagecalls": 1514821272,
   "wulfcryptocalls": 2028358250,
-  "waldosalpha": 1645327841,
+  "waldosalpha": {
+    "id": 1645327841,
+    "access_hash": 5567302943115754439
+  },
   "thetonymoontana": 2375122708,
-  "OnyxxGems": 1551999484,
+  "OnyxxGems": {
+    "id": 1551999484,
+    "access_hash": 7980930198806519634
+  },
   "SaviourCALLS": 1526108028,
-  "eunicalls": 2005508446,
-  "lollycalls": 2178177401,
-  "leoclub168c": 1733379069,
+  "eunicalls": {
+    "id": 2005508446,
+    "access_hash": 4792574129955587927
+  },
+  "lollycalls": {
+    "id": 2178177401,
+    "access_hash": 3333428396701282086
+  },
+  "leoclub168c": {
+    "id": 1733379069,
+    "access_hash": -4075146519275073242
+  },
   "TheCabalCalls": 1957501594,
   "sugarydick": 1887840067,
   "leoclub168g": 2028454753,
   "jadendegens": 1939026906,
-  "certifiedprintor": 2161891429,
+  "certifiedprintor": {
+    "id": 2161891429,
+    "access_hash": 3373317353090689179
+  },
   "MarkGems": 1584420389,
-  "LittleMustachoCalls": 2089007629,
-  "fakepumpsbynumer0": 1792164653,
-  "ramcalls": 1824357363,
-  "MarcellsFightclub": 2319061500,
-  "degenncabal": 2482375782,
-  "menacedegendungeon": 3663548521,
-  "DegenSeals": 1523523939,
-  "caniscooks": 3642450884,
-  "MoonsCallz": 2327607013,
-  "invacooksclub": 2124780831,
-  "pantherjournal": 2209289214,
-  "CryptoChefCooks": 2208034685,
-  "arcanegems": 1662041785,
-  "NisoksChadHouse": 2016955392,
-  "eveesL": 2330338080,
-  "snoopsalpha": 2191944676,
-  "donniesdegen": 2528117563,
-  "CSCalls": 1386478223,
-  "maritocalls": 1789622073,
-  "BrodyCalls": 1237108606,
-  "Archerrgambles": 1778595696,
-  "letswinallgems": 2509399716,
-  "shmooscasino": 2132709791,
-  "slingoorioyaps": 2465692505,
-  "dylansdirtydiary": 1576262256,
-  "PumpItCabal": 2227440412,
-  "x666calls": 1903316574,
-  "ChairmanDN1": 2199691447,
-  "legerlegends": 2099839255
+  "LittleMustachoCalls": {
+    "id": 2089007629,
+    "access_hash": -592561326825798355
+  },
+  "fakepumpsbynumer0": {
+    "id": 1792164653,
+    "access_hash": -869832447491320382
+  },
+  "ramcalls": {
+    "id": 1824357363,
+    "access_hash": -5862638130765070290
+  },
+  "MarcellsFightclub": {
+    "id": 2319061500,
+    "access_hash": -8024143793343551217
+  },
+  "degenncabal": {
+    "id": 2482375782,
+    "access_hash": 7628905471720949216
+  },
+  "menacedegendungeon": {
+    "id": 3663548521,
+    "access_hash": 5034779867227226340
+  },
+  "DegenSeals": {
+    "id": 1523523939,
+    "access_hash": 3028350379905779346
+  },
+  "caniscooks": {
+    "id": 3642450884,
+    "access_hash": 5856247189301240085
+  },
+  "MoonsCallz": {
+    "id": 2327607013,
+    "access_hash": 5402767230192267023
+  },
+  "invacooksclub": {
+    "id": 2124780831,
+    "access_hash": -3844791599676046553
+  },
+  "pantherjournal": {
+    "id": 2209289214,
+    "access_hash": -628257667291215062
+  },
+  "CryptoChefCooks": {
+    "id": 2208034685,
+    "access_hash": 1945340337627615851
+  },
+  "arcanegems": {
+    "id": 1662041785,
+    "access_hash": -4656826445678014308
+  },
+  "NisoksChadHouse": {
+    "id": 2016955392,
+    "access_hash": -4386764381430075782
+  },
+  "eveesL": {
+    "id": 2330338080,
+    "access_hash": -4154616013115467541
+  },
+  "snoopsalpha": {
+    "id": 2191944676,
+    "access_hash": 7086598348029303353
+  },
+  "donniesdegen": {
+    "id": 2528117563,
+    "access_hash": -1414061758144404620
+  },
+  "CSCalls": {
+    "id": 1386478223,
+    "access_hash": 9109413235968474324
+  },
+  "maritocalls": {
+    "id": 1789622073,
+    "access_hash": 317523328040969057
+  },
+  "BrodyCalls": {
+    "id": 1237108606,
+    "access_hash": 3210840956723315065
+  },
+  "Archerrgambles": {
+    "id": 1778595696,
+    "access_hash": -6430138028472745629
+  },
+  "letswinallgems": {
+    "id": 2509399716,
+    "access_hash": 5044621796517300929
+  },
+  "shmooscasino": {
+    "id": 2132709791,
+    "access_hash": -7346037879435371607
+  },
+  "slingoorioyaps": {
+    "id": 2465692505,
+    "access_hash": -2821477035098769107
+  },
+  "dylansdirtydiary": {
+    "id": 1576262256,
+    "access_hash": 6665576961990310639
+  },
+  "PumpItCabal": {
+    "id": 2227440412,
+    "access_hash": 5217001392919462539
+  },
+  "x666calls": {
+    "id": 1903316574,
+    "access_hash": 935780821270412309
+  },
+  "ChairmanDN1": {
+    "id": 2199691447,
+    "access_hash": 2325199440826137380
+  },
+  "legerlegends": {
+    "id": 2099839255,
+    "access_hash": 9046131205019297676
+  },
+  "papicall": {
+    "id": 2144476694,
+    "access_hash": 3473513782156063879
+  }
 }

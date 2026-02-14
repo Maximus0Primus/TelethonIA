@@ -82,6 +82,8 @@ NUMERIC_LIMITS = {
     "trend_strength": 1.0,
     "death_penalty": 1.0,
     "freshest_mention_hours": 999.99,
+    "oldest_mention_hours": 999999.99,
+    "sol_price_at_snapshot": 99999999.99,
     "entry_premium": 9999.999,
     "entry_premium_mult": 1.1,
     "new_kol_ratio": 1.0,
@@ -91,6 +93,8 @@ NUMERIC_LIMITS = {
     "pump_pen": 1.0,
     "breadth_pen": 1.0,
     "stale_pen": 1.0,
+    "size_mult": 1.5,
+    "s_tier_mult": 1.5,
 }
 
 
@@ -98,12 +102,13 @@ NUMERIC_LIMITS = {
 _INT_COLS = {
     "birdeye_buy_24h", "birdeye_sell_24h", "boosts_active", "score_at_snapshot", "score_delta",
     "bubblemaps_cluster_count", "bundle_count", "buys_24h",
-    "confirmation_pillars", "hedging_count", "helius_holder_count",
+    "ca_mention_count", "confirmation_pillars", "hedging_count", "helius_holder_count",
     "helius_recent_tx_count", "helius_unique_buyers", "holder_count",
     "jito_bundle_detected", "jito_bundle_slots", "jito_max_slot_txns",
     "mentions", "mentions_delta", "pair_count", "price_target_count",
     "pvp_recent_count", "pvp_same_name_count", "risk_count", "risk_score",
-    "sells_24h", "trade_24h", "txn_count_24h", "unique_wallet_24h",
+    "sells_24h", "ticker_mention_count", "trade_24h", "txn_count_24h",
+    "unique_wallet_24h", "url_mention_count",
     "whale_count", "whale_new_entries",
 }
 
@@ -413,7 +418,7 @@ def insert_snapshots(ranking: list[dict]) -> None:
             "onchain_multiplier": t.get("onchain_multiplier"),
             "safety_penalty": t.get("safety_penalty"),
             # Phase 2: KOL reputation
-            "top_kols": json.dumps(t.get("top_kols")) if t.get("top_kols") else None,
+            "top_kols": t.get("top_kols") if t.get("top_kols") else None,  # pass list directly, supabase-py handles jsonb
             "kol_reputation_avg": t.get("kol_reputation_avg"),
             # Phase 2: Narrative
             "narrative": t.get("narrative"),
@@ -529,6 +534,21 @@ def insert_snapshots(ranking: list[dict]) -> None:
             "activity_mult": t.get("activity_mult"),
             "crash_pen": t.get("crash_pen"),
             "stale_pen": t.get("stale_pen"),
+            "size_mult": t.get("size_mult"),
+            "s_tier_mult": t.get("s_tier_mult"),
+            # v15: KOL counts for conviction dampening
+            "unique_kols": t.get("unique_kols"),
+            "s_tier_count": sum(1 for tier in t.get("kol_tiers", {}).values() if tier == "S"),
+            # v16: Extraction source counts
+            "ca_mention_count": t.get("ca_mention_count", 0),
+            "ticker_mention_count": t.get("ticker_mention_count", 0),
+            "url_mention_count": t.get("url_mention_count", 0),
+            "has_ca_mention": (t.get("ca_mention_count", 0) or 0) > 0 or (t.get("url_mention_count", 0) or 0) > 0,
+            # v16: Gate reason (NULL = passed all gates, else reason for ejection)
+            "gate_reason": t.get("gate_reason"),
+            # v16: Backtesting features
+            "sol_price_at_snapshot": t.get("sol_price_at_snapshot"),
+            "oldest_mention_hours": t.get("oldest_mention_hours"),
             # ML temporal features: cross-snapshot deltas
             "score_at_snapshot": deltas.get("score_at_snapshot"),
             "score_delta": deltas.get("score_delta"),
@@ -585,6 +605,9 @@ def insert_kol_mentions(mentions: list[dict]) -> None:
             "is_positive": m.get("is_positive", True),
             "narrative": m.get("narrative"),
             "tokens_in_message": m.get("tokens_in_message"),
+            # v16: Extraction audit fields
+            "extraction_method": m.get("extraction_method"),
+            "extracted_cas": m.get("extracted_cas"),
         }))
 
     # Upsert in chunks of 500 — ON CONFLICT (kol_group, message_date, symbol) DO NOTHING
