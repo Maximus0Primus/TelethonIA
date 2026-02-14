@@ -66,7 +66,7 @@ export default async function HomePage() {
         <p>
           Cryptosensus brings clarity to the noise. We score lowcap tokens so
           you know what to buy before the crowd does. Stop guessing. Start
-          winning. Data-driven onchain analysis updated every 15 minutes.
+          winning.
         </p>
         {initialTokens.length > 0 && (
           <>
