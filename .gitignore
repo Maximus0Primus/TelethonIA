@@ -56,4 +56,7 @@ desktop.ini
 *.wav
 *.png
 !crypto-kol-ranking/public/logo.png
+!crypto-kol-ranking/public/logo-dark.png
+!crypto-kol-ranking/src/app/icon.png
+!crypto-kol-ranking/src/app/apple-icon.png
 *.pem

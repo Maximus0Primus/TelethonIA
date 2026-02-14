@@ -38,11 +38,11 @@ export function Header() {
               alt="Cryptosensus"
               width={160}
               height={142}
-              className="h-9 w-auto shrink-0"
+              className="h-7 w-auto shrink-0"
               unoptimized
               priority
             />
-            <h1 className="text-xl font-bold tracking-tight text-white hover:text-white/80 transition-colors leading-none">
+            <h1 className="text-xl font-bold tracking-tight text-white hover:text-white/80 transition-colors">
               Cryptosensus
             </h1>
           </Link>
