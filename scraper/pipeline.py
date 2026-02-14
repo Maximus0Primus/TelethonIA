@@ -580,11 +580,16 @@ def _load_ml_model(horizon: str = "12h"):
 
     try:
         import xgboost as xgb
-        if mode == "regression":
+        if mode == "ltr":
+            # LTR uses xgb.Booster directly (not sklearn wrapper)
+            _ml_model = xgb.Booster()
+            _ml_model.load_model(str(xgb_path))
+        elif mode == "regression":
             _ml_model = xgb.XGBRegressor()
+            _ml_model.load_model(str(xgb_path))
         else:
             _ml_model = xgb.XGBClassifier()
-        _ml_model.load_model(str(xgb_path))
+            _ml_model.load_model(str(xgb_path))
         logger.info("XGBoost %s loaded from %s", mode, xgb_path)
     except Exception as e:
         logger.warning("Failed to load XGBoost model: %s", e)
@@ -658,8 +663,10 @@ def _apply_ml_scores(ranking: list[dict]) -> None:
     ML as MULTIPLIER: predictions scale the manual score within [0.5, 1.5].
     This preserves manual penalties (safety, death, crash) while letting ML boost/dampen.
 
-    Regression mode: raw prediction → percentile rank → scale to [0.5, 1.5]
-    Classification mode: predict_proba → scale to [0.5, 1.5]
+    Supports 3 modes:
+    - regression: raw prediction → percentile rank → scale to [0.5, 1.5]
+    - classification: predict_proba → scale to [0.5, 1.5]
+    - ltr (Learning-to-Rank): relevance score → percentile rank → [0.5, 1.5]
     """
     xgb_model, lgb_model, features, meta = _load_ml_model()
     if (xgb_model is None and lgb_model is None) or not features or not meta:
@@ -680,9 +687,16 @@ def _apply_ml_scores(ranking: list[dict]) -> None:
         # Get raw predictions from each model
         preds = None
 
-        if mode == "regression":
-            # Regression: predict log_return, then use percentile-based scaling
-            xgb_preds = xgb_model.predict(X) if xgb_model is not None else None
+        if mode in ("regression", "ltr"):
+            # Both regression and LTR output raw scores → percentile-based scaling
+            # LTR: XGBoost rank:ndcg outputs relevance scores (higher = better ranking)
+            if mode == "ltr" and xgb_model is not None:
+                # LTR uses Booster.predict(DMatrix), not sklearn .predict(DataFrame)
+                import xgboost as _xgb
+                dmat = _xgb.DMatrix(X)
+                xgb_preds = xgb_model.predict(dmat)
+            else:
+                xgb_preds = xgb_model.predict(X) if xgb_model is not None else None
             lgb_preds = lgb_model.predict(X.values) if lgb_model is not None else None
 
             if xgb_preds is not None and lgb_preds is not None:
@@ -952,6 +966,69 @@ def _get_price_from_candles(token: dict, hours: float) -> float | None:
             return close
 
     return None
+
+
+def _compute_entry_timing_quality(token: dict) -> float:
+    """
+    ML v2 Phase C: Compute entry timing quality (0-1).
+
+    Measures how close the token is to an optimal buy window by combining:
+    1. Freshness sweet spot (winners peak 1-8h after fresh KOL calls)
+    2. Price position (not too pumped, not crashing)
+    3. Social momentum (building > declining)
+    4. Score velocity (rising score = good timing)
+
+    Returns float 0-1 (higher = better entry timing).
+    ML-only feature initially. May become soft multiplier if correlation > 0.05.
+    """
+    signals = []
+
+    # 1. Freshness sweet spot (winners peak at 1-8h after fresh calls)
+    freshest = token.get("freshest_mention_hours", 999)
+    if freshest < 1:
+        signals.append(0.7)       # very fresh, unproven
+    elif freshest < 4:
+        signals.append(1.0)       # sweet spot
+    elif freshest < 8:
+        signals.append(0.8)
+    elif freshest < 16:
+        signals.append(0.5)
+    else:
+        signals.append(0.2)
+
+    # 2. Price position (not too pumped, not in crash)
+    pc24 = token.get("price_change_24h") or 0
+    if -30 < pc24 < 50:
+        signals.append(0.9)       # pre-pump zone
+    elif 50 <= pc24 < 100:
+        signals.append(0.5)       # moderate pump
+    elif pc24 >= 200:
+        signals.append(0.1)       # too late
+    else:
+        signals.append(0.4)       # crashing
+
+    # 3. Social momentum (building > declining)
+    activity = token.get("activity_mult", 1.0)
+    if activity > 1.15:
+        signals.append(0.9)
+    elif activity > 1.0:
+        signals.append(0.7)
+    else:
+        signals.append(0.3)
+
+    # 4. Score velocity (Phase B) — rising score = good timing
+    vel = token.get("score_velocity")
+    if vel is not None:
+        if vel > 5:
+            signals.append(0.9)
+        elif vel > 0:
+            signals.append(0.7)
+        elif vel < -5:
+            signals.append(0.2)
+        else:
+            signals.append(0.5)
+
+    return round(sum(signals) / len(signals), 3) if signals else 0.5
 
 
 def _compute_kol_entry_premium(token: dict) -> tuple[float, float]:
@@ -2096,6 +2173,14 @@ def aggregate_ranking(
         mention_acceleration = (second_half - first_half) / max(1, first_half + second_half)
         # -1 (dying) to +1 (accelerating)
 
+        # --- ML v2 Phase B: Social momentum phase classification ---
+        if mention_acceleration > 0.2 and social_velocity > 0.3:
+            social_momentum_phase = "building"
+        elif mention_acceleration < -0.2 or social_velocity < 0.1:
+            social_momentum_phase = "declining"
+        else:
+            social_momentum_phase = "plateau"
+
         # --- Base Telegram scores (3 modes) ---
 
         # Algorithm v7: Balanced score with weight renormalization
@@ -2184,6 +2269,8 @@ def aggregate_ranking(
             "hedging_count": data.get("hedging_count", 0),
             # Algorithm v3 A3: Sentiment consistency
             "sentiment_consistency": round(sentiment_consistency, 3),
+            # ML v2 Phase B: Social momentum phase
+            "social_momentum_phase": social_momentum_phase,
             # v9: Freshest mention age for death detection
             "freshest_mention_hours": round(freshest_mention_hours, 2),
             # v16: Oldest mention age for backtesting
@@ -2572,6 +2659,11 @@ def aggregate_ranking(
 
         # Update interpretation band after final score
         token["score_interpretation"] = _interpret_score(token["score"])
+
+        # ML v2 Phase C: Entry zone timing quality (0-1)
+        # Measures how close the token is to an optimal buy window.
+        # ML-only initially; may become a soft multiplier if correlation > 0.05.
+        token["entry_timing_quality"] = _compute_entry_timing_quality(token)
 
     squeeze_firing = sum(1 for t in ranking if t.get("squeeze_state") == "firing")
     unconfirmed = sum(1 for t in ranking if t.get("confirmation_pillars", 0) < 2)

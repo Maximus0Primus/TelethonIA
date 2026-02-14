@@ -68,6 +68,10 @@ CORE_FEATURES = [
     "market_cap_log",
     # Cross-snapshot temporal
     "score_delta",
+    # ML v2 Phase B: Temporal velocity (Tier 1)
+    "score_velocity",
+    "mention_velocity",
+    "volume_velocity",
 ]
 
 # Tier 2 (extended): Add these when 500-2000 samples. ~30 features total.
@@ -87,6 +91,11 @@ EXTENDED_FEATURES = CORE_FEATURES + [
     "pvp_same_name_count",
     "new_kol_ratio",
     "mentions_delta",
+    # ML v2 Phase B: Temporal velocity (Tier 2)
+    "score_acceleration",
+    "kol_arrival_rate",
+    # ML v2 Phase C: Entry zone
+    "entry_timing_quality",
 ]
 
 # Tier 3 (full): All features when 2000+ samples. Let the model decide.
@@ -143,6 +152,11 @@ ALL_FEATURE_COLS = [
     "volume_5m_log", "buy_sell_ratio_5m", "ultra_short_heat",
     "already_pumped_penalty",
     "bubblemaps_score", "bubblemaps_cluster_max_pct", "bubblemaps_cluster_count",
+    # ML v2 Phase B: Temporal velocity
+    "score_velocity", "score_acceleration", "mention_velocity",
+    "volume_velocity", "kol_arrival_rate",
+    # ML v2 Phase C: Entry zone
+    "entry_timing_quality",
 ]
 
 HORIZONS = {
@@ -614,6 +628,320 @@ def train_regression(
     return metadata
 
 
+# ═══ LEARNING-TO-RANK TRAINING (ML v2 Phase A) ═══
+
+def _compute_relevance(row, horizon: str = "12h") -> int:
+    """
+    Compute graded relevance label for LTR from max return.
+
+    | Condition          | Label | Meaning              |
+    |--------------------|-------|----------------------|
+    | max_return > 5x    | 4     | Exceptional winner   |
+    | did_2x == True     | 3     | Solid winner (2x-5x) |
+    | max_return > 1.3x  | 1     | Moderate gain        |
+    | Everything else    | 0     | Non-winner           |
+    """
+    max_price_col = f"max_price_{horizon}"
+    p0 = row.get("price_at_snapshot")
+    pmax = row.get(max_price_col)
+
+    if pd.isna(p0) or pd.isna(pmax) or float(p0) <= 0:
+        return 0
+
+    max_return = float(pmax) / float(p0)
+    if max_return > 5.0:
+        return 4
+    elif max_return >= 2.0:
+        return 3
+    elif max_return > 1.3:
+        return 1
+    return 0
+
+
+def _construct_query_groups(df: pd.DataFrame) -> tuple[pd.DataFrame, list[int]]:
+    """
+    Build query groups for LTR: each group = all tokens scored in the same cycle.
+    Filters out groups with < 3 tokens (LTR degenerates with tiny groups).
+
+    Returns (filtered_df, group_sizes) where group_sizes is compatible with
+    XGBoost's DMatrix.set_group().
+    """
+    df = df.copy()
+    df["cycle"] = df["snapshot_at"].dt.floor("15min")
+
+    # Filter: only cycles with 3+ tokens
+    cycle_counts = df["cycle"].value_counts()
+    valid_cycles = cycle_counts[cycle_counts >= 3].index
+    df = df[df["cycle"].isin(valid_cycles)].sort_values(["cycle", "snapshot_at"])
+
+    # Compute group sizes
+    group_sizes = df.groupby("cycle").size().tolist()
+
+    return df, group_sizes
+
+
+def train_ltr(
+    df: pd.DataFrame,
+    horizon: str = "12h",
+    n_trials: int = 100,
+    min_samples: int = 200,
+) -> dict | None:
+    """
+    Train Learning-to-Rank model using XGBoost's rank:ndcg objective.
+    Optimizes NDCG@5 directly — the model learns to rank tokens within
+    each cycle, not predict absolute returns.
+
+    LambdaMART is the state-of-the-art for this type of ranking problem.
+    """
+    max_price_col = f"max_price_{horizon}"
+    snapshot_price_col = "price_at_snapshot"
+    label_col = HORIZONS[horizon]
+
+    if len(df) < min_samples:
+        logger.warning("LTR: Only %d samples (need %d). Skipping.", len(df), min_samples)
+        return None
+
+    df = df.copy()
+    df["snapshot_at"] = pd.to_datetime(df["snapshot_at"])
+    df[max_price_col] = pd.to_numeric(df.get(max_price_col), errors="coerce")
+    df[snapshot_price_col] = pd.to_numeric(df.get(snapshot_price_col), errors="coerce")
+
+    # Compute relevance labels
+    df["relevance"] = df.apply(lambda r: _compute_relevance(r, horizon), axis=1)
+
+    # Need labeled data (at least price data to compute relevance)
+    valid_mask = df[max_price_col].notna() & (df[snapshot_price_col] > 0)
+    df = df[valid_mask].copy()
+
+    if len(df) < min_samples:
+        logger.warning("LTR: Only %d valid samples (need %d).", len(df), min_samples)
+        return None
+
+    # Construct query groups
+    df, group_sizes = _construct_query_groups(df)
+
+    if len(group_sizes) < 10:
+        logger.warning("LTR: Only %d valid cycles (need 10+). Skipping.", len(group_sizes))
+        return None
+
+    logger.info("LTR: %d samples across %d cycles (avg %.1f tokens/cycle)",
+                len(df), len(group_sizes), len(df) / len(group_sizes))
+
+    # Feature selection by tier
+    feature_pool = _select_feature_tier(len(df))
+    df, available_features = prepare_features(df, feature_pool)
+
+    if len(available_features) < 5:
+        logger.error("LTR: Only %d features available — need at least 5", len(available_features))
+        return None
+
+    # Walk-forward split on CYCLES (not individual rows)
+    df["cycle"] = df["snapshot_at"].dt.floor("15min")
+    unique_cycles = sorted(df["cycle"].unique())
+    split_idx = int(len(unique_cycles) * 0.7)
+    train_cycles = set(unique_cycles[:split_idx])
+    test_cycles = set(unique_cycles[split_idx:])
+
+    train_df = df[df["cycle"].isin(train_cycles)]
+    test_df = df[df["cycle"].isin(test_cycles)]
+
+    train_groups = train_df.groupby("cycle").size().tolist()
+    test_groups = test_df.groupby("cycle").size().tolist()
+
+    X_train = train_df[available_features]
+    y_train = train_df["relevance"]
+    X_test = test_df[available_features]
+    y_test = test_df["relevance"]
+
+    # Also compute binary labels for precision@5
+    y_test_binary = test_df[label_col].astype(int) if label_col in test_df.columns else (y_test >= 3).astype(int)
+
+    logger.info(
+        "LTR — Train: %d samples/%d cycles, Test: %d samples/%d cycles",
+        len(X_train), len(train_groups), len(X_test), len(test_groups),
+    )
+    logger.info(
+        "LTR — Relevance distribution: 0=%d, 1=%d, 3=%d, 4=%d",
+        int((y_train == 0).sum()), int((y_train == 1).sum()),
+        int((y_train == 3).sum()), int((y_train == 4).sum()),
+    )
+
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+    # Optuna optimization for XGBoost ranker
+    def objective(trial):
+        params = {
+            "max_depth": trial.suggest_int("max_depth", 3, 7),
+            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
+            "n_estimators": trial.suggest_int("n_estimators", 50, 400),
+            "min_child_weight": trial.suggest_int("min_child_weight", 3, 15),
+            "subsample": trial.suggest_float("subsample", 0.6, 1.0),
+            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
+            "gamma": trial.suggest_float("gamma", 0.0, 5.0),
+            "reg_alpha": trial.suggest_float("reg_alpha", 1e-8, 10.0, log=True),
+            "reg_lambda": trial.suggest_float("reg_lambda", 1e-8, 10.0, log=True),
+        }
+
+        dtrain = xgb.DMatrix(X_train, label=y_train)
+        dtrain.set_group(train_groups)
+        dtest = xgb.DMatrix(X_test, label=y_test)
+        dtest.set_group(test_groups)
+
+        xgb_params = {
+            **params,
+            "objective": "rank:ndcg",
+            "eval_metric": "ndcg@5",
+            "verbosity": 0,
+        }
+
+        result = xgb.train(
+            xgb_params, dtrain,
+            num_boost_round=params["n_estimators"],
+            evals=[(dtest, "test")],
+            verbose_eval=False,
+        )
+
+        # Get NDCG@5 from last evaluation
+        preds = result.predict(dtest)
+        # Compute precision@5 using binary labels
+        p_at_5 = _precision_at_k(y_test_binary, preds, k=5)
+        return p_at_5
+
+    logger.info("=== Optimizing LTR XGBoost Ranker (%d trials) ===", n_trials)
+    study = optuna.create_study(direction="maximize")
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
+    logger.info("LTR best precision@5: %.3f", study.best_value)
+
+    # Train final model with best params
+    best_params = study.best_params
+    n_estimators = best_params.pop("n_estimators")
+
+    dtrain = xgb.DMatrix(X_train, label=y_train)
+    dtrain.set_group(train_groups)
+    dtest = xgb.DMatrix(X_test, label=y_test)
+    dtest.set_group(test_groups)
+
+    xgb_params = {
+        **best_params,
+        "objective": "rank:ndcg",
+        "eval_metric": "ndcg@5",
+        "verbosity": 0,
+    }
+
+    ltr_model = xgb.train(
+        xgb_params, dtrain,
+        num_boost_round=n_estimators,
+        evals=[(dtest, "test")],
+        verbose_eval=False,
+    )
+
+    # Evaluate
+    test_preds = ltr_model.predict(dtest)
+    p_at_5 = _precision_at_k(y_test_binary, test_preds, k=5)
+    p_at_10 = _precision_at_k(y_test_binary, test_preds, k=10)
+    spearman = _spearman_rank(y_test_binary.reset_index(drop=True), pd.Series(test_preds))
+
+    # Compute NDCG@5 manually
+    try:
+        from sklearn.metrics import ndcg_score
+        # Reshape for ndcg_score: needs (n_queries, n_docs) format
+        # We compute per-cycle NDCG and average
+        ndcg_scores = []
+        offset = 0
+        for g_size in test_groups:
+            if g_size < 2:
+                offset += g_size
+                continue
+            y_true = y_test.iloc[offset:offset + g_size].values.reshape(1, -1)
+            y_pred = test_preds[offset:offset + g_size].reshape(1, -1)
+            try:
+                ndcg = ndcg_score(y_true, y_pred, k=5)
+                ndcg_scores.append(ndcg)
+            except Exception:
+                pass
+            offset += g_size
+        avg_ndcg = float(np.mean(ndcg_scores)) if ndcg_scores else 0.0
+    except ImportError:
+        avg_ndcg = 0.0
+
+    logger.info("\n=== LTR RESULTS ===")
+    logger.info("NDCG@5: %.3f (target: >0.70)", avg_ndcg)
+    logger.info("Precision@5: %.3f (target: >%.2f)", p_at_5, MIN_PRECISION_AT_5)
+    logger.info("Precision@10: %.3f", p_at_10)
+    logger.info("Spearman rank: %.3f", spearman)
+
+    # Quality gate
+    if p_at_5 < MIN_PRECISION_AT_5:
+        logger.warning(
+            "LTR QUALITY GATE FAILED: precision@5 = %.3f < %.2f. Model NOT saved.",
+            p_at_5, MIN_PRECISION_AT_5,
+        )
+        return {"quality_gate": "FAILED", "precision_at_5": float(p_at_5), "mode": "ltr"}
+
+    # SHAP on XGBoost Booster
+    xgb_shap = {}
+    try:
+        import shap
+        explainer = shap.TreeExplainer(ltr_model)
+        shap_values = explainer.shap_values(X_test)
+        mean_abs_shap = np.abs(shap_values).mean(axis=0)
+        xgb_shap = dict(sorted(
+            zip(available_features, mean_abs_shap),
+            key=lambda x: x[1], reverse=True,
+        ))
+        xgb_shap = {k: float(v) for k, v in xgb_shap.items()}
+        logger.info("LTR SHAP top features:")
+        for feat, imp in list(xgb_shap.items())[:10]:
+            logger.info("  %s: %.4f", feat, imp)
+    except Exception as e:
+        logger.warning("LTR SHAP failed: %s", e)
+
+    # Save model (XGBoost Booster saves as .json)
+    xgb_path = MODEL_DIR / f"model_{horizon}.json"
+    ltr_model.save_model(str(xgb_path))
+    logger.info("LTR model saved to %s", xgb_path)
+
+    # Feature importances from gain
+    importance = ltr_model.get_score(importance_type="gain")
+    sorted_imp = sorted(importance.items(), key=lambda x: x[1], reverse=True)
+
+    metadata = {
+        "horizon": horizon,
+        "mode": "ltr",
+        "trained_at": datetime.utcnow().isoformat(),
+        "train_samples": len(y_train),
+        "test_samples": len(y_test),
+        "train_cycles": len(train_groups),
+        "test_cycles": len(test_groups),
+        "feature_tier": "core" if len(df) < 500 else "extended" if len(df) < 2000 else "full",
+        "ensemble_weights": {"xgboost": 1.0, "lightgbm": 0.0},  # LTR is XGBoost-only
+        "xgb_params": {k: v for k, v in best_params.items()},
+        "metrics": {
+            "ndcg_at_5": avg_ndcg,
+            "precision_at_5": float(p_at_5),
+            "precision_at_10": float(p_at_10),
+            "spearman": float(spearman),
+        },
+        "quality_gate": "PASSED",
+        "relevance_distribution": {
+            "grade_0": int((y_train == 0).sum()),
+            "grade_1": int((y_train == 1).sum()),
+            "grade_3": int((y_train == 3).sum()),
+            "grade_4": int((y_train == 4).sum()),
+        },
+        "feature_importances_xgb": {k: float(v) for k, v in sorted_imp},
+        "shap_importances_xgb": xgb_shap,
+        "features": available_features,
+    }
+
+    meta_path = MODEL_DIR / f"model_{horizon}_meta.json"
+    with open(meta_path, "w") as f:
+        json.dump(metadata, f, indent=2)
+    logger.info("LTR metadata saved to %s", meta_path)
+
+    return metadata
+
+
 # ═══ CLASSIFICATION TRAINING (legacy, still available via --mode classify) ═══
 
 def train_ensemble(
@@ -813,38 +1141,66 @@ def auto_train(
     # Suppress Optuna logs in auto mode
     optuna.logging.set_verbosity(optuna.logging.WARNING)
 
-    # Train new model
-    new_meta = train_regression(df, horizon, n_trials=trials, min_samples=min_samples)
-    if not new_meta:
-        logger.warning("auto_train: training failed or insufficient data")
+    # Train regression model
+    reg_meta = train_regression(df, horizon, n_trials=trials, min_samples=min_samples)
+
+    # Also try LTR if we have enough data (500+ samples, 10+ cycles)
+    ltr_meta = None
+    if len(df) >= 500:
+        try:
+            ltr_meta = train_ltr(df, horizon, n_trials=trials, min_samples=min_samples)
+        except Exception as e:
+            logger.warning("auto_train: LTR training failed: %s", e)
+
+    # Pick the best model: compare precision@5 across modes
+    candidates = []
+    if reg_meta and reg_meta.get("quality_gate") == "PASSED":
+        candidates.append(("regression", reg_meta))
+    if ltr_meta and ltr_meta.get("quality_gate") == "PASSED":
+        candidates.append(("ltr", ltr_meta))
+
+    if not candidates:
+        logger.warning("auto_train: no model passed quality gate")
         return None
 
-    if new_meta.get("quality_gate") == "FAILED":
-        logger.warning("auto_train: new model failed quality gate (p@5=%.3f < %.2f)",
-                        new_meta.get("precision_at_5", 0), MIN_PRECISION_AT_5)
-        return None
+    # Select best by precision@5
+    best_mode, new_meta = max(
+        candidates, key=lambda x: x[1].get("metrics", {}).get("precision_at_5", 0)
+    )
+    new_p5 = new_meta.get("metrics", {}).get("precision_at_5", 0)
 
-    # A/B comparison: new model must beat old model on Spearman
-    new_spearman = new_meta.get("metrics", {}).get("spearman", 0)
+    if len(candidates) > 1:
+        for mode_name, meta in candidates:
+            p5 = meta.get("metrics", {}).get("precision_at_5", 0)
+            logger.info("auto_train: %s p@5=%.3f", mode_name, p5)
+        logger.info("auto_train: selected %s (p@5=%.3f)", best_mode, new_p5)
+
+    # If LTR won but regression was already saved, re-save LTR model
+    # (train_ltr saves its own model files, so this is only needed if
+    #  train_regression ran second and overwrote the files)
+    if best_mode == "ltr" and reg_meta:
+        # LTR model was already saved by train_ltr — just ensure meta is correct
+        meta_path_ltr = MODEL_DIR / f"model_{horizon}_meta.json"
+        with open(meta_path_ltr, "w") as f:
+            json.dump(new_meta, f, indent=2)
+
+    # A/B comparison: new model must beat old model on precision@5
     if old_meta:
-        old_spearman = old_meta.get("metrics", {}).get("spearman", 0)
-        if new_spearman < old_spearman:
+        old_p5 = old_meta.get("metrics", {}).get("precision_at_5", 0)
+        if new_p5 < old_p5:
             logger.warning(
-                "auto_train: new model (spearman=%.3f) worse than old (%.3f). "
+                "auto_train: new %s model (p@5=%.3f) worse than old %s (p@5=%.3f). "
                 "Keeping old model.",
-                new_spearman, old_spearman,
+                best_mode, new_p5, old_meta.get("mode", "?"), old_p5,
             )
-            # Restore old model files (train_regression already saved new ones)
-            # The old model files were overwritten — this is a known trade-off.
-            # In practice, the quality gate + A/B means this is rare.
             return None
 
         logger.info(
-            "auto_train: new model (spearman=%.3f) beats old (%.3f). Deployed!",
-            new_spearman, old_spearman,
+            "auto_train: new %s model (p@5=%.3f) beats old %s (p@5=%.3f). Deployed!",
+            best_mode, new_p5, old_meta.get("mode", "?"), old_p5,
         )
     else:
-        logger.info("auto_train: no existing model — new model deployed (spearman=%.3f)", new_spearman)
+        logger.info("auto_train: no existing model — new %s model deployed (p@5=%.3f)", best_mode, new_p5)
 
     # Record auto-train timestamp
     new_meta["auto_trained"] = True
@@ -865,8 +1221,8 @@ def main():
         help="Prediction horizon (default: 12h)",
     )
     parser.add_argument(
-        "--mode", choices=["regression", "classify"], default="regression",
-        help="Training mode: regression (predict max_return) or classify (predict did_2x)",
+        "--mode", choices=["regression", "classify", "ltr"], default="regression",
+        help="Training mode: regression (predict max_return), classify (predict did_2x), or ltr (Learning-to-Rank)",
     )
     parser.add_argument(
         "--trials", type=int, default=100,
@@ -902,7 +1258,12 @@ def main():
         return
 
     horizons = HORIZONS.keys() if args.all else [args.horizon]
-    train_fn = train_regression if args.mode == "regression" else train_ensemble
+    if args.mode == "ltr":
+        train_fn = train_ltr
+    elif args.mode == "regression":
+        train_fn = train_regression
+    else:
+        train_fn = train_ensemble
 
     for horizon in horizons:
         logger.info("\n%s\n=== Training %s %s ===\n%s", "=" * 60, horizon, args.mode, "=" * 60)

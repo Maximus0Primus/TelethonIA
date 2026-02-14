@@ -95,6 +95,13 @@ NUMERIC_LIMITS = {
     "stale_pen": 1.0,
     "size_mult": 1.5,
     "s_tier_mult": 1.5,
+    # ML v2: Temporal velocity features
+    "score_velocity": 9999.999,
+    "score_acceleration": 9999.999,
+    "mention_velocity": 9999.999,
+    "volume_velocity": 99.999,
+    "kol_arrival_rate": 99.999,
+    "entry_timing_quality": 1.0,
 }
 
 
@@ -257,7 +264,7 @@ def _fetch_previous_snapshots(client: Client, symbols: list[str]) -> dict[str, d
     try:
         result = (
             client.table("token_snapshots")
-            .select("symbol, mentions, sentiment, volume_24h, holder_count, score_at_snapshot, top_kols, snapshot_at")
+            .select("symbol, mentions, sentiment, volume_24h, holder_count, score_at_snapshot, top_kols, snapshot_at, score_velocity, unique_kols")
             .in_("symbol", symbols)
             .order("snapshot_at", desc=True)
             .limit(len(symbols) * 3)  # enough to get at least 1 per symbol
@@ -286,7 +293,11 @@ def _safe_delta(current, previous) -> float | None:
 
 
 def _compute_temporal_features(current: dict, previous: dict | None) -> dict:
-    """Compute deltas between current and previous snapshot."""
+    """
+    Compute deltas and velocity features between current and previous snapshot.
+    ML v2 Phase B: adds score_velocity, score_acceleration, mention_velocity,
+    volume_velocity, kol_arrival_rate.
+    """
     result = {
         "mentions_delta": None,
         "sentiment_delta": None,
@@ -295,6 +306,12 @@ def _compute_temporal_features(current: dict, previous: dict | None) -> dict:
         "score_at_snapshot": current.get("score"),
         "score_delta": None,
         "new_kol_ratio": None,
+        # ML v2: Velocity features
+        "score_velocity": None,
+        "score_acceleration": None,
+        "mention_velocity": None,
+        "volume_velocity": None,
+        "kol_arrival_rate": None,
     }
 
     if previous is None:
@@ -312,9 +329,54 @@ def _compute_temporal_features(current: dict, previous: dict | None) -> dict:
     if prev_score is not None and curr_score is not None:
         result["score_delta"] = int(curr_score) - int(prev_score)
 
+    # --- ML v2: Compute hours_between from snapshot_at timestamps ---
+    hours_between = None
+    prev_snapshot_at = previous.get("snapshot_at")
+    if prev_snapshot_at:
+        try:
+            from datetime import datetime as _dt
+            if isinstance(prev_snapshot_at, str):
+                # Parse ISO timestamp from DB
+                prev_ts = _dt.fromisoformat(prev_snapshot_at.replace("Z", "+00:00"))
+            else:
+                prev_ts = prev_snapshot_at
+            now = _dt.now(prev_ts.tzinfo) if prev_ts.tzinfo else _dt.utcnow()
+            hours_between = max(0.1, (now - prev_ts).total_seconds() / 3600)
+        except Exception:
+            hours_between = None
+
+    # --- ML v2: Score velocity = score_delta / hours_between ---
+    if result["score_delta"] is not None and hours_between is not None:
+        result["score_velocity"] = round(result["score_delta"] / hours_between, 3)
+
+    # --- ML v2: Score acceleration = current_velocity - previous_velocity ---
+    prev_velocity = previous.get("score_velocity")
+    if result["score_velocity"] is not None and prev_velocity is not None:
+        try:
+            result["score_acceleration"] = round(result["score_velocity"] - float(prev_velocity), 3)
+        except (ValueError, TypeError):
+            pass
+
+    # --- ML v2: Mention velocity = mentions_delta / hours_between ---
+    if result["mentions_delta"] is not None and hours_between is not None:
+        result["mention_velocity"] = round(result["mentions_delta"] / hours_between, 3)
+
+    # --- ML v2: Volume velocity = (log(vol_now) - log(vol_prev)) / hours_between ---
+    curr_vol = current.get("volume_24h")
+    prev_vol = previous.get("volume_24h")
+    if curr_vol is not None and prev_vol is not None and hours_between is not None:
+        try:
+            cv = float(curr_vol)
+            pv = float(prev_vol)
+            if cv > 0 and pv > 0:
+                result["volume_velocity"] = round((math.log(cv) - math.log(pv)) / hours_between, 3)
+        except (ValueError, TypeError):
+            pass
+
     # new_kol_ratio: what % of current KOLs are NEW (not in previous snapshot)
     current_kols = current.get("top_kols") or []
     prev_kols_raw = previous.get("top_kols")
+    new_kol_count = 0
     if current_kols:
         if prev_kols_raw:
             # top_kols is stored as JSON string in DB, parse if needed
@@ -326,10 +388,15 @@ def _compute_temporal_features(current: dict, previous: dict | None) -> dict:
             else:
                 prev_kols = prev_kols_raw
             prev_set = set(prev_kols) if prev_kols else set()
-            new_count = sum(1 for k in current_kols if k not in prev_set)
-            result["new_kol_ratio"] = round(new_count / len(current_kols), 3)
+            new_kol_count = sum(1 for k in current_kols if k not in prev_set)
+            result["new_kol_ratio"] = round(new_kol_count / len(current_kols), 3)
         else:
+            new_kol_count = len(current_kols)
             result["new_kol_ratio"] = 1.0  # All KOLs are "new" if no previous data
+
+    # --- ML v2: KOL arrival rate = new_kol_ratio / hours_between ---
+    if result["new_kol_ratio"] is not None and hours_between is not None:
+        result["kol_arrival_rate"] = round(new_kol_count / hours_between, 3)
 
     return result
 
@@ -533,6 +600,7 @@ def insert_snapshots(ranking: list[dict]) -> None:
             "breadth_pen": t.get("breadth_pen"),
             "activity_mult": t.get("activity_mult"),
             "crash_pen": t.get("crash_pen"),
+            "pump_momentum_pen": t.get("pump_momentum_pen"),
             "stale_pen": t.get("stale_pen"),
             "size_mult": t.get("size_mult"),
             "s_tier_mult": t.get("s_tier_mult"),
@@ -553,6 +621,15 @@ def insert_snapshots(ranking: list[dict]) -> None:
             "score_at_snapshot": deltas.get("score_at_snapshot"),
             "score_delta": deltas.get("score_delta"),
             "new_kol_ratio": deltas.get("new_kol_ratio"),
+            # ML v2 Phase B: Temporal velocity features
+            "score_velocity": deltas.get("score_velocity"),
+            "score_acceleration": deltas.get("score_acceleration"),
+            "mention_velocity": deltas.get("mention_velocity"),
+            "volume_velocity": deltas.get("volume_velocity"),
+            "social_momentum_phase": t.get("social_momentum_phase"),
+            "kol_arrival_rate": deltas.get("kol_arrival_rate"),
+            # ML v2 Phase C: Entry zone detection
+            "entry_timing_quality": t.get("entry_timing_quality"),
         }
         rows.append(_sanitize_row(row))
 

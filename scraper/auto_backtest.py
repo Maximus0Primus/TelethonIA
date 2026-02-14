@@ -96,6 +96,11 @@ NUMERIC_FEATURES = [
     "lp_locked_pct", "unique_wallet_24h_change", "whale_new_entries",
     # Extraction mode features
     "ca_mention_count", "ticker_mention_count", "url_mention_count",
+    # ML v2 Phase B: Temporal velocity
+    "score_velocity", "score_acceleration", "mention_velocity",
+    "volume_velocity", "kol_arrival_rate",
+    # ML v2 Phase C: Entry zone
+    "entry_timing_quality",
 ]
 
 # Columns to fetch from token_snapshots
@@ -121,7 +126,9 @@ SNAPSHOT_COLUMNS = (
     "consensus_val, conviction_val, breadth_val, price_action_val, "
     "pump_bonus, wash_pen, pvp_pen, pump_pen, activity_mult, breadth_pen, crash_pen, stale_pen, size_mult, "
     "s_tier_mult, s_tier_count, unique_kols, pump_momentum_pen, "
-    "ca_mention_count, ticker_mention_count, url_mention_count, has_ca_mention"
+    "ca_mention_count, ticker_mention_count, url_mention_count, has_ca_mention, "
+    "score_velocity, score_acceleration, mention_velocity, volume_velocity, "
+    "social_momentum_phase, kol_arrival_rate, entry_timing_quality"
 )
 
 
