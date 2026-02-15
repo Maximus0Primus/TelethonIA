@@ -16,6 +16,8 @@ interface RankingRow {
   score_interpretation: string | null;
   data_confidence: number | null;
   token_address: string | null;
+  freshest_mention_hours: number | null;
+  market_cap: number | null;
 }
 
 async function callRpc(
@@ -111,6 +113,8 @@ export async function GET(request: NextRequest) {
       scoreInterpretation: t.score_interpretation ?? null,
       dataConfidence: t.data_confidence != null ? Number(t.data_confidence) : null,
       tokenAddress: t.token_address ?? null,
+      freshestMentionHours: t.freshest_mention_hours != null ? Number(t.freshest_mention_hours) : null,
+      marketCap: t.market_cap != null ? Number(t.market_cap) : null,
     }));
 
     // Fetch stats from scrape_metadata (use REST to avoid type issues)

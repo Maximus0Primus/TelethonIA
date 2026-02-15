@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { motion } from "framer-motion";
 import Link from "next/link";
-import { TrendingUp, TrendingDown, Minus, AlertTriangle, ExternalLink } from "lucide-react";
+import { TrendingUp, TrendingDown, Minus, AlertTriangle, ExternalLink, Clock } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export type AnimationPhase = "idle" | "glitching" | "shuffling";
@@ -21,6 +21,8 @@ export interface TokenCardData {
   scoreInterpretation?: string | null;
   dataConfidence?: number | null;
   tokenAddress?: string | null;
+  freshestMentionHours?: number | null;
+  marketCap?: number | null;
 }
 
 interface TokenCardProps {
@@ -84,6 +86,19 @@ const COMPONENT_LABELS: Record<string, string> = {
   breadth: "Breadth",
   price_action: "Price action",
 };
+
+function formatMcap(mcap: number): string {
+  if (mcap >= 1_000_000_000) return `$${(mcap / 1_000_000_000).toFixed(1)}B`;
+  if (mcap >= 1_000_000) return `$${(mcap / 1_000_000).toFixed(1)}M`;
+  if (mcap >= 1_000) return `$${(mcap / 1_000).toFixed(0)}K`;
+  return `$${mcap.toFixed(0)}`;
+}
+
+function formatFreshness(hours: number): string {
+  if (hours < 1) return `${Math.round(hours * 60)}m`;
+  if (hours < 24) return `${hours.toFixed(1)}h`;
+  return `${(hours / 24).toFixed(0)}d`;
+}
 
 // Characters used for the glitch scramble effect
 const GLITCH_CHARS = "!@#$%&*?/<>{}[]~";
@@ -322,31 +337,46 @@ export function TokenCard({
             )}
           </div>
 
-          {/* Bottom: Trend + weakest component */}
-          <div className="flex items-center justify-between">
-            <div
-              className={cn(
-                "flex items-center gap-1.5 text-sm font-medium",
-                token.change24h > 0
-                  ? "text-bullish"
-                  : token.change24h < 0
-                  ? "text-bearish"
-                  : "text-muted-foreground"
+          {/* Bottom: Trend + mcap + freshness + weakest */}
+          <div className="flex flex-col gap-1">
+            <div className="flex items-center justify-between">
+              <div
+                className={cn(
+                  "flex items-center gap-1.5 text-sm font-medium",
+                  token.change24h > 0
+                    ? "text-bullish"
+                    : token.change24h < 0
+                    ? "text-bearish"
+                    : "text-muted-foreground"
+                )}
+              >
+                <TrendIcon className="h-4 w-4" />
+                <span className="tabular-nums">
+                  {token.change24h > 0 ? "+" : ""}
+                  {token.change24h.toFixed(1)}%
+                </span>
+              </div>
+
+              {token.weakestComponent && COMPONENT_LABELS[token.weakestComponent] && (
+                <div className="flex items-center gap-1 text-[10px] sm:text-xs text-muted-foreground/60">
+                  <AlertTriangle className="h-3 w-3" />
+                  <span>{COMPONENT_LABELS[token.weakestComponent]}</span>
+                </div>
               )}
-            >
-              <TrendIcon className="h-4 w-4" />
-              <span className="tabular-nums">
-                {token.change24h > 0 ? "+" : ""}
-                {token.change24h.toFixed(1)}%
-              </span>
             </div>
 
-            {token.weakestComponent && COMPONENT_LABELS[token.weakestComponent] && (
-              <div className="flex items-center gap-1 text-[10px] sm:text-xs text-muted-foreground/60">
-                <AlertTriangle className="h-3 w-3" />
-                <span>{COMPONENT_LABELS[token.weakestComponent]}</span>
-              </div>
-            )}
+            {/* MCap + Freshness row */}
+            <div className="flex items-center justify-between text-[10px] text-muted-foreground/50">
+              {token.marketCap != null && token.marketCap > 0 && (
+                <span className="tabular-nums">{formatMcap(token.marketCap)}</span>
+              )}
+              {token.freshestMentionHours != null && (
+                <span className="flex items-center gap-0.5">
+                  <Clock className="h-2.5 w-2.5" />
+                  {formatFreshness(token.freshestMentionHours)}
+                </span>
+              )}
+            </div>
           </div>
 
           {/* Subtle hover border glow */}

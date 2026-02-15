@@ -74,8 +74,9 @@ HORIZONS = [
 BATCH_LIMIT = 500
 
 # Time budget in seconds — exit gracefully before GH Action timeout
-# v21: 25 min (was 10). GH Action runs every 30min, leaves 5min buffer.
-TIME_BUDGET_SECONDS = 25 * 60  # 25 minutes
+# v23: 18 min (was 25). Must leave room for _fix_inconsistencies, _fill_first_call,
+# backfill_bot_data, and auto_backtest which run after the main loop.
+TIME_BUDGET_SECONDS = 18 * 60  # 18 minutes
 
 # Sanity check: max plausible price ratio per horizon.
 # If OHLCV returns max_price/price_at > this, the data is likely wrong
@@ -622,7 +623,22 @@ def fill_outcomes() -> None:
             stats["api_calls"] += 1
 
         if not pool_addr:
-            stats["skipped"] += 1
+            # v27: No pool address = dead/unresolvable token. Mark due horizons as did_2x=false
+            # instead of skipping (which left them as NULL forever, skewing ML training).
+            update = {}
+            for hz in horizons_to_fill:
+                if snap.get(hz["flag_col"]) is None:
+                    update[hz["flag_col"]] = False
+                    update[hz["price_col"]] = None
+                    update[hz["max_col"]] = None
+            if update:
+                try:
+                    client.table("token_snapshots").update(update).eq("id", snap_id).execute()
+                    stats["no_price"] += 1
+                except Exception as e:
+                    logger.error("Failed to update dead pool %d (%s): %s", snap_id, symbol, e)
+            else:
+                stats["skipped"] += 1
             continue
 
         # ONE OHLCV call for the LONGEST horizon needed → extract all shorter ones
@@ -709,6 +725,22 @@ def fill_outcomes() -> None:
                 logger.debug("DexPaprika OHLCV failed for %s: %s", symbol, e)
 
         if sorted_candles is None:
+            # v27: Both OHLCV sources failed. If snapshot is old enough (>48h),
+            # the token is likely dead — mark due horizons as did_2x=false.
+            if age_hours > 48:
+                update = {}
+                for hz in horizons_to_fill:
+                    if snap.get(hz["flag_col"]) is None:
+                        update[hz["flag_col"]] = False
+                        update[hz["price_col"]] = None
+                        update[hz["max_col"]] = None
+                if update:
+                    try:
+                        client.table("token_snapshots").update(update).eq("id", snap_id).execute()
+                        stats["no_price"] += 1
+                    except Exception as e:
+                        logger.error("Failed to update dead OHLCV %d (%s): %s", snap_id, symbol, e)
+                    continue
             stats["skipped"] += 1
             continue
 
@@ -830,11 +862,19 @@ def fill_outcomes() -> None:
         elapsed, throughput,
     )
 
-    # Second pass: fix existing inconsistencies in already-labeled data
-    _fix_existing_inconsistencies(client)
+    # Second pass: fix existing inconsistencies (skip if <3 min left for other steps)
+    remaining = 24 * 60 - (time.time() - start_time)  # 24 min total budget for fill_outcomes
+    if remaining > 120:
+        _fix_existing_inconsistencies(client)
+    else:
+        logger.warning("Skipping consistency fix (%.0fs remaining)", remaining)
 
-    # Third pass: fill price_at_first_call for snapshots with oldest_mention_hours
-    _fill_first_call_prices(client, pool_cache)
+    # Third pass: fill price_at_first_call (skip if tight on time)
+    remaining = 24 * 60 - (time.time() - start_time)
+    if remaining > 60:
+        _fill_first_call_prices(client, pool_cache)
+    else:
+        logger.warning("Skipping first_call_prices (%.0fs remaining)", remaining)
 
 
 def _fix_existing_inconsistencies(client: Client) -> None:

@@ -152,7 +152,7 @@ SNAPSHOT_COLUMNS = (
     "unique_wallet_24h_change, whale_new_entries, "
     "consensus_val, conviction_val, breadth_val, price_action_val, "
     "pump_bonus, wash_pen, pvp_pen, pump_pen, activity_mult, breadth_pen, crash_pen, stale_pen, size_mult, "
-    "s_tier_mult, s_tier_count, unique_kols, pump_momentum_pen, "
+    "s_tier_mult, s_tier_count, unique_kols, pump_momentum_pen, entry_drift_mult, "
     "ca_mention_count, ticker_mention_count, url_mention_count, has_ca_mention, "
     "score_velocity, score_acceleration, mention_velocity, volume_velocity, "
     "social_momentum_phase, kol_arrival_rate, entry_timing_quality, gate_mult, "
@@ -267,73 +267,32 @@ def _compute_score(row: pd.Series, weights: dict) -> int:
         entry_pen = _safe_mult(row, "entry_premium_mult")
         crash_pen = min(lifecycle_pen, death_pen, entry_pen)
 
-    # All multipliers from stored snapshot values (v14 full chain)
-    safety = _safe_mult(row, "safety_penalty")
+    # --- Multipliers (aligned with pipeline.py v24) ---
     onchain = _safe_mult(row, "onchain_multiplier")
+    safety = _safe_mult(row, "safety_penalty")
     pump_bonus = _safe_mult(row, "pump_bonus")
-    wash_pen = _safe_mult(row, "wash_pen")
+    # v23: wash_pen column stores unified manipulation_pen (merged wash+pump in pipeline)
+    # DO NOT also multiply by pump_pen — it's the same value (backward compat alias)
+    manipulation_pen = _safe_mult(row, "wash_pen")
     pvp_pen = _safe_mult(row, "pvp_pen")
-    pump_pen = _safe_mult(row, "pump_pen")
+    # v24: crash_pen already incorporates pump_momentum_pen via min() in pipeline
+    # DO NOT also multiply by pump_momentum_pen separately
     activity_mult = _safe_mult(row, "activity_mult")
     breadth_pen = _safe_mult(row, "breadth_pen")
-    stale_pen = _safe_mult(row, "stale_pen")
-
-    # Squeeze + trend: disabled in v16 (anti-predictive in memecoins)
-    squeeze_mult = 1.0
-    trend_mult = 1.0
-
-    # v19: Size opportunity multiplier — progressive large-cap penalty
     size_mult = _safe_mult(row, "size_mult")
-    if not pd.notna(row.get("size_mult")):
-        t_mcap = float(row.get("market_cap") or 0) if pd.notna(row.get("market_cap")) else 0
-        fmh = float(row.get("freshest_mention_hours") or 999) if pd.notna(row.get("freshest_mention_hours")) else 999
-        if t_mcap <= 0:
-            mcap_f = 1.0
-        elif t_mcap < 300_000:
-            mcap_f = 1.3
-        elif t_mcap < 1_000_000:
-            mcap_f = 1.15
-        elif t_mcap < 5_000_000:
-            mcap_f = 1.0
-        elif t_mcap < 20_000_000:
-            mcap_f = 0.85
-        elif t_mcap < 50_000_000:
-            mcap_f = 0.70
-        elif t_mcap < 200_000_000:
-            mcap_f = 0.50
-        elif t_mcap < 500_000_000:
-            mcap_f = 0.35
-        else:
-            mcap_f = 0.25
-        # v19: No freshness boost for large caps
-        if t_mcap >= 50_000_000:
-            fresh_f = 1.0
-        elif fmh < 4:
-            fresh_f = 1.2
-        elif fmh < 12:
-            fresh_f = 1.1
-        else:
-            fresh_f = 1.0
-        size_mult = max(0.25, min(1.5, mcap_f * fresh_f))
-
-    # v15.3: S-tier bonus
     s_tier_mult = _safe_mult(row, "s_tier_mult")
-    if not pd.notna(row.get("s_tier_mult")):
-        s_tier_count = int(row.get("s_tier_count") or 0) if pd.notna(row.get("s_tier_count")) else 0
-        s_tier_mult = 1.2 if s_tier_count > 0 else 1.0
-
-    # v17: Pump momentum penalty
-    pump_momentum_pen = _safe_mult(row, "pump_momentum_pen")
-
-    # v21: Soft gate penalty (replaces hard gate ejection)
     gate_mult = _safe_mult(row, "gate_mult")
+    entry_drift_mult = _safe_mult(row, "entry_drift_mult")
 
-    # v17: stale_pen REMOVED from chain — death_penalty Signal 3 already
-    # handles staleness with volume modulation. Keeping both was double-penalizing.
-    combined_raw = (onchain * safety * crash_pen * squeeze_mult * trend_mult
-                    * pump_bonus * wash_pen * pvp_pen * pump_pen
-                    * activity_mult * breadth_pen * size_mult
-                    * s_tier_mult * pump_momentum_pen * gate_mult)
+    # v24 chain (12 multipliers, matching pipeline.py exactly)
+    # Removed from old chain: squeeze_mult (dead), trend_mult (dead),
+    # pump_pen (=manipulation_pen duplicate), stale_pen (death_penalty covers it),
+    # pump_momentum_pen (folded into crash_pen)
+    combined_raw = (onchain * safety * pump_bonus
+                    * manipulation_pen * pvp_pen * crash_pen
+                    * activity_mult * breadth_pen
+                    * size_mult * s_tier_mult * gate_mult
+                    * entry_drift_mult)
     # v17: Floor at 0.25, Cap at 2.0 to prevent multiplier stacking
     combined = max(0.25, min(2.0, combined_raw))
     score = base_score * combined

@@ -183,17 +183,20 @@ def compute_price_action_score(token: dict, *, pa_norm_floor: float = 0.4, pa_no
 
     if rsi is not None:
         # RSI-based momentum classification
+        # v27: direction_mult only applies BONUSES (>=1.0). Pump/crash penalties
+        # are handled by pump_momentum_pen and death_penalty in the chain,
+        # so penalizing here too was double-counting.
         if rsi > 80:
-            direction_mult = 0.3
+            direction_mult = 1.0  # v27: was 0.3 — pump_momentum_pen handles this
             momentum_direction = "hard_pumping"
         elif rsi > 70:
-            direction_mult = 0.5
+            direction_mult = 1.0  # v27: was 0.5 — pump_momentum_pen handles this
             momentum_direction = "pumping"
         elif rsi < 20:
-            direction_mult = 0.3
+            direction_mult = 1.0  # v27: was 0.3 — death_penalty handles this
             momentum_direction = "freefall"
         elif rsi < 30 and rsi_slope <= 0:
-            direction_mult = 0.5
+            direction_mult = 1.0  # v27: was 0.5 — death_penalty handles this
             momentum_direction = "dying"
         elif rsi < 40 and rsi_slope > 3 and macd_hist is not None and macd_hist > 0:
             direction_mult = 1.4
@@ -205,12 +208,10 @@ def compute_price_action_score(token: dict, *, pa_norm_floor: float = 0.4, pa_no
             direction_mult = 1.1
             momentum_direction = "plateau"
 
-        # MACD confirmation adjustment
+        # MACD confirmation adjustment (only for bonuses now)
         if macd_hist is not None:
             if momentum_direction in ("bouncing", "strong_bounce") and macd_hist > 0:
                 direction_mult = min(1.5, direction_mult + 0.1)
-            elif momentum_direction in ("pumping", "hard_pumping") and macd_hist < 0:
-                direction_mult = max(0.2, direction_mult - 0.1)  # Divergence warning
     else:
         # Fallback: multi-signal DexScreener heuristics (no OHLCV candles)
         # Uses price changes, buy/sell ratios, and volume concentration
@@ -225,17 +226,18 @@ def compute_price_action_score(token: dict, *, pa_norm_floor: float = 0.4, pa_no
         is_bouncing = pc_6h < -15 and pc_1h > 5
         is_strong_bounce = pc_6h < -30 and pc_1h > 10
 
+        # v27: direction_mult only applies BONUSES — penalties handled by chain multipliers
         if is_hard_pumping:
-            direction_mult = 0.3
+            direction_mult = 1.0  # v27: was 0.3
             momentum_direction = "hard_pumping"
         elif is_pumping:
-            direction_mult = 0.5
+            direction_mult = 1.0  # v27: was 0.5
             momentum_direction = "pumping"
         elif is_freefall:
-            direction_mult = 0.3
+            direction_mult = 1.0  # v27: was 0.3
             momentum_direction = "freefall"
         elif is_dying:
-            direction_mult = 0.5
+            direction_mult = 1.0  # v27: was 0.5
             momentum_direction = "dying"
         elif is_strong_bounce:
             direction_mult = 1.4
@@ -247,31 +249,30 @@ def compute_price_action_score(token: dict, *, pa_norm_floor: float = 0.4, pa_no
             direction_mult = 1.1
             momentum_direction = "plateau"
 
-        # Buy/sell ratio confirmation: adjust direction_mult based on order flow
+        # Buy/sell ratio confirmation: adjust direction_mult for bounce bonuses
         if momentum_direction in ("bouncing", "strong_bounce") and bsr_1h > 0.6:
             direction_mult = min(1.5, direction_mult + 0.1)  # buyers confirm bounce
         elif momentum_direction in ("bouncing", "strong_bounce") and bsr_1h < 0.4:
-            direction_mult = max(0.5, direction_mult - 0.2)  # sellers = dead cat bounce
-        elif momentum_direction in ("pumping", "hard_pumping") and bsr_5m < 0.45:
-            direction_mult = max(0.2, direction_mult - 0.1)  # pump losing steam
+            direction_mult = max(1.0, direction_mult - 0.2)  # v27: floor at 1.0
 
     # v9: When fallback leaves momentum "neutral", use pc24h as tiebreaker
+    # v27: Only set direction label, no penalty (chain multipliers handle penalties)
     pc_24h = token.get("price_change_24h") or 0
     if rsi is None and momentum_direction == "neutral" and pc_24h:
         if pc_24h < -60:
-            direction_mult = 0.3
+            direction_mult = 1.0  # v27: was 0.3
             momentum_direction = "freefall"
         elif pc_24h < -40:
-            direction_mult = 0.5
+            direction_mult = 1.0  # v27: was 0.5
             momentum_direction = "dying"
         elif pc_24h < -20:
-            direction_mult = 0.7
+            direction_mult = 1.0  # v27: was 0.7
             momentum_direction = "bleeding"
         elif pc_24h > 100:
-            direction_mult = 0.5
+            direction_mult = 1.0  # v27: was 0.5
             momentum_direction = "pumping"
         elif pc_24h > 50:
-            direction_mult = 0.7
+            direction_mult = 1.0  # v27: was 0.7
             momentum_direction = "pumping"
 
     # v9: When ath_ratio is missing, use pc24h as proxy for position

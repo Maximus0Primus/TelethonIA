@@ -469,19 +469,31 @@ def _resolve_pair_to_symbol(chain: str, pair_address: str, ca_cache: dict[str, d
         time.sleep(0.3)
 
 
-def _load_token_cache() -> dict[str, bool]:
-    """Load cached token verification results. { "SYMBOL": true/false }"""
+_CACHE_FALSE_TTL = 4 * 3600  # v28: re-check rejected tokens after 4h
+
+
+def _load_token_cache() -> dict[str, dict]:
+    """Load cached token verification results. v28: { "SYM": {"v": bool, "t": ts} }"""
     import json
     if _DEXSCREENER_CACHE_FILE.exists():
         try:
             with open(_DEXSCREENER_CACHE_FILE, "r") as f:
-                return json.load(f)
+                raw = json.load(f)
+            # Migrate old format (bare bool) → new format (dict with timestamp)
+            now = time.time()
+            cache = {}
+            for k, v in raw.items():
+                if isinstance(v, dict):
+                    cache[k] = v
+                else:
+                    cache[k] = {"v": v, "t": now}
+            return cache
         except (json.JSONDecodeError, OSError):
             pass
     return {}
 
 
-def _save_token_cache(cache: dict[str, bool]) -> None:
+def _save_token_cache(cache: dict[str, dict]) -> None:
     import json
     with open(_DEXSCREENER_CACHE_FILE, "w") as f:
         json.dump(cache, f, indent=2)
@@ -489,43 +501,42 @@ def _save_token_cache(cache: dict[str, bool]) -> None:
 
 def _is_active_token(pairs: list[dict], symbol_raw: str) -> bool:
     """
-    Check if any Solana trading pair for this symbol shows real recent activity.
-    Criteria: Solana chain + exact symbol match + 24h volume > $100 OR 24h transactions > 5.
+    v28: Check if any Solana trading pair exists for this symbol.
+    Volume/liquidity thresholds moved to soft penalties (gate_mult) so
+    outcome_tracker can label these tokens and backtest can validate.
     """
     for p in pairs:
         if p.get("chainId") != "solana":
             continue
         if p.get("baseToken", {}).get("symbol", "").upper() != symbol_raw:
             continue
-
-        vol_24h = float(p.get("volume", {}).get("h24", 0) or 0)
-        txns = p.get("txns", {}).get("h24", {})
-        buys = int(txns.get("buys", 0) or 0)
-        sells = int(txns.get("sells", 0) or 0)
-        total_txns = buys + sells
-
-        if vol_24h > 100 or total_txns > 5:
-            return True
+        return True  # Pair exists on Solana = token is real
 
     return False
 
 
 def verify_tokens_exist(symbols: list[str]) -> set[str]:
     """
-    Check which token symbols have active trading on DexScreener.
-    A token is kept only if it has real recent activity (volume or transactions
-    in the last 24h), not just leftover liquidity from a dead pair.
-    Uses a persistent cache to avoid re-checking known tokens within a cycle.
+    Check which token symbols have a Solana pair on DexScreener.
+    v28: Only checks pair existence (no volume threshold). Cache entries for
+    rejected tokens expire after _CACHE_FALSE_TTL (4h) so early tokens
+    get re-checked instead of being permanently blacklisted.
     """
     cache = _load_token_cache()
     verified: set[str] = set()
     to_check: list[str] = []
+    now = time.time()
 
     for sym in symbols:
         raw = sym.lstrip("$")
         if raw in cache:
-            if cache[raw]:
+            entry = cache[raw]
+            if entry["v"]:
                 verified.add(sym)
+            elif now - entry.get("t", 0) > _CACHE_FALSE_TTL:
+                # v28: false entry expired — re-check
+                to_check.append(sym)
+            # else: still cached as false and within TTL, skip
         else:
             to_check.append(sym)
 
@@ -541,19 +552,19 @@ def verify_tokens_exist(symbols: list[str]) -> set[str]:
                 data = resp.json()
                 pairs = data.get("pairs") or []
                 found = _is_active_token(pairs, raw)
-                cache[raw] = found
+                cache[raw] = {"v": found, "t": now}
                 if found:
                     verified.add(sym)
-                    logger.info("Token %s verified (active trading)", sym)
+                    logger.info("Token %s verified (pair exists)", sym)
                 else:
-                    logger.info("Token %s filtered out (no recent activity)", sym)
+                    logger.info("Token %s filtered out (no Solana pair)", sym)
             elif resp.status_code >= 500:
                 # Server error: not our fault, keep the token to retry next cycle
                 logger.warning("DexScreener API %d for %s — keeping token (server error)", resp.status_code, sym)
                 verified.add(sym)
             else:
-                # 4xx = bad request / not found — token is invalid, reject it
-                cache[raw] = False
+                # 4xx = bad request / not found — token is invalid, cache with TTL
+                cache[raw] = {"v": False, "t": now}
                 logger.info("Token %s rejected (DexScreener %d)", sym, resp.status_code)
         except requests.RequestException as e:
             # Network error: keep the token to retry next cycle
@@ -1010,7 +1021,9 @@ def _compute_wash_trading_score(token: dict) -> float:
 
     if not scores:
         return 0.0
-    return max(0.0, min(1.0, sum(scores) / len(scores)))
+    # v27: Use max() — one severe wash signal is enough to flag the token.
+    # mean() was diluting obvious wash trading when other signals were clean.
+    return max(0.0, min(1.0, max(scores)))
 
 
 def _get_price_from_candles(token: dict, hours: float) -> float | None:
@@ -2644,32 +2657,30 @@ def aggregate_ranking(
     # Gated tokens get gate_reason marked on the dict (shared references).
     all_enriched = list(ranking)
 
-    # === Quality gates BEFORE expensive enrichment (v5.1) ===
-    # Gate 1: Remove tokens that DexScreener couldn't resolve to a token_address
-    before_addr = len(ranking)
-    kept = []
+    # === Quality gates BEFORE expensive enrichment ===
+    # v28: Converted from hard removal to soft penalties (gate_mult) so
+    # outcome_tracker labels these tokens and backtest can validate empirically.
+    # Gate 1: No token_address → 0.3x (can't enrich but still scored)
+    addr_penalized = 0
     for t in ranking:
-        if t.get("token_address"):
-            kept.append(t)
-        else:
-            t["gate_reason"] = "no_address"
-    ranking = kept
-    addr_filtered = before_addr - len(ranking)
-    if addr_filtered:
-        logger.info("No-address gate removed %d unresolvable tokens", addr_filtered)
+        if not t.get("token_address"):
+            existing_gate = t.get("gate_mult", 1.0)
+            t["gate_mult"] = round(min(existing_gate, 0.3), 3)
+            t["gate_reason"] = t.get("gate_reason") or "no_address"
+            addr_penalized += 1
+    if addr_penalized:
+        logger.info("No-address soft penalty (0.3x) applied to %d tokens", addr_penalized)
 
-    # Gate 1b: Remove tokens with no usable on-chain data (no volume AND no liquidity)
-    before_data = len(ranking)
-    kept = []
+    # Gate 1b: No volume AND no liquidity → 0.3x
+    data_penalized = 0
     for t in ranking:
-        if (t.get("volume_24h") or 0) > 0 or (t.get("liquidity_usd") or 0) > 0:
-            kept.append(t)
-        else:
-            t["gate_reason"] = "no_data"
-    ranking = kept
-    data_filtered = before_data - len(ranking)
-    if data_filtered:
-        logger.info("No-data gate removed %d tokens (no volume, no liquidity)", data_filtered)
+        if (t.get("volume_24h") or 0) <= 0 and (t.get("liquidity_usd") or 0) <= 0:
+            existing_gate = t.get("gate_mult", 1.0)
+            t["gate_mult"] = round(min(existing_gate, 0.3), 3)
+            t["gate_reason"] = t.get("gate_reason") or "no_data"
+            data_penalized += 1
+    if data_penalized:
+        logger.info("No-data soft penalty (0.3x) applied to %d tokens", data_penalized)
 
     # Gate 2: For longer windows (48h+), single A-tier KOL = soft penalty (not removal)
     # v21: converted from hard gate to 0.6x penalty — collect outcome data to validate
@@ -2700,9 +2711,10 @@ def aggregate_ranking(
             token["gate_mult"] = round(min(existing_gate, 0.5), 3)
             token["gate_reason"] = token.get("gate_reason") or "wash_trading"
 
+    # v28: Only mint/freeze are hard-gated now; everything else is soft penalty
     hard_gated = sum(1 for t in all_enriched if t.get("gate_reason") and t not in ranking)
     soft_penalized = sum(1 for t in ranking if t.get("gate_mult", 1.0) < 1.0)
-    logger.info("Post-gate: %d tokens (%d soft-penalized, %d hard-gated) — now running expensive enrichment",
+    logger.info("Post-gate: %d tokens (%d soft-penalized, %d hard-gated [mint/freeze only]) — now running expensive enrichment",
                 len(ranking), soft_penalized, hard_gated)
 
     # === Expensive enrichment on SURVIVORS only (v5.1) ===
@@ -2956,7 +2968,8 @@ def aggregate_ranking(
         token["_price_action_val"] = _get_component_value(token, "price_action")
 
         # v21: gate_mult — soft safety penalties (top10, risk, liquidity, holders, single_a_tier)
-        gate_mult = token.get("gate_mult", 1.0)
+        # v27: Explicit default — tokens that bypass _apply_hard_gates get 1.0
+        gate_mult = float(token.get("gate_mult", 1.0) or 1.0)
 
         # v24: Chain (12 multipliers). Added entry_drift_mult (price vs social drift).
         # v23 removals: squeeze_mult (dead), trend_mult (dead),

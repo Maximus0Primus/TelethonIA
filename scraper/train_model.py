@@ -90,10 +90,9 @@ CORE_FEATURES = [
     "price_change_1h",
     "volatility_proxy",
     "market_cap_log",
-    # Cross-snapshot temporal
-    "score_delta",
     # ML v2 Phase B: Temporal velocity (Tier 1)
-    "score_velocity",
+    # v27: Removed score_delta, score_velocity (circular — derived from score itself).
+    # Kept mention_velocity, volume_velocity (independent signals).
     "mention_velocity",
     "volume_velocity",
     # ML v3.1: Calendar/temporal (low-dim, high signal for memecoins)
@@ -128,7 +127,7 @@ EXTENDED_FEATURES = CORE_FEATURES + [
     "new_kol_ratio",
     "mentions_delta",
     # ML v2 Phase B: Temporal velocity (Tier 2)
-    "score_acceleration",
+    # v27: score_acceleration removed (circular — derived from score)
     "kol_arrival_rate",
     # ML v2 Phase C: Entry zone
     "entry_timing_quality",
@@ -558,6 +557,17 @@ def _transform_features(df: pd.DataFrame, feature_pool: list[str]) -> pd.DataFra
             if pd.notna(r.get("birdeye_buy_24h")) else np.nan,
             axis=1,
         )
+
+    # v27: Encode momentum_direction string → ordinal numeric
+    # Without this, pd.to_numeric("hard_pumping", errors="coerce") → NaN → feature dropped
+    _MOMENTUM_ENCODING = {
+        "freefall": -3, "dying": -2, "bleeding": -1,
+        "neutral": 0, "plateau": 1,
+        "bouncing": 2, "strong_bounce": 3,
+        "pumping": 4, "hard_pumping": 5,
+    }
+    if "momentum_direction" in df.columns:
+        df["momentum_direction"] = df["momentum_direction"].map(_MOMENTUM_ENCODING)
 
     # ML v3.1: Calendar/temporal features derived from snapshot_at
     if "snapshot_at" in df.columns:

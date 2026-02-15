@@ -263,6 +263,8 @@ def upsert_tokens(
                 "freshest_mention_hours": t.get("freshest_mention_hours"),
                 # v21: token_address for frontend DexScreener links + price_refresh simplification
                 "token_address": t.get("token_address"),
+                # v27: market_cap for frontend display
+                "market_cap": t.get("market_cap"),
             })
             for t in tokens
         ]
@@ -372,18 +374,27 @@ def _compute_temporal_features(current: dict, previous: dict | None) -> dict:
         result["score_delta"] = int(curr_score) - int(prev_score)
 
     # --- ML v2: Compute hours_between from snapshot_at timestamps ---
+    # v27: Use current snapshot_at (not wall clock) so velocities are correct
+    # for historical data and backtesting, not just live scraping.
     hours_between = None
     prev_snapshot_at = previous.get("snapshot_at")
+    curr_snapshot_at = current.get("snapshot_at")
     if prev_snapshot_at:
         try:
             from datetime import datetime as _dt
             if isinstance(prev_snapshot_at, str):
-                # Parse ISO timestamp from DB
                 prev_ts = _dt.fromisoformat(prev_snapshot_at.replace("Z", "+00:00"))
             else:
                 prev_ts = prev_snapshot_at
-            now = _dt.now(prev_ts.tzinfo) if prev_ts.tzinfo else _dt.utcnow()
-            hours_between = max(0.1, (now - prev_ts).total_seconds() / 3600)
+            # Use current snapshot_at if available, else fall back to now()
+            if curr_snapshot_at:
+                if isinstance(curr_snapshot_at, str):
+                    curr_ts = _dt.fromisoformat(curr_snapshot_at.replace("Z", "+00:00"))
+                else:
+                    curr_ts = curr_snapshot_at
+            else:
+                curr_ts = _dt.now(prev_ts.tzinfo) if prev_ts.tzinfo else _dt.utcnow()
+            hours_between = max(0.1, (curr_ts - prev_ts).total_seconds() / 3600)
         except Exception:
             hours_between = None
 
@@ -703,9 +714,9 @@ def insert_snapshots(ranking: list[dict]) -> None:
             "relative_volume": t.get("relative_volume"),
             "kol_saturation": t.get("kol_saturation"),
             # v23: First-seen price — carry forward from earliest snapshot
+            # v27: Fixed operator precedence — parentheses around the or-chain
             "first_seen_price": (
-                prev.get("first_seen_price")
-                or prev.get("price_at_snapshot")
+                (prev.get("first_seen_price") or prev.get("price_at_snapshot"))
                 if prev else None
             ) or t.get("price_usd"),
         }
