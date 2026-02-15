@@ -64,7 +64,7 @@ export function Header() {
         </div>
       </motion.header>
 
-      <ContactModal open={modalOpen} onOpenChange={setModalOpen} trigger={<span />} />
+      <ContactModal open={modalOpen} onOpenChange={setModalOpen} />
     </>
   );
 }

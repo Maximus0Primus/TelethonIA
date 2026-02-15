@@ -369,9 +369,15 @@ def _resolve_ca_to_symbol(address: str, ca_cache: dict[str, dict]) -> str | None
             pairs = resp.json() if isinstance(resp.json(), list) else resp.json().get("pairs", [])
             # The /tokens/v1/ endpoint returns a list of pairs directly
             if isinstance(pairs, list) and pairs:
+                base_token = pairs[0].get("baseToken", {})
                 # Pick highest-volume Solana pair
-                symbol = pairs[0].get("baseToken", {}).get("symbol", "").upper()
-                if symbol and len(symbol) <= 15:
+                symbol = base_token.get("symbol", "").upper().strip()
+                # v21: fallback to name if symbol is non-ASCII (e.g. emoji tokens like 🌹)
+                if not symbol or not symbol.isascii():
+                    symbol = base_token.get("name", "").upper().strip()
+                    # Remove spaces/special chars from name to make a clean ticker
+                    symbol = re.sub(r"[^A-Z0-9]", "", symbol)
+                if symbol and len(symbol) <= 15 and symbol.isascii():
                     ca_cache[address] = {"symbol": symbol, "resolved_at": time.time()}
                     logger.info("Resolved CA %s… → $%s", address[:8], symbol)
                     return symbol
@@ -408,8 +414,13 @@ def _resolve_pair_to_symbol(chain: str, pair_address: str, ca_cache: dict[str, d
             data = resp.json()
             pairs = data.get("pairs") or data if isinstance(data, list) else data.get("pairs", [])
             if isinstance(pairs, list) and pairs:
-                symbol = pairs[0].get("baseToken", {}).get("symbol", "").upper()
-                if symbol and len(symbol) <= 15:
+                base_token = pairs[0].get("baseToken", {})
+                symbol = base_token.get("symbol", "").upper().strip()
+                # v21: fallback to name if symbol is non-ASCII (e.g. emoji tokens)
+                if not symbol or not symbol.isascii():
+                    symbol = base_token.get("name", "").upper().strip()
+                    symbol = re.sub(r"[^A-Z0-9]", "", symbol)
+                if symbol and len(symbol) <= 15 and symbol.isascii():
                     ca_cache[cache_key] = {"symbol": symbol, "resolved_at": time.time()}
                     logger.info("Resolved pair %s/%s… → $%s", chain, pair_address[:8], symbol)
                     return symbol
@@ -1253,58 +1264,80 @@ def _detect_death_penalty(token: dict, freshest_mention_hours: float) -> float:
 
 def _apply_hard_gates(ranking: list[dict]) -> list[dict]:
     """
-    Remove tokens that fail hard safety checks.
-    These are non-negotiable: mint authority, freeze authority,
-    top10 > gate_top10_pct%, risk > 8000, liq < gate_min_liquidity, holders < gate_min_holders.
-    v16: marks gate_reason on ejected tokens (for snapshot backtesting).
-    v20: thresholds from SCORING_PARAMS (dynamic).
+    v21: Mostly soft penalties — only mint/freeze remain as hard gates.
+    All other safety checks (top10, risk, liquidity, holders) are converted to
+    gate_mult penalties so tokens stay in the pipeline, get labeled by
+    outcome_tracker, and we can empirically validate whether these signals help.
+
+    Hard gates (removed):
+      - mint_authority: can inflate supply at will → genuine rug
+      - freeze_authority: can freeze your tokens → genuine rug
+
+    Soft penalties (kept, gate_mult applied):
+      - top10_concentration > 70%: 0.7x (anti-predictive per v15.3 data)
+      - risk_score > 8000: 0.6x
+      - low_liquidity < 10K: 0.5x (genuine trading concern)
+      - low_holders < 30: 0.7x
     """
     gate_top10 = SCORING_PARAMS["gate_top10_pct"]
     gate_liq = SCORING_PARAMS["gate_min_liquidity"]
     gate_holders = int(SCORING_PARAMS["gate_min_holders"])
 
     passed = []
-    gated = 0
+    hard_gated = 0
+    soft_penalized = 0
     for token in ranking:
+        # === HARD GATES (genuinely dangerous — removed from pipeline) ===
         # mint_authority = can inflate supply at will
         if token.get("has_mint_authority"):
             token["gate_reason"] = "mint_authority"
-            gated += 1
+            hard_gated += 1
             continue
         # freeze_authority = can freeze your tokens
         if token.get("has_freeze_authority"):
             token["gate_reason"] = "freeze_authority"
-            gated += 1
+            hard_gated += 1
             continue
-        # top10 holders own > gate_top10_pct% = extreme concentration
+
+        # === SOFT PENALTIES (gate_mult — token stays, score reduced) ===
+        gate_mult = 1.0
+        gate_reasons = []
+
+        # top10 holders own > gate_top10_pct% = concentration risk
         top10 = token.get("top10_holder_pct")
         if top10 is not None and top10 > gate_top10:
-            token["gate_reason"] = "top10_concentration"
-            gated += 1
-            continue
+            gate_mult = min(gate_mult, 0.7)
+            gate_reasons.append("top10_concentration")
+
         # RugCheck risk > 8000 (out of 10000)
         risk = token.get("risk_score")
         if risk is not None and risk > 8000:
-            token["gate_reason"] = "high_risk_score"
-            gated += 1
-            continue
+            gate_mult = min(gate_mult, 0.6)
+            gate_reasons.append("high_risk_score")
+
         # Liquidity floor
         liq = token.get("liquidity_usd")
         if liq is not None and liq < gate_liq:
-            token["gate_reason"] = "low_liquidity"
-            gated += 1
-            continue
+            gate_mult = min(gate_mult, 0.5)
+            gate_reasons.append("low_liquidity")
+
         # Holder floor (need real organic community)
         hcount = token.get("helius_holder_count") or token.get("holder_count")
         if hcount is not None and hcount < gate_holders:
-            token["gate_reason"] = "low_holders"
-            gated += 1
-            continue
+            gate_mult = min(gate_mult, 0.7)
+            gate_reasons.append("low_holders")
+
+        token["gate_mult"] = round(gate_mult, 3)
+        if gate_reasons:
+            token["gate_reason"] = gate_reasons[0]  # primary reason for diagnostics
+            soft_penalized += 1
         passed.append(token)
 
-    if gated:
-        logger.info("Hard gates removed %d tokens (mint/freeze/top10>%.0f%%/risk>8000/liq<%.0f/holders<%d)",
-                     gated, gate_top10, gate_liq, gate_holders)
+    if hard_gated:
+        logger.info("Hard gates removed %d tokens (mint/freeze only)", hard_gated)
+    if soft_penalized:
+        logger.info("Soft gate penalties applied to %d tokens (top10>%.0f%%/risk>8000/liq<%.0f/holders<%d)",
+                     soft_penalized, gate_top10, gate_liq, gate_holders)
     return passed
 
 
@@ -2403,44 +2436,39 @@ def aggregate_ranking(
     if data_filtered:
         logger.info("No-data gate removed %d tokens (no volume, no liquidity)", data_filtered)
 
-    # Gate 2: For longer windows (48h+), require 1 S-tier OR 2+ any-tier KOLs
+    # Gate 2: For longer windows (48h+), single A-tier KOL = soft penalty (not removal)
+    # v21: converted from hard gate to 0.6x penalty — collect outcome data to validate
     if hours >= 48:
-        before_kol = len(ranking)
-        kept = []
+        single_a_count = 0
         for t in ranking:
             tiers = t.get("kol_tiers", {})
             has_s_tier = any(tier == "S" for tier in tiers.values())
-            if has_s_tier or t.get("unique_kols", 0) >= 2:
-                kept.append(t)
-            else:
-                t["gate_reason"] = "single_a_tier"
-        ranking = kept
-        kol_filtered = before_kol - len(ranking)
-        if kol_filtered:
-            logger.info("Single-A-tier gate removed %d tokens (window=%dh)", kol_filtered, hours)
+            if not has_s_tier and t.get("unique_kols", 0) < 2:
+                existing_gate = t.get("gate_mult", 1.0)
+                t["gate_mult"] = round(min(existing_gate, 0.6), 3)
+                t["gate_reason"] = t.get("gate_reason") or "single_a_tier"
+                single_a_count += 1
+        if single_a_count:
+            logger.info("Single-A-tier penalty applied to %d tokens (window=%dh)", single_a_count, hours)
 
     # === Hard gates (uses RugCheck + DexScreener data) ===
     # v16: _apply_hard_gates now marks gate_reason on ejected tokens
     ranking = _apply_hard_gates(ranking)
 
-    # === Wash trading gate (uses DexScreener volume/txn data) ===
+    # === Wash trading — soft penalty (already in wash_pen multiplier chain) ===
+    # v21: removed hard gate. wash_pen (1.0 - wash_score) already penalizes these tokens.
+    # Tokens with score > 0.8 get wash_pen = 0.2x which is severe enough.
     for token in ranking:
         token["wash_trading_score"] = round(_compute_wash_trading_score(token), 3)
-    before_wash = len(ranking)
-    kept = []
-    for t in ranking:
-        if t.get("wash_trading_score", 0) <= 0.8:
-            kept.append(t)
-        else:
-            t["gate_reason"] = "wash_trading"
-    ranking = kept
-    wash_gated = before_wash - len(ranking)
-    if wash_gated:
-        logger.info("Wash trading gate removed %d tokens (score > 0.8)", wash_gated)
+        if token.get("wash_trading_score", 0) > 0.8:
+            existing_gate = token.get("gate_mult", 1.0)
+            token["gate_mult"] = round(min(existing_gate, 0.5), 3)
+            token["gate_reason"] = token.get("gate_reason") or "wash_trading"
 
-    gated_count = sum(1 for t in all_enriched if t.get("gate_reason"))
-    logger.info("Post-gate survivors: %d tokens, gated: %d (saved for backtesting) — now running expensive enrichment",
-                len(ranking), gated_count)
+    hard_gated = sum(1 for t in all_enriched if t.get("gate_reason") and t not in ranking)
+    soft_penalized = sum(1 for t in ranking if t.get("gate_mult", 1.0) < 1.0)
+    logger.info("Post-gate: %d tokens (%d soft-penalized, %d hard-gated) — now running expensive enrichment",
+                len(ranking), soft_penalized, hard_gated)
 
     # === Expensive enrichment on SURVIVORS only (v5.1) ===
     # Phase 3: Helius enrichment (bundle detection + holder quality + whale tracking)
@@ -2714,13 +2742,16 @@ def aggregate_ranking(
         token["_breadth_val"] = _get_component_value(token, "breadth")
         token["_price_action_val"] = _get_component_value(token, "price_action")
 
+        # v21: gate_mult — soft safety penalties (top10, risk, liquidity, holders, single_a_tier)
+        gate_mult = token.get("gate_mult", 1.0)
+
         # v17: stale_pen REMOVED from chain — death_penalty Signal 3 already
         # handles staleness with volume modulation. Keeping both was double-penalizing.
         combined_raw = (onchain_mult * safety_pen * pump_bonus * wash_pen
                         * pvp_pen * pump_pen * crash_pen * squeeze_mult
                         * trend_mult * activity_mult * breadth_pen
                         * size_mult * s_tier_mult
-                        * pump_momentum_pen)
+                        * pump_momentum_pen * gate_mult)
         # v16: Floor at 0.25 decompresses the 0-14 band where 97% of tokens stuck.
         # v17: Cap at 2.0 prevents multiplier stacking (activity*s_tier*size)
         # from inflating mediocre base scores beyond 100.

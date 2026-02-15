@@ -264,9 +264,10 @@ def refresh_top_tokens(n: int = REFRESH_TOP_N) -> int:
     client = _get_supabase()
 
     # 1. Fetch top N tokens from Supabase (7d window, by score DESC)
+    #    v21: token_address now on tokens table — build address_map directly
     result = (
         client.table("tokens")
-        .select("symbol, score, base_score, base_score_conviction, base_score_momentum, change_24h, freshest_mention_hours")
+        .select("symbol, score, base_score, base_score_conviction, base_score_momentum, change_24h, freshest_mention_hours, token_address")
         .eq("time_window", "7d")
         .order("score", desc=True)
         .limit(n)
@@ -278,27 +279,30 @@ def refresh_top_tokens(n: int = REFRESH_TOP_N) -> int:
         logger.info("Price refresh: no tokens to update")
         return 0
 
-    # We need token addresses + stored lifecycle penalty from last full cycle.
+    # Build address map from tokens table directly (no snapshot JOIN needed)
     symbols = [t["symbol"] for t in tokens]
-    snap_result = (
-        client.table("token_snapshots")
-        .select("symbol, token_address, already_pumped_penalty")
-        .in_("symbol", symbols)
-        .not_.is_("token_address", "null")
-        .order("snapshot_at", desc=True)
-        .limit(n * 3)
-        .execute()
-    )
-
-    # Deduplicate: latest snapshot per symbol
     address_map: dict[str, str] = {}
+    for t in tokens:
+        addr = t.get("token_address")
+        if addr:
+            address_map[t["symbol"]] = addr
+
+    # Fetch stored lifecycle penalty from latest snapshots (still needed for already_pumped)
     stored_lifecycle_pen: dict[str, float] = {}
-    for row in (snap_result.data or []):
-        sym = row.get("symbol")
-        addr = row.get("token_address")
-        if sym and addr and sym not in address_map:
-            address_map[sym] = addr
-            stored_lifecycle_pen[sym] = _safe_float(row.get("already_pumped_penalty"), 1.0)
+    syms_with_addr = [s for s in symbols if s in address_map]
+    if syms_with_addr:
+        snap_result = (
+            client.table("token_snapshots")
+            .select("symbol, already_pumped_penalty")
+            .in_("symbol", syms_with_addr)
+            .order("snapshot_at", desc=True)
+            .limit(n * 3)
+            .execute()
+        )
+        for row in (snap_result.data or []):
+            sym = row.get("symbol")
+            if sym and sym not in stored_lifecycle_pen:
+                stored_lifecycle_pen[sym] = _safe_float(row.get("already_pumped_penalty"), 1.0)
 
     # Batch fetch all token addresses in 1 DexScreener call (max 30)
     all_addresses = [addr for addr in address_map.values()]

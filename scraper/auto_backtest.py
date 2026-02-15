@@ -98,9 +98,12 @@ NUMERIC_FEATURES = [
     "ca_mention_count", "ticker_mention_count", "url_mention_count",
     # ML v2 Phase B: Temporal velocity
     "score_velocity", "score_acceleration", "mention_velocity",
-    "volume_velocity", "kol_arrival_rate",
+    "volume_velocity", "social_momentum_phase", "kol_arrival_rate",
     # ML v2 Phase C: Entry zone
     "entry_timing_quality",
+    # v17/v21: Scoring multipliers
+    "pump_momentum_pen",
+    "gate_mult",
 ]
 
 # Columns to fetch from token_snapshots
@@ -128,7 +131,7 @@ SNAPSHOT_COLUMNS = (
     "s_tier_mult, s_tier_count, unique_kols, pump_momentum_pen, "
     "ca_mention_count, ticker_mention_count, url_mention_count, has_ca_mention, "
     "score_velocity, score_acceleration, mention_velocity, volume_velocity, "
-    "social_momentum_phase, kol_arrival_rate, entry_timing_quality"
+    "social_momentum_phase, kol_arrival_rate, entry_timing_quality, gate_mult"
 )
 
 
@@ -291,12 +294,15 @@ def _compute_score(row: pd.Series, weights: dict) -> int:
     # v17: Pump momentum penalty
     pump_momentum_pen = _safe_mult(row, "pump_momentum_pen")
 
+    # v21: Soft gate penalty (replaces hard gate ejection)
+    gate_mult = _safe_mult(row, "gate_mult")
+
     # v17: stale_pen REMOVED from chain — death_penalty Signal 3 already
     # handles staleness with volume modulation. Keeping both was double-penalizing.
     combined_raw = (onchain * safety * crash_pen * squeeze_mult * trend_mult
                     * pump_bonus * wash_pen * pvp_pen * pump_pen
                     * activity_mult * breadth_pen * size_mult
-                    * s_tier_mult * pump_momentum_pen)
+                    * s_tier_mult * pump_momentum_pen * gate_mult)
     # v17: Floor at 0.25, Cap at 2.0 to prevent multiplier stacking
     combined = max(0.25, min(2.0, combined_raw))
     score = base_score * combined

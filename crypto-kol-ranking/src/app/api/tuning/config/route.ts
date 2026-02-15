@@ -11,7 +11,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const TUNING_SECRET = process.env.TUNING_SECRET; // optional auth for POST
+const TUNING_SECRET = process.env.TUNING_SECRET; // mandatory auth for POST
 
 // v20: 15 dynamic scoring constants (key in DB → key in API response)
 const DYNAMIC_CONSTANT_KEYS = [
@@ -117,12 +117,13 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  // Auth: require TUNING_SECRET if configured
-  if (TUNING_SECRET) {
-    const authHeader = request.headers.get("x-tuning-secret");
-    if (authHeader !== TUNING_SECRET) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
+  // Auth: TUNING_SECRET is mandatory for POST — reject if not configured
+  if (!TUNING_SECRET) {
+    return NextResponse.json({ error: "Server misconfigured: TUNING_SECRET not set" }, { status: 500 });
+  }
+  const authHeader = request.headers.get("x-tuning-secret");
+  if (authHeader !== TUNING_SECRET) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
   let body: ConfigBody;

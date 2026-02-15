@@ -104,6 +104,7 @@ NUMERIC_LIMITS = {
     "volume_velocity": 99.999,
     "kol_arrival_rate": 99.999,
     "entry_timing_quality": 1.0,
+    "gate_mult": 1.0,
 }
 
 
@@ -224,6 +225,8 @@ def upsert_tokens(
                 "data_confidence": t.get("data_confidence"),
                 # v11: freshest_mention_hours for price_refresh social decay
                 "freshest_mention_hours": t.get("freshest_mention_hours"),
+                # v21: token_address for frontend DexScreener links + price_refresh simplification
+                "token_address": t.get("token_address"),
             })
             for t in tokens
         ]
@@ -623,7 +626,9 @@ def insert_snapshots(ranking: list[dict]) -> None:
             "url_mention_count": t.get("url_mention_count", 0),
             "has_ca_mention": (t.get("ca_mention_count", 0) or 0) > 0 or (t.get("url_mention_count", 0) or 0) > 0,
             # v16: Gate reason (NULL = passed all gates, else reason for ejection)
+            # v21: gate_mult — soft penalty value (1.0 = no penalty)
             "gate_reason": t.get("gate_reason"),
+            "gate_mult": t.get("gate_mult", 1.0),
             # v16: Backtesting features
             "sol_price_at_snapshot": t.get("sol_price_at_snapshot"),
             "oldest_mention_hours": t.get("oldest_mention_hours"),

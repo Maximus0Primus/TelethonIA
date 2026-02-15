@@ -54,8 +54,9 @@ const PODIUM_BORDER: Record<number, string> = {
 
 export function KolRow({ kol, rank, index }: KolRowProps) {
   const podiumBorder = PODIUM_BORDER[rank];
-  // Show best available win rate (any horizon preferred, then 24h, then 12h)
-  const winRate = kol.winRateAny ?? kol.winRate24h ?? kol.winRate12h;
+  // Show most actionable win rate: 12h first, then 24h, then any
+  const winRate = kol.winRate12h ?? kol.winRate24h ?? kol.winRateAny;
+  const winRateHorizon = kol.winRate12h != null ? "12h" : kol.winRate24h != null ? "24h" : kol.winRateAny != null ? "any" : null;
 
   return (
     <motion.div
@@ -116,8 +117,11 @@ export function KolRow({ kol, rank, index }: KolRowProps) {
                 style={{ width: `${Math.min(winRate * 100, 100)}%` }}
               />
             </div>
-            <span className="text-xs text-white/50 tabular-nums font-mono w-8 text-right">
-              {(winRate * 100).toFixed(0)}%
+            <span className="text-xs text-white/50 tabular-nums font-mono text-right flex items-center gap-1">
+              <span>{(winRate * 100).toFixed(0)}%</span>
+              {winRateHorizon && (
+                <span className="text-[9px] text-white/25">{winRateHorizon}</span>
+              )}
             </span>
           </>
         ) : (

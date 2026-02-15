@@ -48,6 +48,8 @@ jobs:
             scraper/jupiter_cache.json
             scraper/ohlcv_cache.json
             scraper/pool_address_cache.json
+            scraper/bubblemaps_cache.json
+            scraper/kol_scores.json
           key: enrichment-${{ github.run_id }}
           restore-keys: enrichment-
 

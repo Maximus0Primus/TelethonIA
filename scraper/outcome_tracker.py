@@ -48,11 +48,13 @@ HORIZONS = [
     {"hours": 168, "price_col": "price_after_7d", "flag_col": "did_2x_7d", "max_col": "max_price_7d", "peak_col": "peak_hour_7d", "min_col": "min_price_7d", "t2x_col": "time_to_2x_7d"},
 ]
 
-# Max snapshots to process per cycle (generous — we need to catch up)
-BATCH_LIMIT = 150
+# Max snapshots to process per cycle
+# v21: increased from 150 to 500 — 93% of snapshots were unlabeled, need to catch up
+BATCH_LIMIT = 500
 
 # Time budget in seconds — exit gracefully before GH Action timeout
-TIME_BUDGET_SECONDS = 10 * 60  # 10 minutes
+# v21: 25 min (was 10). GH Action runs every 30min, leaves 5min buffer.
+TIME_BUDGET_SECONDS = 25 * 60  # 25 minutes
 
 # Sanity check: max plausible price ratio per horizon.
 # If OHLCV returns max_price/price_at > this, the data is likely wrong

@@ -53,13 +53,11 @@ export function ContactModal({ trigger, open: controlledOpen, onOpenChange }: Co
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogTrigger asChild>
-        {trigger ?? (
-          <button className="pointer-events-auto rounded-full border border-white bg-white px-4 py-1.5 font-mono text-xs tracking-wider text-black hover:bg-white/85 transition-colors uppercase">
-            Let&apos;s Talk
-          </button>
-        )}
-      </DialogTrigger>
+      {trigger && (
+        <DialogTrigger asChild>
+          {trigger}
+        </DialogTrigger>
+      )}
 
       <DialogContent className="glass-modal border-white/10 sm:max-w-md">
         <DialogHeader>

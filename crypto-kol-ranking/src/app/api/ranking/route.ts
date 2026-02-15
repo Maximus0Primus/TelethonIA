@@ -15,6 +15,7 @@ interface RankingRow {
   weakest_component: string | null;
   score_interpretation: string | null;
   data_confidence: number | null;
+  token_address: string | null;
 }
 
 async function callRpc(
@@ -109,6 +110,7 @@ export async function GET(request: NextRequest) {
       weakestComponent: t.weakest_component ?? null,
       scoreInterpretation: t.score_interpretation ?? null,
       dataConfidence: t.data_confidence != null ? Number(t.data_confidence) : null,
+      tokenAddress: t.token_address ?? null,
     }));
 
     // Fetch stats from scrape_metadata (use REST to avoid type issues)

@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { motion } from "framer-motion";
 import Link from "next/link";
-import { TrendingUp, TrendingDown, Minus, AlertTriangle } from "lucide-react";
+import { TrendingUp, TrendingDown, Minus, AlertTriangle, ExternalLink } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export type AnimationPhase = "idle" | "glitching" | "shuffling";
@@ -20,6 +20,7 @@ export interface TokenCardData {
   weakestComponent?: string | null;
   scoreInterpretation?: string | null;
   dataConfidence?: number | null;
+  tokenAddress?: string | null;
 }
 
 interface TokenCardProps {
@@ -275,11 +276,11 @@ export function TokenCard({
             </motion.span>
           )}
 
-          {/* Symbol */}
-          <div className="overflow-hidden">
+          {/* Symbol + DexScreener link */}
+          <div className="overflow-hidden flex items-center gap-1.5">
             <span
               className={cn(
-                "font-bold block truncate",
+                "font-bold truncate",
                 token.symbol.length > 8 ? "text-lg sm:text-xl" : "text-2xl sm:text-3xl",
                 isGlitching
                   ? "text-[#00ff41] glitch-text-shadow"
@@ -288,6 +289,18 @@ export function TokenCard({
             >
               {scrambledSymbol}
             </span>
+            {token.tokenAddress && (
+              <a
+                href={`https://dexscreener.com/solana/${token.tokenAddress}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={(e) => e.stopPropagation()}
+                className="shrink-0 text-white/20 hover:text-white/60 transition-colors"
+                title="View on DexScreener"
+              >
+                <ExternalLink className="h-3.5 w-3.5" />
+              </a>
+            )}
           </div>
 
           {/* Score - Large centered */}

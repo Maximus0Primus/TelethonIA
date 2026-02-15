@@ -37,7 +37,7 @@ function compare(a: KolRowData, b: KolRowData, key: SortKey, dir: "asc" | "desc"
     case "score":
       return m * ((a.score ?? -1) - (b.score ?? -1));
     case "winRate":
-      return m * (((a.winRateAny ?? a.winRate24h ?? a.winRate12h) ?? -1) - ((b.winRateAny ?? b.winRate24h ?? b.winRate12h) ?? -1));
+      return m * (((a.winRate12h ?? a.winRate24h ?? a.winRateAny) ?? -1) - ((b.winRate12h ?? b.winRate24h ?? b.winRateAny) ?? -1));
     case "calls":
       return m * (a.labeledCalls - b.labeledCalls);
     case "lastActive": {
@@ -96,10 +96,10 @@ export function KolLeaderboard() {
     scoredKols.length > 0
       ? scoredKols.reduce((s, k) => s + (k.score ?? 0), 0) / scoredKols.length
       : 0;
-  const withWinRate = kols.filter((k) => (k.winRateAny ?? k.winRate24h ?? k.winRate12h) !== null);
+  const withWinRate = kols.filter((k) => (k.winRate12h ?? k.winRate24h ?? k.winRateAny) !== null);
   const avgWinRate =
     withWinRate.length > 0
-      ? withWinRate.reduce((s, k) => s + (k.winRateAny ?? k.winRate24h ?? k.winRate12h ?? 0), 0) /
+      ? withWinRate.reduce((s, k) => s + (k.winRate12h ?? k.winRate24h ?? k.winRateAny ?? 0), 0) /
         withWinRate.length
       : 0;
 
@@ -125,7 +125,7 @@ export function KolLeaderboard() {
             accent: "text-[#22D3EE]",
           },
           {
-            label: "Avg Win Rate",
+            label: "Avg Win Rate (12h)",
             value:
               withWinRate.length > 0
                 ? `${(avgWinRate * 100).toFixed(0)}%`

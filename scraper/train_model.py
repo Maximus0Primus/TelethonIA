@@ -101,6 +101,9 @@ EXTENDED_FEATURES = CORE_FEATURES + [
     "kol_arrival_rate",
     # ML v2 Phase C: Entry zone
     "entry_timing_quality",
+    # v17/v21: Scoring multipliers
+    "pump_momentum_pen",
+    "gate_mult",
 ]
 
 # Tier 3 (full): All features when 2000+ samples. Let the model decide.
@@ -162,6 +165,9 @@ ALL_FEATURE_COLS = [
     "volume_velocity", "kol_arrival_rate",
     # ML v2 Phase C: Entry zone
     "entry_timing_quality",
+    # v17/v21: Scoring multipliers
+    "pump_momentum_pen",
+    "gate_mult",
 ]
 
 HORIZONS = {
