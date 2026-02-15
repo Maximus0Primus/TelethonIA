@@ -121,6 +121,13 @@ NUMERIC_FEATURES = [
     # v17/v21: Scoring multipliers
     "pump_momentum_pen",
     "gate_mult",
+    # v26: Market context features
+    "median_peak_return",
+    "entry_vs_median_peak",
+    "win_rate_7d",
+    "market_heat_24h",
+    "relative_volume",
+    "kol_saturation",
 ]
 
 # Columns to fetch from token_snapshots
@@ -154,7 +161,8 @@ SNAPSHOT_COLUMNS = (
     "time_to_sl20_min_24h, time_to_sl30_min_24h, time_to_sl50_min_24h, "
     "max_dd_before_tp_pct_12h, max_dd_before_tp_pct_24h, "
     "time_to_2x_12h, time_to_2x_24h, "
-    "jup_price_impact_1k, min_price_12h, min_price_24h"
+    "jup_price_impact_1k, min_price_12h, min_price_24h, "
+    "median_peak_return, entry_vs_median_peak, win_rate_7d, market_heat_24h, relative_volume, kol_saturation"
 )
 
 
@@ -2444,6 +2452,89 @@ def _generate_recommendations(report: dict) -> list[str]:
     return recs
 
 
+def _compute_market_benchmarks(client, df: pd.DataFrame) -> None:
+    """
+    v26: Compute rolling 7-day market benchmarks from labeled token data.
+    Stores results in scoring_config.market_benchmarks JSONB column.
+
+    Benchmarks computed (first-appearance dedup, last 7 days):
+      - median_peak_return_{hz}: median of max_price / price_at_snapshot
+      - win_rate_7d: % of tokens that hit >= ML_THRESHOLD
+      - p25/p75 percentiles for context
+      - n_tokens_7d: sample size for confidence
+    """
+    try:
+        # Filter to last 7 days only
+        cutoff = df["snapshot_at"].max() - pd.Timedelta(days=7)
+        recent = df[df["snapshot_at"] >= cutoff].copy()
+
+        # First-appearance dedup: one observation per token
+        recent = recent.sort_values("snapshot_at").drop_duplicates(
+            subset=["token_address"], keep="first"
+        )
+
+        benchmarks = {
+            "computed_at": datetime.now(timezone.utc).isoformat(),
+            "n_tokens_7d": len(recent),
+        }
+
+        # Compute peak returns per horizon
+        for hz in ["12h", "24h"]:
+            max_col = f"max_price_{hz}"
+            if max_col not in recent.columns:
+                continue
+
+            # peak_return = max_price / price_at_snapshot
+            valid = recent[
+                recent[max_col].notna() & recent["price_at_snapshot"].notna()
+                & (recent["price_at_snapshot"] > 0)
+            ].copy()
+
+            if len(valid) < 5:
+                continue
+
+            returns = valid[max_col].astype(float) / valid["price_at_snapshot"].astype(float)
+            returns = returns[returns.between(0.01, 1000)]  # sanity bounds
+
+            if len(returns) < 5:
+                continue
+
+            benchmarks[f"median_peak_return_{hz}"] = round(float(returns.median()), 4)
+            benchmarks[f"p25_peak_return_{hz}"] = round(float(returns.quantile(0.25)), 4)
+            benchmarks[f"p75_peak_return_{hz}"] = round(float(returns.quantile(0.75)), 4)
+
+        # Win rate: % of tokens hitting >= ML_THRESHOLD in primary horizon
+        primary_hz = ML_HORIZON  # e.g. "12h"
+        max_col = f"max_price_{primary_hz}"
+        if max_col in recent.columns:
+            valid = recent[
+                recent[max_col].notna() & recent["price_at_snapshot"].notna()
+                & (recent["price_at_snapshot"] > 0)
+            ]
+            if len(valid) > 0:
+                returns = valid[max_col].astype(float) / valid["price_at_snapshot"].astype(float)
+                winners = (returns >= ML_THRESHOLD).sum()
+                benchmarks["win_rate_7d"] = round(float(winners / len(returns)), 4)
+
+        logger.info(
+            "Market benchmarks (7d, n=%d): median_12h=%.2fx, median_24h=%.2fx, wr=%.1f%%",
+            benchmarks.get("n_tokens_7d", 0),
+            benchmarks.get("median_peak_return_12h", 0),
+            benchmarks.get("median_peak_return_24h", 0),
+            benchmarks.get("win_rate_7d", 0) * 100,
+        )
+
+        # Store in scoring_config
+        client.table("scoring_config").update(
+            {"market_benchmarks": benchmarks}
+        ).eq("id", 1).execute()
+
+        logger.info("Market benchmarks saved to scoring_config")
+
+    except Exception as e:
+        logger.error("Failed to compute market benchmarks: %s", e, exc_info=True)
+
+
 def run_auto_backtest() -> dict | None:
     """
     Main entry point. Fetches snapshots, runs progressive analyses,
@@ -2572,6 +2663,9 @@ def run_auto_backtest() -> dict | None:
     # Gap #5: Kelly criterion position sizing
     logger.info("Auto-backtest: running Kelly analysis")
     report["kelly"] = _kelly_analysis(df, horizon_col)
+
+    # v26: Compute & store market benchmarks for pipeline context features
+    _compute_market_benchmarks(client, df)
 
     # Generate recommendations
     report["recommendations"] = _generate_recommendations(report)

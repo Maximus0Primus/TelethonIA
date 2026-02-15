@@ -8,6 +8,7 @@ import json
 import math
 import time
 import logging
+import statistics
 from datetime import datetime, timezone, timedelta
 from collections import defaultdict
 from typing import TypedDict
@@ -192,6 +193,26 @@ _CONVICTION_PATTERNS = {
         r"(?:life\s*chang|generational|100x|1000x|biggest\s*play|"
         r"printing|insane\s*entry|never\s*seen)", re.I
     ),
+    # v25: Alpha framing — KOL signals this is their quality pick
+    "alpha_framing": re.compile(
+        r"(?:alpha\s*(?:call|play|leak|info|pick)|"
+        r"high\s*conviction|my\s*(?:best|comfiest)|top\s*pick|"
+        r"don.t\s*sleep\s*on|sleeper|undervalued|"
+        r"slow\s*cook)", re.I
+    ),
+    # v25: Gamble framing — KOL admits low conviction
+    "gamble_framing": re.compile(
+        r"(?:gamble|degen\s*(?:play|bet|gamble)|just\s*a\s*punt|"
+        r"lottery|lotto\s*ticket|fun\s*bet|risky\s*play|"
+        r"throwing\s*a\s*small|micro\s*bet|for\s*fun)", re.I
+    ),
+    # v25: Technical analysis — KOL did chart work (medium-high conviction)
+    "has_chart_analysis": re.compile(
+        r"(?:chart\s*looks|clean\s*chart|reversal|"
+        r"support\s*(?:level|zone|at)|resistance|"
+        r"consolidat|accumulation\s*zone|"
+        r"find\s*your\s*entr|good\s*entry|nice\s*entry)", re.I
+    ),
 }
 
 
@@ -207,6 +228,10 @@ def _compute_message_conviction(text: str) -> dict:
     has_urgency = bool(_CONVICTION_PATTERNS["urgency"].search(text))
     has_hedging = bool(_CONVICTION_PATTERNS["hedging"].search(text))
     has_strong_positive = bool(_CONVICTION_PATTERNS["strong_positive"].search(text))
+    # v25: Call framing patterns
+    has_alpha_framing = bool(_CONVICTION_PATTERNS["alpha_framing"].search(text))
+    has_gamble_framing = bool(_CONVICTION_PATTERNS["gamble_framing"].search(text))
+    has_chart_analysis = bool(_CONVICTION_PATTERNS["has_chart_analysis"].search(text))
 
     if has_price_target:
         score += 0.5
@@ -218,6 +243,13 @@ def _compute_message_conviction(text: str) -> dict:
         score += 0.4
     if has_hedging:
         score -= 0.5
+    # v25: Call framing scoring
+    if has_alpha_framing:
+        score += 0.6
+    if has_gamble_framing:
+        score -= 0.4
+    if has_chart_analysis:
+        score += 0.3
 
     score = max(0.5, min(2.5, score))
 
@@ -227,6 +259,10 @@ def _compute_message_conviction(text: str) -> dict:
         "has_personal_stake": has_personal_stake,
         "has_urgency": has_urgency,
         "has_hedging": has_hedging,
+        # v25: Call framing flags
+        "has_alpha_framing": has_alpha_framing,
+        "has_gamble_framing": has_gamble_framing,
+        "has_chart_analysis": has_chart_analysis,
     }
 
 
@@ -1010,6 +1046,30 @@ def _get_price_from_candles(token: dict, hours: float) -> float | None:
     return None
 
 
+def _compute_manipulation_penalty(token: dict) -> float:
+    """
+    Unified manipulation detection: wash trading + artificial pump.
+    Returns penalty multiplier in [0.3, 1.0].
+    Takes the HARSHEST of wash trading and artificial pump signals.
+    """
+    # Wash trading signal (from _compute_wash_trading_score)
+    wash_score = token.get("wash_trading_score", 0)
+    wash_pen = max(0.3, 1.0 - wash_score)
+
+    # Artificial pump signal (from _detect_artificial_pump)
+    pump_pen = 1.0
+    if token.get("is_artificial_pump"):
+        pc24 = token.get("price_change_24h") or 0
+        if pc24 > 400:
+            pump_pen = 0.3
+        elif pc24 > 200:
+            pump_pen = 0.5
+        else:
+            pump_pen = 0.7
+
+    return min(wash_pen, pump_pen)  # harshest wins
+
+
 def _compute_entry_timing_quality(token: dict) -> float:
     """
     ML v2 Phase C: Compute entry timing quality (0-1).
@@ -1186,6 +1246,50 @@ def _compute_kol_entry_premium(token: dict) -> tuple[float, float]:
         return round(implied_premium, 3), round(mult, 3)
 
     return 1.0, 1.0
+
+
+def _compute_entry_drift_mult(token: dict) -> float:
+    """
+    v24: Penalizes when price outpaced social growth since first KOL calls.
+    Continuous multiplier in [0.5, 1.0].
+
+    entry_premium = how much price drifted up since KOL calls.
+    social_strength = how much new interest justifies it.
+    When social keeps pace -> no penalty.
+    When price runs ahead -> progressive penalty.
+    """
+    entry_premium = token.get("entry_premium") or 1.0
+    if entry_premium <= 1.2:
+        return 1.0
+
+    # Social strength [0, 1]
+    unique_kols = token.get("unique_kols") or 1
+    kol_score = min(1.0, (unique_kols - 1) / 7)  # 1 KOL=0, 8+=1.0
+
+    activity_mult = token.get("activity_mult") or 1.0
+    activity_score = max(0, min(1.0, (activity_mult - 0.80) / 0.45))
+
+    freshest_h = token.get("freshest_mention_hours") or 999
+    if freshest_h <= 1:
+        fresh_score = 1.0
+    elif freshest_h <= 4:
+        fresh_score = 0.7
+    elif freshest_h <= 8:
+        fresh_score = 0.4
+    else:
+        fresh_score = 0.1
+
+    s_count = sum(1 for t in token.get("kol_tiers", {}).values() if t == "S")
+    s_tier_score = min(1.0, s_count / 2)
+
+    social_strength = (kol_score * 0.30 + activity_score * 0.25
+                       + fresh_score * 0.30 + s_tier_score * 0.15)
+
+    # Net drift = unjustified price increase
+    drift = entry_premium - 1.0
+    net_drift = max(0, drift - social_strength * 1.0)
+    mult = max(0.50, 1.0 - net_drift * 0.25)
+    return round(mult, 3)
 
 
 def _detect_artificial_pump(token: dict) -> bool:
@@ -1735,6 +1839,8 @@ _DEFAULT_SCORING_PARAMS = {
     "ml_threshold": 2.0,
     # ML v3: Bot strategy for capturable profit prediction
     "bot_strategy": "TP50_SL30",
+    # v26: Market benchmarks (populated by auto_backtest)
+    "market_benchmarks": {},
 }
 
 # Module-level cache: refreshed once per scrape cycle via load_scoring_config()
@@ -1808,6 +1914,9 @@ def load_scoring_config() -> None:
 
         # ML v3: Bot strategy for capturable profit prediction
         SCORING_PARAMS["bot_strategy"] = row.get("bot_strategy", "TP50_SL30") or "TP50_SL30"
+
+        # v26: Market benchmarks (computed by auto_backtest, stored as JSONB)
+        SCORING_PARAMS["market_benchmarks"] = row.get("market_benchmarks") or {}
 
         logger.info(
             "scoring_config loaded: consensus=%.2f conviction=%.2f breadth=%.2f PA=%.2f "
@@ -2109,6 +2218,12 @@ def aggregate_ranking(
         "msg_conviction_scores": [],  # per-message NLP conviction scores
         "price_target_count": 0,      # messages with price targets
         "hedging_count": 0,           # messages with hedging language
+        # v25: Message-level text feature accumulators
+        "call_type_scores": [],       # +1 alpha, -1 gamble, +0.5 chart_analysis, 0 neutral
+        "msg_lengths": [],            # len(text) per message
+        "msg_has_ca": [],             # bool: message contains a CA
+        "msg_tokens_count": [],       # nb tokens extracted from the message
+        "msg_texts_raw": [],          # raw text for caps/emoji/question/link analysis
         "kol_mention_counts": {},     # per-KOL mention count for quality weighting
         "hours_ago_by_group": defaultdict(list),  # v9: group_name → [hours_ago, ...] for recency decay
         "kol_stated_entry_mcaps": [],  # v14: entry mcap stated by KOLs in message text
@@ -2217,6 +2332,16 @@ def aggregate_ranking(
                 token_data[token]["sentiments"].append(sentiment)
                 token_data[token]["hours_ago"].append(hours_ago)
                 token_data[token]["msg_conviction_scores"].append(msg_conv["msg_conviction_score"])
+                # v25: Message-level text features
+                ct = 0
+                if msg_conv.get("has_alpha_framing"): ct += 1
+                if msg_conv.get("has_gamble_framing"): ct -= 1
+                if msg_conv.get("has_chart_analysis"): ct += 0.5
+                token_data[token]["call_type_scores"].append(ct)
+                token_data[token]["msg_lengths"].append(msg_len)
+                token_data[token]["msg_has_ca"].append(bool(msg_cas))
+                token_data[token]["msg_tokens_count"].append(len(token_tuples))
+                token_data[token]["msg_texts_raw"].append(text)
 
                 # Negative mentions (sentiment < -0.3) = KOL is warning, not calling
                 # Don't count toward mentions/breadth/conviction — prevents false positives
@@ -2414,6 +2539,31 @@ def aggregate_ranking(
         )
         top_kols_list = [g[0] for g in groups_with_conv]  # ALL KOLs, not just top 5
 
+        # v25: Aggregate message-level text features
+        cts = data["call_type_scores"]
+        call_type_score = sum(cts) / max(1, len(cts)) if cts else 0.0
+        raw_texts = data["msg_texts_raw"]
+        n_msgs = len(raw_texts)
+        if n_msgs > 0:
+            avg_msg_length = sum(data["msg_lengths"]) / n_msgs
+            ca_mention_ratio = sum(data["msg_has_ca"]) / n_msgs
+            multi_token_ratio = sum(1 for c in data["msg_tokens_count"] if c >= 2) / n_msgs
+            total_caps = sum(sum(1 for c in t if c.isupper()) for t in raw_texts)
+            total_chars = sum(len(t) for t in raw_texts)
+            caps_ratio = total_caps / max(1, total_chars)
+            total_emojis = sum(len(re.findall(r'[\U0001F300-\U0001FAFF]', t)) for t in raw_texts)
+            emoji_density = total_emojis / max(1, total_chars)
+            question_ratio = sum(1 for t in raw_texts if '?' in t) / n_msgs
+            link_ratio = sum(1 for t in raw_texts if 'http' in t.lower()) / n_msgs
+        else:
+            avg_msg_length = 0.0
+            ca_mention_ratio = 0.0
+            multi_token_ratio = 0.0
+            caps_ratio = 0.0
+            emoji_density = 0.0
+            question_ratio = 0.0
+            link_ratio = 0.0
+
         ranking.append({
             "symbol": symbol,
             "score": score,
@@ -2443,6 +2593,8 @@ def aggregate_ranking(
             "sentiment_consistency": round(sentiment_consistency, 3),
             # ML v2 Phase B: Social momentum phase
             "social_momentum_phase": social_momentum_phase,
+            # v24: numeric encoding for ML (declining=0, plateau=1, building=2)
+            "social_momentum_num": {"declining": 0, "plateau": 1, "building": 2}.get(social_momentum_phase, 1),
             # v9: Freshest mention age for death detection
             "freshest_mention_hours": round(freshest_mention_hours, 2),
             # v16: Oldest mention age for backtesting
@@ -2464,6 +2616,15 @@ def aggregate_ranking(
             "ca_mention_count": data.get("ca_mention_count", 0),
             "ticker_mention_count": data.get("ticker_mention_count", 0),
             "url_mention_count": data.get("url_mention_count", 0),
+            # v25: Message-level text features
+            "call_type_score": round(call_type_score, 3),
+            "avg_msg_length": round(avg_msg_length, 1),
+            "ca_mention_ratio": round(ca_mention_ratio, 3),
+            "caps_ratio": round(caps_ratio, 3),
+            "emoji_density": round(emoji_density, 4),
+            "multi_token_ratio": round(multi_token_ratio, 3),
+            "question_ratio": round(question_ratio, 3),
+            "link_ratio": round(link_ratio, 3),
         })
 
     # Verify tokens exist on-chain via DexScreener (filters false positives)
@@ -2635,9 +2796,10 @@ def aggregate_ranking(
         death_pen = _detect_death_penalty(token, token.get("freshest_mention_hours", 999))
         token["death_penalty"] = round(death_pen, 3)
 
-        # Wash trading soft penalty (tokens with score 0-0.8 that passed hard gate)
-        wash_score = token.get("wash_trading_score", 0)
-        wash_pen = max(0.3, 1.0 - wash_score)
+        # v23: Unified manipulation penalty (merges wash_pen + pump_pen)
+        manipulation_pen = _compute_manipulation_penalty(token)
+        token["wash_pen"] = round(manipulation_pen, 3)  # backward compat column name
+        token["pump_pen"] = manipulation_pen  # backward compat
 
         # PVP penalty: same-name tokens — softer on pump.fun where copycats are inevitable
         pvp_recent = token.get("pvp_recent_count") or 0
@@ -2647,37 +2809,19 @@ def aggregate_ranking(
         else:
             pvp_pen = max(0.5, 1.0 / (1 + 0.1 * pvp_recent))
 
-        # Algorithm v4: Degressive artificial pump penalty (was binary 0.2)
-        pump_pen = 1.0
-        if token.get("is_artificial_pump"):
-            ap_pc24 = token.get("price_change_24h") or 0
-            if ap_pc24 > 400:
-                pump_pen = 0.3
-            elif ap_pc24 > 200:
-                pump_pen = 0.5
-            elif ap_pc24 > 100:
-                pump_pen = 0.7
-            else:
-                pump_pen = 0.7
-
         # Algorithm v7: Minsky lifecycle phase classification
         # Replaces flat already_pumped_penalty with 5-phase model
         phase, phase_pen = _classify_lifecycle_phase(token)
         token["lifecycle_phase"] = phase
+        # v24: numeric encoding for ML (panic=0 → boom=5)
+        _LIFECYCLE_NUM = {"panic": 0, "profit_taking": 1, "euphoria": 2, "unknown": 3, "displacement": 4, "boom": 5}
+        token["lifecycle_phase_num"] = _LIFECYCLE_NUM.get(phase, 3)
         token["already_pumped_penalty"] = round(phase_pen, 3)  # backward compat field name
         already_pumped_pen = phase_pen
 
         # v9: pa_mult REMOVED from multiplier chain — price_action already has 40% weight
         # in base score via renormalization. Applying pa_mult here double-counted it,
         # making price_action control ~60% instead of the intended 40%.
-
-        # Harvard adaptation: Volume squeeze — v16: DISABLED. Winners have 0.000
-        # squeeze_score vs losers 0.030. Signal fires for losers, not winners.
-        squeeze_mult = 1.0
-
-        # Harvard adaptation: Trend strength — v16: DISABLED. Anti-predictive:
-        # winners avg 0.155 trend_strength vs losers 0.315. Bonus helped losers.
-        trend_mult = 1.0
 
         # v16: Activity ratio — STRONGEST predictor (+0.212 correlation with 2x).
         # v20: bounds from SCORING_PARAMS (dynamic).
@@ -2742,16 +2886,12 @@ def aggregate_ranking(
         token["entry_premium"] = entry_premium
         token["entry_premium_mult"] = entry_premium_mult
 
-        # v14: Hard stale-mention cutoff — kept for data/ML but REMOVED from
-        # multiplier chain in v17. death_penalty Signal 3 already handles staleness
-        # with volume modulation, so stale_pen was double-penalizing.
+        # v24: Entry drift multiplier — penalizes when price outpaced social growth
+        entry_drift_mult = _compute_entry_drift_mult(token)
+        token["entry_drift_mult"] = entry_drift_mult
+
+        # Freshest mention hours (used by size_mult freshness tier)
         freshest_h = token.get("freshest_mention_hours", 0)
-        stale_pen = 1.0
-        if freshest_h > 72:
-            stale_pen = 0.3  # 3+ days old = nearly dead
-        elif freshest_h > 48:
-            stale_pen = 0.5  # 2+ days old = very stale
-        token["stale_pen"] = stale_pen  # stored for ML/data, NOT in multiplier chain
 
         # v15.2: Size opportunity multiplier — backtest-proven signal.
         # Winners avg 4.1M mcap vs losers 21.4M. Fresh (<12h) + small (<500K) = 30% precision.
@@ -2778,7 +2918,6 @@ def aggregate_ranking(
         else:
             mcap_factor = 0.25  # >$500M — needs $500M+ to 2x, not happening
         # freshness tier: KOL just called = buy pressure incoming
-        # (complementary to stale_pen which handles >48h decay)
         # v19: No freshness bonus for large caps — fresh call on $700M token
         # doesn't make it easier to 2x.
         if t_mcap >= 50_000_000:
@@ -2798,14 +2937,14 @@ def aggregate_ranking(
         s_tier_mult = 1.2 if s_tier_count > 0 else 1.0
         token["s_tier_mult"] = s_tier_mult
 
-        # v9+v12: Use min(lifecycle, death, entry_premium) — no double-penalizing pump signals
-        crash_pen = min(already_pumped_pen, death_pen, entry_premium_mult)
+        # v9+v12+v23: Use min(lifecycle, death, entry_premium, pump_momentum)
+        # — no double-penalizing pump signals. pump_momentum_pen folded in here
+        # instead of being a separate chain multiplier.
+        crash_pen = min(already_pumped_pen, death_pen, entry_premium_mult, pump_momentum_pen)
 
         # Tuning platform: store ALL multiplier values for client-side re-scoring
         token["pump_bonus"] = pump_bonus
-        token["wash_pen"] = round(wash_pen, 3)
         token["pvp_pen"] = round(pvp_pen, 3)
-        token["pump_pen"] = pump_pen
         token["breadth_pen"] = breadth_pen
         token["activity_mult"] = activity_mult
         token["crash_pen"] = crash_pen
@@ -2819,13 +2958,15 @@ def aggregate_ranking(
         # v21: gate_mult — soft safety penalties (top10, risk, liquidity, holders, single_a_tier)
         gate_mult = token.get("gate_mult", 1.0)
 
-        # v17: stale_pen REMOVED from chain — death_penalty Signal 3 already
-        # handles staleness with volume modulation. Keeping both was double-penalizing.
-        combined_raw = (onchain_mult * safety_pen * pump_bonus * wash_pen
-                        * pvp_pen * pump_pen * crash_pen * squeeze_mult
-                        * trend_mult * activity_mult * breadth_pen
-                        * size_mult * s_tier_mult
-                        * pump_momentum_pen * gate_mult)
+        # v24: Chain (12 multipliers). Added entry_drift_mult (price vs social drift).
+        # v23 removals: squeeze_mult (dead), trend_mult (dead),
+        # wash_pen+pump_pen (merged → manipulation_pen),
+        # pump_momentum_pen (folded into crash_pen min()).
+        combined_raw = (onchain_mult * safety_pen * pump_bonus
+                        * manipulation_pen * pvp_pen * crash_pen
+                        * activity_mult * breadth_pen
+                        * size_mult * s_tier_mult * gate_mult
+                        * entry_drift_mult)
         # v16: Floor at 0.25 decompresses the 0-14 band where 97% of tokens stuck.
         # v17: Cap at 2.0 prevents multiplier stacking (activity*s_tier*size)
         # from inflating mediocre base scores beyond 100.
@@ -2859,16 +3000,56 @@ def aggregate_ranking(
         # ML-only initially; may become a soft multiplier if correlation > 0.05.
         token["entry_timing_quality"] = _compute_entry_timing_quality(token)
 
-    squeeze_firing = sum(1 for t in ranking if t.get("squeeze_state") == "firing")
     unconfirmed = sum(1 for t in ranking if t.get("confirmation_pillars", 0) < 2)
     logger.info(
         "Applied on-chain multipliers & safety penalties to %d tokens "
-        "(squeeze firing: %d, unconfirmed: %d)",
-        len(ranking), squeeze_firing, unconfirmed,
+        "(unconfirmed: %d)",
+        len(ranking), unconfirmed,
     )
 
     # Apply ML scoring if model is available (overrides manual score)
     _apply_ml_scores(ranking)
+
+    # === v26: Market context features (regime + relative positioning) ===
+    # Computed AFTER all individual scoring, BEFORE final sort.
+    # Category A: Historical benchmarks from auto_backtest (via scoring_config)
+    market_benchmarks = SCORING_PARAMS.get("market_benchmarks", {})
+    ml_horizon = SCORING_PARAMS.get("ml_horizon", "12h")
+
+    # Category B: Cycle-level aggregates (computed from current ranking)
+    all_volumes = [t.get("volume_24h", 0) for t in ranking if t.get("volume_24h")]
+    all_price_changes = [t.get("price_change_24h", 0) for t in ranking
+                         if t.get("price_change_24h") is not None]
+    cycle_median_volume = statistics.median(all_volumes) if all_volumes else 1
+    cycle_median_price_change = statistics.median(all_price_changes) if all_price_changes else 0
+    n_tokens_cycle = len(ranking)
+
+    # Inject into each token
+    median_peak = market_benchmarks.get(f"median_peak_return_{ml_horizon}", 1.5)
+    win_rate_7d = market_benchmarks.get("win_rate_7d", 0.2)
+
+    for token in ranking:
+        # Cat A: Historical benchmarks
+        pc24 = token.get("price_change_24h")
+        current_return = (pc24 / 100 + 1) if pc24 is not None else 1.0
+        entry_vs_peak = current_return / median_peak if median_peak > 1 else 0.5
+
+        token["median_peak_return"] = round(median_peak, 4)
+        token["entry_vs_median_peak"] = round(min(entry_vs_peak, 5.0), 4)  # cap at 5x
+        token["win_rate_7d"] = round(win_rate_7d, 4)
+
+        # Cat B: Cycle-level features
+        token["market_heat_24h"] = round(cycle_median_price_change, 2)
+        vol = token.get("volume_24h") or 0
+        token["relative_volume"] = round(vol / max(1, cycle_median_volume), 4)
+        token["kol_saturation"] = n_tokens_cycle
+
+    logger.info(
+        "v26 market context: median_peak=%.2fx, wr_7d=%.1f%%, heat=%.1f%%, "
+        "med_vol=$%.0f, n_tokens=%d",
+        median_peak, win_rate_7d * 100, cycle_median_price_change,
+        cycle_median_volume, n_tokens_cycle,
+    )
 
     ranking.sort(key=lambda x: (x["score"], x["mentions"]), reverse=True)
     return ranking, raw_kol_mentions, all_enriched

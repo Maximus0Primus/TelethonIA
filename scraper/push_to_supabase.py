@@ -94,7 +94,6 @@ NUMERIC_LIMITS = {
     "pvp_pen": 1.0,
     "pump_pen": 1.0,
     "breadth_pen": 1.0,
-    "stale_pen": 1.0,
     "size_mult": 1.5,
     "s_tier_mult": 1.5,
     # ML v2: Temporal velocity features
@@ -105,6 +104,41 @@ NUMERIC_LIMITS = {
     "kol_arrival_rate": 99.999,
     "entry_timing_quality": 1.0,
     "gate_mult": 1.0,
+    "entry_drift_mult": 1.0,
+    "price_velocity": 9999.999,
+    "price_drift_from_first_seen": 9999999.999,
+    # v25: Message-level text features
+    "call_type_score": 999.999,
+    "avg_msg_length": 9999999.9,
+    "ca_mention_ratio": 1.0,
+    "caps_ratio": 1.0,
+    "emoji_density": 99.9999,
+    "multi_token_ratio": 1.0,
+    "question_ratio": 1.0,
+    "link_ratio": 1.0,
+    # v26: Market context features
+    "median_peak_return": 9999.9999,
+    "entry_vs_median_peak": 99.9999,
+    "win_rate_7d": 1.0,
+    "market_heat_24h": 99999.99,
+    "relative_volume": 9999.9999,
+}
+
+# v24: Ordinal encoding for categorical phase features → ML numeric
+# lifecycle: panic(worst) → boom(best entry)
+_LIFECYCLE_PHASE_MAP = {
+    "panic": 0,
+    "profit_taking": 1,
+    "euphoria": 2,
+    "unknown": 3,
+    "displacement": 4,
+    "boom": 5,
+}
+# social momentum: declining(worst) → building(best)
+_MOMENTUM_PHASE_MAP = {
+    "declining": 0,
+    "plateau": 1,
+    "building": 2,
 }
 
 
@@ -119,7 +153,9 @@ _INT_COLS = {
     "pvp_recent_count", "pvp_same_name_count", "risk_count", "risk_score",
     "sells_24h", "ticker_mention_count", "trade_24h", "txn_count_24h",
     "unique_wallet_24h", "url_mention_count",
+    "lifecycle_phase_num", "social_momentum_num",
     "whale_count", "whale_new_entries",
+    "kol_saturation",
 }
 
 
@@ -269,7 +305,7 @@ def _fetch_previous_snapshots(client: Client, symbols: list[str]) -> dict[str, d
     try:
         result = (
             client.table("token_snapshots")
-            .select("symbol, mentions, sentiment, volume_24h, holder_count, score_at_snapshot, top_kols, snapshot_at, score_velocity, unique_kols")
+            .select("symbol, mentions, sentiment, volume_24h, holder_count, score_at_snapshot, top_kols, snapshot_at, score_velocity, unique_kols, first_seen_price, price_at_snapshot")
             .in_("symbol", symbols)
             .order("snapshot_at", desc=True)
             .limit(len(symbols) * 3)  # enough to get at least 1 per symbol
@@ -317,6 +353,7 @@ def _compute_temporal_features(current: dict, previous: dict | None) -> dict:
         "mention_velocity": None,
         "volume_velocity": None,
         "kol_arrival_rate": None,
+        "price_velocity": None,
     }
 
     if previous is None:
@@ -375,6 +412,18 @@ def _compute_temporal_features(current: dict, previous: dict | None) -> dict:
             pv = float(prev_vol)
             if cv > 0 and pv > 0:
                 result["volume_velocity"] = round((math.log(cv) - math.log(pv)) / hours_between, 3)
+        except (ValueError, TypeError):
+            pass
+
+    # --- v24: Price velocity = log-ratio of price between cycles ---
+    curr_price = current.get("price_usd")
+    prev_price = previous.get("price_at_snapshot")
+    if curr_price is not None and prev_price is not None and hours_between is not None:
+        try:
+            cp = float(curr_price)
+            pp = float(prev_price)
+            if cp > 0 and pp > 0:
+                result["price_velocity"] = round((math.log(cp) - math.log(pp)) / hours_between, 3)
         except (ValueError, TypeError):
             pass
 
@@ -577,6 +626,10 @@ def insert_snapshots(ranking: list[dict]) -> None:
             # Algorithm v9: Death detection + recency
             "freshest_mention_hours": t.get("freshest_mention_hours"),
             "death_penalty": t.get("death_penalty"),
+            # v24: lifecycle phase + numeric encoding for ML
+            "lifecycle_phase": t.get("lifecycle_phase"),
+            "lifecycle_phase_num": _LIFECYCLE_PHASE_MAP.get(t.get("lifecycle_phase"), 3),
+            "social_momentum_num": _MOMENTUM_PHASE_MAP.get(t.get("social_momentum_phase"), 1),
             # v10: DexScreener social/boost signals
             "boosts_active": t.get("boosts_active"),
             "has_twitter": t.get("has_twitter"),
@@ -600,7 +653,7 @@ def insert_snapshots(ranking: list[dict]) -> None:
             "activity_mult": t.get("activity_mult"),
             "crash_pen": t.get("crash_pen"),
             "pump_momentum_pen": t.get("pump_momentum_pen"),
-            "stale_pen": t.get("stale_pen"),
+            # stale_pen removed in v23 (dead code, redundant with death_penalty)
             "size_mult": t.get("size_mult"),
             "s_tier_mult": t.get("s_tier_mult"),
             # v15: KOL counts for conviction dampening
@@ -615,6 +668,7 @@ def insert_snapshots(ranking: list[dict]) -> None:
             # v21: gate_mult — soft penalty value (1.0 = no penalty)
             "gate_reason": t.get("gate_reason"),
             "gate_mult": t.get("gate_mult", 1.0),
+            "entry_drift_mult": t.get("entry_drift_mult"),
             # v16: Backtesting features
             "sol_price_at_snapshot": t.get("sol_price_at_snapshot"),
             "oldest_mention_hours": t.get("oldest_mention_hours"),
@@ -627,11 +681,44 @@ def insert_snapshots(ranking: list[dict]) -> None:
             "score_acceleration": deltas.get("score_acceleration"),
             "mention_velocity": deltas.get("mention_velocity"),
             "volume_velocity": deltas.get("volume_velocity"),
+            "price_velocity": deltas.get("price_velocity"),
             "social_momentum_phase": t.get("social_momentum_phase"),
             "kol_arrival_rate": deltas.get("kol_arrival_rate"),
             # ML v2 Phase C: Entry zone detection
             "entry_timing_quality": t.get("entry_timing_quality"),
+            # v25: Message-level text features
+            "call_type_score": t.get("call_type_score"),
+            "avg_msg_length": t.get("avg_msg_length"),
+            "ca_mention_ratio": t.get("ca_mention_ratio"),
+            "caps_ratio": t.get("caps_ratio"),
+            "emoji_density": t.get("emoji_density"),
+            "multi_token_ratio": t.get("multi_token_ratio"),
+            "question_ratio": t.get("question_ratio"),
+            "link_ratio": t.get("link_ratio"),
+            # v26: Market context features
+            "median_peak_return": t.get("median_peak_return"),
+            "entry_vs_median_peak": t.get("entry_vs_median_peak"),
+            "win_rate_7d": t.get("win_rate_7d"),
+            "market_heat_24h": t.get("market_heat_24h"),
+            "relative_volume": t.get("relative_volume"),
+            "kol_saturation": t.get("kol_saturation"),
+            # v23: First-seen price — carry forward from earliest snapshot
+            "first_seen_price": (
+                prev.get("first_seen_price")
+                or prev.get("price_at_snapshot")
+                if prev else None
+            ) or t.get("price_usd"),
         }
+        # v24: Compute price drift from first-seen price
+        fsp = row.get("first_seen_price")
+        cur_p = row.get("price_at_snapshot")
+        if fsp and cur_p:
+            try:
+                fsp_f, cur_f = float(fsp), float(cur_p)
+                if fsp_f > 0:
+                    row["price_drift_from_first_seen"] = round(cur_f / fsp_f, 3)
+            except (ValueError, TypeError):
+                pass
         rows.append(_sanitize_row(row))
 
     if skipped_stale:

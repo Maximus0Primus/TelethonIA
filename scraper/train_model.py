@@ -101,6 +101,13 @@ CORE_FEATURES = [
     "hour_paris",        # 0-23 Europe/Paris (runners peak 19h-5h)
     "is_weekend",        # 0/1
     "is_prime_time",     # 0/1 (19h-5h Paris)
+    # v26: Market context features (regime + relative positioning)
+    "median_peak_return",
+    "entry_vs_median_peak",
+    "win_rate_7d",
+    "market_heat_24h",
+    "relative_volume",
+    "kol_saturation",
 ]
 
 # Tier 2 (extended): Add these when 500-2000 samples. ~30 features total.
@@ -128,6 +135,25 @@ EXTENDED_FEATURES = CORE_FEATURES + [
     # v17/v21: Scoring multipliers
     "pump_momentum_pen",
     "gate_mult",
+    # v24: Entry drift + price velocity + first-seen drift
+    "entry_drift_mult",
+    "price_velocity",
+    "ath_ratio",
+    "momentum_direction",
+    "price_drift_from_first_seen",
+    # v24: Categorical phase encodings (ordinal)
+    "lifecycle_phase_num",
+    "social_momentum_num",
+    # v25: Message-level text features
+    "call_type_score",
+    "avg_msg_length",
+    "ca_mention_ratio",
+    "caps_ratio",
+    "emoji_density",
+    "multi_token_ratio",
+    "question_ratio",
+    "link_ratio",
+    # v26: Market context features (already in CORE via inheritance)
 ]
 
 # Tier 3 (full): All features when 2000+ samples. Let the model decide.
@@ -192,8 +218,33 @@ ALL_FEATURE_COLS = [
     # v17/v21: Scoring multipliers
     "pump_momentum_pen",
     "gate_mult",
+    # v24: Entry drift + price velocity + PA features + first-seen drift
+    "price_velocity",
+    "ath_ratio",
+    "momentum_direction",
+    "entry_drift_mult",
+    "price_drift_from_first_seen",
+    # v24: Categorical phase encodings (ordinal)
+    "lifecycle_phase_num",
+    "social_momentum_num",
     # ML v3.1: Calendar/temporal
     "day_of_week", "hour_paris", "is_weekend", "is_prime_time",
+    # v25: Message-level text features
+    "call_type_score",
+    "avg_msg_length",
+    "ca_mention_ratio",
+    "caps_ratio",
+    "emoji_density",
+    "multi_token_ratio",
+    "question_ratio",
+    "link_ratio",
+    # v26: Market context features
+    "median_peak_return",
+    "entry_vs_median_peak",
+    "win_rate_7d",
+    "market_heat_24h",
+    "relative_volume",
+    "kol_saturation",
 ]
 
 HORIZONS = {
