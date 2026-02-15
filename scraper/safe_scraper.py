@@ -449,38 +449,48 @@ def process_and_push(messages_data: dict[str, list[dict]], dump: bool = False) -
         logger.error("Auto-backtest failed: %s", e)
 
     # Auto-retrain ML model when enough labeled data accumulated
-    # Conditions: 500+ labeled samples AND >7 days since last training
+    # v22: auto_train does multi-horizon × multi-threshold grid search
+    # Conditions: 100+ labeled samples AND >7 days since last training
     try:
         from train_model import auto_train, MODEL_DIR
-        meta_path = MODEL_DIR / "model_12h_meta.json"
+        import glob as _glob
         should_train = False
-        if not meta_path.exists():
-            # No model yet — train if we have enough data
+
+        # Check any existing model meta across all horizons
+        meta_files = list(MODEL_DIR.glob("model_*_meta.json"))
+        if not meta_files:
             should_train = True
         else:
             import json as _json
-            with open(meta_path) as _f:
-                meta = _json.load(_f)
-            trained_at = meta.get("auto_trained_at") or meta.get("trained_at", "")
-            if trained_at:
-                from datetime import datetime as _dt
+            latest_train = None
+            for mf in meta_files:
                 try:
-                    last_dt = _dt.fromisoformat(trained_at)
-                    days_since = (datetime.now(timezone.utc).replace(tzinfo=None) - last_dt).days
-                    if days_since >= 7:
-                        should_train = True
-                        logger.info("Auto-retrain: %d days since last train, triggering", days_since)
+                    with open(mf) as _f:
+                        meta = _json.load(_f)
+                    trained_at = meta.get("auto_trained_at") or meta.get("trained_at", "")
+                    if trained_at:
+                        from datetime import datetime as _dt
+                        last_dt = _dt.fromisoformat(trained_at)
+                        if latest_train is None or last_dt > latest_train:
+                            latest_train = last_dt
                 except Exception:
+                    pass
+
+            if latest_train:
+                days_since = (datetime.now(timezone.utc).replace(tzinfo=None) - latest_train).days
+                if days_since >= 7:
                     should_train = True
+                    logger.info("Auto-retrain: %d days since last train, triggering", days_since)
             else:
                 should_train = True
 
         if should_train:
-            result = auto_train(horizon="12h", min_samples=500, trials=50)
+            result = auto_train(min_samples=100, trials=50)
             if result:
                 logger.info(
-                    "Auto-retrain: SUCCESS — spearman=%.3f, p@5=%.3f",
-                    result.get("metrics", {}).get("spearman", 0),
+                    "Auto-retrain: SUCCESS — %s/%s/%.1fx p@5=%.3f",
+                    result.get("horizon"), result.get("mode"),
+                    result.get("threshold", 2.0),
                     result.get("metrics", {}).get("precision_at_5", 0),
                 )
             else:

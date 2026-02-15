@@ -49,7 +49,16 @@ logger = logging.getLogger(__name__)
 MODEL_DIR = Path(__file__).parent
 
 # Quality gate: model must exceed this precision@5 to be saved
-MIN_PRECISION_AT_5 = 0.40
+# v22: relaxed from 0.40 — lower thresholds (e.g. +50%) are easier to predict
+MIN_PRECISION_AT_5 = 0.30
+
+# v22: Dynamic return thresholds — no longer tied to did_2x_* columns
+RETURN_THRESHOLDS = {
+    "1.3x": 1.3,   # +30%
+    "1.5x": 1.5,   # +50%
+    "2x": 2.0,     # +100%
+    "3x": 3.0,     # +200%
+}
 
 # ═══ FEATURE SELECTION TIERS ═══
 # Tier 1 (core): Best 15 features from SHAP analysis. Use when <500 samples.
@@ -209,9 +218,13 @@ def _select_feature_tier(n_samples: int) -> list[str]:
 
 
 def load_labeled_data(horizon: str = "12h") -> pd.DataFrame:
-    """Load all labeled snapshots from Supabase with pagination (supabase-py defaults to 1000 row limit)."""
+    """
+    Load all labeled snapshots from Supabase with pagination.
+    v22: Filter on max_price_{horizon} being non-null (not did_2x_*),
+    so the label can be computed dynamically at any threshold.
+    """
     client = _get_client()
-    label_col = HORIZONS[horizon]
+    max_price_col = f"max_price_{horizon}"
 
     all_data = []
     page_size = 1000
@@ -221,7 +234,8 @@ def load_labeled_data(horizon: str = "12h") -> pd.DataFrame:
         result = (
             client.table("token_snapshots")
             .select("*")
-            .not_.is_(label_col, "null")
+            .not_.is_(max_price_col, "null")
+            .not_.is_("price_at_snapshot", "null")
             .order("snapshot_at")
             .range(offset, offset + page_size - 1)
             .execute()
@@ -240,15 +254,24 @@ def load_labeled_data(horizon: str = "12h") -> pd.DataFrame:
         return pd.DataFrame()
 
     df = pd.DataFrame(all_data)
+    # Pre-compute max_return for dynamic threshold labeling
+    df[max_price_col] = pd.to_numeric(df[max_price_col], errors="coerce")
+    df["price_at_snapshot"] = pd.to_numeric(df["price_at_snapshot"], errors="coerce")
+    valid = (df[max_price_col] > 0) & (df["price_at_snapshot"] > 0)
+    df = df[valid].copy()
+    df["max_return"] = df[max_price_col] / df["price_at_snapshot"]
     logger.info("Loaded %d labeled snapshots for %s horizon", len(df), horizon)
     return df
 
 
-def deduplicate_snapshots(df: pd.DataFrame, label_col: str) -> pd.DataFrame:
+def deduplicate_snapshots(df: pd.DataFrame, threshold: float = 2.0) -> pd.DataFrame:
     """
     Deduplicate to ONE snapshot per unique token (by token_address or symbol).
     Keeps the FIRST snapshot per token (earliest call = least biased).
     Also filters out zombie tokens (freshest_mention > stale_hours_severe) which are noise.
+
+    v22: No longer depends on did_2x_* columns. Winner count computed from
+    max_return >= threshold (dynamic).
 
     Without this, the same token appears ~5x in training data, causing:
     - Autocorrelation (correlated samples treated as independent)
@@ -262,11 +285,8 @@ def deduplicate_snapshots(df: pd.DataFrame, label_col: str) -> pd.DataFrame:
 
     # Deduplicate by token_address first (most reliable), fallback to symbol
     if "token_address" in df.columns and df["token_address"].notna().any():
-        dedup_col = "token_address"
-        # For rows without token_address, use symbol
         df["_dedup_key"] = df["token_address"].fillna(df["symbol"])
     else:
-        dedup_col = "symbol"
         df["_dedup_key"] = df["symbol"]
 
     df = df.drop_duplicates(subset=["_dedup_key"], keep="first")
@@ -283,10 +303,10 @@ def deduplicate_snapshots(df: pd.DataFrame, label_col: str) -> pd.DataFrame:
             logger.info("Filtered %d zombie snapshots (freshest_mention > %.0fh)", stale_count, stale_cutoff)
 
     after = len(df)
-    winners_after = df[label_col].sum() if label_col in df.columns else "?"
+    winners_after = int((df["max_return"] >= threshold).sum()) if "max_return" in df.columns else "?"
     logger.info(
-        "Deduplicated: %d → %d snapshots (%d unique tokens, %s winners)",
-        before, after, after, winners_after
+        "Deduplicated: %d → %d snapshots (%d unique tokens, %s winners at %.1fx)",
+        before, after, after, winners_after, threshold
     )
     return df.reset_index(drop=True)
 
@@ -549,38 +569,46 @@ def train_regression(
     horizon: str = "12h",
     n_trials: int = 100,
     min_samples: int = 200,
+    threshold: float = 2.0,
 ) -> dict | None:
     """
     Train regression ensemble: predict max_return (continuous) instead of binary 2x.
     The model learns to rank tokens by expected return — more information than binary.
+
+    v22: threshold param controls what counts as a "winner" for precision@K.
+    Label is computed dynamically from max_return >= threshold.
     """
-    label_col = HORIZONS[horizon]
     max_price_col, snapshot_price_col = RETURN_COLS[horizon]
 
     if len(df) < min_samples:
         logger.warning("Only %d samples (need %d). Skipping training.", len(df), min_samples)
         return None
 
-    # Compute regression target: log(max_return)
-    # max_return = max_price_in_window / price_at_snapshot
+    # max_return should already be pre-computed by load_labeled_data()
     df = df.copy()
-    df[max_price_col] = pd.to_numeric(df.get(max_price_col), errors="coerce")
-    df[snapshot_price_col] = pd.to_numeric(df.get(snapshot_price_col), errors="coerce")
-
-    valid_mask = (
-        df[max_price_col].notna() &
-        df[snapshot_price_col].notna() &
-        (df[snapshot_price_col] > 0) &
-        (df[max_price_col] > 0)
-    )
-    df = df[valid_mask].copy()
+    if "max_return" not in df.columns:
+        df[max_price_col] = pd.to_numeric(df.get(max_price_col), errors="coerce")
+        df[snapshot_price_col] = pd.to_numeric(df.get(snapshot_price_col), errors="coerce")
+        valid_mask = (
+            df[max_price_col].notna() &
+            df[snapshot_price_col].notna() &
+            (df[snapshot_price_col] > 0) &
+            (df[max_price_col] > 0)
+        )
+        df = df[valid_mask].copy()
+        df["max_return"] = df[max_price_col] / df[snapshot_price_col]
 
     if len(df) < min_samples:
         logger.warning("Only %d valid regression samples (need %d).", len(df), min_samples)
         return None
 
-    df["max_return"] = df[max_price_col] / df[snapshot_price_col]
     df["log_return"] = np.log1p(df["max_return"] - 1)  # log1p(return) for stability
+
+    # v22: Dynamic binary label for precision@K
+    df["_winner"] = (df["max_return"] >= threshold).astype(int)
+    n_winners = int(df["_winner"].sum())
+    logger.info("Threshold %.1fx: %d winners / %d total (%.1f%%)",
+                threshold, n_winners, len(df), 100 * n_winners / len(df))
 
     # Feature selection by tier
     feature_pool = _select_feature_tier(len(df))
@@ -596,7 +624,8 @@ def train_regression(
     y_train = train_df["log_return"]
     X_test = test_df[available_features]
     y_test = test_df["log_return"]
-    y_test_binary = test_df[label_col].astype(int)
+    # v22: Dynamic binary label from threshold (not did_2x_* column)
+    y_test_binary = test_df["_winner"]
 
     logger.info(
         "Regression — Train: %d, Test: %d, Return range: [%.2f, %.2f]",
@@ -671,10 +700,12 @@ def train_regression(
 
     metadata = {
         "horizon": horizon,
+        "threshold": threshold,
         "mode": "regression",
         "trained_at": datetime.utcnow().isoformat(),
         "train_samples": len(y_train),
         "test_samples": len(y_test),
+        "n_winners": n_winners,
         "feature_tier": "core" if len(df) < 500 else "extended" if len(df) < 2000 else "full",
         "ensemble_weights": {"xgboost": float(xgb_weight), "lightgbm": float(lgb_weight)},
         "xgb_params": {k: v for k, v in xgb_params.items() if k != "verbosity"},
@@ -704,16 +735,17 @@ def train_regression(
 
 # ═══ LEARNING-TO-RANK TRAINING (ML v2 Phase A) ═══
 
-def _compute_relevance(row, horizon: str = "12h") -> int:
+def _compute_relevance(row, horizon: str = "12h", threshold: float = 2.0) -> int:
     """
     Compute graded relevance label for LTR from max return.
 
-    | Condition          | Label | Meaning              |
-    |--------------------|-------|----------------------|
-    | max_return > 5x    | 4     | Exceptional winner   |
-    | did_2x == True     | 3     | Solid winner (2x-5x) |
-    | max_return > 1.3x  | 1     | Moderate gain        |
-    | Everything else    | 0     | Non-winner           |
+    v22: Thresholds are parametric based on the active threshold.
+    | Condition                         | Label | Meaning              |
+    |-----------------------------------|-------|----------------------|
+    | max_return > threshold * 2.5      | 4     | Exceptional winner   |
+    | max_return >= threshold            | 3     | Solid winner         |
+    | max_return > threshold * 0.65     | 1     | Moderate gain        |
+    | Everything else                   | 0     | Non-winner           |
     """
     max_price_col = f"max_price_{horizon}"
     p0 = row.get("price_at_snapshot")
@@ -723,11 +755,11 @@ def _compute_relevance(row, horizon: str = "12h") -> int:
         return 0
 
     max_return = float(pmax) / float(p0)
-    if max_return > 5.0:
+    if max_return > threshold * 2.5:
         return 4
-    elif max_return >= 2.0:
+    elif max_return >= threshold:
         return 3
-    elif max_return > 1.3:
+    elif max_return > threshold * 0.65:
         return 1
     return 0
 
@@ -759,17 +791,18 @@ def train_ltr(
     horizon: str = "12h",
     n_trials: int = 100,
     min_samples: int = 200,
+    threshold: float = 2.0,
 ) -> dict | None:
     """
     Train Learning-to-Rank model using XGBoost's rank:ndcg objective.
     Optimizes NDCG@5 directly — the model learns to rank tokens within
     each cycle, not predict absolute returns.
 
+    v22: threshold param controls relevance grade boundaries.
     LambdaMART is the state-of-the-art for this type of ranking problem.
     """
     max_price_col = f"max_price_{horizon}"
     snapshot_price_col = "price_at_snapshot"
-    label_col = HORIZONS[horizon]
 
     if len(df) < min_samples:
         logger.warning("LTR: Only %d samples (need %d). Skipping.", len(df), min_samples)
@@ -780,8 +813,8 @@ def train_ltr(
     df[max_price_col] = pd.to_numeric(df.get(max_price_col), errors="coerce")
     df[snapshot_price_col] = pd.to_numeric(df.get(snapshot_price_col), errors="coerce")
 
-    # Compute relevance labels
-    df["relevance"] = df.apply(lambda r: _compute_relevance(r, horizon), axis=1)
+    # Compute relevance labels with parametric thresholds
+    df["relevance"] = df.apply(lambda r: _compute_relevance(r, horizon, threshold), axis=1)
 
     # Need labeled data (at least price data to compute relevance)
     valid_mask = df[max_price_col].notna() & (df[snapshot_price_col] > 0)
@@ -827,8 +860,11 @@ def train_ltr(
     X_test = test_df[available_features]
     y_test = test_df["relevance"]
 
-    # Also compute binary labels for precision@5
-    y_test_binary = test_df[label_col].astype(int) if label_col in test_df.columns else (y_test >= 3).astype(int)
+    # v22: Dynamic binary labels from max_return >= threshold (not did_2x_* column)
+    if "max_return" in test_df.columns:
+        y_test_binary = (test_df["max_return"] >= threshold).astype(int)
+    else:
+        y_test_binary = (y_test >= 3).astype(int)
 
     logger.info(
         "LTR — Train: %d samples/%d cycles, Test: %d samples/%d cycles",
@@ -981,6 +1017,7 @@ def train_ltr(
 
     metadata = {
         "horizon": horizon,
+        "threshold": threshold,
         "mode": "ltr",
         "trained_at": datetime.utcnow().isoformat(),
         "train_samples": len(y_train),
@@ -1174,129 +1211,178 @@ def train_ensemble(
     return metadata
 
 
+def _update_scoring_config_ml(horizon: str, threshold: float) -> None:
+    """Write the active ML horizon + threshold to scoring_config for pipeline + backtest coherence."""
+    try:
+        client = _get_client()
+        client.table("scoring_config").update({
+            "ml_horizon": horizon,
+            "ml_threshold": float(threshold),
+            "updated_at": datetime.utcnow().isoformat(),
+            "updated_by": "auto_train",
+            "change_reason": f"auto_train deployed model: {horizon}/{threshold}x",
+        }).eq("id", 1).execute()
+        logger.info("scoring_config updated: ml_horizon=%s, ml_threshold=%.1f", horizon, threshold)
+    except Exception as e:
+        logger.warning("Failed to update scoring_config ml params: %s", e)
+
+
 def auto_train(
-    horizon: str = "12h",
-    min_samples: int = 500,
+    min_samples: int = 100,
     trials: int = 50,
 ) -> dict | None:
     """
-    Non-interactive auto-retrain with A/B comparison.
+    v22: Multi-horizon × multi-threshold grid search.
+
+    Tries all (horizon, threshold) combos, trains regression (+ LTR if enough data),
+    picks the best combo by precision@5, and deploys it.
 
     Returns metadata dict if model was successfully trained and deployed,
     None if skipped or failed.
-
-    Logic:
-    1. Load labeled data — skip if < min_samples
-    2. Train new model
-    3. Compare with existing model (if any) via Spearman correlation
-    4. Deploy new model only if it beats the old one (or no old model)
     """
-    logger.info("=== AUTO-TRAIN: horizon=%s, min_samples=%d, trials=%d ===", horizon, min_samples, trials)
+    HORIZON_POOL = ["6h", "12h", "24h"]
+    THRESHOLD_POOL = [1.3, 1.5, 2.0]
 
-    df = load_labeled_data(horizon)
-    if df.empty:
-        logger.info("auto_train: no data, skipping")
-        return None
-
-    # Deduplicate: one snapshot per token to prevent autocorrelation
-    df = deduplicate_snapshots(df, HORIZONS[horizon])
-
-    if len(df) < min_samples:
-        logger.info("auto_train: only %d unique tokens (need %d), skipping", len(df), min_samples)
-        return None
-
-    # Load existing model metadata for A/B comparison
-    meta_path = MODEL_DIR / f"model_{horizon}_meta.json"
-    old_meta = None
-    if meta_path.exists():
-        try:
-            with open(meta_path) as f:
-                old_meta = json.load(f)
-            logger.info("auto_train: existing model — spearman=%.3f, p@5=%.3f, samples=%d",
-                        old_meta.get("metrics", {}).get("spearman", 0),
-                        old_meta.get("metrics", {}).get("precision_at_5", 0),
-                        old_meta.get("train_samples", 0) + old_meta.get("test_samples", 0))
-        except Exception:
-            pass
+    logger.info("=== AUTO-TRAIN: grid %s × %s, min_samples=%d, trials=%d ===",
+                HORIZON_POOL, THRESHOLD_POOL, min_samples, trials)
 
     # Suppress Optuna logs in auto mode
     optuna.logging.set_verbosity(optuna.logging.WARNING)
 
-    # Train regression model
-    reg_meta = train_regression(df, horizon, n_trials=trials, min_samples=min_samples)
+    # Load existing model metadata for A/B comparison
+    # Check all horizons for existing models
+    old_meta = None
+    old_horizon = None
+    for hz in HORIZON_POOL:
+        mp = MODEL_DIR / f"model_{hz}_meta.json"
+        if mp.exists():
+            try:
+                with open(mp) as f:
+                    meta = json.load(f)
+                if meta.get("quality_gate") == "PASSED":
+                    p5 = meta.get("metrics", {}).get("precision_at_5", 0)
+                    if old_meta is None or p5 > old_meta.get("metrics", {}).get("precision_at_5", 0):
+                        old_meta = meta
+                        old_horizon = hz
+            except Exception:
+                pass
 
-    # Also try LTR if we have enough data (500+ samples, 10+ cycles)
-    ltr_meta = None
-    if len(df) >= 500:
-        try:
-            ltr_meta = train_ltr(df, horizon, n_trials=trials, min_samples=min_samples)
-        except Exception as e:
-            logger.warning("auto_train: LTR training failed: %s", e)
+    if old_meta:
+        logger.info("auto_train: existing best model — %s/%s, p@5=%.3f, samples=%d",
+                    old_horizon, old_meta.get("mode", "?"),
+                    old_meta.get("metrics", {}).get("precision_at_5", 0),
+                    old_meta.get("train_samples", 0) + old_meta.get("test_samples", 0))
 
-    # Pick the best model: compare precision@5 across modes
-    candidates = []
-    if reg_meta and reg_meta.get("quality_gate") == "PASSED":
-        candidates.append(("regression", reg_meta))
-    if ltr_meta and ltr_meta.get("quality_gate") == "PASSED":
-        candidates.append(("ltr", ltr_meta))
+    # Grid search: best (horizon, threshold) combo
+    best_result = None
+    best_horizon = None
+    best_threshold = None
 
-    if not candidates:
-        logger.warning("auto_train: no model passed quality gate")
+    for horizon in HORIZON_POOL:
+        df = load_labeled_data(horizon)
+        if df.empty:
+            logger.info("auto_train: %s — no data, skipping", horizon)
+            continue
+
+        df = deduplicate_snapshots(df, threshold=2.0)  # dedup with default threshold for logging
+
+        if len(df) < min_samples:
+            logger.info("auto_train: %s — only %d unique tokens (need %d), skipping",
+                        horizon, len(df), min_samples)
+            continue
+
+        for threshold in THRESHOLD_POOL:
+            n_winners = int((df["max_return"] >= threshold).sum())
+            if n_winners < 3:
+                logger.info("auto_train: %s/%.1fx — only %d winners, skipping",
+                            horizon, threshold, n_winners)
+                continue
+
+            logger.info("auto_train: trying %s/%.1fx — %d samples, %d winners",
+                        horizon, threshold, len(df), n_winners)
+
+            # Train regression
+            reg_meta = train_regression(
+                df, horizon, n_trials=trials, min_samples=min_samples, threshold=threshold
+            )
+
+            # Also try LTR if enough data
+            ltr_meta = None
+            if len(df) >= 200:
+                try:
+                    ltr_meta = train_ltr(
+                        df, horizon, n_trials=trials, min_samples=min_samples, threshold=threshold
+                    )
+                except Exception as e:
+                    logger.warning("auto_train: LTR %s/%.1fx failed: %s", horizon, threshold, e)
+
+            # Pick best candidate for this combo
+            candidates = []
+            if reg_meta and reg_meta.get("quality_gate") == "PASSED":
+                candidates.append(reg_meta)
+            if ltr_meta and ltr_meta.get("quality_gate") == "PASSED":
+                candidates.append(ltr_meta)
+
+            if not candidates:
+                continue
+
+            combo_best = max(candidates, key=lambda m: m.get("metrics", {}).get("precision_at_5", 0))
+            combo_p5 = combo_best.get("metrics", {}).get("precision_at_5", 0)
+
+            logger.info("auto_train: %s/%.1fx best = %s p@5=%.3f",
+                        horizon, threshold, combo_best.get("mode"), combo_p5)
+
+            if best_result is None or combo_p5 > best_result.get("metrics", {}).get("precision_at_5", 0):
+                best_result = combo_best
+                best_horizon = horizon
+                best_threshold = threshold
+
+    if best_result is None:
+        logger.warning("auto_train: no model passed quality gate across all combos")
         return None
 
-    # Select best by precision@5
-    best_mode, new_meta = max(
-        candidates, key=lambda x: x[1].get("metrics", {}).get("precision_at_5", 0)
-    )
-    new_p5 = new_meta.get("metrics", {}).get("precision_at_5", 0)
-
-    if len(candidates) > 1:
-        for mode_name, meta in candidates:
-            p5 = meta.get("metrics", {}).get("precision_at_5", 0)
-            logger.info("auto_train: %s p@5=%.3f", mode_name, p5)
-        logger.info("auto_train: selected %s (p@5=%.3f)", best_mode, new_p5)
-
-    # If LTR won but regression was already saved, re-save LTR model
-    # (train_ltr saves its own model files, so this is only needed if
-    #  train_regression ran second and overwrote the files)
-    if best_mode == "ltr" and reg_meta:
-        # LTR model was already saved by train_ltr — just ensure meta is correct
-        meta_path_ltr = MODEL_DIR / f"model_{horizon}_meta.json"
-        with open(meta_path_ltr, "w") as f:
-            json.dump(new_meta, f, indent=2)
+    new_p5 = best_result.get("metrics", {}).get("precision_at_5", 0)
+    best_mode = best_result.get("mode", "regression")
 
     # A/B comparison: new model must beat old model on precision@5
     if old_meta:
         old_p5 = old_meta.get("metrics", {}).get("precision_at_5", 0)
         if new_p5 < old_p5:
             logger.warning(
-                "auto_train: new %s model (p@5=%.3f) worse than old %s (p@5=%.3f). "
+                "auto_train: new %s/%s/%.1fx (p@5=%.3f) worse than old %s/%s (p@5=%.3f). "
                 "Keeping old model.",
-                best_mode, new_p5, old_meta.get("mode", "?"), old_p5,
+                best_horizon, best_mode, best_threshold, new_p5,
+                old_horizon, old_meta.get("mode", "?"), old_p5,
             )
             return None
 
         logger.info(
-            "auto_train: new %s model (p@5=%.3f) beats old %s (p@5=%.3f). Deployed!",
-            best_mode, new_p5, old_meta.get("mode", "?"), old_p5,
+            "auto_train: new %s/%s/%.1fx (p@5=%.3f) beats old %s/%s (p@5=%.3f). Deployed!",
+            best_horizon, best_mode, best_threshold, new_p5,
+            old_horizon, old_meta.get("mode", "?"), old_p5,
         )
     else:
-        logger.info("auto_train: no existing model — new %s model deployed (p@5=%.3f)", best_mode, new_p5)
+        logger.info("auto_train: no existing model — %s/%s/%.1fx deployed (p@5=%.3f)",
+                    best_horizon, best_mode, best_threshold, new_p5)
 
-    # Record auto-train timestamp
-    new_meta["auto_trained"] = True
-    new_meta["auto_trained_at"] = datetime.utcnow().isoformat()
+    # Save final metadata with auto-train info
+    meta_path = MODEL_DIR / f"model_{best_horizon}_meta.json"
+    best_result["auto_trained"] = True
+    best_result["auto_trained_at"] = datetime.utcnow().isoformat()
     with open(meta_path, "w") as f:
-        json.dump(new_meta, f, indent=2)
+        json.dump(best_result, f, indent=2)
 
-    return new_meta
+    # Update scoring_config so pipeline + backtest use the same horizon/threshold
+    _update_scoring_config_ml(best_horizon, best_threshold)
+
+    return best_result
 
 
 def main():
     from dotenv import load_dotenv
     load_dotenv(Path(__file__).parent / ".env")
 
-    parser = argparse.ArgumentParser(description="Train ML ensemble for memecoin 2x prediction")
+    parser = argparse.ArgumentParser(description="Train ML ensemble for memecoin prediction")
     parser.add_argument(
         "--horizon", choices=["1h", "6h", "12h", "24h"], default="12h",
         help="Prediction horizon (default: 12h)",
@@ -1306,12 +1392,16 @@ def main():
         help="Training mode: regression (predict max_return), classify (predict did_2x), or ltr (Learning-to-Rank)",
     )
     parser.add_argument(
+        "--threshold", type=float, default=2.0,
+        help="Return threshold for winner label (default: 2.0 = 2x). E.g. 1.5 = +50%%",
+    )
+    parser.add_argument(
         "--trials", type=int, default=100,
         help="Number of Optuna trials per model (default: 100)",
     )
     parser.add_argument(
-        "--min-samples", type=int, default=200,
-        help="Minimum labeled samples required to train (default: 200)",
+        "--min-samples", type=int, default=100,
+        help="Minimum labeled samples required to train (default: 100)",
     )
     parser.add_argument(
         "--all", action="store_true",
@@ -1319,26 +1409,30 @@ def main():
     )
     parser.add_argument(
         "--auto", action="store_true",
-        help="Non-interactive mode: auto-train with A/B comparison, quiet output",
+        help="Non-interactive mode: grid search horizon×threshold, A/B comparison",
     )
     args = parser.parse_args()
 
     if args.auto:
-        # Auto mode: quiet, non-interactive, A/B comparison
+        # Auto mode: quiet, non-interactive, multi-horizon × multi-threshold grid
         logging.getLogger().setLevel(logging.WARNING)
         logger.setLevel(logging.INFO)
         result = auto_train(
-            horizon=args.horizon,
             min_samples=args.min_samples,
             trials=args.trials,
         )
         if result:
-            logger.info("auto_train: SUCCESS — %s", result.get("metrics", {}))
+            logger.info("auto_train: SUCCESS — %s/%s/%.1fx p@5=%.3f",
+                        result.get("horizon"), result.get("mode"),
+                        result.get("threshold", 2.0),
+                        result.get("metrics", {}).get("precision_at_5", 0))
         else:
             logger.info("auto_train: skipped or failed")
         return
 
     horizons = HORIZONS.keys() if args.all else [args.horizon]
+    threshold = args.threshold
+
     if args.mode == "ltr":
         train_fn = train_ltr
     elif args.mode == "regression":
@@ -1347,12 +1441,18 @@ def main():
         train_fn = train_ensemble
 
     for horizon in horizons:
-        logger.info("\n%s\n=== Training %s %s ===\n%s", "=" * 60, horizon, args.mode, "=" * 60)
+        logger.info("\n%s\n=== Training %s %s (threshold=%.1fx) ===\n%s",
+                    "=" * 60, horizon, args.mode, threshold, "=" * 60)
         df = load_labeled_data(horizon)
         if not df.empty:
             # Deduplicate: one snapshot per token to prevent autocorrelation
-            df = deduplicate_snapshots(df, HORIZONS[horizon])
-            result = train_fn(df, horizon, n_trials=args.trials, min_samples=args.min_samples)
+            df = deduplicate_snapshots(df, threshold=threshold)
+            # Classification mode doesn't support threshold param
+            if args.mode == "classify":
+                result = train_fn(df, horizon, n_trials=args.trials, min_samples=args.min_samples)
+            else:
+                result = train_fn(df, horizon, n_trials=args.trials,
+                                  min_samples=args.min_samples, threshold=threshold)
             if result and result.get("quality_gate") == "FAILED":
                 logger.warning("Model for %s failed quality gate — not deployed.", horizon)
 

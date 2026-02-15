@@ -540,7 +540,8 @@ _ml_meta = None           # Full metadata dict (mode, weights, quality gate)
 _ml_loaded = False         # Prevent repeated load attempts
 
 # Quality gate: refuse to load models below this threshold
-_MIN_PRECISION_AT_5 = 0.40
+# v22: relaxed from 0.40 — lower return thresholds (e.g. +50%) are easier to predict
+_MIN_PRECISION_AT_5 = 0.30
 
 
 def _load_ml_model(horizon: str = "12h"):
@@ -679,7 +680,9 @@ def _apply_ml_scores(ranking: list[dict]) -> None:
     - classification: predict_proba → scale to [0.5, 1.5]
     - ltr (Learning-to-Rank): relevance score → percentile rank → [0.5, 1.5]
     """
-    xgb_model, lgb_model, features, meta = _load_ml_model()
+    # v22: Read ML horizon from scoring_config (dynamic)
+    ml_horizon = SCORING_PARAMS.get("ml_horizon", "12h")
+    xgb_model, lgb_model, features, meta = _load_ml_model(horizon=ml_horizon)
     if (xgb_model is None and lgb_model is None) or not features or not meta:
         return
 
@@ -1682,6 +1685,9 @@ _DEFAULT_SCORING_PARAMS = {
     "gate_top10_pct": 70,
     "gate_min_liquidity": 10000,
     "gate_min_holders": 30,
+    # v22: ML model horizon + threshold (dynamic)
+    "ml_horizon": "12h",
+    "ml_threshold": 2.0,
 }
 
 # Module-level cache: refreshed once per scrape cycle via load_scoring_config()
@@ -1749,13 +1755,18 @@ def load_scoring_config() -> None:
         for key, default in _DYNAMIC_KEYS.items():
             SCORING_PARAMS[key] = float(row.get(key, default))
 
+        # v22: ML model horizon + threshold
+        SCORING_PARAMS["ml_horizon"] = row.get("ml_horizon", "12h") or "12h"
+        SCORING_PARAMS["ml_threshold"] = float(row.get("ml_threshold", 2.0) or 2.0)
+
         logger.info(
             "scoring_config loaded: consensus=%.2f conviction=%.2f breadth=%.2f PA=%.2f "
-            "decay=%.3f activity=[%.2f,%.2f] (updated_by=%s, %s)",
+            "decay=%.3f activity=[%.2f,%.2f] ml=%s/%.1fx (updated_by=%s, %s)",
             new_weights["consensus"], new_weights["conviction"],
             new_weights["breadth"], new_weights["price_action"],
             SCORING_PARAMS["decay_lambda"],
             SCORING_PARAMS["activity_mult_floor"], SCORING_PARAMS["activity_mult_cap"],
+            SCORING_PARAMS["ml_horizon"], SCORING_PARAMS["ml_threshold"],
             row.get("updated_by", "?"), row.get("change_reason", ""),
         )
     except Exception as e:

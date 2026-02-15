@@ -45,9 +45,14 @@ _DEFAULT_WEIGHTS = {
 BALANCED_WEIGHTS = _DEFAULT_WEIGHTS.copy()
 
 
+# v22: Module-level ML config read from scoring_config
+ML_HORIZON = "12h"
+ML_THRESHOLD = 2.0
+
+
 def _load_current_weights(client) -> dict:
-    """Load current production weights from scoring_config table."""
-    global BALANCED_WEIGHTS
+    """Load current production weights + ML config from scoring_config table."""
+    global BALANCED_WEIGHTS, ML_HORIZON, ML_THRESHOLD
     try:
         result = client.table("scoring_config").select("*").eq("id", 1).execute()
         if result.data:
@@ -62,7 +67,13 @@ def _load_current_weights(client) -> dict:
             if abs(total - 1.0) < 0.02:
                 BALANCED_WEIGHTS.update(weights)
                 logger.info("auto_backtest: loaded weights from scoring_config: %s", weights)
-                return weights
+
+            # v22: Read ML horizon + threshold
+            ML_HORIZON = row.get("ml_horizon", "12h") or "12h"
+            ML_THRESHOLD = float(row.get("ml_threshold", 2.0) or 2.0)
+            logger.info("auto_backtest: ML target = %s/%.1fx", ML_HORIZON, ML_THRESHOLD)
+
+            return weights
     except Exception as e:
         logger.debug("auto_backtest: scoring_config load failed: %s", e)
     return BALANCED_WEIGHTS.copy()
@@ -323,13 +334,15 @@ def _compute_return(row: pd.Series, horizon: str = "12h") -> float | None:
 
 def _top1_hit_rate(df: pd.DataFrame) -> dict:
     """
-    THE key metric: does the #1 ranked token 2x?
+    THE key metric: does the #1 ranked token hit the return threshold?
 
+    v22: Multi-threshold hit rates computed from max_return (not did_2x_* flags).
     Groups snapshots by cycle, picks the highest-scoring token per cycle.
     Deduplicates: if the same token is #1 across consecutive cycles, it's
-    counted only ONCE (first occurrence). This prevents $LARRY being #1 for
-    4 cycles from inflating the test count.
+    counted only ONCE (first occurrence).
     """
+    THRESHOLDS = [1.3, 1.5, 2.0]
+
     df = df.copy()
     df["score"] = df.apply(lambda r: _compute_score(r, BALANCED_WEIGHTS), axis=1)
 
@@ -339,51 +352,63 @@ def _top1_hit_rate(df: pd.DataFrame) -> dict:
     results = {"1h": {}, "6h": {}, "12h": {}, "24h": {}, "48h": {}, "72h": {}, "7d": {}}
 
     for horizon in ["1h", "6h", "12h", "24h", "48h", "72h", "7d"]:
-        flag_col = f"did_2x_{horizon}"
-        if flag_col not in df.columns:
+        max_price_col = f"max_price_{horizon}"
+        if max_price_col not in df.columns:
             continue
 
-        tokens_tested = 0
-        tokens_hit = 0
         top1_details = []
-        seen_addresses = set()  # dedup: same token as #1 counted once
+        seen_addresses = set()
 
         for cycle_ts, group in df.sort_values("snapshot_at").groupby("cycle"):
-            labeled = group[group[flag_col].notna()]
+            # Need max_price + price_at_snapshot for return computation
+            labeled = group[group[max_price_col].notna() & group["price_at_snapshot"].notna()]
             if labeled.empty:
                 continue
 
-            # #1 token = highest score in this cycle
             top1 = labeled.loc[labeled["score"].idxmax()]
             addr = top1.get("token_address") or top1["symbol"]
-            did_2x = bool(top1[flag_col])
-            ret = _compute_return(top1, horizon)
 
-            # Skip if this token was already #1 in a previous cycle
             if addr in seen_addresses:
                 continue
             seen_addresses.add(addr)
 
-            tokens_tested += 1
-            if did_2x:
-                tokens_hit += 1
-
+            ret = _compute_return(top1, horizon)
             top1_details.append({
                 "cycle": str(cycle_ts),
                 "symbol": top1["symbol"],
                 "score": int(top1["score"]),
-                "did_2x": did_2x,
                 "max_return": round(ret, 2) if ret else None,
             })
 
-        if tokens_tested > 0:
-            results[horizon] = {
-                "tokens_tested": tokens_tested,
-                "tokens_hit": tokens_hit,
-                "hit_rate": round(tokens_hit / tokens_tested, 4),
-                "target": 1.0,
-                "details": top1_details,
-            }
+        if not top1_details:
+            continue
+
+        tokens_tested = len(top1_details)
+        horizon_result = {
+            "tokens_tested": tokens_tested,
+            "details": top1_details,
+        }
+
+        # Compute hit rates at multiple thresholds
+        for thresh in THRESHOLDS:
+            thresh_key = f"{thresh}x"
+            hits = sum(1 for d in top1_details if d["max_return"] and d["max_return"] >= thresh)
+            horizon_result[f"hits_{thresh_key}"] = hits
+            horizon_result[f"hit_rate_{thresh_key}"] = round(hits / tokens_tested, 4)
+
+        # Backward compat: "tokens_hit" and "hit_rate" use 2.0x
+        horizon_result["tokens_hit"] = horizon_result.get("hits_2.0x", 0)
+        horizon_result["hit_rate"] = horizon_result.get("hit_rate_2.0x", 0)
+        horizon_result["target"] = 1.0
+
+        # Mark details with multi-threshold flags
+        for d in top1_details:
+            ret = d.get("max_return")
+            d["did_2x"] = bool(ret and ret >= 2.0)
+            for thresh in THRESHOLDS:
+                d[f"hit_{thresh}x"] = bool(ret and ret >= thresh)
+
+        results[horizon] = horizon_result
 
     return results
 
@@ -794,6 +819,7 @@ def _walk_forward(df: pd.DataFrame, horizon_col: str = "did_2x_12h") -> list[dic
 def _find_optimal_weights(df: pd.DataFrame, horizon_col: str = "did_2x_12h") -> dict | None:
     """
     Grid search for weight combination that maximizes #1 token hit rate.
+    v22: Uses ML_THRESHOLD from scoring_config for dynamic hit rate computation.
     Returns best weights dict or None if no improvement found.
     """
     first = df.sort_values("snapshot_at").drop_duplicates(subset=["token_address"], keep="first")
@@ -801,16 +827,21 @@ def _find_optimal_weights(df: pd.DataFrame, horizon_col: str = "did_2x_12h") -> 
     if len(labeled) < 50:
         return None
 
+    # v22: Use threshold from scoring_config for hit rate computation
+    threshold = ML_THRESHOLD
+    horizon_suffix = horizon_col.replace("did_2x_", "")
+
     # Generate candidate weight combinations (step=0.05, sum=1.0)
     best_hr = -1
     best_weights = None
-    step = 0.05
     components = list(BALANCED_WEIGHTS.keys())
 
     # Score the current weights first as baseline
     labeled["base_score"] = labeled.apply(lambda r: _compute_score(r, BALANCED_WEIGHTS), axis=1)
     # Use top1 metric: per-cycle #1 token hit rate
     labeled["cycle"] = labeled["snapshot_at"].dt.floor("15min")
+    # Pre-compute max_return for dynamic threshold
+    labeled["_max_return"] = labeled.apply(lambda r: _compute_return(r, horizon_suffix), axis=1)
 
     def _top1_hr_for_weights(weights: dict) -> float:
         labeled["test_score"] = labeled.apply(lambda r: _compute_score(r, weights), axis=1)
@@ -827,7 +858,9 @@ def _find_optimal_weights(df: pd.DataFrame, horizon_col: str = "did_2x_12h") -> 
                 continue
             seen.add(addr)
             tested += 1
-            if bool(top1[horizon_col]):
+            # v22: Use max_return >= threshold instead of did_2x flag
+            ret = top1.get("_max_return")
+            if ret is not None and ret >= threshold:
                 hits += 1
         return hits / max(1, tested)
 
@@ -1038,23 +1071,25 @@ def _generate_recommendations(report: dict) -> list[str]:
         recs.append(f"HIGH FALSE POSITIVE RATE: {fp_rate*100:.0f}% of high-scoring tokens "
                    "didn't 2x. Algorithm is overconfident.")
 
-    # === PRIMARY TARGET: #1 token must always 2x ===
+    # === PRIMARY TARGET: #1 token must hit return threshold ===
     top1 = report.get("top1_hit_rate", {})
     for horizon in ["12h", "6h", "24h", "48h", "72h", "7d"]:
         t1 = top1.get(horizon, {})
         if t1.get("tokens_tested", 0) > 0:
-            hr = t1["hit_rate"]
             tested = t1["tokens_tested"]
-            hits = t1["tokens_hit"]
-            if hr >= 1.0:
-                recs.append(f"TARGET MET ({horizon}): #1 token 2x'd {hits}/{tested} unique tokens (100%)")
-            elif hr >= 0.5:
-                recs.append(f"CLOSE ({horizon}): #1 token 2x'd {hits}/{tested} unique tokens ({hr*100:.0f}%). Target: 100%")
-            else:
-                recs.append(f"NEEDS WORK ({horizon}): #1 token 2x'd {hits}/{tested} unique tokens ({hr*100:.0f}%). Target: 100%")
-            # Show which #1 tokens failed
+            # v22: Show multi-threshold hit rates
+            for thresh_key in ["1.3x", "1.5x", "2.0x"]:
+                hr = t1.get(f"hit_rate_{thresh_key}", 0)
+                hits = t1.get(f"hits_{thresh_key}", 0)
+                if hr >= 1.0:
+                    recs.append(f"TARGET MET ({horizon}/{thresh_key}): #1 token hit {hits}/{tested} (100%)")
+                elif hr >= 0.5:
+                    recs.append(f"CLOSE ({horizon}/{thresh_key}): #1 token hit {hits}/{tested} ({hr*100:.0f}%)")
+                else:
+                    recs.append(f"NEEDS WORK ({horizon}/{thresh_key}): #1 token hit {hits}/{tested} ({hr*100:.0f}%)")
+            # Show which #1 tokens failed at 2x
             for d in t1.get("details", []):
-                if not d["did_2x"]:
+                if not d.get("did_2x"):
                     ret = d.get("max_return")
                     ret_str = f"{ret}x" if ret else "?"
                     recs.append(f"  MISS: {d['symbol']} score={d['score']} return={ret_str}")
@@ -1259,12 +1294,16 @@ def main():
         for horizon in ["1h", "6h", "12h", "24h", "48h", "72h", "7d"]:
             t1 = top1.get(horizon, {})
             if t1.get("tokens_tested", 0) > 0:
-                hr = t1["hit_rate"]
-                marker = "OK" if hr >= 1.0 else "MISS"
-                print(f"  {horizon}: {t1['tokens_hit']}/{t1['tokens_tested']} = "
-                      f"{hr*100:.0f}% [{marker}]")
+                tested = t1["tokens_tested"]
+                # v22: Multi-threshold display
+                parts = []
+                for tk in ["1.3x", "1.5x", "2.0x"]:
+                    hr = t1.get(f"hit_rate_{tk}", 0)
+                    hits = t1.get(f"hits_{tk}", 0)
+                    parts.append(f"{tk}={hits}/{tested}({hr*100:.0f}%)")
+                print(f"  {horizon}: {' | '.join(parts)}")
                 for d in t1.get("details", []):
-                    status = "2x" if d["did_2x"] else "FAIL"
+                    status = "2x" if d.get("did_2x") else "FAIL"
                     ret = f"{d['max_return']}x" if d.get("max_return") else "?"
                     print(f"    {d['symbol']:15s} score={d['score']:3d} "
                           f"return={ret:>6s} [{status}]")
