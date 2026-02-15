@@ -5,6 +5,7 @@ interface RpcRow {
   kol_name: string;
   unique_tokens: number;
   labeled_calls: number;
+  hits_any: number;
   labeled_12h: number;
   labeled_24h: number;
   labeled_48h: number;
@@ -25,14 +26,13 @@ export interface KolLeaderboardEntry {
   score: number | null;
   uniqueTokens: number;
   labeledCalls: number;
+  hitsAny: number;
   hits12h: number;
   hits24h: number;
   hits48h: number;
   hits72h: number;
   hits7d: number;
-  winRate12h: number | null;
-  winRate24h: number | null;
-  winRateAny: number | null;
+  winRateAll: number | null;
   lastActive: string | null;
 }
 
@@ -68,29 +68,6 @@ async function callRpc(caOnly: boolean): Promise<{
 }
 
 /**
- * Best per-horizon win rate for a KOL.
- * Uses per-horizon labeled counts so denominator matches the horizon.
- * Requires MIN_HORIZON_CALLS per horizon to count.
- */
-function bestHorizonWinRate(row: RpcRow, minCalls: number): number | null {
-  const horizons: [number, number][] = [
-    [Number(row.hits_12h), Number(row.labeled_12h)],
-    [Number(row.hits_24h), Number(row.labeled_24h)],
-    [Number(row.hits_48h), Number(row.labeled_48h)],
-    [Number(row.hits_72h), Number(row.labeled_72h)],
-    [Number(row.hits_7d), Number(row.labeled_7d)],
-  ];
-  let best: number | null = null;
-  for (const [hits, labeled] of horizons) {
-    if (labeled >= minCalls) {
-      const rate = hits / labeled;
-      if (best === null || rate > best) best = rate;
-    }
-  }
-  return best;
-}
-
-/**
  * Compute dynamic normalized scores from RPC data.
  * Uses per-horizon win rates so incomplete horizons don't deflate scores.
  * Matches kol_scorer.py logic: score = (hit_rate / baseline), capped [0.1, 3.0].
@@ -101,21 +78,15 @@ function computeDynamicScores(
   const MIN_CALLS = 5;
   const scores = new Map<string, number>();
 
-  // Compute baseline: best per-horizon win rate across all KOLs
+  // Compute baseline: overall hit rate (any horizon) across all KOLs
   let totalHits = 0;
   let totalLabeled = 0;
   for (const row of rpcRows) {
-    // Use the longest labeled horizon for baseline (most complete data)
-    const labeled24 = Number(row.labeled_24h);
-    const hits24 = Number(row.hits_24h);
-    const labeled12 = Number(row.labeled_12h);
-    const hits12 = Number(row.hits_12h);
-    if (labeled24 >= 1) {
-      totalLabeled += labeled24;
-      totalHits += hits24;
-    } else if (labeled12 >= 1) {
-      totalLabeled += labeled12;
-      totalHits += hits12;
+    const labeled = Number(row.labeled_calls);
+    const hits = Number(row.hits_any);
+    if (labeled >= 1) {
+      totalLabeled += labeled;
+      totalHits += hits;
     }
   }
 
@@ -123,10 +94,12 @@ function computeDynamicScores(
   const safeBaseline = Math.max(baseline, 0.01);
 
   for (const row of rpcRows) {
-    const best = bestHorizonWinRate(row, MIN_CALLS);
-    if (best === null) continue;
+    const labeled = Number(row.labeled_calls);
+    const hits = Number(row.hits_any);
+    if (labeled < MIN_CALLS) continue;
 
-    const normalized = best / safeBaseline;
+    const winRate = hits / labeled;
+    const normalized = winRate / safeBaseline;
     scores.set(
       row.kol_name,
       Math.round(Math.max(0.1, Math.min(3.0, normalized)) * 1000) / 1000
@@ -165,8 +138,7 @@ export async function GET(request: Request) {
       ([name, tierInfo]) => {
         const rpc = rpcMap.get(name);
         const labeledCalls = rpc ? Number(rpc.labeled_calls) : 0;
-        const labeled12h = rpc ? Number(rpc.labeled_12h) : 0;
-        const labeled24h = rpc ? Number(rpc.labeled_24h) : 0;
+        const hitsAny = rpc ? Number(rpc.hits_any) : 0;
         const hits12h = rpc ? Number(rpc.hits_12h) : 0;
         const hits24h = rpc ? Number(rpc.hits_24h) : 0;
         const hits48h = rpc ? Number(rpc.hits_48h) : 0;
@@ -176,11 +148,8 @@ export async function GET(request: Request) {
         // Dynamic score primary, static KOL_SCORES fallback
         const score = dynamicScores.get(name) ?? KOL_SCORES[name] ?? null;
 
-        // Per-horizon win rates (use per-horizon labeled counts as denominator)
-        const winRate12h = labeled12h >= 3 ? hits12h / labeled12h : null;
-        const winRate24h = labeled24h >= 3 ? hits24h / labeled24h : null;
-        // Best available horizon win rate
-        const winRateAny = rpc ? bestHorizonWinRate(rpc, 3) : null;
+        // Overall win rate: hits at ANY horizon / all labeled calls (no minimum threshold)
+        const winRateAll = labeledCalls >= 1 ? hitsAny / labeledCalls : null;
 
         return {
           name,
@@ -189,14 +158,13 @@ export async function GET(request: Request) {
           score,
           uniqueTokens: rpc ? Number(rpc.unique_tokens) : 0,
           labeledCalls,
+          hitsAny,
           hits12h,
           hits24h,
           hits48h,
           hits72h,
           hits7d,
-          winRate12h,
-          winRate24h,
-          winRateAny,
+          winRateAll,
           lastActive: rpc?.last_active ?? null,
         };
       }

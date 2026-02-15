@@ -388,243 +388,415 @@ def _get_max_price_dexpaprika(
 
 # === Main ===
 
+def _parse_snapshot_ts(snap_at_str: str) -> float | None:
+    """Parse snapshot_at string to Unix timestamp."""
+    try:
+        if snap_at_str.endswith("Z"):
+            snap_dt = datetime.fromisoformat(snap_at_str.replace("Z", "+00:00"))
+        elif "+" in snap_at_str:
+            snap_dt = datetime.fromisoformat(snap_at_str)
+        else:
+            snap_dt = datetime.fromisoformat(snap_at_str).replace(tzinfo=timezone.utc)
+        return snap_dt.timestamp()
+    except (ValueError, AttributeError):
+        return None
+
+
+def _extract_horizons_from_candles(
+    sorted_candles: list,
+    snapshot_ts: float,
+    price_at: float,
+    horizons_to_fill: list[dict],
+) -> dict[int, dict]:
+    """
+    From a single set of chronologically sorted candles, extract max_price, min_price,
+    last_close, peak_ts, time_to_2x, and bot_data for ALL requested horizons at once.
+
+    This is the key optimization: 1 OHLCV fetch → label all pending horizons.
+    """
+    results = {}
+    target_2x = price_at * 2.0 if price_at > 0 else None
+
+    for hz in horizons_to_fill:
+        hours = hz["hours"]
+        window_end_ts = snapshot_ts + hours * 3600
+
+        max_high = 0.0
+        min_low = float('inf')
+        peak_ts = None
+        time_to_2x_ts = None
+        last_close = None
+        last_ts = 0
+        candles_in_window = 0
+
+        # Bot simulation: TP/SL tracking (only for 12h/24h)
+        tp_timestamps = {m: None for m in TP_MULTS}
+        sl_timestamps = {m: None for m in SL_MULTS}
+        tp_prices = {m: price_at * m for m in TP_MULTS} if price_at > 0 else {}
+        sl_prices = {m: price_at * m for m in SL_MULTS} if price_at > 0 else {}
+        max_dd_before_tp30 = 0.0
+
+        for candle in sorted_candles:
+            candle_ts = candle[0]
+            if candle_ts < snapshot_ts or candle_ts > window_end_ts:
+                continue
+            high = float(candle[2])
+            low = float(candle[3])
+            close = float(candle[4])
+
+            if high > max_high:
+                max_high = high
+                peak_ts = candle_ts
+            if low < min_low:
+                min_low = low
+            if target_2x and time_to_2x_ts is None and high >= target_2x:
+                time_to_2x_ts = candle_ts
+            if candle_ts > last_ts:
+                last_ts = candle_ts
+                last_close = close
+            candles_in_window += 1
+
+            # Bot: TP/SL detection
+            if hours in (12, 24):
+                for mult, target in tp_prices.items():
+                    if tp_timestamps[mult] is None and high >= target:
+                        tp_timestamps[mult] = candle_ts
+                for mult, target in sl_prices.items():
+                    if sl_timestamps[mult] is None and low <= target:
+                        sl_timestamps[mult] = candle_ts
+                if price_at > 0 and tp_timestamps.get(1.3) is None:
+                    dd = (price_at - low) / price_at
+                    if dd > max_dd_before_tp30:
+                        max_dd_before_tp30 = dd
+
+        if candles_in_window == 0:
+            results[hours] = None
+            continue
+
+        time_to_2x_hours = None
+        if time_to_2x_ts:
+            time_to_2x_hours = round((time_to_2x_ts - snapshot_ts) / 3600, 2)
+            time_to_2x_hours = max(0, min(hours, time_to_2x_hours))
+
+        bot_data = None
+        if hours in (12, 24) and price_at > 0:
+            bot_data = {
+                "t_1_3x": _ts_to_minutes(tp_timestamps.get(1.3), snapshot_ts),
+                "t_1_5x": _ts_to_minutes(tp_timestamps.get(1.5), snapshot_ts),
+                "t_sl20": _ts_to_minutes(sl_timestamps.get(0.8), snapshot_ts),
+                "t_sl30": _ts_to_minutes(sl_timestamps.get(0.7), snapshot_ts),
+                "t_sl50": _ts_to_minutes(sl_timestamps.get(0.5), snapshot_ts),
+                "max_dd_pct": round(max_dd_before_tp30 * 100, 2) if max_dd_before_tp30 > 0 else 0,
+            }
+
+        results[hours] = {
+            "max_price": max_high if max_high > 0 else None,
+            "min_price": min_low if min_low < float('inf') else None,
+            "last_close": last_close,
+            "peak_ts": peak_ts,
+            "time_to_2x_hours": time_to_2x_hours,
+            "bot_data": bot_data,
+        }
+
+    return results
+
+
 def fill_outcomes() -> None:
     """
-    For each horizon, find snapshots old enough to label but not yet labeled.
-    Uses OHLCV candle data to find the MAX price during the window.
-    NO DexScreener current price fallback — that causes false negatives.
-    If OHLCV fails, snapshot stays unlabeled and will be retried next cycle.
+    Batch-optimized outcome labeling: 1 OHLCV call per snapshot labels ALL pending horizons.
 
-    Consistency enforcement: a longer horizon's max_price is always >= shorter horizon's.
+    Old approach: loop per horizon × per snapshot = 7 API calls per token.
+    New approach: find snapshots with ANY unlabeled horizon, fetch longest needed window once,
+    extract all shorter horizons from the same candle data.
+
+    GeckoTerminal rate limit: 30 req/min. Old: ~100 tokens/run. New: ~700 tokens/run (7x faster).
     """
     client = _get_client()
     now = datetime.now(timezone.utc)
     pool_cache = _load_pool_cache()
-    stats = {"updated": 0, "ohlcv": 0, "skipped": 0, "no_price": 0, "consistent": 0}
+    stats = {"updated": 0, "api_calls": 0, "skipped": 0, "no_price": 0, "consistent": 0}
     start_time = time.time()
-    budget_exceeded = False
 
-    for horizon in HORIZONS:
-        if budget_exceeded:
+    # Find snapshots with ANY unlabeled horizon (oldest first for fairness)
+    # Use the shortest horizon cutoff (1h) to get all eligible snapshots
+    cutoff_1h = (now - timedelta(hours=1)).isoformat()
+
+    try:
+        result = (
+            client.table("token_snapshots")
+            .select("id, symbol, price_at_snapshot, snapshot_at, token_address, pair_address, "
+                    "max_price_1h, max_price_6h, max_price_12h, max_price_24h, max_price_48h, max_price_72h, max_price_7d, "
+                    "did_2x_1h, did_2x_6h, did_2x_12h, did_2x_24h, did_2x_48h, did_2x_72h, did_2x_7d")
+            .lt("snapshot_at", cutoff_1h)
+            .or_("did_2x_1h.is.null,did_2x_6h.is.null,did_2x_12h.is.null,did_2x_24h.is.null,did_2x_48h.is.null,did_2x_72h.is.null,did_2x_7d.is.null")
+            .order("snapshot_at", desc=False)
+            .limit(BATCH_LIMIT)
+            .execute()
+        )
+    except Exception as e:
+        logger.error("Failed to query pending snapshots: %s", e)
+        return
+
+    snapshots = result.data or []
+    if not snapshots:
+        logger.info("No pending snapshots to label")
+        _save_pool_cache(pool_cache)
+        return
+
+    logger.info("Processing %d snapshots (batch-optimized, all horizons per token)", len(snapshots))
+
+    for snap in snapshots:
+        # Check time budget
+        if time.time() - start_time > TIME_BUDGET_SECONDS:
+            logger.warning("Time budget exceeded (%.0fs), stopping gracefully", time.time() - start_time)
             break
-        hours = horizon["hours"]
-        price_col = horizon["price_col"]
-        flag_col = horizon["flag_col"]
-        max_col = horizon["max_col"]
-        peak_col = horizon["peak_col"]
-        min_col = horizon["min_col"]
-        t2x_col = horizon["t2x_col"]
 
-        cutoff = (now - timedelta(hours=hours)).isoformat()
+        snap_id = snap["id"]
+        symbol = snap["symbol"]
+        price_at = snap.get("price_at_snapshot")
 
-        try:
-            result = (
-                client.table("token_snapshots")
-                .select("id, symbol, price_at_snapshot, snapshot_at, token_address, pair_address, "
-                        "max_price_1h, max_price_6h, max_price_12h, max_price_24h, max_price_48h, max_price_72h, max_price_7d, "
-                        "did_2x_1h, did_2x_6h, did_2x_12h, did_2x_24h, did_2x_48h, did_2x_72h, did_2x_7d")
-                .is_(flag_col, "null")
-                .lt("snapshot_at", cutoff)
-                .limit(BATCH_LIMIT)
-                .execute()
-            )
-        except Exception as e:
-            logger.error("Failed to query pending snapshots for %dh: %s", hours, e)
-            continue
-
-        snapshots = result.data or []
-        if not snapshots:
-            logger.debug("No pending snapshots for %dh horizon", hours)
-            continue
-
-        logger.info("Processing %d snapshots for %dh horizon", len(snapshots), hours)
-
-        for snap in snapshots:
-            # Check time budget before each snapshot
-            if time.time() - start_time > TIME_BUDGET_SECONDS:
-                logger.warning("Outcome tracker: time budget exceeded (%.0fs), stopping gracefully",
-                               time.time() - start_time)
-                budget_exceeded = True
-                break
-
-            snap_id = snap["id"]
-            symbol = snap["symbol"]
-            price_at = snap.get("price_at_snapshot")
-
-            if not price_at or float(price_at) <= 0:
+        if not price_at or float(price_at) <= 0:
+            # Mark all unlabeled horizons as False (no price = can't evaluate)
+            update = {}
+            for hz in HORIZONS:
+                if snap.get(hz["flag_col"]) is None:
+                    update[hz["price_col"]] = None
+                    update[hz["flag_col"]] = False
+            if update:
                 try:
-                    client.table("token_snapshots").update({
-                        price_col: None,
-                        flag_col: False,
-                    }).eq("id", snap_id).execute()
+                    client.table("token_snapshots").update(update).eq("id", snap_id).execute()
                     stats["no_price"] += 1
                 except Exception as e:
                     logger.error("Failed to update %d: %s", snap_id, e)
+            continue
+
+        price_at = float(price_at)
+        snapshot_ts = _parse_snapshot_ts(snap.get("snapshot_at", ""))
+        if not snapshot_ts:
+            stats["skipped"] += 1
+            continue
+
+        # Determine which horizons need filling and are old enough
+        age_hours = (now.timestamp() - snapshot_ts) / 3600
+        horizons_to_fill = []
+        for hz in HORIZONS:
+            if snap.get(hz["flag_col"]) is None and age_hours >= hz["hours"]:
+                horizons_to_fill.append(hz)
+
+        if not horizons_to_fill:
+            continue
+
+        # Resolve pool address (1 API call, cached for 7 days)
+        pool_addr = snap.get("pair_address")
+        token_addr = snap.get("token_address")
+        if not pool_addr and token_addr:
+            pool_addr = _get_pool_address(token_addr, pool_cache)
+            time.sleep(2.1)
+            stats["api_calls"] += 1
+
+        if not pool_addr:
+            stats["skipped"] += 1
+            continue
+
+        # ONE OHLCV call for the LONGEST horizon needed → extract all shorter ones
+        longest_hours = max(hz["hours"] for hz in horizons_to_fill)
+        window_end_ts = int(snapshot_ts + longest_hours * 3600)
+        num_candles = (longest_hours * 60) // 5 + 10
+
+        sorted_candles = None
+        source = "none"
+
+        # Try GeckoTerminal
+        try:
+            resp = requests.get(
+                GECKOTERMINAL_OHLCV_URL.format(pool=pool_addr),
+                params={
+                    "aggregate": 5,
+                    "before_timestamp": window_end_ts,
+                    "limit": min(1000, num_candles),
+                    "currency": "usd",
+                    "token": "base",
+                },
+                timeout=15,
+            )
+            time.sleep(2.1)
+            stats["api_calls"] += 1
+
+            if resp.status_code == 200:
+                ohlcv_list = resp.json().get("data", {}).get("attributes", {}).get("ohlcv_list") or []
+                if ohlcv_list:
+                    sorted_candles = sorted(ohlcv_list, key=lambda c: c[0])
+                    source = "gecko_ohlcv"
+            elif resp.status_code == 429:
+                logger.warning("GeckoTerminal rate limited, sleeping 10s")
+                time.sleep(10)
+        except requests.RequestException as e:
+            logger.debug("GeckoTerminal OHLCV failed for %s: %s", symbol, e)
+
+        # Fallback: DexPaprika
+        if sorted_candles is None:
+            start_dt = datetime.fromtimestamp(snapshot_ts, tz=timezone.utc)
+            end_dt = start_dt + timedelta(hours=longest_hours)
+            try:
+                resp = requests.get(
+                    f"{DEXPAPRIKA_BASE}/networks/solana/pools/{pool_addr}/ohlcv",
+                    params={
+                        "start": start_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        "end": end_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        "limit": (longest_hours * 4) + 10,
+                        "interval": "15m",
+                    },
+                    timeout=15,
+                )
+                time.sleep(0.3)
+                stats["api_calls"] += 1
+
+                if resp.status_code == 200:
+                    candles_raw = resp.json()
+                    if isinstance(candles_raw, list) and candles_raw:
+                        # DexPaprika format: list of dicts with open/high/low/close/time
+                        sorted_candles = []
+                        for c in candles_raw:
+                            try:
+                                ts_str = c.get("time") or c.get("timestamp", "")
+                                if ts_str.endswith("Z"):
+                                    ts_dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                                else:
+                                    ts_dt = datetime.fromisoformat(ts_str)
+                                sorted_candles.append([
+                                    int(ts_dt.timestamp()),
+                                    float(c.get("open", 0)),
+                                    float(c.get("high", 0)),
+                                    float(c.get("low", 0)),
+                                    float(c.get("close", 0)),
+                                    float(c.get("volume", 0)),
+                                ])
+                            except (ValueError, TypeError):
+                                continue
+                        sorted_candles.sort(key=lambda x: x[0])
+                        if sorted_candles:
+                            source = "dexpaprika_ohlcv"
+                        else:
+                            sorted_candles = None
+            except requests.RequestException as e:
+                logger.debug("DexPaprika OHLCV failed for %s: %s", symbol, e)
+
+        if sorted_candles is None:
+            stats["skipped"] += 1
+            continue
+
+        # Extract all horizons from the single candle dataset
+        hz_results = _extract_horizons_from_candles(
+            sorted_candles, snapshot_ts, price_at, horizons_to_fill,
+        )
+
+        # Build the update for all horizons at once
+        update_data = {}
+        running_max = 0.0
+        running_did_2x = False
+
+        # Also check already-labeled shorter horizons for consistency
+        for hz in HORIZONS:
+            existing_max = snap.get(hz["max_col"])
+            existing_did = snap.get(hz["flag_col"])
+            if existing_max is not None and float(existing_max) > running_max:
+                running_max = float(existing_max)
+            if existing_did is True:
+                running_did_2x = True
+
+            if hz not in horizons_to_fill:
                 continue
 
-            price_at = float(price_at)
+            hours = hz["hours"]
+            result_data = hz_results.get(hours)
 
-            # Consistency check: if a shorter horizon already found 2x,
-            # the longer horizon's max must be >= that shorter max.
-            # E.g. if max_price_6h = 0.001 and we're computing 12h,
-            # then max_price_12h must be >= 0.001.
-            shorter_max = 0.0
-            shorter_did_2x = False
-            for sh in HORIZONS:
-                if sh["hours"] >= hours:
-                    break
-                sh_max = snap.get(sh["max_col"])
-                sh_did = snap.get(sh["flag_col"])
-                if sh_max is not None and float(sh_max) > shorter_max:
-                    shorter_max = float(sh_max)
-                if sh_did is True:
-                    shorter_did_2x = True
+            max_price = result_data["max_price"] if result_data else None
+            min_price = result_data["min_price"] if result_data else None
+            last_close = result_data["last_close"] if result_data else None
+            peak_ts_val = result_data["peak_ts"] if result_data else None
+            t2x_hours = result_data["time_to_2x_hours"] if result_data else None
+            bot_data = result_data["bot_data"] if result_data else None
 
-            # Parse snapshot timestamp
-            snap_at_str = snap.get("snapshot_at", "")
-            try:
-                if snap_at_str.endswith("Z"):
-                    snap_dt = datetime.fromisoformat(snap_at_str.replace("Z", "+00:00"))
-                elif "+" in snap_at_str:
-                    snap_dt = datetime.fromisoformat(snap_at_str)
-                else:
-                    snap_dt = datetime.fromisoformat(snap_at_str).replace(tzinfo=timezone.utc)
-                snapshot_ts = snap_dt.timestamp()
-            except (ValueError, AttributeError):
-                snapshot_ts = None
-
-            max_price = None
-            min_price = None
-            last_close = None
-            peak_ts = None
-            time_to_2x_hours = None
-            bot_data = None
-            source = "none"
-
-            if snapshot_ts:
-                pool_addr = snap.get("pair_address")
-                token_addr = snap.get("token_address")
-
-                if not pool_addr and token_addr:
-                    pool_addr = _get_pool_address(token_addr, pool_cache)
-                    time.sleep(2.1)
-
-                if pool_addr:
-                    # Try GeckoTerminal OHLCV first
-                    max_price, min_price, last_close, peak_ts, time_to_2x_hours, bot_data = _get_max_price_gecko(
-                        pool_addr, snapshot_ts, hours, price_at=price_at,
-                    )
-                    time.sleep(2.1)
-                    if max_price is not None:
-                        source = "gecko_ohlcv"
-
-                    # Fallback: DexPaprika OHLCV
-                    if max_price is None:
-                        max_price, min_price, last_close, peak_ts, time_to_2x_hours, bot_data = _get_max_price_dexpaprika(
-                            pool_addr, snapshot_ts, hours, price_at=price_at,
-                        )
-                        time.sleep(0.3)
-                        if max_price is not None:
-                            source = "dexpaprika_ohlcv"
-
-            # If OHLCV failed but shorter horizon has data, use consistency rule
-            if max_price is None and shorter_max > 0:
-                max_price = shorter_max
+            # Consistency: inherit from shorter horizon if no OHLCV data
+            if max_price is None and running_max > 0:
+                max_price = running_max
                 last_close = None
-                source = "consistency_inherited"
                 stats["consistent"] += 1
 
             if max_price is None:
-                # No OHLCV data — skip and retry next cycle (DON'T use current price)
-                stats["skipped"] += 1
-                continue
+                continue  # Skip this horizon, retry next cycle
 
-            # Sanity check: reject OHLCV data that is wildly implausible.
-            # GeckoTerminal/DexPaprika sometimes return the SOL price (~$85)
-            # instead of the token price due to base/quote token mismatch.
+            # Sanity check
             ratio = max_price / price_at if price_at > 0 else 0
             max_ratio = MAX_PLAUSIBLE_RATIO.get(hours, 500)
             if ratio > max_ratio:
                 logger.warning(
-                    "Implausible OHLCV for %s/%dh: %.6f -> %.6f (%.0fx) — "
-                    "likely SOL price, not token price. Skipping.",
+                    "Implausible OHLCV for %s/%dh: %.6f -> %.6f (%.0fx) — skipping",
                     symbol, hours, price_at, max_price, ratio,
                 )
-                stats["skipped"] += 1
                 continue
 
-            # Apply consistency floor: max_price can't be less than shorter horizon's max
-            if shorter_max > 0 and max_price < shorter_max:
-                logger.debug(
-                    "Consistency fix %s/%dh: %.10f -> %.10f (from shorter window)",
-                    symbol, hours, max_price, shorter_max,
-                )
-                max_price = shorter_max
+            # Consistency floor
+            if running_max > 0 and max_price < running_max:
+                max_price = running_max
 
             did_2x = max_price >= (price_at * 2.0)
-
-            # If shorter horizon did 2x, this horizon must also be 2x
-            if shorter_did_2x and not did_2x:
+            if running_did_2x and not did_2x:
                 did_2x = True
-                logger.debug(
-                    "Consistency override %s/%dh: shorter horizon was 2x, forcing did_2x=True",
-                    symbol, hours,
-                )
 
-            # Validate last_close against ratio check before storing
+            # Validate last_close
             safe_close = last_close
-            if safe_close and price_at > 0:
-                close_ratio = safe_close / price_at
-                if close_ratio > max_ratio:
-                    logger.warning(
-                        "Implausible last_close for %s/%dh: %.6f -> %.6f (%.0fx), using max_price",
-                        symbol, hours, price_at, safe_close, close_ratio,
-                    )
-                    safe_close = None
+            if safe_close and price_at > 0 and (safe_close / price_at) > max_ratio:
+                safe_close = None
 
-            # v16: Compute peak_hour — how many hours after snapshot the peak occurred
+            # Peak hour
             peak_hour = None
-            if peak_ts and snapshot_ts:
-                peak_hour = round((peak_ts - snapshot_ts) / 3600, 2)
-                # Clamp to window (candle timestamps can be slightly off)
+            if peak_ts_val and snapshot_ts:
+                peak_hour = round((peak_ts_val - snapshot_ts) / 3600, 2)
                 peak_hour = max(0, min(hours, peak_hour))
 
-            update_data = {
-                price_col: safe_close if safe_close else max_price,
-                flag_col: did_2x,
-                max_col: max_price,
-                peak_col: peak_hour,
-                min_col: min_price,
-                t2x_col: time_to_2x_hours,
-            }
+            update_data[hz["price_col"]] = safe_close if safe_close else max_price
+            update_data[hz["flag_col"]] = did_2x
+            update_data[hz["max_col"]] = max_price
+            update_data[hz["peak_col"]] = peak_hour
+            update_data[hz["min_col"]] = min_price
+            update_data[hz["t2x_col"]] = t2x_hours
 
-            # Bot simulation columns: write TP/SL timing for 12h and 24h horizons
+            # Bot simulation columns
             if bot_data and hours in (12, 24):
-                hz = f"_{hours}h"
-                update_data[f"time_to_1_3x_min{hz}"] = bot_data.get("t_1_3x")
-                update_data[f"time_to_1_5x_min{hz}"] = bot_data.get("t_1_5x")
-                update_data[f"time_to_sl20_min{hz}"] = bot_data.get("t_sl20")
-                update_data[f"time_to_sl30_min{hz}"] = bot_data.get("t_sl30")
-                update_data[f"time_to_sl50_min{hz}"] = bot_data.get("t_sl50")
-                update_data[f"max_dd_before_tp_pct{hz}"] = bot_data.get("max_dd_pct")
+                hz_suffix = f"_{hours}h"
+                update_data[f"time_to_1_3x_min{hz_suffix}"] = bot_data.get("t_1_3x")
+                update_data[f"time_to_1_5x_min{hz_suffix}"] = bot_data.get("t_1_5x")
+                update_data[f"time_to_sl20_min{hz_suffix}"] = bot_data.get("t_sl20")
+                update_data[f"time_to_sl30_min{hz_suffix}"] = bot_data.get("t_sl30")
+                update_data[f"time_to_sl50_min{hz_suffix}"] = bot_data.get("t_sl50")
+                update_data[f"max_dd_before_tp_pct{hz_suffix}"] = bot_data.get("max_dd_pct")
 
+            # Update running max for next horizons
+            if max_price > running_max:
+                running_max = max_price
+            if did_2x:
+                running_did_2x = True
+
+            if did_2x:
+                logger.info(
+                    "2x CONFIRMED (%s): %s at %dh (%.10f -> %.10f = %.1fx)",
+                    source, symbol, hours, price_at, max_price, max_price / price_at,
+                )
+
+        # Single DB update for ALL horizons of this snapshot
+        if update_data:
             try:
                 client.table("token_snapshots").update(update_data).eq("id", snap_id).execute()
                 stats["updated"] += 1
-                stats["ohlcv"] += 1
-                if did_2x:
-                    logger.info(
-                        "2x CONFIRMED (%s): %s at %dh (%.10f -> %.10f = %.1fx)",
-                        source, symbol, hours, price_at, max_price, max_price / price_at,
-                    )
             except Exception as e:
-                logger.error("Failed to update %d (%s/%dh): %s", snap_id, symbol, hours, e)
+                logger.error("Failed to update %d (%s): %s", snap_id, symbol, e)
 
     _save_pool_cache(pool_cache)
 
     logger.info(
-        "Outcome tracker: updated=%d, ohlcv=%d, skipped=%d, no_price=%d, consistency_inherited=%d",
-        stats["updated"], stats["ohlcv"], stats["skipped"], stats["no_price"], stats["consistent"],
+        "Outcome tracker: updated=%d, api_calls=%d, skipped=%d, no_price=%d, consistency=%d",
+        stats["updated"], stats["api_calls"], stats["skipped"], stats["no_price"], stats["consistent"],
     )
 
     # Second pass: fix existing inconsistencies in already-labeled data

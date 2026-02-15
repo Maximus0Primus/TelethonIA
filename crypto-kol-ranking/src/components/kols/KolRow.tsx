@@ -10,14 +10,13 @@ export interface KolRowData {
   score: number | null;
   uniqueTokens: number;
   labeledCalls: number;
+  hitsAny: number;
   hits12h: number;
   hits24h: number;
   hits48h: number;
   hits72h: number;
   hits7d: number;
-  winRate12h: number | null;
-  winRate24h: number | null;
-  winRateAny: number | null;
+  winRateAll: number | null;
   lastActive: string | null;
 }
 
@@ -54,9 +53,8 @@ const PODIUM_BORDER: Record<number, string> = {
 
 export function KolRow({ kol, rank, index }: KolRowProps) {
   const podiumBorder = PODIUM_BORDER[rank];
-  // Show most actionable win rate: 12h first, then 24h, then any
-  const winRate = kol.winRate12h ?? kol.winRate24h ?? kol.winRateAny;
-  const winRateHorizon = kol.winRate12h != null ? "12h" : kol.winRate24h != null ? "24h" : kol.winRateAny != null ? "any" : null;
+  // Overall win rate: hit 2x at any horizon / all labeled calls
+  const winRate = kol.winRateAll;
 
   return (
     <motion.div
@@ -117,11 +115,8 @@ export function KolRow({ kol, rank, index }: KolRowProps) {
                 style={{ width: `${Math.min(winRate * 100, 100)}%` }}
               />
             </div>
-            <span className="text-xs text-white/50 tabular-nums font-mono text-right flex items-center gap-1">
-              <span>{(winRate * 100).toFixed(0)}%</span>
-              {winRateHorizon && (
-                <span className="text-[9px] text-white/25">{winRateHorizon}</span>
-              )}
+            <span className="text-xs text-white/50 tabular-nums font-mono text-right">
+              {(winRate * 100).toFixed(0)}%
             </span>
           </>
         ) : (
