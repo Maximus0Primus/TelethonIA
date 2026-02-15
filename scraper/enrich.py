@@ -32,7 +32,8 @@ BIRDEYE_TOKEN_OVERVIEW_URL = "https://public-api.birdeye.so/defi/token_overview"
 BIRDEYE_TOKEN_SECURITY_URL = "https://public-api.birdeye.so/defi/token_security"
 
 # Max tokens to enrich via Birdeye per cycle (free tier = 30K CUs/month)
-BIRDEYE_TOP_N = 5
+# Raised from 5 → 20: ~600 CU/cycle × 96 cycles/day = ~18K CU/month (within 30K limit)
+BIRDEYE_TOP_N = 20
 
 
 def _load_cache() -> dict:
@@ -306,12 +307,35 @@ def _fetch_rugcheck(mint: str) -> dict | None:
         has_freeze_authority = 1 if any("freeze" in r.lower() for r in risk_names) else 0
         risk_count = len(risks)
 
-        # LP locked info
+        # LP locked info — check multiple sources in the RugCheck response
         lp_locked_pct = None
-        for h in top_holders:
-            if h.get("owner", "").lower() in ("raydium", "orca", "meteora"):
-                lp_locked_pct = h.get("pct", 0)
-                break
+
+        # Source 1: top-level lpLockedPct (present in some response versions)
+        if data.get("lpLockedPct") is not None:
+            lp_locked_pct = float(data["lpLockedPct"])
+
+        # Source 2: markets array — each market has lp.lpLockedPct
+        if lp_locked_pct is None:
+            markets = data.get("markets") or []
+            for m in markets:
+                lp = m.get("lp") or {}
+                pct = lp.get("lpLockedPct")
+                if pct is not None and pct > 0:
+                    lp_locked_pct = float(pct)
+                    break  # use first market with locked LP
+
+        # Source 3: topHolders flagged as LP (isLpToken or owner label)
+        if lp_locked_pct is None:
+            for h in top_holders:
+                if h.get("isLpToken") or h.get("is_lp"):
+                    lp_locked_pct = h.get("pct", 0)
+                    break
+
+        if lp_locked_pct is None:
+            # Debug: log available keys so we can find the right field
+            avail_keys = [k for k in data.keys() if "lp" in k.lower() or "lock" in k.lower() or "market" in k.lower()]
+            if avail_keys:
+                logger.debug("RugCheck LP debug for %s: relevant keys=%s", mint[:8], avail_keys)
 
         return {
             "risk_score": risk_score,
@@ -497,6 +521,13 @@ def enrich_tokens(ranking: list[dict]) -> list[dict]:
 
     cache = _load_cache()
     birdeye_key = os.environ.get("BIRDEYE_API_KEY")
+    helius_key = os.environ.get("HELIUS_API_KEY")
+
+    if not birdeye_key:
+        logger.warning("BIRDEYE_API_KEY not set — Birdeye enrichment (holder_count, wallets) will be skipped")
+    if not helius_key:
+        logger.warning("HELIUS_API_KEY not set — Helius enrichment (gini, whale, jito) will be skipped")
+
     enriched_count = 0
     birdeye_count = 0
 

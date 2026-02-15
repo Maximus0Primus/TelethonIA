@@ -86,8 +86,6 @@ HORIZON_MINUTES = {
     "48h": 2880, "72h": 4320, "7d": 10080,
 }
 
-TOTAL_KOLS = 60
-
 SCORE_BANDS = [
     ("band_0_30", 0, 30),
     ("band_30_50", 30, 50),

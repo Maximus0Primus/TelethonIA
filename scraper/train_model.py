@@ -57,6 +57,11 @@ MODEL_DIR = Path(__file__).parent
 # v22: relaxed from 0.40 — lower thresholds (e.g. +50%) are easier to predict
 MIN_PRECISION_AT_5 = 0.30
 
+# Minimum test set size for quality gate to be meaningful
+# Need 200+ unique tokens for p@5 to be statistically reliable.
+# With N=14 the ML adds noise, not signal. Collect more data first.
+MIN_N_TEST = 200
+
 # v22: Dynamic return thresholds — no longer tied to did_2x_* columns
 RETURN_THRESHOLDS = {
     "1.3x": 1.3,   # +30%
@@ -465,11 +470,10 @@ def load_risk_reward_data(horizon: str = "12h") -> pd.DataFrame:
     return df
 
 
-def prepare_features(df: pd.DataFrame, feature_pool: list[str]) -> tuple[pd.DataFrame, list[str]]:
+def _transform_features(df: pd.DataFrame, feature_pool: list[str]) -> pd.DataFrame:
     """
-    Transform raw data into ML features.
-    Only uses features from the provided pool (tier-selected).
-    Returns (df_with_features, list_of_available_feature_columns).
+    Per-row feature transformations (log-scale, derived features).
+    Safe to run on full dataset before train/test split — no data leakage.
     """
     df = df.copy()
 
@@ -518,13 +522,19 @@ def prepare_features(df: pd.DataFrame, feature_pool: list[str]) -> tuple[pd.Data
         df["is_weekend"] = (df["day_of_week"] >= 5).astype(int)
         df["is_prime_time"] = ((df["hour_paris"] >= 19) | (df["hour_paris"] < 5)).astype(int)
 
-    # Filter to features in the tier pool that are available (>10% non-null)
+    return df
+
+
+def _select_available_features(df: pd.DataFrame, feature_pool: list[str]) -> list[str]:
+    """
+    Filter features to those with >10% non-null values.
+    MUST be called on TRAIN set only to avoid data leakage.
+    """
     available = []
     for col in feature_pool:
         if col in df.columns:
             non_null_pct = df[col].notna().mean()
             if non_null_pct >= 0.10:
-                df[col] = pd.to_numeric(df[col], errors="coerce")
                 available.append(col)
             else:
                 logger.debug("Dropping %s: only %.0f%% non-null", col, non_null_pct * 100)
@@ -532,6 +542,20 @@ def prepare_features(df: pd.DataFrame, feature_pool: list[str]) -> tuple[pd.Data
             logger.debug("Feature %s not in data — skipping", col)
 
     logger.info("Using %d features (from %d in tier pool)", len(available), len(feature_pool))
+    return available
+
+
+def prepare_features(df: pd.DataFrame, feature_pool: list[str]) -> tuple[pd.DataFrame, list[str]]:
+    """
+    Legacy wrapper: transform + select in one call.
+    For new code, use _transform_features() + _select_available_features() separately
+    with the split applied between them to avoid feature-selection leakage.
+    """
+    df = _transform_features(df, feature_pool)
+    available = _select_available_features(df, feature_pool)
+    # Coerce selected features to numeric
+    for col in available:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
     return df, available
 
 
@@ -778,15 +802,21 @@ def train_regression(
     logger.info("Threshold %.1fx: %d winners / %d total (%.1f%%)",
                 threshold, n_winners, len(df), 100 * n_winners / len(df))
 
-    # Feature selection by tier
+    # Feature selection by tier (transform before split, select on train only)
     feature_pool = _select_feature_tier(len(df))
-    df, available_features = prepare_features(df, feature_pool)
+    df = _transform_features(df, feature_pool)
+
+    train_df, test_df = walk_forward_split(df)
+    available_features = _select_available_features(train_df, feature_pool)
 
     if len(available_features) < 5:
         logger.error("Only %d features available — need at least 5", len(available_features))
         return None
 
-    train_df, test_df = walk_forward_split(df)
+    # Coerce selected features to numeric in both splits
+    for col in available_features:
+        train_df[col] = pd.to_numeric(train_df[col], errors="coerce")
+        test_df[col] = pd.to_numeric(test_df[col], errors="coerce")
 
     X_train = train_df[available_features]
     y_train = train_df["log_return"]
@@ -840,6 +870,15 @@ def train_regression(
     logger.info("Precision@10 (thresholded): %.3f", p_at_10)
 
     # Quality gate
+    if len(y_test) < MIN_N_TEST:
+        logger.warning(
+            "QUALITY GATE FAILED: test set too small (%d < %d minimum). "
+            "Collect more data before training.",
+            len(y_test), MIN_N_TEST,
+        )
+        return {"quality_gate": "FAILED", "reason": "insufficient_test_data",
+                "n_test": len(y_test), "min_required": MIN_N_TEST}
+
     if p_at_5 < MIN_PRECISION_AT_5:
         logger.warning(
             "QUALITY GATE FAILED: precision@5 = %.3f < %.2f minimum. "
@@ -1002,13 +1041,9 @@ def train_ltr(
     logger.info("LTR: %d samples across %d cycles (avg %.1f tokens/cycle)",
                 len(df), len(group_sizes), len(df) / len(group_sizes))
 
-    # Feature selection by tier
+    # Feature selection by tier (transform before split, select on train only)
     feature_pool = _select_feature_tier(len(df))
-    df, available_features = prepare_features(df, feature_pool)
-
-    if len(available_features) < 5:
-        logger.error("LTR: Only %d features available — need at least 5", len(available_features))
-        return None
+    df = _transform_features(df, feature_pool)
 
     # Walk-forward split on CYCLES (not individual rows)
     df["cycle"] = df["snapshot_at"].dt.floor("15min")
@@ -1019,6 +1054,17 @@ def train_ltr(
 
     train_df = df[df["cycle"].isin(train_cycles)]
     test_df = df[df["cycle"].isin(test_cycles)]
+
+    available_features = _select_available_features(train_df, feature_pool)
+
+    if len(available_features) < 5:
+        logger.error("LTR: Only %d features available — need at least 5", len(available_features))
+        return None
+
+    # Coerce selected features to numeric in both splits
+    for col in available_features:
+        train_df[col] = pd.to_numeric(train_df[col], errors="coerce")
+        test_df[col] = pd.to_numeric(test_df[col], errors="coerce")
 
     train_groups = train_df.groupby("cycle").size().tolist()
     test_groups = test_df.groupby("cycle").size().tolist()
@@ -1149,6 +1195,14 @@ def train_ltr(
     logger.info("Spearman rank: %.3f", spearman)
 
     # Quality gate
+    if len(y_test) < MIN_N_TEST:
+        logger.warning(
+            "LTR QUALITY GATE FAILED: test set too small (%d < %d minimum).",
+            len(y_test), MIN_N_TEST,
+        )
+        return {"quality_gate": "FAILED", "reason": "insufficient_test_data",
+                "n_test": len(y_test), "min_required": MIN_N_TEST, "mode": "ltr"}
+
     if p_at_5 < MIN_PRECISION_AT_5:
         logger.warning(
             "LTR QUALITY GATE FAILED: precision@5 = %.3f < %.2f. Model NOT saved.",
@@ -1255,15 +1309,21 @@ def train_bot_won(
         logger.warning("Bot training: only %d wins, need at least 3. Skipping.", n_winners)
         return None
 
-    # Feature selection by tier
+    # Feature selection by tier (transform before split, select on train only)
     feature_pool = _select_feature_tier(len(df))
-    df, available_features = prepare_features(df, feature_pool)
+    df = _transform_features(df, feature_pool)
+
+    train_df, test_df = walk_forward_split(df)
+    available_features = _select_available_features(train_df, feature_pool)
 
     if len(available_features) < 5:
         logger.error("Bot training: only %d features — need at least 5", len(available_features))
         return None
 
-    train_df, test_df = walk_forward_split(df)
+    # Coerce selected features to numeric in both splits
+    for col in available_features:
+        train_df[col] = pd.to_numeric(train_df[col], errors="coerce")
+        test_df[col] = pd.to_numeric(test_df[col], errors="coerce")
 
     X_train = train_df[available_features]
     y_train = train_df[y_col].astype(int)
@@ -1321,6 +1381,14 @@ def train_bot_won(
     logger.info("Precision@10: %.3f, AUC: %.3f, F1: %.3f", p_at_10, auc, f1)
 
     # Quality gate
+    if len(y_test) < MIN_N_TEST:
+        logger.warning(
+            "BOT QUALITY GATE FAILED: test set too small (%d < %d minimum).",
+            len(y_test), MIN_N_TEST,
+        )
+        return {"quality_gate": "FAILED", "reason": "insufficient_test_data",
+                "n_test": len(y_test), "min_required": MIN_N_TEST, "mode": "bot_won"}
+
     if p_at_5 < MIN_PRECISION_AT_5:
         logger.warning(
             "BOT QUALITY GATE FAILED: precision@5 = %.3f < %.2f. Model NOT saved.",
@@ -1418,15 +1486,21 @@ def train_risk_reward(
         logger.warning("RR training: only %d winners, need at least 3. Skipping.", n_winners)
         return None
 
-    # Feature selection by tier
+    # Feature selection by tier (transform before split, select on train only)
     feature_pool = _select_feature_tier(len(df))
-    df, available_features = prepare_features(df, feature_pool)
+    df = _transform_features(df, feature_pool)
+
+    train_df, test_df = walk_forward_split(df)
+    available_features = _select_available_features(train_df, feature_pool)
 
     if len(available_features) < 5:
         logger.error("RR training: only %d features — need at least 5", len(available_features))
         return None
 
-    train_df, test_df = walk_forward_split(df)
+    # Coerce selected features to numeric in both splits
+    for col in available_features:
+        train_df[col] = pd.to_numeric(train_df[col], errors="coerce")
+        test_df[col] = pd.to_numeric(test_df[col], errors="coerce")
 
     X_train = train_df[available_features]
     y_train = train_df["log_rr"]
@@ -1502,6 +1576,14 @@ def train_risk_reward(
         logger.info("DD by RR band: %s", dd_by_rr_band)
 
     # Quality gate
+    if len(y_test) < MIN_N_TEST:
+        logger.warning(
+            "RR QUALITY GATE FAILED: test set too small (%d < %d minimum).",
+            len(y_test), MIN_N_TEST,
+        )
+        return {"quality_gate": "FAILED", "reason": "insufficient_test_data",
+                "n_test": len(y_test), "min_required": MIN_N_TEST, "mode": "risk_reward"}
+
     if p_at_5 < MIN_PRECISION_AT_5:
         logger.warning(
             "RR QUALITY GATE FAILED: precision@5 = %.3f < %.2f. Model NOT saved.",
@@ -1583,15 +1665,21 @@ def train_ensemble(
         logger.warning("Only %d samples (need %d). Skipping.", len(df), min_samples)
         return None
 
-    # Feature selection by tier
+    # Feature selection by tier (transform before split, select on train only)
     feature_pool = _select_feature_tier(len(df))
-    df, available_features = prepare_features(df, feature_pool)
+    df = _transform_features(df, feature_pool)
+
+    train_df, test_df = walk_forward_split(df)
+    available_features = _select_available_features(train_df, feature_pool)
 
     if len(available_features) < 5:
         logger.error("Only %d features available — need at least 5", len(available_features))
         return None
 
-    train_df, test_df = walk_forward_split(df)
+    # Coerce selected features to numeric in both splits
+    for col in available_features:
+        train_df[col] = pd.to_numeric(train_df[col], errors="coerce")
+        test_df[col] = pd.to_numeric(test_df[col], errors="coerce")
 
     X_train = train_df[available_features]
     y_train = train_df[label_col].astype(int)
@@ -1664,6 +1752,14 @@ def train_ensemble(
     logger.info("\n%s", classification_report(y_test, ensemble_pred, zero_division=0))
 
     # Quality gate
+    if len(y_test) < MIN_N_TEST:
+        logger.warning(
+            "QUALITY GATE FAILED: test set too small (%d < %d minimum).",
+            len(y_test), MIN_N_TEST,
+        )
+        return {"quality_gate": "FAILED", "reason": "insufficient_test_data",
+                "n_test": len(y_test), "min_required": MIN_N_TEST}
+
     if p_at_5 < MIN_PRECISION_AT_5:
         logger.warning(
             "QUALITY GATE FAILED: precision@5 = %.3f < %.2f. Model NOT saved.",

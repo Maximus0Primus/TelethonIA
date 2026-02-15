@@ -28,6 +28,27 @@ from supabase import create_client, Client
 
 logger = logging.getLogger(__name__)
 
+
+class _RateLimiter:
+    """Simple rate limiter: sleeps only the remaining time to maintain req/min target."""
+
+    def __init__(self, requests_per_minute: int = 28):
+        self._interval = 60.0 / requests_per_minute  # seconds between requests
+        self._last_request = 0.0
+
+    def wait(self):
+        """Sleep just enough to maintain rate limit (accounts for processing time)."""
+        now = time.monotonic()
+        elapsed = now - self._last_request
+        if elapsed < self._interval:
+            time.sleep(self._interval - elapsed)
+        self._last_request = time.monotonic()
+
+
+# GeckoTerminal: 30 req/min, use 28 to leave headroom
+_gecko_limiter = _RateLimiter(28)
+
+
 GECKOTERMINAL_POOLS_URL = "https://api.geckoterminal.com/api/v2/networks/solana/tokens/{token_address}/pools"
 GECKOTERMINAL_OHLCV_URL = "https://api.geckoterminal.com/api/v2/networks/solana/pools/{pool}/ohlcv/minute"
 DEXPAPRIKA_BASE = "https://api.dexpaprika.com"
@@ -134,6 +155,12 @@ def _ts_to_minutes(ts: float | None, snapshot_ts: float) -> int | None:
 # TP/SL thresholds for bot simulation
 TP_MULTS = [1.3, 1.5]   # +30%, +50%  (2.0x already tracked as time_to_2x)
 SL_MULTS = [0.8, 0.7, 0.5]  # -20%, -30%, -50%
+
+logger.info(
+    "Outcome tracker: TP levels=%s, SL levels=%s",
+    [f"+{int((t-1)*100)}%" for t in TP_MULTS],
+    [f"-{int((1-s)*100)}%" for s in SL_MULTS],
+)
 
 
 def _get_max_price_gecko(
@@ -590,8 +617,8 @@ def fill_outcomes() -> None:
         pool_addr = snap.get("pair_address")
         token_addr = snap.get("token_address")
         if not pool_addr and token_addr:
+            _gecko_limiter.wait()
             pool_addr = _get_pool_address(token_addr, pool_cache)
-            time.sleep(2.1)
             stats["api_calls"] += 1
 
         if not pool_addr:
@@ -608,6 +635,7 @@ def fill_outcomes() -> None:
 
         # Try GeckoTerminal
         try:
+            _gecko_limiter.wait()
             resp = requests.get(
                 GECKOTERMINAL_OHLCV_URL.format(pool=pool_addr),
                 params={
@@ -619,7 +647,6 @@ def fill_outcomes() -> None:
                 },
                 timeout=15,
             )
-            time.sleep(2.1)
             stats["api_calls"] += 1
 
             if resp.status_code == 200:
@@ -628,8 +655,8 @@ def fill_outcomes() -> None:
                     sorted_candles = sorted(ohlcv_list, key=lambda c: c[0])
                     source = "gecko_ohlcv"
             elif resp.status_code == 429:
-                logger.warning("GeckoTerminal rate limited, sleeping 10s")
-                time.sleep(10)
+                logger.warning("GeckoTerminal rate limited — falling back to DexPaprika")
+                # Don't sleep 10s — immediately try DexPaprika fallback below
         except requests.RequestException as e:
             logger.debug("GeckoTerminal OHLCV failed for %s: %s", symbol, e)
 
@@ -794,9 +821,13 @@ def fill_outcomes() -> None:
 
     _save_pool_cache(pool_cache)
 
+    elapsed = time.time() - start_time
+    throughput = stats["updated"] / max(1, elapsed) * 60  # tokens/minute
     logger.info(
-        "Outcome tracker: updated=%d, api_calls=%d, skipped=%d, no_price=%d, consistency=%d",
+        "Outcome tracker: updated=%d, api_calls=%d, skipped=%d, no_price=%d, consistency=%d "
+        "(%.0fs elapsed, %.1f tokens/min)",
         stats["updated"], stats["api_calls"], stats["skipped"], stats["no_price"], stats["consistent"],
+        elapsed, throughput,
     )
 
     # Second pass: fix existing inconsistencies in already-labeled data
@@ -1043,18 +1074,18 @@ def backfill_bot_data(batch_limit: int = 50) -> None:
             token_addr = snap.get("token_address")
 
             if not pool_addr and token_addr:
+                _gecko_limiter.wait()
                 pool_addr = _get_pool_address(token_addr, pool_cache)
-                time.sleep(2.1)
 
             if not pool_addr:
                 stats["skipped"] += 1
                 continue
 
             # Fetch OHLCV — try Gecko then DexPaprika
+            _gecko_limiter.wait()
             _, _, _, _, _, bot_data = _get_max_price_gecko(
                 pool_addr, snapshot_ts, hours, price_at=price_at,
             )
-            time.sleep(2.1)
 
             if bot_data is None:
                 _, _, _, _, _, bot_data = _get_max_price_dexpaprika(

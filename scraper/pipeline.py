@@ -577,10 +577,20 @@ def _load_ml_model(horizon: str = "12h"):
 
     # Quality gate check
     p_at_5 = meta.get("metrics", {}).get("precision_at_5", 0)
+    n_test = meta.get("metrics", {}).get("n_test", meta.get("n_test", 0))
     if meta.get("quality_gate") != "PASSED" or p_at_5 < _MIN_PRECISION_AT_5:
         logger.warning(
             "ML quality gate REJECTED: precision@5=%.3f (need >=%.2f), gate=%s. Using manual scores only.",
             p_at_5, _MIN_PRECISION_AT_5, meta.get("quality_gate", "UNKNOWN"),
+        )
+        return None, None, None, None
+
+    # Refuse models trained on tiny test sets — statistically meaningless
+    if n_test < 200:
+        logger.warning(
+            "ML DISABLED: model trained on only %d test samples (need >=200). "
+            "Collect more data before trusting ML scores.",
+            n_test,
         )
         return None, None, None, None
 
@@ -1029,15 +1039,18 @@ def _compute_entry_timing_quality(token: dict) -> float:
         signals.append(0.2)
 
     # 2. Price position (not too pumped, not in crash)
-    pc24 = token.get("price_change_24h") or 0
-    if -30 < pc24 < 50:
-        signals.append(0.9)       # pre-pump zone
-    elif 50 <= pc24 < 100:
-        signals.append(0.5)       # moderate pump
-    elif pc24 >= 200:
-        signals.append(0.1)       # too late
+    pc24 = token.get("price_change_24h")
+    if pc24 is not None:
+        if -30 < pc24 < 50:
+            signals.append(0.9)       # pre-pump zone
+        elif 50 <= pc24 < 100:
+            signals.append(0.5)       # moderate pump
+        elif pc24 >= 200:
+            signals.append(0.1)       # too late
+        else:
+            signals.append(0.4)       # crashing
     else:
-        signals.append(0.4)       # crashing
+        signals.append(0.5)           # neutral when no data
 
     # 3. Social momentum (building > declining)
     activity = token.get("activity_mult", 1.0)
@@ -1241,12 +1254,13 @@ def _detect_death_penalty(token: dict, freshest_mention_hours: float) -> float:
                 penalties.append(0.8)
 
     # --- Signal 2: Volume death (catches tokens rugged days ago with stable price) ---
-    vol_24h = token.get("volume_24h") or 0
-    vol_1h = token.get("volume_1h") or 0
-    if vol_24h < 5000 and vol_1h < 500:
-        penalties.append(0.15)  # practically dead volume
-    elif vol_24h < 1000:
-        penalties.append(0.1)   # absolute volume floor — no trading happening
+    vol_24h = token.get("volume_24h")
+    vol_1h = token.get("volume_1h")
+    if vol_24h is not None and vol_1h is not None:
+        if vol_24h < 5000 and vol_1h < 500:
+            penalties.append(0.15)  # practically dead volume
+        elif vol_24h < 1000:
+            penalties.append(0.1)   # absolute volume floor — no trading happening
 
     # --- Signal 3 (v15): Social staleness — volume-modulated ---
     # User guidance: "after 12h without mentions, start losing, but mostly look at PA + volume"
@@ -1262,8 +1276,11 @@ def _detect_death_penalty(token: dict, freshest_mention_hours: float) -> float:
             stale_base = 0.7     # 12-24h = mildly stale
 
         # Volume modulator: healthy trading proves the token is still alive
-        vol_24h = token.get("volume_24h") or 0
-        if vol_24h > 1_000_000:
+        # If no volume data, use stale_base without modulation (no false softening)
+        vol_24h = token.get("volume_24h")
+        if vol_24h is None:
+            stale_pen = stale_base
+        elif vol_24h > 1_000_000:
             stale_pen = min(0.95, stale_base + 0.45)   # massive volume = barely penalized
         elif vol_24h > 500_000:
             stale_pen = min(0.9, stale_base + 0.35)
@@ -1400,22 +1417,23 @@ def _compute_trend_strength(token: dict) -> float:
     Measures directional conviction across timeframes.
     Returns 0.0 (no trend / conflicting signals) to 1.0 (very strong directional move).
     """
-    pc1h = token.get("price_change_1h") or 0
-    pc6h = token.get("price_change_6h") or 0
-    pc24h = token.get("price_change_24h") or 0
+    pc1h = token.get("price_change_1h")
+    pc6h = token.get("price_change_6h")
+    pc24h = token.get("price_change_24h")
 
-    if not pc24h and not pc6h and not pc1h:
+    # Only use non-None values for direction analysis
+    valid = [(pc, tf) for pc, tf in [(pc1h, "1h"), (pc6h, "6h"), (pc24h, "24h")] if pc is not None]
+    if not valid:
         return 0.0
 
-    direction_1h = 1 if pc1h > 0 else -1
-    direction_6h = 1 if pc6h > 0 else -1
-    direction_24h = 1 if pc24h > 0 else -1
+    directions = [1 if pc > 0 else -1 for pc, _ in valid]
 
-    # All timeframes agree in direction = strong trend
-    agreement = (direction_1h == direction_6h == direction_24h)
+    # All available timeframes agree in direction = strong trend
+    agreement = len(set(directions)) == 1
 
-    # Magnitude: clamped to reasonable range for memecoins (100%+ move in 24h = max)
-    magnitude = min(abs(pc24h) / 100, 1.0)
+    # Magnitude: use longest available timeframe, clamped to 100%
+    longest_pc = valid[-1][0]  # last entry = longest timeframe
+    magnitude = min(abs(longest_pc) / 100, 1.0)
 
     if agreement:
         return min(1.0, 0.5 + magnitude * 0.5)
@@ -1529,6 +1547,16 @@ def _compute_onchain_multiplier(token: dict) -> float:
             factors.append(1.1)    # healthy
         elif velocity < 0.2:
             factors.append(0.6)    # stagnant
+    elif txn_count and txn_count > 0:
+        # Fallback: absolute txn density (no holder normalization)
+        # Thresholds calibrated on DexScreener 24h txn counts for Solana memecoins
+        token["txn_velocity"] = None  # Can't compute real velocity without holders
+        if txn_count > 5000:
+            factors.append(1.2)    # very active trading
+        elif txn_count > 1000:
+            factors.append(1.05)   # moderate activity
+        elif txn_count < 100:
+            factors.append(0.7)    # very low activity
 
     # Algorithm v4: Volatility proxy penalty (high volatility = unstable)
     vol_proxy = token.get("volatility_proxy")
