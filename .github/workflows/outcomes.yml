@@ -2,9 +2,13 @@ name: Fill Outcome Labels
 
 on:
   schedule:
-    # Every 2 hours — labels snapshots whose time windows have elapsed
-    - cron: '15 */2 * * *'
+    # Every 30 min — batch-optimized: 1 OHLCV call per token labels all horizons
+    - cron: '*/30 * * * *'
   workflow_dispatch: {} # Manual trigger
+
+concurrency:
+  group: outcome-labels
+  cancel-in-progress: false  # Let running job finish, skip new one
 
 jobs:
   fill-outcomes:
