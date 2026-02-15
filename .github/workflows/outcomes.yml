@@ -45,3 +45,17 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         working-directory: scraper
         run: python -c "from outcome_tracker import fill_outcomes; fill_outcomes()"
+
+      - name: Backfill bot TP/SL columns (existing labeled snapshots)
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        working-directory: scraper
+        run: python -c "from outcome_tracker import backfill_bot_data; backfill_bot_data(batch_limit=50)"
+
+      - name: Run auto-backtest
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        working-directory: scraper
+        run: python -c "from auto_backtest import run_auto_backtest; run_auto_backtest()"

@@ -664,6 +664,23 @@ def _build_feature_row(token: dict, features: list[str]) -> dict:
                 row[feat] = float(b) / max(1, float(b) + float(s))
             else:
                 row[feat] = np.nan
+        elif feat in ("day_of_week", "hour_paris", "is_weekend", "is_prime_time"):
+            # ML v3.1: Calendar/temporal features — compute from current time
+            # At inference time, use NOW (Europe/Paris) since we're scoring live tokens
+            from datetime import datetime, timezone, timedelta
+            try:
+                from zoneinfo import ZoneInfo
+                now_paris = datetime.now(ZoneInfo("Europe/Paris"))
+            except Exception:
+                now_paris = datetime.now(timezone(timedelta(hours=1)))
+            if feat == "day_of_week":
+                row[feat] = float(now_paris.weekday())       # 0=Mon..6=Sun
+            elif feat == "hour_paris":
+                row[feat] = float(now_paris.hour)
+            elif feat == "is_weekend":
+                row[feat] = 1.0 if now_paris.weekday() >= 5 else 0.0
+            elif feat == "is_prime_time":
+                row[feat] = 1.0 if now_paris.hour >= 19 or now_paris.hour < 5 else 0.0
         else:
             val = token.get(feat)
             row[feat] = float(val) if val is not None else np.nan
@@ -1688,6 +1705,8 @@ _DEFAULT_SCORING_PARAMS = {
     # v22: ML model horizon + threshold (dynamic)
     "ml_horizon": "12h",
     "ml_threshold": 2.0,
+    # ML v3: Bot strategy for capturable profit prediction
+    "bot_strategy": "TP50_SL30",
 }
 
 # Module-level cache: refreshed once per scrape cycle via load_scoring_config()
@@ -1759,14 +1778,18 @@ def load_scoring_config() -> None:
         SCORING_PARAMS["ml_horizon"] = row.get("ml_horizon", "12h") or "12h"
         SCORING_PARAMS["ml_threshold"] = float(row.get("ml_threshold", 2.0) or 2.0)
 
+        # ML v3: Bot strategy for capturable profit prediction
+        SCORING_PARAMS["bot_strategy"] = row.get("bot_strategy", "TP50_SL30") or "TP50_SL30"
+
         logger.info(
             "scoring_config loaded: consensus=%.2f conviction=%.2f breadth=%.2f PA=%.2f "
-            "decay=%.3f activity=[%.2f,%.2f] ml=%s/%.1fx (updated_by=%s, %s)",
+            "decay=%.3f activity=[%.2f,%.2f] ml=%s/%.1fx bot=%s (updated_by=%s, %s)",
             new_weights["consensus"], new_weights["conviction"],
             new_weights["breadth"], new_weights["price_action"],
             SCORING_PARAMS["decay_lambda"],
             SCORING_PARAMS["activity_mult_floor"], SCORING_PARAMS["activity_mult_cap"],
             SCORING_PARAMS["ml_horizon"], SCORING_PARAMS["ml_threshold"],
+            SCORING_PARAMS["bot_strategy"],
             row.get("updated_by", "?"), row.get("change_reason", ""),
         )
     except Exception as e:

@@ -1,5 +1,6 @@
 """
 Automated backtesting & algorithm diagnosis engine.
+ML v3: Token re-entries with cooldown (replaces permanent seen_addresses dedup).
 
 Runs after fill_outcomes() in each scrape cycle. Produces a structured report
 that progressively enables more analyses as labeled data accumulates.
@@ -78,6 +79,13 @@ def _load_current_weights(client) -> dict:
         logger.debug("auto_backtest: scoring_config load failed: %s", e)
     return BALANCED_WEIGHTS.copy()
 
+# ML v3: Re-entry support — token can be traded again after position closes
+# No arbitrary cooldown: the score/ML decides if re-entry is warranted
+HORIZON_MINUTES = {
+    "1h": 60, "6h": 360, "12h": 720, "24h": 1440,
+    "48h": 2880, "72h": 4320, "7d": 10080,
+}
+
 TOTAL_KOLS = 60
 
 SCORE_BANDS = [
@@ -142,7 +150,13 @@ SNAPSHOT_COLUMNS = (
     "s_tier_mult, s_tier_count, unique_kols, pump_momentum_pen, "
     "ca_mention_count, ticker_mention_count, url_mention_count, has_ca_mention, "
     "score_velocity, score_acceleration, mention_velocity, volume_velocity, "
-    "social_momentum_phase, kol_arrival_rate, entry_timing_quality, gate_mult"
+    "social_momentum_phase, kol_arrival_rate, entry_timing_quality, gate_mult, "
+    "time_to_1_3x_min_12h, time_to_1_5x_min_12h, time_to_1_3x_min_24h, time_to_1_5x_min_24h, "
+    "time_to_sl20_min_12h, time_to_sl30_min_12h, time_to_sl50_min_12h, "
+    "time_to_sl20_min_24h, time_to_sl30_min_24h, time_to_sl50_min_24h, "
+    "max_dd_before_tp_pct_12h, max_dd_before_tp_pct_24h, "
+    "time_to_2x_12h, time_to_2x_24h, "
+    "jup_price_impact_1k, min_price_12h, min_price_24h"
 )
 
 
@@ -357,7 +371,8 @@ def _top1_hit_rate(df: pd.DataFrame) -> dict:
             continue
 
         top1_details = []
-        seen_addresses = set()
+        open_positions = {}  # addr -> exit_time (pd.Timestamp)
+        hz_min = HORIZON_MINUTES.get(horizon, 720)
 
         for cycle_ts, group in df.sort_values("snapshot_at").groupby("cycle"):
             # Need max_price + price_at_snapshot for return computation
@@ -368,9 +383,13 @@ def _top1_hit_rate(df: pd.DataFrame) -> dict:
             top1 = labeled.loc[labeled["score"].idxmax()]
             addr = top1.get("token_address") or top1["symbol"]
 
-            if addr in seen_addresses:
-                continue
-            seen_addresses.add(addr)
+            # ML v3: Re-entry — skip only if position is still open
+            if addr in open_positions:
+                if cycle_ts < open_positions[addr]:
+                    continue  # Position still open
+
+            # Record position: closes at entry + horizon duration
+            open_positions[addr] = cycle_ts + pd.Timedelta(minutes=hz_min)
 
             ret = _compute_return(top1, horizon)
             top1_details.append({
@@ -664,6 +683,117 @@ def _v8_signal_validation(df: pd.DataFrame, horizon_col: str = "did_2x_12h") -> 
     return result
 
 
+def _temporal_analysis(df: pd.DataFrame, horizon_col: str = "did_2x_12h") -> dict:
+    """
+    ML v3.1: Analyze hit rate by day-of-week and hour-of-day (Europe/Paris).
+
+    Validates trader intuition:
+    - Sunday = worst, Tuesday = best
+    - Runners peak 19h-5h Paris time
+    """
+    first = df.sort_values("snapshot_at").drop_duplicates(subset=["token_address"], keep="first")
+    labeled = first[first[horizon_col].notna()].copy()
+    if labeled.empty:
+        return {}
+
+    ts = pd.to_datetime(labeled["snapshot_at"], utc=True)
+    try:
+        ts_paris = ts.dt.tz_convert("Europe/Paris")
+    except Exception:
+        ts_paris = ts + pd.Timedelta(hours=1)
+
+    labeled["_dow"] = ts_paris.dt.dayofweek  # 0=Mon..6=Sun
+    labeled["_hour_paris"] = ts_paris.dt.hour
+
+    result = {}
+    day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+    # Hit rate by day of week
+    by_day = {}
+    for dow in range(7):
+        subset = labeled[labeled["_dow"] == dow]
+        n = len(subset)
+        if n < 2:
+            continue
+        hits = int(subset[horizon_col].sum())
+        by_day[day_names[dow]] = {
+            "count": n,
+            "hits": hits,
+            "hit_rate": round(hits / n, 4),
+        }
+    result["by_day_of_week"] = by_day
+
+    # Best and worst days
+    if by_day:
+        best_day = max(by_day, key=lambda d: by_day[d]["hit_rate"])
+        worst_day = min(by_day, key=lambda d: by_day[d]["hit_rate"])
+        result["best_day"] = best_day
+        result["best_day_hit_rate"] = by_day[best_day]["hit_rate"]
+        result["worst_day"] = worst_day
+        result["worst_day_hit_rate"] = by_day[worst_day]["hit_rate"]
+
+    # Hit rate by hour bands (Paris time)
+    hour_bands = [
+        ("00-04", 0, 5),
+        ("05-08", 5, 9),
+        ("09-12", 9, 13),
+        ("13-15", 13, 16),
+        ("16-18", 16, 19),
+        ("19-23", 19, 24),
+    ]
+    by_hour = {}
+    for band_name, lo, hi in hour_bands:
+        subset = labeled[(labeled["_hour_paris"] >= lo) & (labeled["_hour_paris"] < hi)]
+        n = len(subset)
+        if n < 2:
+            continue
+        hits = int(subset[horizon_col].sum())
+        by_hour[band_name] = {
+            "count": n,
+            "hits": hits,
+            "hit_rate": round(hits / n, 4),
+        }
+    result["by_hour_paris"] = by_hour
+
+    # Prime time (19h-5h Paris) vs off-peak
+    prime = labeled[(labeled["_hour_paris"] >= 19) | (labeled["_hour_paris"] < 5)]
+    off_peak = labeled[(labeled["_hour_paris"] >= 5) & (labeled["_hour_paris"] < 19)]
+
+    if len(prime) >= 3:
+        prime_hits = int(prime[horizon_col].sum())
+        result["prime_time"] = {
+            "count": len(prime), "hits": prime_hits,
+            "hit_rate": round(prime_hits / len(prime), 4),
+            "description": "19h-05h Paris",
+        }
+    if len(off_peak) >= 3:
+        off_hits = int(off_peak[horizon_col].sum())
+        result["off_peak"] = {
+            "count": len(off_peak), "hits": off_hits,
+            "hit_rate": round(off_hits / len(off_peak), 4),
+            "description": "05h-19h Paris",
+        }
+
+    # Weekend vs weekday
+    weekend = labeled[labeled["_dow"] >= 5]
+    weekday = labeled[labeled["_dow"] < 5]
+
+    if len(weekend) >= 3:
+        we_hits = int(weekend[horizon_col].sum())
+        result["weekend"] = {
+            "count": len(weekend), "hits": we_hits,
+            "hit_rate": round(we_hits / len(weekend), 4),
+        }
+    if len(weekday) >= 3:
+        wd_hits = int(weekday[horizon_col].sum())
+        result["weekday"] = {
+            "count": len(weekday), "hits": wd_hits,
+            "hit_rate": round(wd_hits / len(weekday), 4),
+        }
+
+    return result
+
+
 def _extraction_analysis(df: pd.DataFrame, horizon_col: str = "did_2x_12h") -> dict:
     """Analyze extraction method (CA vs ticker) correlation with 2x outcomes (first-appearance)."""
     first = df.sort_values("snapshot_at").drop_duplicates(subset=["token_address"], keep="first")
@@ -710,6 +840,427 @@ def _extraction_analysis(df: pd.DataFrame, horizon_col: str = "did_2x_12h") -> d
             pass
 
     return result
+
+
+BOT_STRATEGIES = [
+    # Conservative: small gain, tight stop
+    {"name": "TP30_SL20", "tp_col": "time_to_1_3x_min", "sl_col": "time_to_sl20_min",
+     "tp_pct": 0.30, "sl_pct": -0.20, "description": "+30% TP / -20% SL"},
+    # Moderate: medium gain, medium risk
+    {"name": "TP50_SL30", "tp_col": "time_to_1_5x_min", "sl_col": "time_to_sl30_min",
+     "tp_pct": 0.50, "sl_pct": -0.30, "description": "+50% TP / -30% SL"},
+    # Aggressive: big gain, big risk — the classic 2x
+    {"name": "TP100_SL50", "tp_col": "time_to_2x_min", "sl_col": "time_to_sl50_min",
+     "tp_pct": 1.00, "sl_pct": -0.50, "description": "+100% TP / -50% SL"},
+]
+
+
+def _realistic_bot_simulation(df: pd.DataFrame) -> dict:
+    """
+    Simulate realistic bot trading with TP/SL on the #1-ranked token per cycle.
+
+    For each strategy (TP30/SL20, TP50/SL30, TP100/SL50) × horizon (12h, 24h):
+    - Pick the #1 token per cycle (highest score, first-appearance dedup)
+    - Determine exit: TP hit first → win, SL hit first → loss, neither → timeout
+    - Compute win rate, profit factor, expectancy, breakeven WR
+
+    Also tests rank filters (top 1, top 3, top 5) to find optimal selectivity.
+    """
+    df = df.copy()
+    df["score"] = df.apply(lambda r: _compute_score(r, BALANCED_WEIGHTS), axis=1)
+    df["cycle"] = df["snapshot_at"].dt.floor("15min")
+
+    results = {}
+
+    for hz in ["12h", "24h"]:
+        hz_suffix = f"_{hz}"
+
+        for strat in BOT_STRATEGIES:
+            # Build column names for this horizon
+            if strat["name"] == "TP100_SL50":
+                # time_to_2x is stored in hours, convert to minutes for comparison
+                tp_col_raw = f"time_to_2x_{hz}"
+                tp_is_hours = True
+            else:
+                tp_col_raw = strat["tp_col"] + hz_suffix
+                tp_is_hours = False
+
+            sl_col = strat["sl_col"] + hz_suffix
+            price_col = f"price_after_{hz}"
+
+            # Check columns exist
+            if tp_col_raw not in df.columns or sl_col not in df.columns:
+                continue
+
+            # Test multiple rank filters
+            hz_min = HORIZON_MINUTES.get(hz, 720)
+
+            for top_n in [1, 3, 5]:
+                strat_key = f"{strat['name']}_{hz}_top{top_n}"
+
+                trades = []
+                open_positions = {}  # addr -> exit_time (pd.Timestamp)
+
+                for cycle_ts, group in df.sort_values("snapshot_at").groupby("cycle"):
+                    labeled = group[
+                        group["price_at_snapshot"].notna()
+                        & (group[tp_col_raw].notna() | group[sl_col].notna() | group[price_col].notna())
+                    ]
+                    if labeled.empty:
+                        continue
+
+                    # Pick top N by score
+                    top_tokens = labeled.nlargest(top_n, "score")
+
+                    for _, row in top_tokens.iterrows():
+                        addr = row.get("token_address") or row["symbol"]
+
+                        # ML v3: Re-entry — skip only if position is still open
+                        if addr in open_positions:
+                            if cycle_ts < open_positions[addr]:
+                                continue  # Position still open
+
+                        price_at = float(row["price_at_snapshot"])
+                        if price_at <= 0:
+                            continue
+
+                        # Get TP and SL times in minutes
+                        tp_raw = row.get(tp_col_raw)
+                        tp_min = None
+                        if pd.notna(tp_raw):
+                            if tp_is_hours:
+                                tp_min = round(float(tp_raw) * 60)
+                            else:
+                                tp_min = int(tp_raw)
+
+                        sl_raw = row.get(sl_col)
+                        sl_min = int(sl_raw) if pd.notna(sl_raw) else None
+
+                        # Determine exit
+                        if tp_min is not None and (sl_min is None or tp_min < sl_min):
+                            exit_type = "TP"
+                            pnl = strat["tp_pct"]
+                            exit_min = tp_min
+                        elif sl_min is not None and (tp_min is None or sl_min < tp_min):
+                            exit_type = "SL"
+                            pnl = strat["sl_pct"]
+                            exit_min = sl_min
+                        elif tp_min is not None and sl_min is not None and tp_min == sl_min:
+                            # Same candle → assume worst case (SL)
+                            exit_type = "SL"
+                            pnl = strat["sl_pct"]
+                            exit_min = sl_min
+                        else:
+                            # Neither TP nor SL → timeout, use actual return
+                            exit_type = "TIMEOUT"
+                            p_after = row.get(price_col)
+                            if pd.notna(p_after) and float(p_after) > 0:
+                                pnl = (float(p_after) / price_at) - 1.0
+                            else:
+                                continue  # No exit data at all, skip
+                            exit_min = None
+
+                        # Track position exit time for re-entry logic
+                        if exit_type in ("TP", "SL") and exit_min is not None:
+                            pos_exit_time = cycle_ts + pd.Timedelta(minutes=exit_min)
+                        else:
+                            pos_exit_time = cycle_ts + pd.Timedelta(minutes=hz_min)
+                        open_positions[addr] = pos_exit_time
+
+                        trades.append({
+                            "symbol": row["symbol"],
+                            "exit": exit_type,
+                            "pnl": pnl,
+                            "exit_min": exit_min,
+                            "score": int(row["score"]),
+                        })
+
+                if len(trades) < 3:
+                    continue
+
+                # Compute metrics
+                tp_trades = [t for t in trades if t["exit"] == "TP"]
+                sl_trades = [t for t in trades if t["exit"] == "SL"]
+                timeout_trades = [t for t in trades if t["exit"] == "TIMEOUT"]
+
+                n_tp = len(tp_trades)
+                n_sl = len(sl_trades)
+                n_timeout = len(timeout_trades)
+                n_decided = n_tp + n_sl  # Trades with clear TP or SL exit
+
+                win_rate = n_tp / n_decided if n_decided > 0 else 0
+
+                total_gains = sum(t["pnl"] for t in trades if t["pnl"] > 0)
+                total_losses = abs(sum(t["pnl"] for t in trades if t["pnl"] < 0))
+                profit_factor = total_gains / total_losses if total_losses > 0 else float('inf') if total_gains > 0 else 0
+
+                pnl_values = [t["pnl"] for t in trades]
+                expectancy = sum(pnl_values) / len(pnl_values)
+
+                breakeven_wr = abs(strat["sl_pct"]) / (strat["tp_pct"] + abs(strat["sl_pct"]))
+                is_profitable = expectancy > 0
+
+                # Avg time to win/loss
+                win_times = [t["exit_min"] for t in tp_trades if t["exit_min"] is not None]
+                loss_times = [t["exit_min"] for t in sl_trades if t["exit_min"] is not None]
+                avg_win_min = round(sum(win_times) / len(win_times)) if win_times else None
+                avg_loss_min = round(sum(loss_times) / len(loss_times)) if loss_times else None
+
+                # Max consecutive losses
+                max_consec_loss = 0
+                current_streak = 0
+                for t in trades:
+                    if t["pnl"] < 0:
+                        current_streak += 1
+                        max_consec_loss = max(max_consec_loss, current_streak)
+                    else:
+                        current_streak = 0
+
+                results[strat_key] = {
+                    "description": strat["description"],
+                    "horizon": hz,
+                    "top_n": top_n,
+                    "trades": len(trades),
+                    "tp": n_tp,
+                    "sl": n_sl,
+                    "timeout": n_timeout,
+                    "win_rate": round(win_rate, 4),
+                    "profit_factor": round(profit_factor, 4) if profit_factor != float('inf') else 999.0,
+                    "expectancy": round(expectancy, 4),
+                    "breakeven_wr": round(breakeven_wr, 4),
+                    "is_profitable": is_profitable,
+                    "avg_win_min": avg_win_min,
+                    "avg_loss_min": avg_loss_min,
+                    "max_consecutive_losses": max_consec_loss,
+                    "total_pnl_pct": round(sum(pnl_values) * 100, 2),
+                }
+
+    # Find best strategy (highest expectancy with at least 5 trades, top1 only)
+    top1_results = {k: v for k, v in results.items() if v.get("top_n") == 1 and v["trades"] >= 5}
+    if top1_results:
+        best_key = max(top1_results, key=lambda k: top1_results[k]["expectancy"])
+        results["best_strategy"] = best_key
+        results["best_expectancy"] = top1_results[best_key]["expectancy"]
+    else:
+        results["best_strategy"] = None
+        results["best_expectancy"] = None
+
+    return results
+
+
+def _adaptive_bot_simulation(df: pd.DataFrame) -> dict:
+    """
+    ML v3.1: Simulate adaptive SL based on actual DD data (oracle upper bound).
+
+    For each token: adaptive_SL = max_dd_before_tp * 1.2 (20% above typical DD).
+    This is an "oracle" simulation — upper bound on what ML-predicted SL could achieve.
+
+    Also loads dd_by_rr_band from model meta (if available) to show ML-recommended SLs.
+
+    Compares fixed SL (20%, 30%, 50%) vs adaptive SL for each horizon.
+    """
+    from pathlib import Path
+
+    df = df.copy()
+    df["score"] = df.apply(lambda r: _compute_score(r, BALANCED_WEIGHTS), axis=1)
+    df["cycle"] = df["snapshot_at"].dt.floor("15min")
+
+    results = {}
+
+    # Load RR model meta for dd_by_rr_band (informational)
+    model_dir = Path(__file__).parent
+    for hz in ["12h", "24h"]:
+        rr_meta_path = model_dir / f"model_{hz}_rr_meta.json"
+        if rr_meta_path.exists():
+            try:
+                with open(rr_meta_path) as f:
+                    rr_meta = json.load(f)
+                dd_bands = rr_meta.get("dd_by_rr_band", {})
+                if dd_bands:
+                    results[f"ml_dd_bands_{hz}"] = dd_bands
+            except Exception:
+                pass
+
+    FIXED_SL_PCTS = [20, 30, 50]
+
+    for hz in ["12h", "24h"]:
+        dd_col = f"max_dd_before_tp_pct_{hz}"
+        max_price_col = f"max_price_{hz}"
+        price_col = f"price_after_{hz}"
+
+        if dd_col not in df.columns or max_price_col not in df.columns:
+            continue
+
+        hz_min = HORIZON_MINUTES.get(hz, 720)
+
+        # For each cycle, pick #1 token and simulate
+        fixed_trades = {sl: [] for sl in FIXED_SL_PCTS}
+        adaptive_trades = []
+        open_positions = {}
+
+        for cycle_ts, group in df.sort_values("snapshot_at").groupby("cycle"):
+            labeled = group[
+                group["price_at_snapshot"].notna()
+                & group[max_price_col].notna()
+            ]
+            if labeled.empty:
+                continue
+
+            top1 = labeled.loc[labeled["score"].idxmax()]
+            addr = top1.get("token_address") or top1["symbol"]
+
+            # Re-entry: skip if position still open
+            if addr in open_positions:
+                if cycle_ts < open_positions[addr]:
+                    continue
+
+            open_positions[addr] = cycle_ts + pd.Timedelta(minutes=hz_min)
+
+            price_at = float(top1["price_at_snapshot"])
+            if price_at <= 0:
+                continue
+
+            max_price = float(top1[max_price_col]) if pd.notna(top1[max_price_col]) else 0
+            max_return = max_price / price_at if max_price > 0 else 0
+
+            dd_raw = top1.get(dd_col)
+            dd_pct = float(dd_raw) if pd.notna(dd_raw) else None
+
+            # Use final price at horizon for timeout scenario
+            p_after_raw = top1.get(price_col)
+            final_return = float(p_after_raw) / price_at if pd.notna(p_after_raw) and float(p_after_raw) > 0 else None
+
+            # --- Fixed SL simulations ---
+            for sl_pct in FIXED_SL_PCTS:
+                if dd_pct is not None and dd_pct >= sl_pct:
+                    # SL triggered — loss
+                    fixed_trades[sl_pct].append({
+                        "symbol": top1["symbol"],
+                        "exit": "SL",
+                        "pnl": -sl_pct / 100.0,
+                        "max_return": round(max_return, 3),
+                    })
+                elif max_return >= 1.5:
+                    # TP at +50% (normalized comparison point)
+                    fixed_trades[sl_pct].append({
+                        "symbol": top1["symbol"],
+                        "exit": "TP",
+                        "pnl": 0.50,
+                        "max_return": round(max_return, 3),
+                    })
+                elif final_return is not None:
+                    fixed_trades[sl_pct].append({
+                        "symbol": top1["symbol"],
+                        "exit": "TIMEOUT",
+                        "pnl": final_return - 1.0,
+                        "max_return": round(max_return, 3),
+                    })
+
+            # --- Adaptive SL simulation (oracle: SL = actual DD * 1.2) ---
+            if dd_pct is not None and dd_pct > 0:
+                adaptive_sl = dd_pct * 1.2  # 20% above the actual max drawdown
+                # With oracle SL, we never get stopped out (since SL > actual DD)
+                # So the trade survives to reach its max return
+                if max_return >= 1.5:
+                    pnl = 0.50  # TP at +50%
+                    exit_type = "TP"
+                elif final_return is not None:
+                    pnl = final_return - 1.0
+                    exit_type = "TIMEOUT"
+                else:
+                    pnl = 0
+                    exit_type = "TIMEOUT"
+
+                adaptive_trades.append({
+                    "symbol": top1["symbol"],
+                    "exit": exit_type,
+                    "pnl": pnl,
+                    "adaptive_sl_pct": round(adaptive_sl, 1),
+                    "actual_dd_pct": round(dd_pct, 1),
+                    "max_return": round(max_return, 3),
+                })
+
+        # Compute metrics for each fixed SL
+        for sl_pct in FIXED_SL_PCTS:
+            trades = fixed_trades[sl_pct]
+            if len(trades) < 3:
+                continue
+
+            n_tp = sum(1 for t in trades if t["exit"] == "TP")
+            n_sl = sum(1 for t in trades if t["exit"] == "SL")
+            n_decided = n_tp + n_sl
+            win_rate = n_tp / n_decided if n_decided > 0 else 0
+
+            pnl_values = [t["pnl"] for t in trades]
+            expectancy = sum(pnl_values) / len(pnl_values)
+
+            total_gains = sum(t["pnl"] for t in trades if t["pnl"] > 0)
+            total_losses = abs(sum(t["pnl"] for t in trades if t["pnl"] < 0))
+            profit_factor = total_gains / total_losses if total_losses > 0 else (999.0 if total_gains > 0 else 0)
+
+            results[f"fixed_SL{sl_pct}_{hz}"] = {
+                "type": "fixed",
+                "sl_pct": sl_pct,
+                "horizon": hz,
+                "trades": len(trades),
+                "tp": n_tp,
+                "sl": n_sl,
+                "win_rate": round(win_rate, 4),
+                "expectancy": round(expectancy, 4),
+                "profit_factor": round(min(profit_factor, 999.0), 4),
+                "total_pnl_pct": round(sum(pnl_values) * 100, 2),
+            }
+
+        # Compute metrics for adaptive SL
+        if len(adaptive_trades) >= 3:
+            n_tp = sum(1 for t in adaptive_trades if t["exit"] == "TP")
+            n_decided = sum(1 for t in adaptive_trades if t["exit"] in ("TP", "SL"))
+            win_rate = n_tp / n_decided if n_decided > 0 else (1.0 if n_tp > 0 else 0)
+
+            pnl_values = [t["pnl"] for t in adaptive_trades]
+            expectancy = sum(pnl_values) / len(pnl_values)
+
+            total_gains = sum(t["pnl"] for t in adaptive_trades if t["pnl"] > 0)
+            total_losses = abs(sum(t["pnl"] for t in adaptive_trades if t["pnl"] < 0))
+            profit_factor = total_gains / total_losses if total_losses > 0 else (999.0 if total_gains > 0 else 0)
+
+            avg_adaptive_sl = float(np.mean([t["adaptive_sl_pct"] for t in adaptive_trades]))
+            avg_actual_dd = float(np.mean([t["actual_dd_pct"] for t in adaptive_trades]))
+
+            results[f"adaptive_{hz}"] = {
+                "type": "adaptive_oracle",
+                "horizon": hz,
+                "trades": len(adaptive_trades),
+                "tp": n_tp,
+                "win_rate": round(win_rate, 4),
+                "expectancy": round(expectancy, 4),
+                "profit_factor": round(min(profit_factor, 999.0), 4),
+                "total_pnl_pct": round(sum(pnl_values) * 100, 2),
+                "avg_adaptive_sl_pct": round(avg_adaptive_sl, 1),
+                "avg_actual_dd_pct": round(avg_actual_dd, 1),
+                "description": "Oracle SL = actual DD * 1.2 (upper bound for ML-predicted SL)",
+            }
+
+    # Compare: find best fixed vs adaptive
+    fixed_results = {k: v for k, v in results.items() if isinstance(v, dict) and v.get("type") == "fixed"}
+    adaptive_results = {k: v for k, v in results.items() if isinstance(v, dict) and v.get("type") == "adaptive_oracle"}
+
+    if fixed_results:
+        best_fixed = max(fixed_results, key=lambda k: fixed_results[k].get("expectancy", -999))
+        results["best_fixed"] = best_fixed
+        results["best_fixed_expectancy"] = fixed_results[best_fixed]["expectancy"]
+
+    if adaptive_results:
+        best_adaptive = max(adaptive_results, key=lambda k: adaptive_results[k].get("expectancy", -999))
+        results["best_adaptive"] = best_adaptive
+        results["best_adaptive_expectancy"] = adaptive_results[best_adaptive]["expectancy"]
+
+    # Compute improvement delta
+    if "best_fixed_expectancy" in results and "best_adaptive_expectancy" in results:
+        delta = results["best_adaptive_expectancy"] - results["best_fixed_expectancy"]
+        results["adaptive_improvement_pp"] = round(delta * 100, 2)
+
+    return results
 
 
 def _optimal_threshold(df: pd.DataFrame, horizon_col: str = "did_2x_12h") -> dict:
@@ -970,6 +1521,648 @@ def _auto_apply_weights(client, df: pd.DataFrame, horizon_col: str = "did_2x_12h
         return None
 
 
+# ═══ GAP #1: EQUITY CURVE + MAX DRAWDOWN ═══
+
+def _equity_curve_analysis(df: pd.DataFrame) -> dict:
+    """
+    Simulate equity curve from bot trades on #1 token per cycle.
+    Tracks cumulative PnL, max drawdown, recovery time, losing streaks.
+    Uses TP50/SL30 on 12h as default strategy (most data).
+    """
+    df = df.copy()
+    df["score"] = df.apply(lambda r: _compute_score(r, BALANCED_WEIGHTS), axis=1)
+    df["cycle"] = df["snapshot_at"].dt.floor("15min")
+
+    results = {}
+
+    for hz in ["12h", "24h"]:
+        tp_col = f"time_to_1_5x_min_{hz}"
+        sl_col = f"time_to_sl30_min_{hz}"
+        price_col = f"price_after_{hz}"
+        hz_min = HORIZON_MINUTES.get(hz, 720)
+
+        if tp_col not in df.columns or sl_col not in df.columns:
+            continue
+
+        equity = 1.0  # Start with 1.0 (100%)
+        peak_equity = 1.0
+        curve = []  # (cycle_ts, equity, drawdown_pct)
+        trades = []
+        open_positions = {}
+        max_dd = 0.0
+        dd_start = None
+        max_dd_duration_cycles = 0
+        current_dd_cycles = 0
+
+        for cycle_ts, group in df.sort_values("snapshot_at").groupby("cycle"):
+            labeled = group[
+                group["price_at_snapshot"].notna()
+                & (group[tp_col].notna() | group[sl_col].notna() | group[price_col].notna())
+            ]
+            if labeled.empty:
+                continue
+
+            top1 = labeled.loc[labeled["score"].idxmax()]
+            addr = top1.get("token_address") or top1["symbol"]
+
+            if addr in open_positions and cycle_ts < open_positions[addr]:
+                continue
+
+            price_at = float(top1["price_at_snapshot"])
+            if price_at <= 0:
+                continue
+
+            tp_raw = top1.get(tp_col)
+            sl_raw = top1.get(sl_col)
+            tp_min = int(tp_raw) if pd.notna(tp_raw) else None
+            sl_min = int(sl_raw) if pd.notna(sl_raw) else None
+
+            if tp_min is not None and (sl_min is None or tp_min < sl_min):
+                pnl_pct = 0.50
+                exit_type = "TP"
+                exit_min = tp_min
+            elif sl_min is not None and (tp_min is None or sl_min <= tp_min):
+                pnl_pct = -0.30
+                exit_type = "SL"
+                exit_min = sl_min
+            else:
+                p_after = top1.get(price_col)
+                if pd.notna(p_after) and float(p_after) > 0:
+                    pnl_pct = (float(p_after) / price_at) - 1.0
+                    exit_type = "TIMEOUT"
+                    exit_min = None
+                else:
+                    continue
+
+            if exit_type in ("TP", "SL") and exit_min is not None:
+                open_positions[addr] = cycle_ts + pd.Timedelta(minutes=exit_min)
+            else:
+                open_positions[addr] = cycle_ts + pd.Timedelta(minutes=hz_min)
+
+            # Update equity (risk 10% of equity per trade)
+            risk_frac = 0.10
+            equity_change = equity * risk_frac * pnl_pct
+            equity += equity_change
+
+            # Track peak and drawdown
+            if equity > peak_equity:
+                peak_equity = equity
+                current_dd_cycles = 0
+            else:
+                current_dd_cycles += 1
+                max_dd_duration_cycles = max(max_dd_duration_cycles, current_dd_cycles)
+
+            dd_pct = (peak_equity - equity) / peak_equity * 100 if peak_equity > 0 else 0
+            max_dd = max(max_dd, dd_pct)
+
+            trades.append({
+                "symbol": top1["symbol"],
+                "exit": exit_type,
+                "pnl_pct": round(pnl_pct * 100, 2),
+                "equity": round(equity, 4),
+            })
+            curve.append({
+                "cycle": str(cycle_ts),
+                "equity": round(equity, 4),
+                "dd_pct": round(dd_pct, 2),
+            })
+
+        if len(trades) < 3:
+            continue
+
+        # Compute losing streak stats
+        max_losing_streak = 0
+        current_streak = 0
+        streaks = []
+        for t in trades:
+            if t["pnl_pct"] < 0:
+                current_streak += 1
+                max_losing_streak = max(max_losing_streak, current_streak)
+            else:
+                if current_streak > 0:
+                    streaks.append(current_streak)
+                current_streak = 0
+        if current_streak > 0:
+            streaks.append(current_streak)
+
+        # Equity at risk during max losing streak
+        worst_streak_loss = 0.0
+        cs = 0
+        running_loss = 0.0
+        for t in trades:
+            if t["pnl_pct"] < 0:
+                cs += 1
+                running_loss += t["pnl_pct"]
+                if cs == max_losing_streak:
+                    worst_streak_loss = running_loss
+            else:
+                cs = 0
+                running_loss = 0.0
+
+        total_return = (equity - 1.0) * 100
+        n_wins = sum(1 for t in trades if t["pnl_pct"] > 0)
+        n_losses = sum(1 for t in trades if t["pnl_pct"] < 0)
+
+        results[f"TP50_SL30_{hz}"] = {
+            "strategy": "TP50_SL30",
+            "horizon": hz,
+            "risk_per_trade_pct": 10,
+            "trades": len(trades),
+            "wins": n_wins,
+            "losses": n_losses,
+            "final_equity": round(equity, 4),
+            "total_return_pct": round(total_return, 2),
+            "max_drawdown_pct": round(max_dd, 2),
+            "max_losing_streak": max_losing_streak,
+            "worst_streak_loss_pct": round(worst_streak_loss, 2),
+            "max_dd_duration_cycles": max_dd_duration_cycles,
+            "peak_equity": round(peak_equity, 4),
+            "curve_points": len(curve),
+            # Last 5 trades for quick inspection
+            "recent_trades": trades[-5:] if len(trades) >= 5 else trades,
+        }
+
+        # Calmar ratio = annual return / max DD (annualized from data range)
+        if max_dd > 0 and len(curve) > 1:
+            from datetime import datetime as _dt
+            first_ts = pd.Timestamp(curve[0]["cycle"])
+            last_ts = pd.Timestamp(curve[-1]["cycle"])
+            days = max(1, (last_ts - first_ts).days)
+            ann_return = total_return * (365 / days)
+            results[f"TP50_SL30_{hz}"]["calmar_ratio"] = round(ann_return / max_dd, 3)
+
+    return results
+
+
+# ═══ GAP #2: SLIPPAGE MODELING ═══
+
+def _slippage_analysis(df: pd.DataFrame) -> dict:
+    """
+    Estimate slippage impact on backtest results.
+
+    Model: slippage = entry_slippage + exit_slippage
+    - Based on liquidity_usd (available for 85%+ of snapshots)
+    - Formula: slippage_pct = (trade_size / liquidity_usd) * 100 * impact_factor
+    - impact_factor = 2.0 for low-liquidity memecoins (AMM curve is steep)
+
+    Tests multiple trade sizes ($100, $500, $1000, $5000) to show
+    at what size slippage eats the profit.
+    """
+    TRADE_SIZES = [100, 500, 1000, 5000]
+    IMPACT_FACTOR = 2.0  # AMM constant-product: 2x theoretical for memecoins
+    TP_PCT = 0.50  # TP50 benchmark
+
+    df = df.copy()
+    df["score"] = df.apply(lambda r: _compute_score(r, BALANCED_WEIGHTS), axis=1)
+    df["cycle"] = df["snapshot_at"].dt.floor("15min")
+
+    results = {}
+
+    # Get #1 token per cycle with liquidity data
+    top1_tokens = []
+    seen = set()
+    for _, group in df.sort_values("snapshot_at").groupby("cycle"):
+        labeled = group[group["price_at_snapshot"].notna()]
+        if labeled.empty:
+            continue
+        top1 = labeled.loc[labeled["score"].idxmax()]
+        addr = top1.get("token_address") or top1["symbol"]
+        if addr in seen:
+            continue
+        seen.add(addr)
+        liq = top1.get("liquidity_usd")
+        if pd.notna(liq) and float(liq) > 0:
+            top1_tokens.append({
+                "symbol": top1["symbol"],
+                "liquidity_usd": float(liq),
+                "market_cap": float(top1.get("market_cap") or 0),
+                "max_return_12h": _compute_return(top1, "12h"),
+            })
+
+    if not top1_tokens:
+        return {"error": "no liquidity data"}
+
+    results["tokens_with_liquidity"] = len(top1_tokens)
+    liq_values = [t["liquidity_usd"] for t in top1_tokens]
+    results["liquidity_stats"] = {
+        "median": round(float(np.median(liq_values)), 0),
+        "p25": round(float(np.percentile(liq_values, 25)), 0),
+        "p75": round(float(np.percentile(liq_values, 75)), 0),
+        "min": round(min(liq_values), 0),
+    }
+
+    for trade_size in TRADE_SIZES:
+        slippages = []
+        net_returns = []
+        killed_trades = 0
+
+        for t in top1_tokens:
+            liq = t["liquidity_usd"]
+            # Entry slippage (buy) + exit slippage (sell) = 2x single-side
+            entry_slip = (trade_size / liq) * 100 * IMPACT_FACTOR
+            exit_slip = entry_slip  # Symmetric for AMM
+            total_slip = entry_slip + exit_slip
+            # Cap at 50% (beyond that, trade is impossible)
+            total_slip = min(total_slip, 50.0)
+            slippages.append(total_slip)
+
+            ret = t.get("max_return_12h")
+            if ret is not None:
+                net_ret = ret - 1.0 - (total_slip / 100)
+                net_returns.append(net_ret)
+                if ret >= 1.5 and net_ret < TP_PCT - (total_slip / 100):
+                    killed_trades += 1
+
+        results[f"size_{trade_size}"] = {
+            "trade_size_usd": trade_size,
+            "avg_slippage_pct": round(float(np.mean(slippages)), 2),
+            "median_slippage_pct": round(float(np.median(slippages)), 2),
+            "p95_slippage_pct": round(float(np.percentile(slippages, 95)), 2),
+            "tokens_above_5pct_slip": sum(1 for s in slippages if s > 5),
+            "tokens_above_10pct_slip": sum(1 for s in slippages if s > 10),
+            "killed_winning_trades": killed_trades,
+        }
+
+        # Net win rate after slippage (for tokens with return data)
+        if net_returns:
+            net_winners = sum(1 for r in net_returns if r > 0)
+            results[f"size_{trade_size}"]["net_positive_pct"] = round(
+                100 * net_winners / len(net_returns), 1
+            )
+
+    # Recommended max trade size (where median slippage < 2%)
+    rec_size = None
+    for ts in TRADE_SIZES:
+        info = results.get(f"size_{ts}", {})
+        if info.get("median_slippage_pct", 999) < 2.0:
+            rec_size = ts
+    results["recommended_max_size_usd"] = rec_size or TRADE_SIZES[0]
+
+    return results
+
+
+# ═══ GAP #3: CONFIDENCE INTERVALS ═══
+
+def _confidence_intervals(df: pd.DataFrame, horizon_col: str = "did_2x_12h") -> dict:
+    """
+    Compute binomial confidence intervals on key backtest metrics.
+
+    With N=14 test samples and 50% hit rate, the 95% CI is [23%, 77%].
+    This tells you the backtest results are NOT statistically reliable yet.
+
+    Uses Wilson score interval (better than Wald for small N).
+    """
+    from scipy.stats import norm
+
+    def _wilson_ci(hits: int, n: int, z: float = 1.96) -> tuple[float, float]:
+        """Wilson score 95% CI — better coverage for small N than naive p ± z*sqrt(p(1-p)/n)."""
+        if n == 0:
+            return (0.0, 0.0)
+        p = hits / n
+        denom = 1 + z ** 2 / n
+        center = (p + z ** 2 / (2 * n)) / denom
+        spread = z * math.sqrt((p * (1 - p) + z ** 2 / (4 * n)) / n) / denom
+        return (max(0.0, center - spread), min(1.0, center + spread))
+
+    first = df.sort_values("snapshot_at").drop_duplicates(subset=["token_address"], keep="first")
+    labeled = first[first[horizon_col].notna()].copy()
+
+    results = {}
+    n = len(labeled)
+    results["n_labeled"] = n
+
+    if n < 5:
+        results["verdict"] = "INSUFFICIENT DATA — need at least 30 tokens for any CI"
+        return results
+
+    # CI on overall hit rate
+    hits = int(labeled[horizon_col].sum())
+    hr = hits / n
+    ci_low, ci_high = _wilson_ci(hits, n)
+    results["overall_hit_rate"] = {
+        "hits": hits,
+        "n": n,
+        "hit_rate": round(hr, 4),
+        "ci_95_low": round(ci_low, 4),
+        "ci_95_high": round(ci_high, 4),
+        "ci_width": round(ci_high - ci_low, 4),
+    }
+
+    # CI on top1 hit rate (from report if available)
+    # Re-compute here for independence
+    labeled["score"] = labeled.apply(lambda r: _compute_score(r, BALANCED_WEIGHTS), axis=1)
+    labeled["cycle"] = labeled["snapshot_at"].dt.floor("15min")
+    horizon_suffix = horizon_col.replace("did_2x_", "")
+
+    top1_tested = 0
+    top1_hits = 0
+    seen = set()
+    for _, group in labeled.sort_values("snapshot_at").groupby("cycle"):
+        if group.empty:
+            continue
+        top1 = group.loc[group["score"].idxmax()]
+        addr = top1.get("token_address") or top1["symbol"]
+        if addr in seen:
+            continue
+        seen.add(addr)
+        top1_tested += 1
+        ret = _compute_return(top1, horizon_suffix)
+        if ret is not None and ret >= 2.0:
+            top1_hits += 1
+
+    if top1_tested >= 3:
+        t1_hr = top1_hits / top1_tested
+        ci_low, ci_high = _wilson_ci(top1_hits, top1_tested)
+        results["top1_hit_rate"] = {
+            "hits": top1_hits,
+            "n": top1_tested,
+            "hit_rate": round(t1_hr, 4),
+            "ci_95_low": round(ci_low, 4),
+            "ci_95_high": round(ci_high, 4),
+            "ci_width": round(ci_high - ci_low, 4),
+        }
+
+    # Multi-threshold CIs
+    for thresh in [1.3, 1.5, 2.0]:
+        thresh_key = f"{thresh}x"
+        labeled["_max_ret"] = labeled.apply(lambda r: _compute_return(r, horizon_suffix), axis=1)
+        valid = labeled["_max_ret"].notna()
+        n_valid = int(valid.sum())
+        if n_valid < 5:
+            continue
+        h = int((labeled.loc[valid, "_max_ret"] >= thresh).sum())
+        hr = h / n_valid
+        ci_low, ci_high = _wilson_ci(h, n_valid)
+        results[f"hit_rate_{thresh_key}"] = {
+            "hits": h, "n": n_valid, "hit_rate": round(hr, 4),
+            "ci_95_low": round(ci_low, 4), "ci_95_high": round(ci_high, 4),
+            "ci_width": round(ci_high - ci_low, 4),
+        }
+
+    # Statistical power: how many samples needed for ±5pp CI width?
+    if n > 0:
+        p_hat = max(0.01, hits / n)
+        # For Wilson CI width ≈ 2 * z * sqrt(p(1-p)/N) = 0.10 → N = (2z)^2 * p(1-p) / 0.10^2
+        z = 1.96
+        n_needed_10pp = int(math.ceil(z ** 2 * p_hat * (1 - p_hat) / 0.05 ** 2))
+        n_needed_5pp = int(math.ceil(z ** 2 * p_hat * (1 - p_hat) / 0.025 ** 2))
+        results["samples_needed"] = {
+            "for_10pp_ci": n_needed_10pp,
+            "for_5pp_ci": n_needed_5pp,
+            "current": n,
+            "deficit": max(0, n_needed_10pp - n),
+        }
+
+    # Verdict
+    ci_width = results.get("overall_hit_rate", {}).get("ci_width", 1.0)
+    if ci_width > 0.30:
+        results["verdict"] = f"UNRELIABLE — CI width {ci_width*100:.0f}pp (need <10pp). N={n} too small."
+    elif ci_width > 0.15:
+        results["verdict"] = f"WEAK — CI width {ci_width*100:.0f}pp. Results directionally useful but noisy."
+    elif ci_width > 0.10:
+        results["verdict"] = f"MODERATE — CI width {ci_width*100:.0f}pp. Getting reliable."
+    else:
+        results["verdict"] = f"STRONG — CI width {ci_width*100:.0f}pp. Results are statistically reliable."
+
+    return results
+
+
+# ═══ GAP #4: MULTI-TOKEN PORTFOLIO SIMULATION ═══
+
+def _portfolio_simulation(df: pd.DataFrame) -> dict:
+    """
+    Simulate a portfolio holding top N tokens per cycle simultaneously.
+
+    Key difference from single-token backtest:
+    - Multiple positions open at once (diversification)
+    - Equal-weight allocation across positions
+    - Track portfolio equity curve, not individual trades
+    - Shows if diversification helps or hurts
+    """
+    df = df.copy()
+    df["score"] = df.apply(lambda r: _compute_score(r, BALANCED_WEIGHTS), axis=1)
+    df["cycle"] = df["snapshot_at"].dt.floor("15min")
+
+    results = {}
+
+    for hz in ["12h", "24h"]:
+        tp_col = f"time_to_1_5x_min_{hz}"
+        sl_col = f"time_to_sl30_min_{hz}"
+        price_col = f"price_after_{hz}"
+        hz_min = HORIZON_MINUTES.get(hz, 720)
+
+        if tp_col not in df.columns or sl_col not in df.columns:
+            continue
+
+        for portfolio_size in [1, 3, 5]:
+            equity = 1.0
+            peak_equity = 1.0
+            max_dd = 0.0
+            all_trades = []
+            open_positions = {}
+
+            for cycle_ts, group in df.sort_values("snapshot_at").groupby("cycle"):
+                labeled = group[
+                    group["price_at_snapshot"].notna()
+                    & (group[tp_col].notna() | group[sl_col].notna() | group[price_col].notna())
+                ]
+                if labeled.empty:
+                    continue
+
+                top_n = labeled.nlargest(portfolio_size, "score")
+
+                cycle_pnl = 0.0
+                cycle_trades = 0
+
+                for _, row in top_n.iterrows():
+                    addr = row.get("token_address") or row["symbol"]
+                    if addr in open_positions and cycle_ts < open_positions[addr]:
+                        continue
+
+                    price_at = float(row["price_at_snapshot"])
+                    if price_at <= 0:
+                        continue
+
+                    tp_raw = row.get(tp_col)
+                    sl_raw = row.get(sl_col)
+                    tp_min = int(tp_raw) if pd.notna(tp_raw) else None
+                    sl_min = int(sl_raw) if pd.notna(sl_raw) else None
+
+                    if tp_min is not None and (sl_min is None or tp_min < sl_min):
+                        pnl = 0.50
+                        exit_type = "TP"
+                        exit_min = tp_min
+                    elif sl_min is not None and (tp_min is None or sl_min <= tp_min):
+                        pnl = -0.30
+                        exit_type = "SL"
+                        exit_min = sl_min
+                    else:
+                        p_after = row.get(price_col)
+                        if pd.notna(p_after) and float(p_after) > 0:
+                            pnl = (float(p_after) / price_at) - 1.0
+                        else:
+                            continue
+                        exit_type = "TIMEOUT"
+                        exit_min = None
+
+                    if exit_type in ("TP", "SL") and exit_min is not None:
+                        open_positions[addr] = cycle_ts + pd.Timedelta(minutes=exit_min)
+                    else:
+                        open_positions[addr] = cycle_ts + pd.Timedelta(minutes=hz_min)
+
+                    # Each position gets equal weight: risk_per_trade = 10% / portfolio_size
+                    risk_frac = 0.10 / portfolio_size
+                    cycle_pnl += equity * risk_frac * pnl
+                    cycle_trades += 1
+
+                    all_trades.append({"exit": exit_type, "pnl": pnl})
+
+                equity += cycle_pnl
+                if equity > peak_equity:
+                    peak_equity = equity
+                dd_pct = (peak_equity - equity) / peak_equity * 100 if peak_equity > 0 else 0
+                max_dd = max(max_dd, dd_pct)
+
+            if len(all_trades) < 3:
+                continue
+
+            n_tp = sum(1 for t in all_trades if t["exit"] == "TP")
+            n_sl = sum(1 for t in all_trades if t["exit"] == "SL")
+            n_decided = n_tp + n_sl
+            win_rate = n_tp / n_decided if n_decided > 0 else 0
+            pnl_values = [t["pnl"] for t in all_trades]
+            expectancy = sum(pnl_values) / len(pnl_values)
+
+            results[f"top{portfolio_size}_{hz}"] = {
+                "portfolio_size": portfolio_size,
+                "horizon": hz,
+                "trades": len(all_trades),
+                "wins": n_tp,
+                "losses": n_sl,
+                "win_rate": round(win_rate, 4),
+                "expectancy": round(expectancy, 4),
+                "final_equity": round(equity, 4),
+                "total_return_pct": round((equity - 1.0) * 100, 2),
+                "max_drawdown_pct": round(max_dd, 2),
+            }
+
+    # Find best portfolio config
+    valid_results = {k: v for k, v in results.items() if isinstance(v, dict) and "final_equity" in v}
+    if valid_results:
+        # Best by risk-adjusted return (return / max_dd)
+        best_key = max(valid_results, key=lambda k: (
+            valid_results[k]["total_return_pct"] / max(1, valid_results[k]["max_drawdown_pct"])
+        ))
+        results["best_config"] = best_key
+        best = valid_results[best_key]
+        results["best_risk_adjusted"] = round(
+            best["total_return_pct"] / max(1, best["max_drawdown_pct"]), 3
+        )
+
+    return results
+
+
+# ═══ GAP #5: KELLY CRITERION POSITION SIZING ═══
+
+def _kelly_analysis(df: pd.DataFrame, horizon_col: str = "did_2x_12h") -> dict:
+    """
+    Compute Kelly criterion optimal bet size by score band.
+
+    Kelly fraction = (p * b - q) / b
+    Where: p = win probability, q = 1-p, b = avg win / avg loss (odds)
+
+    Half-Kelly is recommended in practice (less volatile, 75% of full Kelly growth).
+    Shows how much of bankroll to risk per trade for each score band.
+    """
+    first = df.sort_values("snapshot_at").drop_duplicates(subset=["token_address"], keep="first").copy()
+    first["score"] = first.apply(lambda r: _compute_score(r, BALANCED_WEIGHTS), axis=1)
+
+    results = {}
+
+    for hz in ["12h", "24h"]:
+        tp_col = f"time_to_1_5x_min_{hz}"
+        sl_col = f"time_to_sl30_min_{hz}"
+
+        if tp_col not in first.columns or sl_col not in first.columns:
+            continue
+
+        # Label trades: TP first = win (+50%), SL first = loss (-30%)
+        first[f"_tp_{hz}"] = pd.to_numeric(first.get(tp_col), errors="coerce")
+        first[f"_sl_{hz}"] = pd.to_numeric(first.get(sl_col), errors="coerce")
+        has_data = first[f"_tp_{hz}"].notna() | first[f"_sl_{hz}"].notna()
+        labeled = first[has_data].copy()
+
+        if labeled.empty:
+            continue
+
+        tp_hit = labeled[f"_tp_{hz}"].notna()
+        sl_hit = labeled[f"_sl_{hz}"].notna()
+        labeled["_won"] = (tp_hit & (~sl_hit | (labeled[f"_tp_{hz}"] < labeled[f"_sl_{hz}"]))).astype(int)
+
+        # Kelly by score band
+        bands_result = {}
+        for band_name, lo, hi in SCORE_BANDS:
+            band = labeled[(labeled["score"] >= lo) & (labeled["score"] < hi)]
+            n = len(band)
+            if n < 5:
+                bands_result[band_name] = {"count": n, "kelly_pct": 0, "verdict": "insufficient data"}
+                continue
+
+            wins = int(band["_won"].sum())
+            losses = n - wins
+            p = wins / n  # Win probability
+            q = 1 - p
+
+            # Average win = +50%, average loss = -30% (TP50/SL30)
+            avg_win = 0.50
+            avg_loss = 0.30
+            b = avg_win / avg_loss  # Odds ratio
+
+            # Kelly fraction
+            kelly = (p * b - q) / b if b > 0 else 0
+            kelly = max(0, kelly)  # Never negative (= don't bet)
+            half_kelly = kelly / 2
+
+            bands_result[band_name] = {
+                "count": n,
+                "wins": wins,
+                "win_rate": round(p, 4),
+                "kelly_full_pct": round(kelly * 100, 2),
+                "kelly_half_pct": round(half_kelly * 100, 2),
+                "expected_edge_pct": round((p * avg_win - q * avg_loss) * 100, 2),
+                "verdict": (
+                    "NO EDGE" if kelly <= 0
+                    else "WEAK" if half_kelly < 0.02
+                    else "TRADEABLE" if half_kelly < 0.10
+                    else "STRONG"
+                ),
+            }
+
+        results[f"TP50_SL30_{hz}"] = bands_result
+
+    # Overall recommendation
+    all_bands = {}
+    for hz_key, bands in results.items():
+        if not isinstance(bands, dict):
+            continue
+        for band_name, info in bands.items():
+            if isinstance(info, dict) and info.get("kelly_half_pct", 0) > 0:
+                all_bands[f"{hz_key}/{band_name}"] = info
+
+    if all_bands:
+        best_band = max(all_bands, key=lambda k: all_bands[k]["kelly_half_pct"])
+        results["best_band"] = best_band
+        results["best_half_kelly_pct"] = all_bands[best_band]["kelly_half_pct"]
+        results["recommendation"] = (
+            f"Bet {all_bands[best_band]['kelly_half_pct']:.1f}% of bankroll per trade "
+            f"on {best_band} tokens (half-Kelly)"
+        )
+    else:
+        results["recommendation"] = "No score band has positive edge with current data."
+
+    return results
+
+
 def _generate_recommendations(report: dict) -> list[str]:
     """Generate actionable text recommendations from analysis results."""
     recs = []
@@ -1113,6 +2306,134 @@ def _generate_recommendations(report: dict) -> list[str]:
             recs.append(f"EXTRACTION: CA-only ({ca_hr*100:.0f}%) and ticker-only ({tick_hr*100:.0f}%) "
                        "have similar hit rates. Extraction mode is not a strong differentiator.")
 
+    # Bot simulation insights
+    bot = report.get("realistic_bot", {})
+    best_strat = bot.get("best_strategy")
+    best_exp = bot.get("best_expectancy")
+    if best_strat and best_exp is not None:
+        if best_exp > 0:
+            strat_data = bot.get(best_strat, {})
+            recs.append(
+                f"BOT VIABLE: {best_strat} has +{best_exp*100:.1f}% expectancy per trade "
+                f"(WR={strat_data.get('win_rate', 0)*100:.0f}%, "
+                f"PF={strat_data.get('profit_factor', 0):.2f}, "
+                f"{strat_data.get('trades', 0)} trades)"
+            )
+        else:
+            recs.append(
+                f"BOT NOT VIABLE: best strategy {best_strat} has {best_exp*100:.1f}% expectancy. "
+                "All TP/SL combos are unprofitable with current scoring."
+            )
+    elif bot:
+        recs.append("BOT: Not enough TP/SL data yet. Wait for outcome_tracker to fill bot columns.")
+
+    # Temporal analysis insights
+    temporal = report.get("temporal_analysis", {})
+    if temporal:
+        best_day = temporal.get("best_day")
+        worst_day = temporal.get("worst_day")
+        if best_day and worst_day:
+            best_hr = temporal.get("best_day_hit_rate", 0)
+            worst_hr = temporal.get("worst_day_hit_rate", 0)
+            recs.append(
+                f"TEMPORAL: Best day={best_day} ({best_hr*100:.0f}% hit rate), "
+                f"Worst day={worst_day} ({worst_hr*100:.0f}%)"
+            )
+        prime = temporal.get("prime_time", {})
+        off_peak = temporal.get("off_peak", {})
+        if prime and off_peak:
+            p_hr = prime.get("hit_rate", 0)
+            o_hr = off_peak.get("hit_rate", 0)
+            if p_hr > o_hr * 1.3:
+                recs.append(
+                    f"TEMPORAL: Prime time 19h-5h ({p_hr*100:.0f}%) outperforms "
+                    f"off-peak ({o_hr*100:.0f}%) — confirms runner hours"
+                )
+            elif o_hr > p_hr * 1.3:
+                recs.append(
+                    f"TEMPORAL: Off-peak 5h-19h ({o_hr*100:.0f}%) outperforms "
+                    f"prime time ({p_hr*100:.0f}%) — surprising"
+                )
+
+    # Adaptive SL insights
+    adaptive = report.get("adaptive_bot", {})
+    improvement = adaptive.get("adaptive_improvement_pp")
+    if improvement is not None:
+        if improvement > 0:
+            recs.append(
+                f"ADAPTIVE SL: Oracle adaptive SL improves expectancy by +{improvement:.1f}pp "
+                f"over best fixed SL. ML-predicted SL has room to add value."
+            )
+        else:
+            recs.append(
+                f"ADAPTIVE SL: Oracle adaptive SL does NOT improve over fixed SL "
+                f"({improvement:+.1f}pp). Fixed SL is sufficient."
+            )
+    elif adaptive:
+        recs.append("ADAPTIVE SL: Not enough DD data for adaptive simulation.")
+
+    # Equity curve insights
+    eq = report.get("equity_curve", {})
+    for key, info in eq.items():
+        if not isinstance(info, dict) or "max_drawdown_pct" not in info:
+            continue
+        dd = info["max_drawdown_pct"]
+        ret = info["total_return_pct"]
+        streak = info.get("max_losing_streak", 0)
+        if dd > 30:
+            recs.append(
+                f"RISK ({key}): Max drawdown {dd:.0f}% — account would lose {dd:.0f}% at worst. "
+                f"Max losing streak: {streak}."
+            )
+        elif ret > 0:
+            calmar = info.get("calmar_ratio", 0)
+            recs.append(
+                f"EQUITY ({key}): +{ret:.1f}% return, {dd:.1f}% max DD "
+                f"(Calmar={calmar:.2f}), streak={streak}"
+            )
+
+    # Slippage insights
+    slip = report.get("slippage", {})
+    rec_size = slip.get("recommended_max_size_usd")
+    if rec_size:
+        s500 = slip.get("size_500", {})
+        recs.append(
+            f"SLIPPAGE: Recommended max trade size ${rec_size}. "
+            f"At $500: median slippage {s500.get('median_slippage_pct', '?')}%, "
+            f"{s500.get('tokens_above_5pct_slip', '?')} tokens >5% slip"
+        )
+
+    # Confidence interval insights
+    ci = report.get("confidence_intervals", {})
+    verdict = ci.get("verdict")
+    if verdict:
+        recs.append(f"STATISTICAL: {verdict}")
+    needed = ci.get("samples_needed", {})
+    deficit = needed.get("deficit", 0)
+    if deficit > 0:
+        recs.append(
+            f"DATA NEEDED: {deficit} more unique tokens for reliable ±10pp CI "
+            f"(have {needed.get('current', 0)}, need {needed.get('for_10pp_ci', 0)})"
+        )
+
+    # Portfolio insights
+    port = report.get("portfolio", {})
+    best_cfg = port.get("best_config")
+    if best_cfg:
+        best_info = port.get(best_cfg, {})
+        recs.append(
+            f"PORTFOLIO: Best config = {best_cfg} "
+            f"(return={best_info.get('total_return_pct', 0):+.1f}%, "
+            f"DD={best_info.get('max_drawdown_pct', 0):.1f}%, "
+            f"WR={best_info.get('win_rate', 0)*100:.0f}%)"
+        )
+
+    # Kelly insights
+    kelly = report.get("kelly", {})
+    kelly_rec = kelly.get("recommendation")
+    if kelly_rec:
+        recs.append(f"KELLY: {kelly_rec}")
+
     # Overall hit rate
     data = report.get("data_summary", {})
     hr = data.get("hit_rate_12h", 0)
@@ -1185,6 +2506,14 @@ def run_auto_backtest() -> dict | None:
     logger.info("Auto-backtest: computing #1 token hit rate")
     report["top1_hit_rate"] = _top1_hit_rate(df)
 
+    # === REALISTIC BOT SIMULATION (TP/SL candle-by-candle) ===
+    logger.info("Auto-backtest: running realistic bot simulation")
+    report["realistic_bot"] = _realistic_bot_simulation(df)
+
+    # === ADAPTIVE SL SIMULATION (ML v3.1 — oracle upper bound) ===
+    logger.info("Auto-backtest: running adaptive SL simulation")
+    report["adaptive_bot"] = _adaptive_bot_simulation(df)
+
     # Progressive analyses based on available data
 
     # Tier 1: 30+ labeled
@@ -1199,6 +2528,7 @@ def run_auto_backtest() -> dict | None:
         report["false_positive_autopsy"] = _false_positive_autopsy(df, horizon_col)
         report["v8_signals"] = _v8_signal_validation(df, horizon_col)
         report["extraction_analysis"] = _extraction_analysis(df, horizon_col)
+        report["temporal_analysis"] = _temporal_analysis(df, horizon_col)
 
     # Tier 3: 100+ labeled
     if n_labeled >= 100:
@@ -1222,6 +2552,28 @@ def run_auto_backtest() -> dict | None:
     if n_labeled >= 200:
         logger.info("Auto-backtest: running walk-forward validation")
         report["walk_forward"] = _walk_forward(df, horizon_col)
+
+    # === NEW ANALYSES (always run, they handle sparse data gracefully) ===
+
+    # Gap #1: Equity curve + max drawdown
+    logger.info("Auto-backtest: running equity curve analysis")
+    report["equity_curve"] = _equity_curve_analysis(df)
+
+    # Gap #2: Slippage modeling
+    logger.info("Auto-backtest: running slippage analysis")
+    report["slippage"] = _slippage_analysis(df)
+
+    # Gap #3: Confidence intervals
+    logger.info("Auto-backtest: running confidence intervals")
+    report["confidence_intervals"] = _confidence_intervals(df, horizon_col)
+
+    # Gap #4: Portfolio simulation (top 1/3/5)
+    logger.info("Auto-backtest: running portfolio simulation")
+    report["portfolio"] = _portfolio_simulation(df)
+
+    # Gap #5: Kelly criterion position sizing
+    logger.info("Auto-backtest: running Kelly analysis")
+    report["kelly"] = _kelly_analysis(df, horizon_col)
 
     # Generate recommendations
     report["recommendations"] = _generate_recommendations(report)
@@ -1308,6 +2660,67 @@ def main():
                     print(f"    {d['symbol']:15s} score={d['score']:3d} "
                           f"return={ret:>6s} [{status}]")
 
+    # Realistic Bot Simulation
+    bot = report.get("realistic_bot", {})
+    if bot:
+        print(f"\nRealistic Bot Simulation (TP/SL):")
+        best = bot.get("best_strategy")
+        best_exp = bot.get("best_expectancy")
+        if best:
+            print(f"  BEST STRATEGY: {best} (expectancy={best_exp:+.2%})")
+        # Show top1 strategies grouped by horizon
+        for hz in ["12h", "24h"]:
+            hz_strats = {k: v for k, v in bot.items()
+                         if isinstance(v, dict) and v.get("horizon") == hz and v.get("top_n") == 1}
+            if hz_strats:
+                print(f"\n  --- {hz} (top 1 token) ---")
+                for key, s in sorted(hz_strats.items()):
+                    status = "PROFITABLE" if s["is_profitable"] else "UNPROFITABLE"
+                    print(f"  {s['description']:20s} | {s['trades']:2d} trades | "
+                          f"WR={s['win_rate']:.0%} (need>{s['breakeven_wr']:.0%}) | "
+                          f"PF={s['profit_factor']:.2f} | "
+                          f"E[r]={s['expectancy']:+.2%} | "
+                          f"TP={s['tp']} SL={s['sl']} TO={s['timeout']} | "
+                          f"{status}")
+                    if s.get("avg_win_min") is not None:
+                        print(f"  {'':20s} | avg win={s['avg_win_min']}min "
+                              f"avg loss={s.get('avg_loss_min', '?')}min "
+                              f"max_consec_loss={s['max_consecutive_losses']}")
+
+    # Adaptive SL Simulation
+    adaptive = report.get("adaptive_bot", {})
+    if adaptive:
+        print(f"\nAdaptive SL Simulation (ML v3.1 — oracle upper bound):")
+        for hz in ["12h", "24h"]:
+            # Fixed SL results
+            for sl_pct in [20, 30, 50]:
+                key = f"fixed_SL{sl_pct}_{hz}"
+                s = adaptive.get(key)
+                if s:
+                    print(f"  Fixed SL{sl_pct}% {hz}: {s['trades']} trades | "
+                          f"WR={s['win_rate']:.0%} | E[r]={s['expectancy']:+.2%} | "
+                          f"PF={s['profit_factor']:.2f}")
+            # Adaptive result
+            a_key = f"adaptive_{hz}"
+            a = adaptive.get(a_key)
+            if a:
+                print(f"  Adaptive  {hz}: {a['trades']} trades | "
+                      f"WR={a['win_rate']:.0%} | E[r]={a['expectancy']:+.2%} | "
+                      f"PF={a['profit_factor']:.2f} | "
+                      f"avg_SL={a['avg_adaptive_sl_pct']:.1f}% avg_DD={a['avg_actual_dd_pct']:.1f}%")
+            # ML DD bands
+            bands_key = f"ml_dd_bands_{hz}"
+            bands = adaptive.get(bands_key)
+            if bands:
+                print(f"  ML DD bands ({hz}):")
+                for band, info in bands.items():
+                    print(f"    rr {band}: n={info['count']} avg_dd={info['avg_dd_pct']}% "
+                          f"p75_dd={info['p75_dd_pct']}% → SL={info['recommended_sl_pct']}%")
+
+        imp = adaptive.get("adaptive_improvement_pp")
+        if imp is not None:
+            print(f"  Adaptive vs Fixed improvement: {imp:+.1f}pp expectancy")
+
     # Score calibration
     cal = report.get("score_calibration", {})
     if cal:
@@ -1343,6 +2756,39 @@ def main():
         if corr is not None:
             print(f"  has_ca_mention correlation: {corr:+.3f}")
 
+    # Temporal analysis
+    temporal = report.get("temporal_analysis", {})
+    if temporal:
+        print(f"\nTemporal Analysis (Europe/Paris):")
+        by_day = temporal.get("by_day_of_week", {})
+        if by_day:
+            print(f"  Day of week:")
+            for day, info in by_day.items():
+                bar = "#" * max(0, int(info["hit_rate"] * 20))
+                print(f"    {day:3s}: {info['hit_rate']*100:5.1f}% "
+                      f"({info['hits']}/{info['count']}) {bar}")
+        by_hour = temporal.get("by_hour_paris", {})
+        if by_hour:
+            print(f"  Hour bands (Paris):")
+            for band, info in by_hour.items():
+                bar = "#" * max(0, int(info["hit_rate"] * 20))
+                print(f"    {band:5s}h: {info['hit_rate']*100:5.1f}% "
+                      f"({info['hits']}/{info['count']}) {bar}")
+        prime = temporal.get("prime_time", {})
+        off_peak = temporal.get("off_peak", {})
+        if prime and off_peak:
+            print(f"  Prime time (19h-5h): {prime.get('hit_rate', 0)*100:.1f}% "
+                  f"({prime.get('hits', 0)}/{prime.get('count', 0)})")
+            print(f"  Off-peak   (5h-19h): {off_peak.get('hit_rate', 0)*100:.1f}% "
+                  f"({off_peak.get('hits', 0)}/{off_peak.get('count', 0)})")
+        weekend = temporal.get("weekend", {})
+        weekday = temporal.get("weekday", {})
+        if weekend and weekday:
+            print(f"  Weekend: {weekend.get('hit_rate', 0)*100:.1f}% "
+                  f"({weekend.get('hits', 0)}/{weekend.get('count', 0)})")
+            print(f"  Weekday: {weekday.get('hit_rate', 0)*100:.1f}% "
+                  f"({weekday.get('hits', 0)}/{weekday.get('count', 0)})")
+
     # v8 signals
     v8 = report.get("v8_signals", {})
     if v8:
@@ -1363,6 +2809,97 @@ def main():
             delta = val.get("hit_rate_delta", 0)
             arrow = "^" if delta > 0 else "v" if delta < 0 else "="
             print(f"  {key:30s} {arrow} {delta*100:+.1f}pp (n={val.get('sample_size', 0)})")
+
+    # Equity Curve
+    eq = report.get("equity_curve", {})
+    if eq:
+        print(f"\nEquity Curve (10% risk per trade):")
+        for key, info in eq.items():
+            if not isinstance(info, dict) or "final_equity" not in info:
+                continue
+            status = "PROFITABLE" if info["total_return_pct"] > 0 else "LOSS"
+            calmar = info.get("calmar_ratio", 0)
+            print(f"  {key}: {info['trades']} trades | "
+                  f"Return={info['total_return_pct']:+.1f}% | "
+                  f"Max DD={info['max_drawdown_pct']:.1f}% | "
+                  f"Calmar={calmar:.2f} | "
+                  f"Max losing streak={info['max_losing_streak']} | "
+                  f"{status}")
+
+    # Slippage
+    slip = report.get("slippage", {})
+    if slip and "tokens_with_liquidity" in slip:
+        print(f"\nSlippage Analysis ({slip['tokens_with_liquidity']} tokens with liquidity):")
+        liq = slip.get("liquidity_stats", {})
+        print(f"  Liquidity: median=${liq.get('median', 0):,.0f} "
+              f"p25=${liq.get('p25', 0):,.0f} p75=${liq.get('p75', 0):,.0f}")
+        for size in [100, 500, 1000, 5000]:
+            s = slip.get(f"size_{size}", {})
+            if s:
+                print(f"  ${size:5d}: median_slip={s['median_slippage_pct']:.2f}% "
+                      f"p95={s['p95_slippage_pct']:.2f}% "
+                      f">5%={s['tokens_above_5pct_slip']} "
+                      f">10%={s['tokens_above_10pct_slip']}")
+        print(f"  Recommended max size: ${slip.get('recommended_max_size_usd', '?')}")
+
+    # Confidence Intervals
+    ci = report.get("confidence_intervals", {})
+    if ci:
+        print(f"\nStatistical Confidence:")
+        verdict = ci.get("verdict", "")
+        print(f"  {verdict}")
+        overall = ci.get("overall_hit_rate", {})
+        if overall:
+            print(f"  Overall 2x: {overall['hit_rate']*100:.1f}% "
+                  f"[{overall['ci_95_low']*100:.1f}%-{overall['ci_95_high']*100:.1f}%] "
+                  f"(n={overall['n']}, CI width={overall['ci_width']*100:.0f}pp)")
+        t1 = ci.get("top1_hit_rate", {})
+        if t1:
+            print(f"  Top1 2x:   {t1['hit_rate']*100:.1f}% "
+                  f"[{t1['ci_95_low']*100:.1f}%-{t1['ci_95_high']*100:.1f}%] "
+                  f"(n={t1['n']}, CI width={t1['ci_width']*100:.0f}pp)")
+        needed = ci.get("samples_needed", {})
+        if needed:
+            print(f"  Samples: have {needed['current']}, "
+                  f"need {needed['for_10pp_ci']} for ±10pp CI, "
+                  f"{needed['for_5pp_ci']} for ±5pp CI")
+
+    # Portfolio Simulation
+    port = report.get("portfolio", {})
+    if port:
+        print(f"\nPortfolio Simulation (top N tokens, TP50/SL30):")
+        best_cfg = port.get("best_config")
+        for hz in ["12h", "24h"]:
+            hz_results = {k: v for k, v in port.items()
+                          if isinstance(v, dict) and v.get("horizon") == hz}
+            if hz_results:
+                print(f"  --- {hz} ---")
+                for key in sorted(hz_results):
+                    p = hz_results[key]
+                    marker = " <-- BEST" if key == best_cfg else ""
+                    print(f"  Top{p['portfolio_size']}: {p['trades']:3d} trades | "
+                          f"WR={p['win_rate']:.0%} | "
+                          f"Return={p['total_return_pct']:+.1f}% | "
+                          f"DD={p['max_drawdown_pct']:.1f}%{marker}")
+
+    # Kelly Criterion
+    kelly = report.get("kelly", {})
+    if kelly:
+        print(f"\nKelly Criterion (optimal bet size):")
+        rec = kelly.get("recommendation", "")
+        print(f"  {rec}")
+        for hz_key, bands in kelly.items():
+            if not isinstance(bands, dict) or "band_0_30" not in bands:
+                continue
+            print(f"  --- {hz_key} ---")
+            for band_name, lo, hi in SCORE_BANDS:
+                info = bands.get(band_name, {})
+                if not isinstance(info, dict) or info.get("count", 0) < 5:
+                    continue
+                print(f"  {lo}-{hi}: WR={info['win_rate']*100:.0f}% "
+                      f"Kelly={info['kelly_half_pct']:.1f}% "
+                      f"edge={info['expected_edge_pct']:+.1f}% "
+                      f"[{info['verdict']}] (n={info['count']})")
 
     # Recommendations
     recs = report.get("recommendations", [])

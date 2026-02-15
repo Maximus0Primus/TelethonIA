@@ -1,5 +1,7 @@
 """
-ML training script for memecoin 2x prediction.
+ML training script for memecoin prediction.
+v3.1: risk_reward mode — predicts rr_ratio for adaptive SL per token.
+v3: bot_won labels (TP before SL) for capturable profit prediction.
 v2: Regression + classification dual mode, adaptive feature selection,
     Spearman rank correlation metric, quality gates.
 
@@ -8,13 +10,16 @@ v2: Regression + classification dual mode, adaptive feature selection,
 - Optuna hyperparameter optimization
 - SHAP feature importance analysis
 - Adaptive feature selection by sample count
-
-Run manually when enough labeled snapshots have accumulated (~500+).
+- ML v3: bot_won mode — predicts if TP hits before SL (capturable profit)
+- ML v3.1: risk_reward mode — predicts rr_ratio, outputs dd_by_rr_band for adaptive SL
 
 Usage:
     python train_model.py --horizon 12h --trials 100
     python train_model.py --horizon 12h --mode regression --trials 100
+    python train_model.py --mode bot_won --horizon 12h --strategy TP50_SL30
+    python train_model.py --mode risk_reward --horizon 12h --min-samples 30
     python train_model.py --all --trials 200
+    python train_model.py --auto  # grid search + bot_won Phase 2 + risk_reward Phase 3
 """
 
 import os
@@ -86,6 +91,11 @@ CORE_FEATURES = [
     "score_velocity",
     "mention_velocity",
     "volume_velocity",
+    # ML v3.1: Calendar/temporal (low-dim, high signal for memecoins)
+    "day_of_week",       # 0=Mon..6=Sun (Sunday worst, Tuesday best)
+    "hour_paris",        # 0-23 Europe/Paris (runners peak 19h-5h)
+    "is_weekend",        # 0/1
+    "is_prime_time",     # 0/1 (19h-5h Paris)
 ]
 
 # Tier 2 (extended): Add these when 500-2000 samples. ~30 features total.
@@ -177,6 +187,8 @@ ALL_FEATURE_COLS = [
     # v17/v21: Scoring multipliers
     "pump_momentum_pen",
     "gate_mult",
+    # ML v3.1: Calendar/temporal
+    "day_of_week", "hour_paris", "is_weekend", "is_prime_time",
 ]
 
 HORIZONS = {
@@ -184,6 +196,13 @@ HORIZONS = {
     "6h": "did_2x_6h",
     "12h": "did_2x_12h",
     "24h": "did_2x_24h",
+}
+
+# ML v3: Bot TP/SL strategies for bot_won training
+BOT_STRATEGIES = {
+    "TP30_SL20": {"tp_col": "time_to_1_3x_min", "sl_col": "time_to_sl20_min", "tp_pct": 0.30, "sl_pct": -0.20},
+    "TP50_SL30": {"tp_col": "time_to_1_5x_min", "sl_col": "time_to_sl30_min", "tp_pct": 0.50, "sl_pct": -0.30},
+    "TP100_SL50": {"tp_col": "time_to_2x",      "sl_col": "time_to_sl50_min", "tp_pct": 1.00, "sl_pct": -0.50},
 }
 
 # Return columns for regression target
@@ -311,6 +330,141 @@ def deduplicate_snapshots(df: pd.DataFrame, threshold: float = 2.0) -> pd.DataFr
     return df.reset_index(drop=True)
 
 
+def load_bot_labeled_data(horizon: str = "12h", strategy: str = "TP50_SL30") -> pd.DataFrame:
+    """
+    ML v3: Load snapshots with bot TP/SL data and compute bot_won label.
+
+    bot_won = 1 if TP hit before SL (chronologically), 0 if SL first or timeout.
+    This teaches the model to predict *capturable* profit, not theoretical max.
+    """
+    if strategy not in BOT_STRATEGIES:
+        raise ValueError(f"Unknown strategy: {strategy}. Choose from {list(BOT_STRATEGIES)}")
+
+    client = _get_client()
+    strat = BOT_STRATEGIES[strategy]
+
+    # Build column names for this horizon
+    if strategy == "TP100_SL50":
+        tp_col = f"time_to_2x_{horizon}"   # stored in hours
+        tp_is_hours = True
+    else:
+        tp_col = f"{strat['tp_col']}_{horizon}"  # stored in minutes
+        tp_is_hours = False
+    sl_col = f"{strat['sl_col']}_{horizon}"
+
+    # Fetch all snapshots with pagination
+    all_data = []
+    page_size = 1000
+    offset = 0
+
+    while True:
+        result = (
+            client.table("token_snapshots")
+            .select("*")
+            .not_.is_("price_at_snapshot", "null")
+            .order("snapshot_at")
+            .range(offset, offset + page_size - 1)
+            .execute()
+        )
+        if not result.data:
+            break
+        all_data.extend(result.data)
+        if len(result.data) < page_size:
+            break
+        offset += page_size
+
+    if not all_data:
+        logger.error("No data found for bot labeling")
+        return pd.DataFrame()
+
+    df = pd.DataFrame(all_data)
+
+    # Filter to rows where at least one of TP/SL is non-null
+    if tp_col not in df.columns or sl_col not in df.columns:
+        logger.warning("Bot columns %s/%s not found in data", tp_col, sl_col)
+        return pd.DataFrame()
+
+    df[tp_col] = pd.to_numeric(df.get(tp_col), errors="coerce")
+    df[sl_col] = pd.to_numeric(df.get(sl_col), errors="coerce")
+    has_data = df[tp_col].notna() | df[sl_col].notna()
+    df = df[has_data].copy()
+
+    if df.empty:
+        logger.warning("No bot TP/SL data found for %s/%s", horizon, strategy)
+        return pd.DataFrame()
+
+    # Convert TP from hours to minutes if needed (time_to_2x is in hours)
+    if tp_is_hours:
+        df["_tp_min"] = df[tp_col] * 60
+    else:
+        df["_tp_min"] = df[tp_col]
+    df["_sl_min"] = df[sl_col]
+
+    # Label: bot_won = 1 if TP hit before SL
+    tp_hit = df["_tp_min"].notna()
+    sl_hit = df["_sl_min"].notna()
+    tp_before_sl = tp_hit & (~sl_hit | (df["_tp_min"] < df["_sl_min"]))
+    df["_bot_won"] = tp_before_sl.astype(int)
+
+    # Compute max_return for compatibility with deduplicate_snapshots()
+    max_price_col = f"max_price_{horizon}"
+    if max_price_col in df.columns:
+        df[max_price_col] = pd.to_numeric(df[max_price_col], errors="coerce")
+        df["price_at_snapshot"] = pd.to_numeric(df["price_at_snapshot"], errors="coerce")
+        valid = df[max_price_col].notna() & df["price_at_snapshot"].notna() & (df["price_at_snapshot"] > 0)
+        df.loc[valid, "max_return"] = df.loc[valid, max_price_col] / df.loc[valid, "price_at_snapshot"]
+
+    n_won = int(df["_bot_won"].sum())
+    logger.info("Bot labeling %s/%s: %d samples, %d wins (%.1f%% win rate)",
+                horizon, strategy, len(df), n_won, 100 * n_won / max(1, len(df)))
+
+    return df
+
+
+def load_risk_reward_data(horizon: str = "12h") -> pd.DataFrame:
+    """
+    ML v3.1: Load snapshots with drawdown data and compute risk/reward ratio.
+
+    rr_ratio = max_return / (1 + max_dd_pct / 100)
+    - rr_ratio > 1.0 = return compensates the drawdown
+    - rr_ratio < 1.0 = drawdown eats the potential return
+
+    Reuses load_labeled_data() for paginated fetch + max_return computation.
+    Filters to rows where max_dd_before_tp_pct_{hz} is non-null and > 0.
+    """
+    df = load_labeled_data(horizon)
+    if df.empty:
+        return df
+
+    dd_col = f"max_dd_before_tp_pct_{horizon}"
+    if dd_col not in df.columns:
+        logger.warning("RR loader: column %s not in data", dd_col)
+        return pd.DataFrame()
+
+    df[dd_col] = pd.to_numeric(df.get(dd_col), errors="coerce")
+    valid = df[dd_col].notna() & (df[dd_col] > 0) & df["max_return"].notna() & (df["max_return"] > 0)
+    df = df[valid].copy()
+
+    if df.empty:
+        logger.warning("RR loader: no valid rows with DD data for %s", horizon)
+        return df
+
+    df["rr_ratio"] = df["max_return"] / (1 + df[dd_col] / 100.0)
+    df["log_rr"] = np.log1p(df["rr_ratio"] - 1)
+    df["_winner"] = (df["rr_ratio"] > 1.0).astype(int)
+    df["dd_pct"] = df[dd_col]
+
+    n_winners = int(df["_winner"].sum())
+    logger.info(
+        "RR loader %s: %d samples, %d winners (rr>1.0, %.1f%%), "
+        "median rr=%.2f, avg rr=%.2f, median dd=%.1f%%",
+        horizon, len(df), n_winners, 100 * n_winners / max(1, len(df)),
+        float(df["rr_ratio"].median()), float(df["rr_ratio"].mean()),
+        float(df["dd_pct"].median()),
+    )
+    return df
+
+
 def prepare_features(df: pd.DataFrame, feature_pool: list[str]) -> tuple[pd.DataFrame, list[str]]:
     """
     Transform raw data into ML features.
@@ -349,6 +503,20 @@ def prepare_features(df: pd.DataFrame, feature_pool: list[str]) -> tuple[pd.Data
             if pd.notna(r.get("birdeye_buy_24h")) else np.nan,
             axis=1,
         )
+
+    # ML v3.1: Calendar/temporal features derived from snapshot_at
+    if "snapshot_at" in df.columns:
+        ts = pd.to_datetime(df["snapshot_at"], utc=True)
+        # Convert to Europe/Paris for trader-relevant hours
+        try:
+            ts_paris = ts.dt.tz_convert("Europe/Paris")
+        except Exception:
+            # Fallback: UTC+1 (approx)
+            ts_paris = ts + pd.Timedelta(hours=1)
+        df["day_of_week"] = ts_paris.dt.dayofweek       # 0=Mon..6=Sun
+        df["hour_paris"] = ts_paris.dt.hour              # 0-23
+        df["is_weekend"] = (df["day_of_week"] >= 5).astype(int)
+        df["is_prime_time"] = ((df["hour_paris"] >= 19) | (df["hour_paris"] < 5)).astype(int)
 
     # Filter to features in the tier pool that are available (>10% non-null)
     available = []
@@ -1053,6 +1221,353 @@ def train_ltr(
     return metadata
 
 
+# ═══ BOT_WON TRAINING (ML v3) ═══
+
+def train_bot_won(
+    df: pd.DataFrame,
+    horizon: str = "12h",
+    strategy: str = "TP50_SL30",
+    n_trials: int = 100,
+    min_samples: int = 100,
+) -> dict | None:
+    """
+    ML v3: Train binary classification — predict bot_won (TP before SL).
+    Learns capturable profit patterns instead of theoretical max return.
+
+    Uses the same feature set and XGBoost+LightGBM ensemble as classification,
+    but with bot_won labels computed from TP/SL chronological ordering.
+    Models saved with _bot suffix to coexist with regression/LTR models.
+    """
+    if len(df) < min_samples:
+        logger.warning("Bot training: only %d samples (need %d). Skipping.", len(df), min_samples)
+        return None
+
+    if "_bot_won" not in df.columns:
+        logger.error("Bot training: missing _bot_won column. Call load_bot_labeled_data() first.")
+        return None
+
+    y_col = "_bot_won"
+    n_winners = int(df[y_col].sum())
+    logger.info("Bot training %s/%s: %d samples, %d wins (%.1f%%)",
+                horizon, strategy, len(df), n_winners, 100 * n_winners / max(1, len(df)))
+
+    if n_winners < 3:
+        logger.warning("Bot training: only %d wins, need at least 3. Skipping.", n_winners)
+        return None
+
+    # Feature selection by tier
+    feature_pool = _select_feature_tier(len(df))
+    df, available_features = prepare_features(df, feature_pool)
+
+    if len(available_features) < 5:
+        logger.error("Bot training: only %d features — need at least 5", len(available_features))
+        return None
+
+    train_df, test_df = walk_forward_split(df)
+
+    X_train = train_df[available_features]
+    y_train = train_df[y_col].astype(int)
+    X_test = test_df[available_features]
+    y_test = test_df[y_col].astype(int)
+
+    pos_count = y_train.sum()
+    neg_count = len(y_train) - pos_count
+    scale_pos = neg_count / max(1, pos_count)
+
+    logger.info(
+        "Bot Train: %d (%d wins, %.1f%%), Test: %d (%d wins, %.1f%%)",
+        len(y_train), pos_count, 100 * pos_count / max(1, len(y_train)),
+        len(y_test), y_test.sum(), 100 * y_test.sum() / max(1, len(y_test)),
+    )
+
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+    # Train XGBoost classifier
+    logger.info("=== Optimizing XGBoost Bot Classifier (%d trials) ===", n_trials)
+    xgb_model, xgb_params, xgb_score = _optimize_xgboost(
+        X_train, y_train, X_test, y_test, scale_pos, n_trials
+    )
+
+    # Train LightGBM classifier
+    logger.info("=== Optimizing LightGBM Bot Classifier (%d trials) ===", n_trials)
+    lgb_model, lgb_params, lgb_score = _optimize_lightgbm(
+        X_train, y_train, X_test, y_test, scale_pos, n_trials
+    )
+
+    # Ensemble
+    xgb_proba = xgb_model.predict_proba(X_test)[:, 1]
+    lgb_proba = lgb_model.predict_proba(X_test)[:, 1]
+
+    total_score = xgb_score + lgb_score
+    xgb_weight = xgb_score / max(0.001, total_score)
+    lgb_weight = lgb_score / max(0.001, total_score)
+
+    ensemble_proba = xgb_weight * xgb_proba + lgb_weight * lgb_proba
+
+    # Metrics
+    p_at_5 = _precision_at_k(y_test, ensemble_proba, k=5)
+    p_at_10 = _precision_at_k(y_test, ensemble_proba, k=10)
+    ensemble_pred = (ensemble_proba >= 0.5).astype(int)
+    precision = precision_score(y_test, ensemble_pred, zero_division=0)
+    recall = recall_score(y_test, ensemble_pred, zero_division=0)
+    f1 = f1_score(y_test, ensemble_pred, zero_division=0)
+    try:
+        auc = roc_auc_score(y_test, ensemble_proba)
+    except ValueError:
+        auc = 0.0
+
+    logger.info("\n=== BOT CLASSIFICATION RESULTS (%s/%s) ===", horizon, strategy)
+    logger.info("Precision@5: %.3f (target: >%.2f)", p_at_5, MIN_PRECISION_AT_5)
+    logger.info("Precision@10: %.3f, AUC: %.3f, F1: %.3f", p_at_10, auc, f1)
+
+    # Quality gate
+    if p_at_5 < MIN_PRECISION_AT_5:
+        logger.warning(
+            "BOT QUALITY GATE FAILED: precision@5 = %.3f < %.2f. Model NOT saved.",
+            p_at_5, MIN_PRECISION_AT_5,
+        )
+        return {"quality_gate": "FAILED", "precision_at_5": float(p_at_5), "mode": "bot_won"}
+
+    # SHAP analysis
+    xgb_shap = _compute_shap(xgb_model, X_test, available_features, "XGBoost-Bot")
+    lgb_shap = _compute_shap(lgb_model, X_test, available_features, "LightGBM-Bot")
+
+    # Save models with _bot suffix
+    xgb_path = MODEL_DIR / f"model_{horizon}_bot.json"
+    xgb_model.save_model(str(xgb_path))
+    logger.info("XGBoost bot model saved to %s", xgb_path)
+
+    lgb_path = MODEL_DIR / f"model_{horizon}_bot_lgb.txt"
+    lgb_model.booster_.save_model(str(lgb_path))
+    logger.info("LightGBM bot model saved to %s", lgb_path)
+
+    # Feature importances
+    xgb_importances = dict(zip(available_features, xgb_model.feature_importances_))
+    sorted_imp = sorted(xgb_importances.items(), key=lambda x: x[1], reverse=True)
+
+    metadata = {
+        "horizon": horizon,
+        "strategy": strategy,
+        "mode": "bot_won",
+        "trained_at": datetime.utcnow().isoformat(),
+        "train_samples": len(y_train),
+        "test_samples": len(y_test),
+        "n_winners": n_winners,
+        "feature_tier": "core" if len(df) < 500 else "extended" if len(df) < 2000 else "full",
+        "ensemble_weights": {"xgboost": float(xgb_weight), "lightgbm": float(lgb_weight)},
+        "xgb_params": {k: v for k, v in xgb_params.items() if k != "verbosity"},
+        "lgb_params": {k: v for k, v in lgb_params.items() if k not in ("verbosity", "metric")},
+        "metrics": {
+            "precision_at_5": float(p_at_5),
+            "precision_at_10": float(p_at_10),
+            "precision": float(precision),
+            "recall": float(recall),
+            "f1": float(f1),
+            "auc_roc": float(auc),
+        },
+        "quality_gate": "PASSED",
+        "feature_importances_xgb": {k: float(v) for k, v in sorted_imp},
+        "shap_importances_xgb": xgb_shap,
+        "shap_importances_lgb": lgb_shap,
+        "features": available_features,
+    }
+
+    meta_path = MODEL_DIR / f"model_{horizon}_bot_meta.json"
+    with open(meta_path, "w") as f:
+        json.dump(metadata, f, indent=2)
+    logger.info("Bot metadata saved to %s", meta_path)
+
+    return metadata
+
+
+# ═══ RISK/REWARD REGRESSION (ML v3.1) ═══
+
+def train_risk_reward(
+    df: pd.DataFrame,
+    horizon: str = "12h",
+    n_trials: int = 100,
+    min_samples: int = 30,
+) -> dict | None:
+    """
+    ML v3.1: Train regression ensemble to predict risk/reward ratio.
+
+    Target = log_rr = log1p(rr_ratio - 1), where:
+        rr_ratio = max_return / (1 + max_dd_pct / 100)
+
+    Winner label = rr_ratio > 1.0 (return compensates drawdown).
+    Uses same XGBoost+LightGBM ensemble as regression mode.
+
+    Extra metadata: dd_by_rr_band — for each predicted rr_ratio band,
+    the real DD distribution + recommended adaptive SL.
+    """
+    if len(df) < min_samples:
+        logger.warning("RR training: only %d samples (need %d). Skipping.", len(df), min_samples)
+        return None
+
+    if "log_rr" not in df.columns or "_winner" not in df.columns:
+        logger.error("RR training: missing log_rr/_winner columns. Call load_risk_reward_data() first.")
+        return None
+
+    n_winners = int(df["_winner"].sum())
+    logger.info(
+        "RR training %s: %d samples, %d winners (rr>1.0, %.1f%%)",
+        horizon, len(df), n_winners, 100 * n_winners / max(1, len(df)),
+    )
+
+    if n_winners < 3:
+        logger.warning("RR training: only %d winners, need at least 3. Skipping.", n_winners)
+        return None
+
+    # Feature selection by tier
+    feature_pool = _select_feature_tier(len(df))
+    df, available_features = prepare_features(df, feature_pool)
+
+    if len(available_features) < 5:
+        logger.error("RR training: only %d features — need at least 5", len(available_features))
+        return None
+
+    train_df, test_df = walk_forward_split(df)
+
+    X_train = train_df[available_features]
+    y_train = train_df["log_rr"]
+    X_test = test_df[available_features]
+    y_test = test_df["log_rr"]
+    y_test_binary = test_df["_winner"]
+
+    logger.info(
+        "RR — Train: %d, Test: %d, log_rr range: [%.3f, %.3f]",
+        len(y_train), len(y_test), y_train.min(), y_train.max(),
+    )
+
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+    # Train XGBoost regressor
+    logger.info("=== Optimizing XGBoost RR Regressor (%d trials) ===", n_trials)
+    xgb_model, xgb_params, xgb_spearman = _optimize_xgb_regressor(
+        X_train, y_train, X_test, y_test, n_trials
+    )
+
+    # Train LightGBM regressor
+    logger.info("=== Optimizing LightGBM RR Regressor (%d trials) ===", n_trials)
+    lgb_model, lgb_params, lgb_spearman = _optimize_lgb_regressor(
+        X_train, y_train, X_test, y_test, n_trials
+    )
+
+    # Ensemble: weighted average of predictions
+    xgb_preds = xgb_model.predict(X_test)
+    lgb_preds = lgb_model.predict(X_test)
+
+    total_score = abs(xgb_spearman) + abs(lgb_spearman)
+    xgb_weight = abs(xgb_spearman) / max(0.001, total_score)
+    lgb_weight = abs(lgb_spearman) / max(0.001, total_score)
+
+    ensemble_preds = xgb_weight * xgb_preds + lgb_weight * lgb_preds
+
+    # Metrics
+    spearman = _spearman_rank(y_test, ensemble_preds)
+    rmse = float(np.sqrt(mean_squared_error(y_test, ensemble_preds)))
+    p_at_5 = _precision_at_k(y_test_binary, ensemble_preds, k=5)
+    p_at_10 = _precision_at_k(y_test_binary, ensemble_preds, k=10)
+
+    logger.info("\n=== RISK/REWARD REGRESSION RESULTS ===")
+    logger.info("Weights: XGBoost=%.2f, LightGBM=%.2f", xgb_weight, lgb_weight)
+    logger.info("Spearman rank correlation: %.3f", spearman)
+    logger.info("RMSE: %.3f", rmse)
+    logger.info("Precision@5 (rr>1.0): %.3f (target: >%.2f)", p_at_5, MIN_PRECISION_AT_5)
+    logger.info("Precision@10 (rr>1.0): %.3f", p_at_10)
+
+    # DD distribution by predicted rr_ratio band (the key adaptive SL output)
+    dd_by_rr_band = {}
+    if "dd_pct" in test_df.columns and len(test_df) > 0:
+        pred_rr = np.expm1(ensemble_preds) + 1  # inverse of log1p(rr - 1)
+        pred_bands = pd.cut(
+            pred_rr,
+            bins=[-999, 0.5, 0.8, 1.0, 1.5, 999],
+            labels=["<0.5", "0.5-0.8", "0.8-1.0", "1.0-1.5", ">1.5"],
+        )
+        test_dd = pd.to_numeric(test_df["dd_pct"], errors="coerce")
+        for band in ["<0.5", "0.5-0.8", "0.8-1.0", "1.0-1.5", ">1.5"]:
+            mask = pred_bands == band
+            grp_dd = test_dd[mask].dropna()
+            if len(grp_dd) == 0:
+                continue
+            p75_dd = float(grp_dd.quantile(0.75))
+            dd_by_rr_band[band] = {
+                "count": int(len(grp_dd)),
+                "avg_dd_pct": round(float(grp_dd.mean()), 1),
+                "median_dd_pct": round(float(grp_dd.median()), 1),
+                "p75_dd_pct": round(p75_dd, 1),
+                "recommended_sl_pct": round(p75_dd * 1.2, 1),
+            }
+        logger.info("DD by RR band: %s", dd_by_rr_band)
+
+    # Quality gate
+    if p_at_5 < MIN_PRECISION_AT_5:
+        logger.warning(
+            "RR QUALITY GATE FAILED: precision@5 = %.3f < %.2f. Model NOT saved.",
+            p_at_5, MIN_PRECISION_AT_5,
+        )
+        return {
+            "quality_gate": "FAILED",
+            "precision_at_5": float(p_at_5),
+            "mode": "risk_reward",
+            "dd_by_rr_band": dd_by_rr_band,
+            "metrics": {"precision_at_5": float(p_at_5), "spearman": float(spearman)},
+        }
+
+    # SHAP analysis
+    logger.info("=== RR SHAP Analysis ===")
+    xgb_shap = _compute_shap(xgb_model, X_test, available_features, "XGBoost-RR")
+    lgb_shap = _compute_shap(lgb_model, X_test, available_features, "LightGBM-RR")
+
+    # Save models with _rr suffix
+    xgb_path = MODEL_DIR / f"model_{horizon}_rr.json"
+    xgb_model.save_model(str(xgb_path))
+    logger.info("XGBoost RR model saved to %s", xgb_path)
+
+    lgb_path = MODEL_DIR / f"model_{horizon}_rr_lgb.txt"
+    lgb_model.booster_.save_model(str(lgb_path))
+    logger.info("LightGBM RR model saved to %s", lgb_path)
+
+    # Feature importances
+    xgb_importances = dict(zip(available_features, xgb_model.feature_importances_))
+    sorted_imp = sorted(xgb_importances.items(), key=lambda x: x[1], reverse=True)
+
+    metadata = {
+        "horizon": horizon,
+        "mode": "risk_reward",
+        "trained_at": datetime.utcnow().isoformat(),
+        "train_samples": len(y_train),
+        "test_samples": len(y_test),
+        "n_winners": n_winners,
+        "feature_tier": "core" if len(df) < 500 else "extended" if len(df) < 2000 else "full",
+        "ensemble_weights": {"xgboost": float(xgb_weight), "lightgbm": float(lgb_weight)},
+        "xgb_params": {k: v for k, v in xgb_params.items() if k != "verbosity"},
+        "lgb_params": {k: v for k, v in lgb_params.items() if k != "verbosity"},
+        "metrics": {
+            "spearman": float(spearman),
+            "rmse": rmse,
+            "precision_at_5": float(p_at_5),
+            "precision_at_10": float(p_at_10),
+            "xgb_spearman": float(xgb_spearman),
+            "lgb_spearman": float(lgb_spearman),
+        },
+        "quality_gate": "PASSED",
+        "dd_by_rr_band": dd_by_rr_band,
+        "feature_importances_xgb": {k: float(v) for k, v in sorted_imp},
+        "shap_importances_xgb": xgb_shap,
+        "shap_importances_lgb": lgb_shap,
+        "features": available_features,
+    }
+
+    meta_path = MODEL_DIR / f"model_{horizon}_rr_meta.json"
+    with open(meta_path, "w") as f:
+        json.dump(metadata, f, indent=2)
+    logger.info("RR metadata saved to %s", meta_path)
+
+    return metadata
+
+
 # ═══ CLASSIFICATION TRAINING (legacy, still available via --mode classify) ═══
 
 def train_ensemble(
@@ -1227,6 +1742,21 @@ def _update_scoring_config_ml(horizon: str, threshold: float) -> None:
         logger.warning("Failed to update scoring_config ml params: %s", e)
 
 
+def _update_scoring_config_bot(strategy: str) -> None:
+    """ML v3: Write the active bot_strategy to scoring_config (does not affect ml_horizon/ml_threshold)."""
+    try:
+        client = _get_client()
+        client.table("scoring_config").update({
+            "bot_strategy": strategy,
+            "updated_at": datetime.utcnow().isoformat(),
+            "updated_by": "auto_train",
+            "change_reason": f"auto_train deployed bot model: {strategy}",
+        }).eq("id", 1).execute()
+        logger.info("scoring_config updated: bot_strategy=%s", strategy)
+    except Exception as e:
+        logger.warning("Failed to update scoring_config bot_strategy: %s", e)
+
+
 def auto_train(
     min_samples: int = 100,
     trials: int = 50,
@@ -1375,6 +1905,116 @@ def auto_train(
     # Update scoring_config so pipeline + backtest use the same horizon/threshold
     _update_scoring_config_ml(best_horizon, best_threshold)
 
+    # ═══ Phase 2: bot_won training (if bot TP/SL data available) ═══
+    logger.info("=== AUTO-TRAIN Phase 2: bot_won training ===")
+    BOT_STRATEGY_POOL = ["TP30_SL20", "TP50_SL30", "TP100_SL50"]
+
+    best_bot_result = None
+    best_bot_horizon = None
+    best_bot_strategy = None
+
+    for bot_hz in ["12h", "24h"]:  # Only 12h/24h have bot columns
+        for bot_strat in BOT_STRATEGY_POOL:
+            try:
+                df_bot = load_bot_labeled_data(bot_hz, bot_strat)
+            except Exception as e:
+                logger.debug("auto_train bot: %s/%s load failed: %s", bot_hz, bot_strat, e)
+                continue
+
+            if df_bot.empty or len(df_bot) < min_samples:
+                logger.info("auto_train bot: %s/%s — %d samples (need %d), skipping",
+                            bot_hz, bot_strat, len(df_bot) if not df_bot.empty else 0, min_samples)
+                continue
+
+            df_bot = deduplicate_snapshots(df_bot)
+            if len(df_bot) < min_samples:
+                continue
+
+            try:
+                bot_meta = train_bot_won(df_bot, bot_hz, bot_strat, n_trials=trials, min_samples=min_samples)
+            except Exception as e:
+                logger.warning("auto_train bot: %s/%s training failed: %s", bot_hz, bot_strat, e)
+                continue
+
+            if not bot_meta or bot_meta.get("quality_gate") != "PASSED":
+                continue
+
+            bot_p5 = bot_meta.get("metrics", {}).get("precision_at_5", 0)
+            logger.info("auto_train bot: %s/%s passed gate (p@5=%.3f)", bot_hz, bot_strat, bot_p5)
+
+            if best_bot_result is None or bot_p5 > best_bot_result.get("metrics", {}).get("precision_at_5", 0):
+                best_bot_result = bot_meta
+                best_bot_horizon = bot_hz
+                best_bot_strategy = bot_strat
+
+    if best_bot_result:
+        bot_p5 = best_bot_result.get("metrics", {}).get("precision_at_5", 0)
+        logger.info("auto_train bot: BEST = %s/%s p@5=%.3f — deployed!",
+                    best_bot_horizon, best_bot_strategy, bot_p5)
+
+        # Save bot meta with auto-train info
+        bot_meta_path = MODEL_DIR / f"model_{best_bot_horizon}_bot_meta.json"
+        best_bot_result["auto_trained"] = True
+        best_bot_result["auto_trained_at"] = datetime.utcnow().isoformat()
+        with open(bot_meta_path, "w") as f:
+            json.dump(best_bot_result, f, indent=2)
+
+        # Update scoring_config with bot_strategy (does not touch ml_horizon/ml_threshold)
+        _update_scoring_config_bot(best_bot_strategy)
+    else:
+        logger.info("auto_train bot: no bot model passed quality gate")
+
+    # ═══ Phase 3: risk_reward regression (adaptive SL data) ═══
+    logger.info("=== AUTO-TRAIN Phase 3: risk_reward regression ===")
+    best_rr_result = None
+    best_rr_horizon = None
+
+    for rr_hz in ["12h", "24h"]:
+        try:
+            df_rr = load_risk_reward_data(rr_hz)
+        except Exception as e:
+            logger.debug("auto_train rr: %s load failed: %s", rr_hz, e)
+            continue
+
+        if df_rr.empty:
+            logger.info("auto_train rr: %s — no DD data, skipping", rr_hz)
+            continue
+
+        df_rr = deduplicate_snapshots(df_rr)
+        if len(df_rr) < 30:
+            logger.info("auto_train rr: %s — only %d unique tokens (need 30), skipping",
+                        rr_hz, len(df_rr))
+            continue
+
+        try:
+            rr_meta = train_risk_reward(df_rr, rr_hz, n_trials=trials, min_samples=30)
+        except Exception as e:
+            logger.warning("auto_train rr: %s training failed: %s", rr_hz, e)
+            continue
+
+        if not rr_meta or rr_meta.get("quality_gate") != "PASSED":
+            continue
+
+        rr_p5 = rr_meta.get("metrics", {}).get("precision_at_5", 0)
+        logger.info("auto_train rr: %s passed gate (p@5=%.3f)", rr_hz, rr_p5)
+
+        if best_rr_result is None or rr_p5 > best_rr_result.get("metrics", {}).get("precision_at_5", 0):
+            best_rr_result = rr_meta
+            best_rr_horizon = rr_hz
+
+    if best_rr_result:
+        rr_p5 = best_rr_result.get("metrics", {}).get("precision_at_5", 0)
+        logger.info("auto_train rr: BEST = %s p@5=%.3f — deployed!", best_rr_horizon, rr_p5)
+
+        # Save rr meta with auto-train info
+        rr_meta_path = MODEL_DIR / f"model_{best_rr_horizon}_rr_meta.json"
+        best_rr_result["auto_trained"] = True
+        best_rr_result["auto_trained_at"] = datetime.utcnow().isoformat()
+        with open(rr_meta_path, "w") as f:
+            json.dump(best_rr_result, f, indent=2)
+    else:
+        logger.info("auto_train rr: no rr model passed quality gate")
+
     return best_result
 
 
@@ -1388,8 +2028,12 @@ def main():
         help="Prediction horizon (default: 12h)",
     )
     parser.add_argument(
-        "--mode", choices=["regression", "classify", "ltr"], default="regression",
-        help="Training mode: regression (predict max_return), classify (predict did_2x), or ltr (Learning-to-Rank)",
+        "--mode", choices=["regression", "classify", "ltr", "bot_won", "risk_reward"], default="regression",
+        help="Training mode: regression, classify, ltr, bot_won, or risk_reward (adaptive SL)",
+    )
+    parser.add_argument(
+        "--strategy", choices=list(BOT_STRATEGIES.keys()), default="TP50_SL30",
+        help="Bot strategy for bot_won mode (default: TP50_SL30)",
     )
     parser.add_argument(
         "--threshold", type=float, default=2.0,
@@ -1432,6 +2076,34 @@ def main():
 
     horizons = HORIZONS.keys() if args.all else [args.horizon]
     threshold = args.threshold
+
+    # ML v3: bot_won mode — separate data loading and training path
+    if args.mode == "bot_won":
+        for horizon in horizons:
+            logger.info("\n%s\n=== Training %s bot_won (%s) ===\n%s",
+                        "=" * 60, horizon, args.strategy, "=" * 60)
+            df = load_bot_labeled_data(horizon, args.strategy)
+            if not df.empty:
+                df = deduplicate_snapshots(df)
+                result = train_bot_won(df, horizon, args.strategy,
+                                       n_trials=args.trials, min_samples=args.min_samples)
+                if result and result.get("quality_gate") == "FAILED":
+                    logger.warning("Bot model for %s/%s failed quality gate.", horizon, args.strategy)
+                elif result and result.get("quality_gate") == "PASSED":
+                    _update_scoring_config_bot(args.strategy)
+        return
+
+    # ML v3.1: risk_reward mode — predicts rr_ratio for adaptive SL
+    if args.mode == "risk_reward":
+        for horizon in horizons:
+            logger.info("\n%s\n=== Training %s risk_reward ===\n%s",
+                        "=" * 60, horizon, "=" * 60)
+            df = load_risk_reward_data(horizon)
+            if not df.empty:
+                df = deduplicate_snapshots(df)
+                train_risk_reward(df, horizon, n_trials=args.trials,
+                                  min_samples=args.min_samples)
+        return
 
     if args.mode == "ltr":
         train_fn = train_ltr

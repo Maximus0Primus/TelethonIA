@@ -126,22 +126,33 @@ def _get_pool_address(token_address: str, pool_cache: dict) -> str | None:
         return None
 
 
+def _ts_to_minutes(ts: float | None, snapshot_ts: float) -> int | None:
+    """Convert a Unix timestamp to minutes after snapshot. None if ts is None."""
+    return round((ts - snapshot_ts) / 60) if ts else None
+
+
+# TP/SL thresholds for bot simulation
+TP_MULTS = [1.3, 1.5]   # +30%, +50%  (2.0x already tracked as time_to_2x)
+SL_MULTS = [0.8, 0.7, 0.5]  # -20%, -30%, -50%
+
+
 def _get_max_price_gecko(
     pool_address: str,
     snapshot_ts: float,
     window_hours: int,
     price_at: float | None = None,
-) -> tuple[float | None, float | None, float | None, float | None, float | None]:
+) -> tuple[float | None, float | None, float | None, float | None, float | None, dict | None]:
     """
     Get the max high price, min low price, and the close of the last candle
     during a time window using GeckoTerminal OHLCV (5-min candles).
 
-    Returns (max_high, min_low, last_close, peak_ts, time_to_2x_hours) or all Nones.
+    Returns (max_high, min_low, last_close, peak_ts, time_to_2x_hours, bot_data) or all Nones.
     peak_ts is the Unix timestamp of the candle with the highest price.
     time_to_2x_hours is hours after snapshot when price first reached 2x.
+    bot_data contains TP/SL timing in minutes for bot simulation (only for 12h/24h).
     """
     if not pool_address:
-        return None, None, None, None, None
+        return None, None, None, None, None, None
 
     window_start_ts = int(snapshot_ts)
     window_end_ts = int(snapshot_ts + window_hours * 3600)
@@ -161,13 +172,13 @@ def _get_max_price_gecko(
         )
         if resp.status_code == 429:
             logger.warning("GeckoTerminal rate limited on OHLCV")
-            return None, None, None, None, None
+            return None, None, None, None, None, None
         if resp.status_code != 200:
-            return None, None, None, None, None
+            return None, None, None, None, None, None
 
         ohlcv_list = resp.json().get("data", {}).get("attributes", {}).get("ohlcv_list") or []
         if not ohlcv_list:
-            return None, None, None, None, None
+            return None, None, None, None, None, None
 
         max_high = 0.0
         min_low = float('inf')
@@ -177,6 +188,13 @@ def _get_max_price_gecko(
         last_close = None
         last_ts = 0
         candles_in_window = 0
+
+        # Bot simulation: TP/SL tracking
+        tp_timestamps = {m: None for m in TP_MULTS}
+        sl_timestamps = {m: None for m in SL_MULTS}
+        tp_prices = {m: price_at * m for m in TP_MULTS} if price_at and price_at > 0 else {}
+        sl_prices = {m: price_at * m for m in SL_MULTS} if price_at and price_at > 0 else {}
+        max_dd_before_tp30 = 0.0
 
         # Sort chronologically for time_to_2x (first candle that hits 2x)
         sorted_candles = sorted(ohlcv_list, key=lambda c: c[0])
@@ -198,13 +216,39 @@ def _get_max_price_gecko(
                     last_close = close
                 candles_in_window += 1
 
+                # Bot: TP detection (first candle where high >= target)
+                for mult, target in tp_prices.items():
+                    if tp_timestamps[mult] is None and high >= target:
+                        tp_timestamps[mult] = candle_ts
+                # Bot: SL detection (first candle where low <= target)
+                for mult, target in sl_prices.items():
+                    if sl_timestamps[mult] is None and low <= target:
+                        sl_timestamps[mult] = candle_ts
+                # Bot: Drawdown before TP30% (max dip from entry before first +30%)
+                if price_at and price_at > 0 and tp_timestamps.get(1.3) is None:
+                    dd = (price_at - low) / price_at
+                    if dd > max_dd_before_tp30:
+                        max_dd_before_tp30 = dd
+
         if candles_in_window == 0:
-            return None, None, None, None, None
+            return None, None, None, None, None, None
 
         time_to_2x_hours = None
         if time_to_2x_ts:
             time_to_2x_hours = round((time_to_2x_ts - snapshot_ts) / 3600, 2)
             time_to_2x_hours = max(0, min(window_hours, time_to_2x_hours))
+
+        # Build bot_data dict (only meaningful for 12h/24h horizons)
+        bot_data = None
+        if window_hours in (12, 24) and price_at and price_at > 0:
+            bot_data = {
+                "t_1_3x": _ts_to_minutes(tp_timestamps.get(1.3), snapshot_ts),
+                "t_1_5x": _ts_to_minutes(tp_timestamps.get(1.5), snapshot_ts),
+                "t_sl20": _ts_to_minutes(sl_timestamps.get(0.8), snapshot_ts),
+                "t_sl30": _ts_to_minutes(sl_timestamps.get(0.7), snapshot_ts),
+                "t_sl50": _ts_to_minutes(sl_timestamps.get(0.5), snapshot_ts),
+                "max_dd_pct": round(max_dd_before_tp30 * 100, 2) if max_dd_before_tp30 > 0 else 0,
+            }
 
         logger.debug(
             "GeckoOHLCV: %d candles in %dh window, max=%.10f, min=%.10f, close=%.10f",
@@ -216,11 +260,12 @@ def _get_max_price_gecko(
             last_close,
             peak_ts,
             time_to_2x_hours,
+            bot_data,
         )
 
     except requests.RequestException as e:
         logger.debug("GeckoTerminal OHLCV failed: %s", e)
-        return None, None, None, None, None
+        return None, None, None, None, None, None
 
 
 # === DexPaprika Fallback (free, 10K req/day) ===
@@ -230,13 +275,13 @@ def _get_max_price_dexpaprika(
     snapshot_ts: float,
     window_hours: int,
     price_at: float | None = None,
-) -> tuple[float | None, float | None, float | None, float | None, float | None]:
+) -> tuple[float | None, float | None, float | None, float | None, float | None, dict | None]:
     """
     Fallback: get max high, min low, last close via DexPaprika OHLCV (free, no auth, 15-min candles).
-    Returns (max_high, min_low, last_close, peak_ts, time_to_2x_hours) or all Nones.
+    Returns (max_high, min_low, last_close, peak_ts, time_to_2x_hours, bot_data) or all Nones.
     """
     if not pool_address:
-        return None, None, None, None, None
+        return None, None, None, None, None, None
 
     start_dt = datetime.fromtimestamp(snapshot_ts, tz=timezone.utc)
     end_dt = start_dt + timedelta(hours=window_hours)
@@ -253,11 +298,11 @@ def _get_max_price_dexpaprika(
             timeout=15,
         )
         if resp.status_code != 200:
-            return None, None, None, None, None
+            return None, None, None, None, None, None
 
         items = resp.json()
         if not isinstance(items, list) or not items:
-            return None, None, None, None, None
+            return None, None, None, None, None, None
 
         max_high = 0.0
         min_low = float('inf')
@@ -265,6 +310,13 @@ def _get_max_price_dexpaprika(
         time_to_2x_ts = None
         target_2x = price_at * 2.0 if price_at and price_at > 0 else None
         last_close = None
+
+        # Bot simulation: TP/SL tracking
+        tp_timestamps = {m: None for m in TP_MULTS}
+        sl_timestamps = {m: None for m in SL_MULTS}
+        tp_prices = {m: price_at * m for m in TP_MULTS} if price_at and price_at > 0 else {}
+        sl_prices = {m: price_at * m for m in SL_MULTS} if price_at and price_at > 0 else {}
+        max_dd_before_tp30 = 0.0
 
         for item in items:
             h = float(item.get("high", 0) or 0)
@@ -289,10 +341,37 @@ def _get_max_price_dexpaprika(
                 time_to_2x_ts = candle_ts
             last_close = c  # items are chronological, last one is the most recent
 
+            # Bot: TP detection
+            if candle_ts:
+                for mult, target in tp_prices.items():
+                    if tp_timestamps[mult] is None and h >= target:
+                        tp_timestamps[mult] = candle_ts
+                # Bot: SL detection
+                for mult, target in sl_prices.items():
+                    if sl_timestamps[mult] is None and lo > 0 and lo <= target:
+                        sl_timestamps[mult] = candle_ts
+                # Bot: Drawdown before TP30%
+                if price_at and price_at > 0 and lo > 0 and tp_timestamps.get(1.3) is None:
+                    dd = (price_at - lo) / price_at
+                    if dd > max_dd_before_tp30:
+                        max_dd_before_tp30 = dd
+
         time_to_2x_hours = None
         if time_to_2x_ts:
             time_to_2x_hours = round((time_to_2x_ts - snapshot_ts) / 3600, 2)
             time_to_2x_hours = max(0, min(window_hours, time_to_2x_hours))
+
+        # Build bot_data dict (only meaningful for 12h/24h horizons)
+        bot_data = None
+        if window_hours in (12, 24) and price_at and price_at > 0:
+            bot_data = {
+                "t_1_3x": _ts_to_minutes(tp_timestamps.get(1.3), snapshot_ts),
+                "t_1_5x": _ts_to_minutes(tp_timestamps.get(1.5), snapshot_ts),
+                "t_sl20": _ts_to_minutes(sl_timestamps.get(0.8), snapshot_ts),
+                "t_sl30": _ts_to_minutes(sl_timestamps.get(0.7), snapshot_ts),
+                "t_sl50": _ts_to_minutes(sl_timestamps.get(0.5), snapshot_ts),
+                "max_dd_pct": round(max_dd_before_tp30 * 100, 2) if max_dd_before_tp30 > 0 else 0,
+            }
 
         return (
             max_high if max_high > 0 else None,
@@ -300,10 +379,11 @@ def _get_max_price_dexpaprika(
             last_close,
             peak_ts,
             time_to_2x_hours,
+            bot_data,
         )
 
     except requests.RequestException:
-        return None, None, None, None, None
+        return None, None, None, None, None, None
 
 
 # === Main ===
@@ -418,6 +498,7 @@ def fill_outcomes() -> None:
             last_close = None
             peak_ts = None
             time_to_2x_hours = None
+            bot_data = None
             source = "none"
 
             if snapshot_ts:
@@ -430,7 +511,7 @@ def fill_outcomes() -> None:
 
                 if pool_addr:
                     # Try GeckoTerminal OHLCV first
-                    max_price, min_price, last_close, peak_ts, time_to_2x_hours = _get_max_price_gecko(
+                    max_price, min_price, last_close, peak_ts, time_to_2x_hours, bot_data = _get_max_price_gecko(
                         pool_addr, snapshot_ts, hours, price_at=price_at,
                     )
                     time.sleep(2.1)
@@ -439,7 +520,7 @@ def fill_outcomes() -> None:
 
                     # Fallback: DexPaprika OHLCV
                     if max_price is None:
-                        max_price, min_price, last_close, peak_ts, time_to_2x_hours = _get_max_price_dexpaprika(
+                        max_price, min_price, last_close, peak_ts, time_to_2x_hours, bot_data = _get_max_price_dexpaprika(
                             pool_addr, snapshot_ts, hours, price_at=price_at,
                         )
                         time.sleep(0.3)
@@ -516,6 +597,16 @@ def fill_outcomes() -> None:
                 min_col: min_price,
                 t2x_col: time_to_2x_hours,
             }
+
+            # Bot simulation columns: write TP/SL timing for 12h and 24h horizons
+            if bot_data and hours in (12, 24):
+                hz = f"_{hours}h"
+                update_data[f"time_to_1_3x_min{hz}"] = bot_data.get("t_1_3x")
+                update_data[f"time_to_1_5x_min{hz}"] = bot_data.get("t_1_5x")
+                update_data[f"time_to_sl20_min{hz}"] = bot_data.get("t_sl20")
+                update_data[f"time_to_sl30_min{hz}"] = bot_data.get("t_sl30")
+                update_data[f"time_to_sl50_min{hz}"] = bot_data.get("t_sl50")
+                update_data[f"max_dd_before_tp_pct{hz}"] = bot_data.get("max_dd_pct")
 
             try:
                 client.table("token_snapshots").update(update_data).eq("id", snap_id).execute()
@@ -712,3 +803,116 @@ def _fill_first_call_prices(client: Client, pool_cache: dict) -> None:
 
     if filled > 0:
         logger.info("Filled price_at_first_call for %d snapshots", filled)
+
+
+def backfill_bot_data(batch_limit: int = 50) -> None:
+    """
+    Backfill TP/SL timing columns for snapshots that already have OHLCV labels
+    but are missing bot simulation data. Targets 12h and 24h horizons.
+
+    This is needed because outcome_tracker skips already-labeled snapshots
+    (did_2x_12h IS NOT NULL), so they never get the new bot columns filled.
+
+    Rate-limited: processes batch_limit snapshots per call, ~2.1s per OHLCV fetch.
+    """
+    client = _get_client()
+    pool_cache = _load_pool_cache()
+    stats = {"filled": 0, "skipped": 0, "errors": 0}
+
+    for hours in [12, 24]:
+        hz = f"_{hours}h"
+        bot_col = f"time_to_1_3x_min{hz}"  # sentinel: if this is NULL, bot data is missing
+        max_col = f"max_price_{hours}h"
+
+        try:
+            result = (
+                client.table("token_snapshots")
+                .select("id, symbol, price_at_snapshot, snapshot_at, token_address, pair_address")
+                .is_(bot_col, "null")
+                .not_.is_(max_col, "null")  # has OHLCV data
+                .not_.is_("price_at_snapshot", "null")
+                .limit(batch_limit)
+                .execute()
+            )
+        except Exception as e:
+            logger.error("backfill_bot_data: query failed for %dh: %s", hours, e)
+            continue
+
+        snapshots = result.data or []
+        if not snapshots:
+            logger.info("backfill_bot_data: no pending snapshots for %dh", hours)
+            continue
+
+        logger.info("backfill_bot_data: processing %d snapshots for %dh", len(snapshots), hours)
+
+        for snap in snapshots:
+            snap_id = snap["id"]
+            symbol = snap["symbol"]
+            price_at = float(snap.get("price_at_snapshot") or 0)
+            if price_at <= 0:
+                stats["skipped"] += 1
+                continue
+
+            # Parse snapshot timestamp
+            snap_at_str = snap.get("snapshot_at", "")
+            try:
+                if snap_at_str.endswith("Z"):
+                    snap_dt = datetime.fromisoformat(snap_at_str.replace("Z", "+00:00"))
+                elif "+" in snap_at_str:
+                    snap_dt = datetime.fromisoformat(snap_at_str)
+                else:
+                    snap_dt = datetime.fromisoformat(snap_at_str).replace(tzinfo=timezone.utc)
+                snapshot_ts = snap_dt.timestamp()
+            except (ValueError, AttributeError):
+                stats["skipped"] += 1
+                continue
+
+            pool_addr = snap.get("pair_address")
+            token_addr = snap.get("token_address")
+
+            if not pool_addr and token_addr:
+                pool_addr = _get_pool_address(token_addr, pool_cache)
+                time.sleep(2.1)
+
+            if not pool_addr:
+                stats["skipped"] += 1
+                continue
+
+            # Fetch OHLCV — try Gecko then DexPaprika
+            _, _, _, _, _, bot_data = _get_max_price_gecko(
+                pool_addr, snapshot_ts, hours, price_at=price_at,
+            )
+            time.sleep(2.1)
+
+            if bot_data is None:
+                _, _, _, _, _, bot_data = _get_max_price_dexpaprika(
+                    pool_addr, snapshot_ts, hours, price_at=price_at,
+                )
+                time.sleep(0.3)
+
+            if bot_data is None:
+                stats["skipped"] += 1
+                continue
+
+            # Write bot columns
+            update_data = {
+                f"time_to_1_3x_min{hz}": bot_data.get("t_1_3x"),
+                f"time_to_1_5x_min{hz}": bot_data.get("t_1_5x"),
+                f"time_to_sl20_min{hz}": bot_data.get("t_sl20"),
+                f"time_to_sl30_min{hz}": bot_data.get("t_sl30"),
+                f"time_to_sl50_min{hz}": bot_data.get("t_sl50"),
+                f"max_dd_before_tp_pct{hz}": bot_data.get("max_dd_pct"),
+            }
+
+            try:
+                client.table("token_snapshots").update(update_data).eq("id", snap_id).execute()
+                stats["filled"] += 1
+                logger.debug("backfill_bot_data: filled %s/%dh — TP30=%s SL20=%s",
+                             symbol, hours, bot_data.get("t_1_3x"), bot_data.get("t_sl20"))
+            except Exception as e:
+                logger.error("backfill_bot_data: update failed %d: %s", snap_id, e)
+                stats["errors"] += 1
+
+    _save_pool_cache(pool_cache)
+    logger.info("backfill_bot_data: filled=%d, skipped=%d, errors=%d",
+                stats["filled"], stats["skipped"], stats["errors"])
