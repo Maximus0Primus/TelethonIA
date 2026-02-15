@@ -196,6 +196,8 @@ async def _fetch_messages(client: TelegramClient, peer, count: int) -> list[dict
             all_msgs.append({
                 "text": text,
                 "date": message.date.isoformat(),
+                "is_forwarded": message.fwd_from is not None,
+                "is_reply": message.reply_to is not None,
             })
 
         if hit_age_limit:

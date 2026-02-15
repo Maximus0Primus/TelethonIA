@@ -2164,11 +2164,21 @@ def aggregate_ranking(
 
             # v14: Detect update/brag messages — weight reduction
             is_update = _is_update_or_brag(text)
+            # Forward/reply detection — forwarded content inflates breadth
+            is_forwarded = msg.get("is_forwarded", False)
+            is_reply = msg.get("is_reply", False)
             # v14: Message length as confidence signal
             msg_len = len(text)
             length_weight = 1.2 if msg_len > 150 else (0.5 if msg_len < 20 else 1.0)
-            # Combined mention weight: updates get 0.3x, length modulates
-            mention_weight = (0.3 if is_update else 1.0) * length_weight
+            # Combined mention weight: forwards 0.2x, updates 0.3x, replies 0.4x
+            if is_forwarded:
+                mention_weight = 0.2 * length_weight
+            elif is_update:
+                mention_weight = 0.3 * length_weight
+            elif is_reply:
+                mention_weight = 0.4 * length_weight
+            else:
+                mention_weight = 1.0 * length_weight
 
             # Per-message conviction NLP (Sprint 6)
             msg_conv = _compute_message_conviction(text)
@@ -2215,7 +2225,9 @@ def aggregate_ranking(
                 if is_positive_mention:
                     # v14: Weighted mentions — updates/brags count 0.3x, short msgs 0.5x
                     token_data[token]["mentions"] += mention_weight
-                    token_data[token]["groups"].add(group_name)
+                    # Forwarded msgs don't count as unique KOL calls for breadth
+                    if not is_forwarded:
+                        token_data[token]["groups"].add(group_name)
                     token_data[token]["convictions"].append(conviction)
                     # Track per-KOL mention counts (weighted) for quality-weighted breadth
                     kol_counts = token_data[token]["kol_mention_counts"]

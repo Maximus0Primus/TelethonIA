@@ -550,7 +550,6 @@ def insert_snapshots(ranking: list[dict]) -> None:
             "short_term_heat": t.get("short_term_heat"),
             "txn_velocity": t.get("txn_velocity"),
             "sentiment_consistency": t.get("sentiment_consistency"),
-            "is_artificial_pump": t.get("is_artificial_pump"),
             # Algorithm v3 Sprint C: ME2F-inspired ML features
             "volatility_proxy": t.get("volatility_proxy"),
             "whale_dominance": t.get("whale_dominance"),
@@ -568,26 +567,13 @@ def insert_snapshots(ranking: list[dict]) -> None:
             "ath_ratio": t.get("ath_ratio"),
             "price_action_score": t.get("price_action_score"),
             "momentum_direction": t.get("momentum_direction"),
-            "support_level": t.get("support_level"),
             # Algorithm v4 Sprint 4: Whale direction
             "whale_direction": t.get("whale_direction"),
-            # Algorithm v6: pandas-ta technical indicators
-            "rsi_14": t.get("rsi_14"),
-            "macd_histogram": t.get("macd_histogram"),
-            "bb_width": t.get("bb_width"),
-            "bb_pct_b": t.get("bb_pct_b"),
-            "obv_slope_norm": t.get("obv_slope_norm"),
             # Algorithm v7: Scoring improvements
-            "lifecycle_phase": t.get("lifecycle_phase"),
             "weakest_component": t.get("weakest_component"),
             "weakest_component_value": t.get("weakest_component_value"),
             "score_interpretation": t.get("score_interpretation"),
             "data_confidence": t.get("data_confidence"),
-            # Algorithm v8: Harvard adaptations (squeeze, trend, confirmation)
-            "squeeze_state": t.get("squeeze_state"),
-            "squeeze_score": t.get("squeeze_score"),
-            "trend_strength": t.get("trend_strength"),
-            "confirmation_pillars": t.get("confirmation_pillars"),
             # Algorithm v9: Death detection + recency
             "freshest_mention_hours": t.get("freshest_mention_hours"),
             "death_penalty": t.get("death_penalty"),
