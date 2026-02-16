@@ -587,6 +587,9 @@ def fill_outcomes() -> None:
                     "max_price_1h, max_price_6h, max_price_12h, max_price_24h, max_price_48h, max_price_72h, max_price_7d, "
                     "did_2x_1h, did_2x_6h, did_2x_12h, did_2x_24h, did_2x_48h, did_2x_72h, did_2x_7d")
             .or_(filter_str)
+            # v33: Skip phantom scores (pre-v28 hard-gated tokens with no components).
+            # They have inflated scores (54-69) and jump to front of queue, blocking real tokens.
+            .not_.is_("consensus_val", "null")
             .order("score_at_snapshot", desc=True, nullsfirst=False)
             .order("snapshot_at", desc=False)
             .limit(BATCH_LIMIT)
