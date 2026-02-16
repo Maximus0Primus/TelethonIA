@@ -89,6 +89,25 @@ TIME_BUDGET_SECONDS = 18 * 60  # 18 minutes
 # Even for memecoins, 200x in 24h is extraordinary — anything above is a data bug.
 MAX_PLAUSIBLE_RATIO = {1: 50, 6: 100, 12: 200, 24: 500, 48: 1000, 72: 2000, 168: 5000}
 
+# v32: OHLCV-level sanity check threshold.
+# If median candle price is >500x price_at_snapshot, the entire dataset is rejected.
+# Catches SOL quote price leak where GeckoTerminal returns ~$85 SOL instead of token price.
+_CANDLE_SANITY_RATIO = 500
+
+
+def _check_candle_sanity(candles: list, price_at: float, symbol: str, source: str) -> bool:
+    """Return True if candles look reasonable vs price_at_snapshot."""
+    if not candles or price_at <= 0:
+        return True  # can't check, let per-horizon check handle it
+    median_high = candles[len(candles) // 2][2]  # high price of median candle
+    if median_high > 0 and median_high / price_at > _CANDLE_SANITY_RATIO:
+        logger.warning(
+            "OHLCV price mismatch for %s (%s): candle=%.6f vs snapshot=%.6f (%.0fx) — rejecting",
+            symbol, source, median_high, price_at, median_high / price_at,
+        )
+        return False
+    return True
+
 
 def _get_client() -> Client:
     url = os.environ["SUPABASE_URL"]
@@ -688,6 +707,10 @@ def fill_outcomes() -> None:
         except requests.RequestException as e:
             logger.debug("GeckoTerminal OHLCV failed for %s: %s", symbol, e)
 
+        # v32: reject SOL quote price leak before fallback chain short-circuits
+        if sorted_candles and not _check_candle_sanity(sorted_candles, price_at, symbol, source):
+            sorted_candles = None
+
         # Fallback: DexPaprika
         if sorted_candles is None:
             start_dt = datetime.fromtimestamp(snapshot_ts, tz=timezone.utc)
@@ -736,6 +759,10 @@ def fill_outcomes() -> None:
             except requests.RequestException as e:
                 logger.debug("DexPaprika OHLCV failed for %s: %s", symbol, e)
 
+        # v32: reject SOL quote price leak before Birdeye fallback
+        if sorted_candles and not _check_candle_sanity(sorted_candles, price_at, symbol, source):
+            sorted_candles = None
+
         # Fallback 3: Birdeye OHLCV (uses token MINT address, not pool)
         # v31: Recovers tokens deindexed by GeckoTerminal/DexPaprika but still on-chain
         if sorted_candles is None and token_addr:
@@ -780,9 +807,13 @@ def fill_outcomes() -> None:
                 except requests.RequestException as e:
                     logger.debug("Birdeye OHLCV failed for %s: %s", symbol, e)
 
+        # v32: final sanity check on Birdeye candles too
+        if sorted_candles and not _check_candle_sanity(sorted_candles, price_at, symbol, source):
+            sorted_candles = None
+
         if sorted_candles is None:
-            # v27: All OHLCV sources failed. If snapshot is old enough (>48h),
-            # the token is likely dead — mark due horizons as did_2x=false.
+            # v27: All OHLCV sources failed (or all rejected by sanity check).
+            # If snapshot is old enough (>48h), mark due horizons as did_2x=false.
             if age_hours > 48:
                 update = {}
                 for hz in horizons_to_fill:
