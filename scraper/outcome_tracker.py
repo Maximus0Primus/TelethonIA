@@ -545,10 +545,11 @@ def fill_outcomes() -> None:
     stats = {"updated": 0, "api_calls": 0, "skipped": 0, "no_price": 0, "consistent": 0}
     start_time = time.time()
 
-    # Find snapshots with fillable unlabeled horizons (oldest first for fairness).
+    # Find snapshots with fillable unlabeled horizons.
     # v29 fix: each horizon is only included when the snapshot is old enough to fill it.
     # Without this, snapshots with only did_2x_7d=NULL (but <7 days old) clog the batch
     # and block newer snapshots from being labeled — the root cause of the labeling backlog.
+    # v30: Order by score DESC so high-score tokens get labeled first (most useful for backtesting).
     or_parts = []
     for hz in HORIZONS:
         cutoff = (now - timedelta(hours=hz["hours"])).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -562,6 +563,7 @@ def fill_outcomes() -> None:
                     "max_price_1h, max_price_6h, max_price_12h, max_price_24h, max_price_48h, max_price_72h, max_price_7d, "
                     "did_2x_1h, did_2x_6h, did_2x_12h, did_2x_24h, did_2x_48h, did_2x_72h, did_2x_7d")
             .or_(filter_str)
+            .order("score_at_snapshot", desc=True, nullsfirst=False)
             .order("snapshot_at", desc=False)
             .limit(BATCH_LIMIT)
             .execute()
