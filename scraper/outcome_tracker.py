@@ -545,9 +545,15 @@ def fill_outcomes() -> None:
     stats = {"updated": 0, "api_calls": 0, "skipped": 0, "no_price": 0, "consistent": 0}
     start_time = time.time()
 
-    # Find snapshots with ANY unlabeled horizon (oldest first for fairness)
-    # Use the shortest horizon cutoff (1h) to get all eligible snapshots
-    cutoff_1h = (now - timedelta(hours=1)).isoformat()
+    # Find snapshots with fillable unlabeled horizons (oldest first for fairness).
+    # v29 fix: each horizon is only included when the snapshot is old enough to fill it.
+    # Without this, snapshots with only did_2x_7d=NULL (but <7 days old) clog the batch
+    # and block newer snapshots from being labeled — the root cause of the labeling backlog.
+    or_parts = []
+    for hz in HORIZONS:
+        cutoff = (now - timedelta(hours=hz["hours"])).strftime("%Y-%m-%dT%H:%M:%SZ")
+        or_parts.append(f'and({hz["flag_col"]}.is.null,snapshot_at.lt.{cutoff})')
+    filter_str = ",".join(or_parts)
 
     try:
         result = (
@@ -555,8 +561,7 @@ def fill_outcomes() -> None:
             .select("id, symbol, price_at_snapshot, snapshot_at, token_address, pair_address, "
                     "max_price_1h, max_price_6h, max_price_12h, max_price_24h, max_price_48h, max_price_72h, max_price_7d, "
                     "did_2x_1h, did_2x_6h, did_2x_12h, did_2x_24h, did_2x_48h, did_2x_72h, did_2x_7d")
-            .lt("snapshot_at", cutoff_1h)
-            .or_("did_2x_1h.is.null,did_2x_6h.is.null,did_2x_12h.is.null,did_2x_24h.is.null,did_2x_48h.is.null,did_2x_72h.is.null,did_2x_7d.is.null")
+            .or_(filter_str)
             .order("snapshot_at", desc=False)
             .limit(BATCH_LIMIT)
             .execute()
