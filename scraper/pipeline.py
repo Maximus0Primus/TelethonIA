@@ -137,6 +137,12 @@ _UPDATE_BRAG_PATTERNS = [
     re.compile(r"(?:took\s+profit|closed|cashed\s+out|already\s+up)", re.I),
     re.compile(r"(?:\d+x\s+done|\d+x\s+hit|hit\s+\d+x|made\s+a?\s*x?\d+)", re.I),
     re.compile(r"\d+x\s*[-–—]\s*\$", re.I),  # scorecard: "9x - $TOILET"
+    # v32: "4x from the call" / "4x from my play" — bragging about past call performance
+    re.compile(r"\d+x\s+from\s+(?:the\s+|my\s+)?(?:call|play|entry|pick)", re.I),
+    # v32: "warned you" / "told you" / "I said" — retrospective self-reference
+    re.compile(r"(?:warned\s+you|told\s+you|i\s+said|i\s+called)", re.I),
+    # v32: "5M -> 20M" / "went from 5M to 20M" — market cap growth brag
+    re.compile(r"\d+[km]\s*(?:->|→|to)\s*\d+[km]", re.I),
 ]
 
 

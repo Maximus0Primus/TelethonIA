@@ -143,15 +143,8 @@ EXTENDED_FEATURES = CORE_FEATURES + [
     # v24: Categorical phase encodings (ordinal)
     "lifecycle_phase_num",
     "social_momentum_num",
-    # v25: Message-level text features
+    # v25: Message-level text features (only call_type_score kept — others are noise per v32 audit)
     "call_type_score",
-    "avg_msg_length",
-    "ca_mention_ratio",
-    "caps_ratio",
-    "emoji_density",
-    "multi_token_ratio",
-    "question_ratio",
-    "link_ratio",
     # v26: Market context features (already in CORE via inheritance)
 ]
 
@@ -228,15 +221,8 @@ ALL_FEATURE_COLS = [
     "social_momentum_num",
     # ML v3.1: Calendar/temporal
     "day_of_week", "hour_paris", "is_weekend", "is_prime_time",
-    # v25: Message-level text features
+    # v25: Message-level text features (only call_type_score kept — others are noise per v32 audit)
     "call_type_score",
-    "avg_msg_length",
-    "ca_mention_ratio",
-    "caps_ratio",
-    "emoji_density",
-    "multi_token_ratio",
-    "question_ratio",
-    "link_ratio",
     # v26: Market context features
     "median_peak_return",
     "entry_vs_median_peak",
