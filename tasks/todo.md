@@ -1,16 +1,14 @@
 # Active TODO — Feb 15, 2026
 
-## Current State
+## Current State (Feb 16)
 
 - **Scraper:** Running every 15min full cycle + 3min price refresh
-- **Snapshots:** 7,210 total | 457 labeled 12h | 114 labeled 24h | 2,174 labeled 1h
-- **Unique tokens:** 406 total | 90 with 12h labels | 66 with 24h labels | 206 with 1h labels
-- **Drawdown data:** 94 snapshots (53 unique tokens) with max_dd_before_tp_pct
-- **Velocity features:** 4,198 snapshots with score_velocity/mention_velocity/volume_velocity
-- **ML Models deployed:** 1h + 12h + 24h (XGBoost+LightGBM ensemble, regression)
-- **Algorithm:** v22 — dynamic ML training (horizon + threshold auto-optimized)
+- **Snapshots:** ~10,500 total | 780 labeled 24h | 122 unique tokens labeled
+- **Algorithm:** v28 (soft gates, backtest alignment) + v29-v31 (labeling pipeline fixes)
+- **v31:** Birdeye OHLCV fallback — recovers tokens deindexed from DexScreener/GeckoTerminal
 - **scoring_config:** Balanced 30/5/10/55, ML horizon=24h, threshold=1.3x, bot_strategy=TP50_SL30
 - **Frontend:** Next.js 16 + Tuning Lab + KOL Leaderboard + Token Detail
+- **Backlog:** ~7,000 unlabeled snapshots (clearing via run_labeling_loop.py + GH Actions)
 
 ---
 
@@ -132,6 +130,7 @@
 - [ ] SHAP-driven weight optimization
 - [ ] Classifier "pump en cours" vs "pre-pump"
 - [ ] Feature importance dashboard (SHAP waterfall per token)
+- [ ] **Custom NLP model** — Fine-tune CryptoBERT on `kol_mentions.message_text → did_2x` when N > 2000 unique labeled tokens. Requires GPU (A10G+). Prématuré tant que signal sentiment ~0.02 corrélation et N < 500.
 
 ---
 

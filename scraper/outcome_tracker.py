@@ -6,7 +6,9 @@ Uses OHLCV candle data to find the MAX PRICE during the window, not just the
 price at a single point in time. This prevents false negatives where a token
 pumps to 3x then dumps back before we check.
 
-Fallback chain: GeckoTerminal OHLCV -> DexPaprika OHLCV -> SKIP (retry next cycle).
+Fallback chain: GeckoTerminal OHLCV -> DexPaprika OHLCV -> Birdeye OHLCV -> SKIP.
+Birdeye uses the token MINT address (not pool), so it can find tokens that were
+deindexed by GeckoTerminal/DexPaprika/DexScreener but still exist on-chain.
 DexScreener current price is NOT used as fallback because it gives false negatives
 on pump-and-dump patterns.
 
@@ -47,11 +49,14 @@ class _RateLimiter:
 
 # GeckoTerminal: 30 req/min, use 28 to leave headroom
 _gecko_limiter = _RateLimiter(28)
+# Birdeye: free tier is very limited (~30K CUs/month), use 10 req/min
+_birdeye_limiter = _RateLimiter(10)
 
 
 GECKOTERMINAL_POOLS_URL = "https://api.geckoterminal.com/api/v2/networks/solana/tokens/{token_address}/pools"
 GECKOTERMINAL_OHLCV_URL = "https://api.geckoterminal.com/api/v2/networks/solana/pools/{pool}/ohlcv/minute"
 DEXPAPRIKA_BASE = "https://api.dexpaprika.com"
+BIRDEYE_OHLCV_URL = "https://public-api.birdeye.so/defi/ohlcv"
 
 # Pool address cache (token_address -> pool_address, stable mapping)
 _POOL_CACHE_FILE = Path(__file__).parent / "pool_address_cache.json"
@@ -731,8 +736,52 @@ def fill_outcomes() -> None:
             except requests.RequestException as e:
                 logger.debug("DexPaprika OHLCV failed for %s: %s", symbol, e)
 
+        # Fallback 3: Birdeye OHLCV (uses token MINT address, not pool)
+        # v31: Recovers tokens deindexed by GeckoTerminal/DexPaprika but still on-chain
+        if sorted_candles is None and token_addr:
+            birdeye_key = os.environ.get("BIRDEYE_API_KEY", "")
+            if birdeye_key:
+                try:
+                    _birdeye_limiter.wait()
+                    resp = requests.get(
+                        BIRDEYE_OHLCV_URL,
+                        params={
+                            "address": token_addr,
+                            "type": "15m",
+                            "time_from": int(snapshot_ts),
+                            "time_to": int(snapshot_ts + longest_hours * 3600),
+                        },
+                        headers={"X-API-KEY": birdeye_key, "x-chain": "solana"},
+                        timeout=15,
+                    )
+                    stats["api_calls"] += 1
+
+                    if resp.status_code == 200:
+                        items = resp.json().get("data", {}).get("items", [])
+                        if items:
+                            sorted_candles = []
+                            for c in items:
+                                sorted_candles.append([
+                                    int(c.get("unixTime", 0)),
+                                    float(c.get("o", 0)),
+                                    float(c.get("h", 0)),
+                                    float(c.get("l", 0)),
+                                    float(c.get("c", 0)),
+                                    float(c.get("v", 0)),
+                                ])
+                            sorted_candles.sort(key=lambda x: x[0])
+                            if sorted_candles:
+                                source = "birdeye_ohlcv"
+                                logger.info("Birdeye recovered %d candles for %s", len(sorted_candles), symbol)
+                            else:
+                                sorted_candles = None
+                    elif resp.status_code == 429:
+                        logger.warning("Birdeye rate limited for %s", symbol)
+                except requests.RequestException as e:
+                    logger.debug("Birdeye OHLCV failed for %s: %s", symbol, e)
+
         if sorted_candles is None:
-            # v27: Both OHLCV sources failed. If snapshot is old enough (>48h),
+            # v27: All OHLCV sources failed. If snapshot is old enough (>48h),
             # the token is likely dead — mark due horizons as did_2x=false.
             if age_hours > 48:
                 update = {}
