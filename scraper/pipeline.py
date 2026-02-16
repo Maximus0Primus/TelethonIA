@@ -1430,45 +1430,39 @@ def _detect_death_penalty(token: dict, freshest_mention_hours: float) -> float:
 
 def _apply_hard_gates(ranking: list[dict]) -> list[dict]:
     """
-    v21: Mostly soft penalties — only mint/freeze remain as hard gates.
-    All other safety checks (top10, risk, liquidity, holders) are converted to
-    gate_mult penalties so tokens stay in the pipeline, get labeled by
-    outcome_tracker, and we can empirically validate whether these signals help.
+    v33: ALL gates are soft penalties now — no more hard removal.
+    Every token stays in the pipeline, gets scored, enriched, and labeled
+    by outcome_tracker so we can empirically validate all gates.
 
-    Hard gates (removed):
-      - mint_authority: can inflate supply at will → genuine rug
-      - freeze_authority: can freeze your tokens → genuine rug
-
-    Soft penalties (kept, gate_mult applied):
-      - top10_concentration > 70%: 0.7x (anti-predictive per v15.3 data)
+    Soft penalties (gate_mult applied):
+      - mint_authority: 0.05x (can inflate supply — genuine rug risk)
+      - freeze_authority: 0.05x (can freeze tokens — genuine rug risk)
+      - top10_concentration > 70%: 0.7x
       - risk_score > 8000: 0.6x
-      - low_liquidity < 10K: 0.5x (genuine trading concern)
+      - low_liquidity < 10K: 0.5x
       - low_holders < 30: 0.7x
     """
     gate_top10 = SCORING_PARAMS["gate_top10_pct"]
     gate_liq = SCORING_PARAMS["gate_min_liquidity"]
     gate_holders = int(SCORING_PARAMS["gate_min_holders"])
 
-    passed = []
-    hard_gated = 0
     soft_penalized = 0
     for token in ranking:
-        # === HARD GATES (genuinely dangerous — removed from pipeline) ===
-        # mint_authority = can inflate supply at will
-        if token.get("has_mint_authority"):
-            token["gate_reason"] = "mint_authority"
-            hard_gated += 1
-            continue
-        # freeze_authority = can freeze your tokens
-        if token.get("has_freeze_authority"):
-            token["gate_reason"] = "freeze_authority"
-            hard_gated += 1
-            continue
-
-        # === SOFT PENALTIES (gate_mult — token stays, score reduced) ===
-        gate_mult = 1.0
+        # v33: Preserve gate_mult from earlier soft penalties (no_address, no_data, single_a_tier)
+        gate_mult = float(token.get("gate_mult", 1.0) or 1.0)
         gate_reasons = []
 
+        # === EXTREME SOFT PENALTIES (formerly hard gates) ===
+        # v33: Converted from hard removal to 0.05x so tokens stay in pipeline,
+        # get scored/enriched/labeled. Score crushed to near-zero but data collected.
+        if token.get("has_mint_authority"):
+            gate_mult = min(gate_mult, 0.05)
+            gate_reasons.append("mint_authority")
+        if token.get("has_freeze_authority"):
+            gate_mult = min(gate_mult, 0.05)
+            gate_reasons.append("freeze_authority")
+
+        # === SOFT PENALTIES ===
         # top10 holders own > gate_top10_pct% = concentration risk
         top10 = token.get("top10_holder_pct")
         if top10 is not None and top10 > gate_top10:
@@ -1497,14 +1491,11 @@ def _apply_hard_gates(ranking: list[dict]) -> list[dict]:
         if gate_reasons:
             token["gate_reason"] = gate_reasons[0]  # primary reason for diagnostics
             soft_penalized += 1
-        passed.append(token)
 
-    if hard_gated:
-        logger.info("Hard gates removed %d tokens (mint/freeze only)", hard_gated)
     if soft_penalized:
-        logger.info("Soft gate penalties applied to %d tokens (top10>%.0f%%/risk>8000/liq<%.0f/holders<%d)",
+        logger.info("Soft gate penalties applied to %d tokens (mint/freeze=0.05x, top10>%.0f%%/risk>8000/liq<%.0f/holders<%d)",
                      soft_penalized, gate_top10, gate_liq, gate_holders)
-    return passed
+    return ranking
 
 
 def _detect_volume_squeeze(token: dict) -> tuple[str, float]:
@@ -2665,9 +2656,9 @@ def aggregate_ranking(
     # Enrich with on-chain data (DexScreener + RugCheck) — needed for gates
     enrich_tokens(ranking)
 
-    # v16: Save ALL enriched tokens before gates for snapshot backtesting.
-    # Gated tokens get gate_reason marked on the dict (shared references).
-    all_enriched = list(ranking)
+    # v33: all_enriched == ranking (no hard gates remove tokens anymore).
+    # Kept as alias for backward compatibility with safe_scraper.py.
+    all_enriched = ranking
 
     # === Quality gates BEFORE expensive enrichment ===
     # v28: Converted from hard removal to soft penalties (gate_mult) so
@@ -2710,7 +2701,7 @@ def aggregate_ranking(
             logger.info("Single-A-tier penalty applied to %d tokens (window=%dh)", single_a_count, hours)
 
     # === Hard gates (uses RugCheck + DexScreener data) ===
-    # v16: _apply_hard_gates now marks gate_reason on ejected tokens
+    # v33: _apply_hard_gates is now all-soft (returns same list, no removals)
     ranking = _apply_hard_gates(ranking)
 
     # === Wash trading — soft penalty (already in wash_pen multiplier chain) ===
@@ -2723,13 +2714,12 @@ def aggregate_ranking(
             token["gate_mult"] = round(min(existing_gate, 0.5), 3)
             token["gate_reason"] = token.get("gate_reason") or "wash_trading"
 
-    # v28: Only mint/freeze are hard-gated now; everything else is soft penalty
-    hard_gated = sum(1 for t in all_enriched if t.get("gate_reason") and t not in ranking)
+    # v33: All gates are soft now — no more hard removal, ranking == all_enriched
     soft_penalized = sum(1 for t in ranking if t.get("gate_mult", 1.0) < 1.0)
-    logger.info("Post-gate: %d tokens (%d soft-penalized, %d hard-gated [mint/freeze only]) — now running expensive enrichment",
-                len(ranking), soft_penalized, hard_gated)
+    logger.info("Post-gate: %d tokens (%d soft-penalized) — now running expensive enrichment",
+                len(ranking), soft_penalized)
 
-    # === Expensive enrichment on SURVIVORS only (v5.1) ===
+    # === Expensive enrichment on ALL tokens (v33: no hard gates) ===
     # Phase 3: Helius enrichment (bundle detection + holder quality + whale tracking)
     enrich_tokens_helius(ranking)
 

@@ -370,8 +370,8 @@ def process_and_push(messages_data: dict[str, list[dict]], dump: bool = False) -
         # v10: Keep mentions from the largest window only (7d) to avoid duplicates
         if window_name == "7d":
             all_raw_mentions = raw_mentions
-        gated = sum(1 for t in all_enriched if t.get("gate_reason"))
-        logger.info("Window %s: %d survivors, %d gated (total %d)", window_name, len(ranking), gated, len(all_enriched))
+        penalized = sum(1 for t in all_enriched if t.get("gate_mult", 1.0) < 1.0)
+        logger.info("Window %s: %d tokens (%d penalized)", window_name, len(ranking), penalized)
 
     # Debug dump (before push, so we capture pre-Supabase state)
     if dump:
@@ -399,17 +399,16 @@ def process_and_push(messages_data: dict[str, list[dict]], dump: bool = False) -
     # v16: Fetch SOL price once per cycle for market context in backtesting
     sol_price = _fetch_sol_price()
 
-    # v16: Insert snapshots for ALL tokens (survivors + gated) for backtesting.
-    # Gated tokens have gate_reason set; survivors have gate_reason=None.
+    # v33: all_enriched == ranking (no hard gates), all tokens fully scored.
     all_24h = all_enriched_by_window.get("24h", [])
     if sol_price and all_24h:
         for t in all_24h:
             t["sol_price_at_snapshot"] = sol_price
     if all_24h:
-        gated_24h = sum(1 for t in all_24h if t.get("gate_reason"))
+        penalized_24h = sum(1 for t in all_24h if t.get("gate_mult", 1.0) < 1.0)
         insert_snapshots(all_24h)
-        logger.info("Inserted %d snapshots (24h): %d survivors + %d gated",
-                     len(all_24h), len(all_24h) - gated_24h, gated_24h)
+        logger.info("Inserted %d snapshots (24h): %d penalized",
+                     len(all_24h), penalized_24h)
 
     # Also insert snapshots for 7d window (covers tokens not in 24h)
     all_7d = all_enriched_by_window.get("7d", [])
