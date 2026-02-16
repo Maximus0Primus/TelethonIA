@@ -131,9 +131,10 @@ EXTENDED_FEATURES = CORE_FEATURES + [
     "kol_arrival_rate",
     # ML v2 Phase C: Entry zone
     "entry_timing_quality",
-    # v17/v21: Scoring multipliers
+    # v17/v21/v32: Scoring multipliers
     "pump_momentum_pen",
     "gate_mult",
+    "hype_pen",
     # v24: Entry drift + price velocity + first-seen drift
     "entry_drift_mult",
     "price_velocity",
@@ -207,9 +208,10 @@ ALL_FEATURE_COLS = [
     "volume_velocity", "kol_arrival_rate",
     # ML v2 Phase C: Entry zone
     "entry_timing_quality",
-    # v17/v21: Scoring multipliers
+    # v17/v21/v32: Scoring multipliers
     "pump_momentum_pen",
     "gate_mult",
+    "hype_pen",
     # v24: Entry drift + price velocity + PA features + first-seen drift
     "price_velocity",
     "ath_ratio",

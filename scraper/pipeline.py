@@ -1117,17 +1117,23 @@ def _compute_entry_timing_quality(token: dict) -> float:
     else:
         signals.append(0.2)
 
-    # 2. Price position (not too pumped, not in crash)
+    # 2. Price momentum (v32: inverted from original — momentum IS the signal)
+    # Data shows winners are already pumping +100-300% at snapshot time
+    # and continue to 2x. "Too late" is a myth in memecoins.
     pc24 = token.get("price_change_24h")
     if pc24 is not None:
-        if -30 < pc24 < 50:
-            signals.append(0.9)       # pre-pump zone
-        elif 50 <= pc24 < 100:
-            signals.append(0.5)       # moderate pump
-        elif pc24 >= 200:
-            signals.append(0.1)       # too late
+        if pc24 < -30:
+            signals.append(0.2)       # crashing hard
+        elif pc24 < 0:
+            signals.append(0.4)       # declining
+        elif pc24 < 50:
+            signals.append(0.5)       # flat/slow — unproven
+        elif 50 <= pc24 < 200:
+            signals.append(0.9)       # momentum zone (winners live here)
+        elif 200 <= pc24 < 500:
+            signals.append(0.7)       # strong pump, might continue
         else:
-            signals.append(0.4)       # crashing
+            signals.append(0.4)       # extreme overextension (>500%)
     else:
         signals.append(0.5)           # neutral when no data
 
@@ -2973,11 +2979,25 @@ def aggregate_ranking(
         token["_breadth_val"] = _get_component_value(token, "breadth")
         token["_price_action_val"] = _get_component_value(token, "price_action")
 
+        # v32: Hype penalty — more KOLs = WORSE outcomes (corr -0.132, N=1630)
+        # 1-2 KOLs: 11.2% 2x rate, 3-5: 3.6%, 6+: 3.5%
+        # Early/quiet tokens outperform hyped ones 3:1
+        uk_count = token.get("unique_kols") or 1
+        if uk_count <= 2:
+            hype_pen = 1.0        # sweet spot — early discovery
+        elif uk_count <= 4:
+            hype_pen = 0.85       # moderate hype
+        elif uk_count <= 7:
+            hype_pen = 0.65       # crowded trade
+        else:
+            hype_pen = 0.50       # everyone knows — probably too late
+        token["hype_pen"] = hype_pen
+
         # v21: gate_mult — soft safety penalties (top10, risk, liquidity, holders, single_a_tier)
         # v27: Explicit default — tokens that bypass _apply_hard_gates get 1.0
         gate_mult = float(token.get("gate_mult", 1.0) or 1.0)
 
-        # v24: Chain (12 multipliers). Added entry_drift_mult (price vs social drift).
+        # v24: Chain (13 multipliers). Added hype_pen (v32).
         # v23 removals: squeeze_mult (dead), trend_mult (dead),
         # wash_pen+pump_pen (merged → manipulation_pen),
         # pump_momentum_pen (folded into crash_pen min()).
@@ -2985,7 +3005,7 @@ def aggregate_ranking(
                         * manipulation_pen * pvp_pen * crash_pen
                         * activity_mult * breadth_pen
                         * size_mult * s_tier_mult * gate_mult
-                        * entry_drift_mult)
+                        * entry_drift_mult * hype_pen)
         # v16: Floor at 0.25 decompresses the 0-14 band where 97% of tokens stuck.
         # v17: Cap at 2.0 prevents multiplier stacking (activity*s_tier*size)
         # from inflating mediocre base scores beyond 100.

@@ -104,6 +104,7 @@ NUMERIC_LIMITS = {
     "kol_arrival_rate": 99.999,
     "entry_timing_quality": 1.0,
     "gate_mult": 1.0,
+    "hype_pen": 1.0,
     "entry_drift_mult": 1.0,
     "price_velocity": 9999.999,
     "price_drift_from_first_seen": 9999999.999,
@@ -679,6 +680,7 @@ def insert_snapshots(ranking: list[dict]) -> None:
             # v21: gate_mult — soft penalty value (1.0 = no penalty)
             "gate_reason": t.get("gate_reason"),
             "gate_mult": t.get("gate_mult", 1.0),
+            "hype_pen": t.get("hype_pen", 1.0),
             "entry_drift_mult": t.get("entry_drift_mult"),
             # v16: Backtesting features
             "sol_price_at_snapshot": t.get("sol_price_at_snapshot"),
