@@ -1827,10 +1827,10 @@ def _compute_safety_penalty(token: dict) -> float:
 # === SCORE COMPUTATION WEIGHTS ===
 # Hardcoded fallback — overridden by scoring_config table when available
 _DEFAULT_WEIGHTS = {
-    "consensus": 0.30,      # v16: was 0.25; best component (0.072 corr)
-    "conviction": 0.05,     # v16: was 0.10; near noise (0.025 corr)
-    "breadth": 0.10,        # v16: was 0.20; essentially random (0.003 corr)
-    "price_action": 0.55,   # v16: was 0.45; dominant signal (0.062 corr)
+    "consensus": 0.10,      # v32: was 0.30; anti-predictive (-0.033 corr, N=1630)
+    "conviction": 0.00,     # v32: was 0.05; anti-predictive (-0.017 corr)
+    "breadth": 0.05,        # v32: was 0.10; anti-predictive (-0.022 corr)
+    "price_action": 0.85,   # v32: was 0.55; only positive signal (+0.183 corr)
 }
 
 _DEFAULT_SCORING_PARAMS = {

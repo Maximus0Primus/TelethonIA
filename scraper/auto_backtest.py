@@ -37,10 +37,10 @@ from supabase import create_client
 # --- Constants (fallback, overridden by scoring_config table) ---
 
 _DEFAULT_WEIGHTS = {
-    "consensus": 0.30,
-    "conviction": 0.05,
-    "breadth": 0.10,
-    "price_action": 0.55,
+    "consensus": 0.10,      # v32: anti-predictive (-0.033 corr, N=1630)
+    "conviction": 0.00,     # v32: anti-predictive (-0.017 corr)
+    "breadth": 0.05,        # v32: anti-predictive (-0.022 corr)
+    "price_action": 0.85,   # v32: only positive signal (+0.183 corr)
 }
 
 BALANCED_WEIGHTS = _DEFAULT_WEIGHTS.copy()
