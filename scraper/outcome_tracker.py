@@ -53,6 +53,13 @@ _gecko_limiter = _RateLimiter(28)
 # Birdeye: free tier is very limited (~30K CUs/month), use 10 req/min
 _birdeye_limiter = _RateLimiter(10)
 
+# v34: Adaptive GeckoTerminal circuit breaker.
+# After N consecutive 429s, skip Gecko for the rest of the run.
+# Logs show 179 rate limits per 18min run — each wastes 2.14s for nothing.
+_GECKO_429_THRESHOLD = 3
+_gecko_consecutive_429s = 0
+_gecko_disabled = False
+
 
 GECKOTERMINAL_POOLS_URL = "https://api.geckoterminal.com/api/v2/networks/solana/tokens/{token_address}/pools"
 GECKOTERMINAL_OHLCV_URL = "https://api.geckoterminal.com/api/v2/networks/solana/pools/{pool}/ohlcv/minute"
@@ -142,6 +149,7 @@ def _save_pool_cache(cache: dict) -> None:
 
 def _get_pool_address(token_address: str, pool_cache: dict) -> str | None:
     """Get the top Solana pool address for a token via GeckoTerminal."""
+    global _gecko_consecutive_429s, _gecko_disabled
     if not token_address:
         return None
 
@@ -149,13 +157,19 @@ def _get_pool_address(token_address: str, pool_cache: dict) -> str | None:
     if cached and (time.time() - cached.get("_ts", 0)) < _POOL_CACHE_TTL:
         return cached.get("pool")
 
+    if _gecko_disabled:
+        return None  # Can't resolve pool without GeckoTerminal
+
     try:
         resp = requests.get(
             GECKOTERMINAL_POOLS_URL.format(token_address=token_address),
             timeout=10,
         )
         if resp.status_code == 429:
-            logger.warning("GeckoTerminal rate limited on pool lookup")
+            _gecko_consecutive_429s += 1
+            if _gecko_consecutive_429s >= _GECKO_429_THRESHOLD:
+                _gecko_disabled = True
+                logger.warning("GeckoTerminal disabled (pool lookup 429s)")
             return None
         if resp.status_code != 200:
             return None
@@ -576,31 +590,42 @@ def _fetch_ohlcv_candles(
     window_seconds = end_ts - start_ts
     num_candles_5m = int(window_seconds / 300) + 10
 
-    # Try GeckoTerminal
-    try:
-        _gecko_limiter.wait()
-        resp = requests.get(
-            GECKOTERMINAL_OHLCV_URL.format(pool=pool_addr),
-            params={
-                "aggregate": 5,
-                "before_timestamp": int(end_ts),
-                "limit": min(1000, num_candles_5m),
-                "currency": "usd",
-                "token": "base",
-            },
-            timeout=15,
-        )
-        stats["api_calls"] += 1
+    # Try GeckoTerminal (skip if circuit breaker tripped)
+    global _gecko_consecutive_429s, _gecko_disabled
+    if not _gecko_disabled:
+        try:
+            _gecko_limiter.wait()
+            resp = requests.get(
+                GECKOTERMINAL_OHLCV_URL.format(pool=pool_addr),
+                params={
+                    "aggregate": 5,
+                    "before_timestamp": int(end_ts),
+                    "limit": min(1000, num_candles_5m),
+                    "currency": "usd",
+                    "token": "base",
+                },
+                timeout=15,
+            )
+            stats["api_calls"] += 1
 
-        if resp.status_code == 200:
-            ohlcv_list = resp.json().get("data", {}).get("attributes", {}).get("ohlcv_list") or []
-            if ohlcv_list:
-                sorted_candles = sorted(ohlcv_list, key=lambda c: c[0])
-                source = "gecko_ohlcv"
-        elif resp.status_code == 429:
-            logger.warning("GeckoTerminal rate limited — falling back to DexPaprika")
-    except requests.RequestException as e:
-        logger.debug("GeckoTerminal OHLCV failed for %s: %s", symbol, e)
+            if resp.status_code == 200:
+                ohlcv_list = resp.json().get("data", {}).get("attributes", {}).get("ohlcv_list") or []
+                if ohlcv_list:
+                    sorted_candles = sorted(ohlcv_list, key=lambda c: c[0])
+                    source = "gecko_ohlcv"
+                _gecko_consecutive_429s = 0  # Reset on success
+            elif resp.status_code == 429:
+                _gecko_consecutive_429s += 1
+                if _gecko_consecutive_429s >= _GECKO_429_THRESHOLD:
+                    _gecko_disabled = True
+                    logger.warning(
+                        "GeckoTerminal disabled for this run (%d consecutive 429s) — using DexPaprika/Birdeye",
+                        _gecko_consecutive_429s,
+                    )
+                else:
+                    logger.warning("GeckoTerminal rate limited — falling back to DexPaprika")
+        except requests.RequestException as e:
+            logger.debug("GeckoTerminal OHLCV failed for %s: %s", symbol, e)
 
     # v32: reject SOL quote price leak before fallback chain short-circuits
     if sorted_candles and not _check_candle_sanity(sorted_candles, price_at, symbol, source):
