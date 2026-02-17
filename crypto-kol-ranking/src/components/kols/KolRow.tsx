@@ -18,6 +18,13 @@ export interface KolRowData {
   hits7d: number;
   winRateAll: number | null;
   lastActive: string | null;
+  // v2: exact call-price based metrics
+  totalCalls: number;
+  withEntryPrice: number;
+  hits2xExact: number;
+  winRate2xExact: number | null;
+  avgMaxReturn: number | null;
+  bestReturn: number | null;
 }
 
 interface KolRowProps {
@@ -53,8 +60,10 @@ const PODIUM_BORDER: Record<number, string> = {
 
 export function KolRow({ kol, rank, index }: KolRowProps) {
   const podiumBorder = PODIUM_BORDER[rank];
-  // Overall win rate: hit 2x at any horizon / all labeled calls
-  const winRate = kol.winRateAll;
+  // v2 exact call-price winrate preferred, v1 snapshot-based fallback
+  const winRate = kol.winRate2xExact ?? kol.winRateAll;
+  const isV2 = kol.winRate2xExact !== null;
+  const callCount = isV2 ? kol.totalCalls : kol.labeledCalls;
 
   return (
     <motion.div
@@ -121,8 +130,8 @@ export function KolRow({ kol, rank, index }: KolRowProps) {
           </>
         ) : (
           <span className="text-xs text-white/20 w-full text-right">
-            {kol.labeledCalls > 0
-              ? `${kol.labeledCalls} call${kol.labeledCalls > 1 ? "s" : ""}`
+            {callCount > 0
+              ? `${callCount} call${callCount > 1 ? "s" : ""}`
               : "\u2014"}
           </span>
         )}
@@ -130,7 +139,7 @@ export function KolRow({ kol, rank, index }: KolRowProps) {
 
       {/* Calls */}
       <span className="text-sm text-white/50 tabular-nums font-mono text-right">
-        {kol.labeledCalls}
+        {callCount}
       </span>
 
       {/* Last Active — hidden on mobile */}
