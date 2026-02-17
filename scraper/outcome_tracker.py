@@ -1371,7 +1371,7 @@ def backfill_bot_data(batch_limit: int = 50) -> None:
 #   - did_2x = TRUE if token EVER doubled from entry price
 # =============================================================================
 
-KCO_BATCH_LIMIT = 50       # rows per phase per run (rate limit friendly)
+KCO_BATCH_LIMIT = 200      # v34: was 50, increased to clear 422-row entry_price backlog
 KCO_TIME_BUDGET = 8 * 60   # 8 minutes total budget (v34: was 5, outcomes timeout now 45min)
 
 
@@ -1464,6 +1464,28 @@ def _kco_phase_a_sync(client: Client, stats: dict) -> None:
         logger.warning("KCO Phase A: no tokens with addresses found")
         return
 
+    # Step 1b: Build token_address → pair_address lookup from token_snapshots
+    # v34: Without pair_address, Phase B can't fetch OHLCV → entry_price never fills
+    pair_map = {}  # token_address → pair_address
+    try:
+        pair_result = (
+            client.table("token_snapshots")
+            .select("token_address, pair_address")
+            .not_.is_("pair_address", "null")
+            .not_.is_("token_address", "null")
+            .order("snapshot_at", desc=True)
+            .limit(1000)
+            .execute()
+        )
+        for row in (pair_result.data or []):
+            ta = row.get("token_address")
+            pa = row.get("pair_address")
+            if ta and pa and ta not in pair_map:
+                pair_map[ta] = pa
+        logger.info("KCO Phase A: loaded %d pair_address mappings", len(pair_map))
+    except Exception as e:
+        logger.warning("KCO Phase A: failed to load pair_addresses: %s", e)
+
     # Step 2: Get ALL kol_mentions (paginated)
     try:
         mentions = _kco_paginate_query(
@@ -1527,18 +1549,22 @@ def _kco_phase_a_sync(client: Client, stats: dict) -> None:
 
     existing_keys = {(r["kol_group"], r["token_address"]) for r in existing}
 
-    # Step 5: Insert new rows
+    # Step 5: Insert new rows (with pair_address from snapshots)
     new_rows = []
     for key, call in first_calls.items():
         if key in existing_keys:
             continue
-        new_rows.append({
+        row = {
             "mention_id": call["mention_id"],
             "token_address": call["token_address"],
             "symbol": call["symbol"],
             "kol_group": call["kol_group"],
             "call_timestamp": call["call_timestamp"],
-        })
+        }
+        pa = pair_map.get(call["token_address"])
+        if pa:
+            row["pair_address"] = pa
+        new_rows.append(row)
 
     if not new_rows:
         logger.info("KCO Phase A: all pairs already synced")
