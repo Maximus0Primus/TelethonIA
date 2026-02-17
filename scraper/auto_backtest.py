@@ -37,10 +37,10 @@ from supabase import create_client
 # --- Constants (fallback, overridden by scoring_config table) ---
 
 _DEFAULT_WEIGHTS = {
-    "consensus": 0.10,      # v32: anti-predictive (-0.033 corr, N=1630)
-    "conviction": 0.00,     # v32: anti-predictive (-0.017 corr)
-    "breadth": 0.05,        # v32: anti-predictive (-0.022 corr)
-    "price_action": 0.85,   # v32: only positive signal (+0.183 corr)
+    "consensus": 0.35,      # v34: kol_arrival_rate(+0.42), mention_velocity(+0.41) on clean data
+    "conviction": 0.00,     # v34: still anti-predictive (r=-0.17)
+    "breadth": 0.40,        # v34: whale_count(+0.47) = #1 predictor on clean deduped data
+    "price_action": 0.25,   # v34: collapsed r=+0.26→-0.01 after phantom label cleanup
 }
 
 BALANCED_WEIGHTS = _DEFAULT_WEIGHTS.copy()
@@ -317,12 +317,16 @@ def _top1_hit_rate(df: pd.DataFrame) -> dict:
 
     v22: Multi-threshold hit rates computed from max_return (not did_2x_* flags).
     Groups snapshots by cycle, picks the highest-scoring token per cycle.
-    Deduplicates: if the same token is #1 across consecutive cycles, it's
-    counted only ONCE (first occurrence).
+
+    v34: First-appearance dedup — each token only appears in its earliest cycle.
+    Prevents the same token from being counted 20-30x across consecutive cycles
+    (was 27.6x inflation for low-score tokens). Also prevents stale snapshots
+    from masking the actual first entry opportunity.
     """
     THRESHOLDS = [1.3, 1.5, 2.0]
 
-    df = df.copy()
+    # v34: First-appearance dedup — keep only the first snapshot per token
+    df = df.sort_values("snapshot_at").drop_duplicates(subset=["token_address"], keep="first").copy()
     df["score"] = df.apply(lambda r: _compute_score(r, BALANCED_WEIGHTS), axis=1)
 
     # Group snapshots into cycles (same minute = same cycle)

@@ -1068,14 +1068,12 @@ def _get_price_from_candles(token: dict, hours: float) -> float | None:
 
 def _compute_manipulation_penalty(token: dict) -> float:
     """
-    Unified manipulation detection: wash trading + artificial pump.
+    Manipulation detection: artificial pump only.
     Returns penalty multiplier in [0.3, 1.0].
-    Takes the HARSHEST of wash trading and artificial pump signals.
-    """
-    # Wash trading signal (from _compute_wash_trading_score)
-    wash_score = token.get("wash_trading_score", 0)
-    wash_pen = max(0.3, 1.0 - wash_score)
 
+    v34: REMOVED wash_pen from this function. Wash trading data (38.1% hit rate)
+    shows it's anti-predictive as a penalty. Kept as ML feature only.
+    """
     # Artificial pump signal (from _detect_artificial_pump)
     pump_pen = 1.0
     if token.get("is_artificial_pump"):
@@ -1087,7 +1085,7 @@ def _compute_manipulation_penalty(token: dict) -> float:
         else:
             pump_pen = 0.7
 
-    return min(wash_pen, pump_pen)  # harshest wins
+    return pump_pen
 
 
 def _compute_entry_timing_quality(token: dict) -> float:
@@ -1435,16 +1433,18 @@ def _apply_hard_gates(ranking: list[dict]) -> list[dict]:
     Every token stays in the pipeline, gets scored, enriched, and labeled
     by outcome_tracker so we can empirically validate all gates.
 
-    Soft penalties (gate_mult applied):
+    v34: REMOVED anti-predictive gates based on N=1630 audit data:
+      - high_risk_score (46.7% hit rate vs 9.9% scored) — REMOVED
+      - low_liquidity (17.4% hit rate vs 9.9% scored) — REMOVED
+      - wash_trading (38.1% hit rate vs 9.9% scored) — REMOVED (separate function)
+
+    Remaining soft penalties (gate_mult applied):
       - mint_authority: 0.05x (can inflate supply — genuine rug risk)
       - freeze_authority: 0.05x (can freeze tokens — genuine rug risk)
       - top10_concentration > 70%: 0.7x
-      - risk_score > 8000: 0.6x
-      - low_liquidity < 10K: 0.5x
       - low_holders < 30: 0.7x
     """
     gate_top10 = SCORING_PARAMS["gate_top10_pct"]
-    gate_liq = SCORING_PARAMS["gate_min_liquidity"]
     gate_holders = int(SCORING_PARAMS["gate_min_holders"])
 
     soft_penalized = 0
@@ -1470,17 +1470,12 @@ def _apply_hard_gates(ranking: list[dict]) -> list[dict]:
             gate_mult = min(gate_mult, 0.7)
             gate_reasons.append("top10_concentration")
 
-        # RugCheck risk > 8000 (out of 10000)
-        risk = token.get("risk_score")
-        if risk is not None and risk > 8000:
-            gate_mult = min(gate_mult, 0.6)
-            gate_reasons.append("high_risk_score")
+        # v34: REMOVED high_risk_score gate — data shows 46.7% hit rate vs 9.9% for scored tokens.
+        # Safety metrics are anti-predictive in memecoins. RugCheck risk > 8000 correlates with WINNERS.
+        # Keeping as data column for ML features but not penalizing.
 
-        # Liquidity floor
-        liq = token.get("liquidity_usd")
-        if liq is not None and liq < gate_liq:
-            gate_mult = min(gate_mult, 0.5)
-            gate_reasons.append("low_liquidity")
+        # v34: REMOVED low_liquidity gate — data shows 17.4% hit rate vs 9.9% for scored tokens.
+        # Low liquidity = early entry opportunity, not risk. Keeping as data column for ML.
 
         # Holder floor (need real organic community)
         hcount = token.get("helius_holder_count") or token.get("holder_count")
@@ -1494,8 +1489,8 @@ def _apply_hard_gates(ranking: list[dict]) -> list[dict]:
             soft_penalized += 1
 
     if soft_penalized:
-        logger.info("Soft gate penalties applied to %d tokens (mint/freeze=0.05x, top10>%.0f%%/risk>8000/liq<%.0f/holders<%d)",
-                     soft_penalized, gate_top10, gate_liq, gate_holders)
+        logger.info("Soft gate penalties applied to %d tokens (mint/freeze=0.05x, top10>%.0f%%, holders<%d)",
+                     soft_penalized, gate_top10, gate_holders)
     return ranking
 
 
@@ -1825,10 +1820,10 @@ def _compute_safety_penalty(token: dict) -> float:
 # === SCORE COMPUTATION WEIGHTS ===
 # Hardcoded fallback — overridden by scoring_config table when available
 _DEFAULT_WEIGHTS = {
-    "consensus": 0.10,      # v32: was 0.30; anti-predictive (-0.033 corr, N=1630)
-    "conviction": 0.00,     # v32: was 0.05; anti-predictive (-0.017 corr)
-    "breadth": 0.05,        # v32: was 0.10; anti-predictive (-0.022 corr)
-    "price_action": 0.85,   # v32: was 0.55; only positive signal (+0.183 corr)
+    "consensus": 0.35,      # v34: was 0.10; top correlates on clean data: kol_arrival_rate(+0.42), mention_velocity(+0.41)
+    "conviction": 0.00,     # v34: still anti-predictive (r=-0.17 on clean deduped data)
+    "breadth": 0.40,        # v34: was 0.05; whale_count(+0.47) = #1 predictor on clean data
+    "price_action": 0.25,   # v34: was 0.85; COLLAPSED from r=+0.26 to r=-0.01 after phantom cleanup!
 }
 
 _DEFAULT_SCORING_PARAMS = {
@@ -2705,15 +2700,11 @@ def aggregate_ranking(
     # v33: _apply_hard_gates is now all-soft (returns same list, no removals)
     ranking = _apply_hard_gates(ranking)
 
-    # === Wash trading — soft penalty (already in wash_pen multiplier chain) ===
-    # v21: removed hard gate. wash_pen (1.0 - wash_score) already penalizes these tokens.
-    # Tokens with score > 0.8 get wash_pen = 0.2x which is severe enough.
+    # === Wash trading — compute score for ML features only, NO penalty ===
+    # v34: REMOVED wash_trading gate penalty. Data shows 38.1% hit rate vs 9.9% for scored tokens.
+    # Wash trading score kept as feature for ML model but no longer penalizes score.
     for token in ranking:
         token["wash_trading_score"] = round(_compute_wash_trading_score(token), 3)
-        if token.get("wash_trading_score", 0) > 0.8:
-            existing_gate = token.get("gate_mult", 1.0)
-            token["gate_mult"] = round(min(existing_gate, 0.5), 3)
-            token["gate_reason"] = token.get("gate_reason") or "wash_trading"
 
     # v33: All gates are soft now — no more hard removal, ranking == all_enriched
     soft_penalized = sum(1 for t in ranking if t.get("gate_mult", 1.0) < 1.0)

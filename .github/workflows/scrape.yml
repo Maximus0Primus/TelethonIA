@@ -65,5 +65,7 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           HELIUS_API_KEY: ${{ secrets.HELIUS_API_KEY }}
           BIRDEYE_API_KEY: ${{ secrets.BIRDEYE_API_KEY }}
+          JUPITER_API_KEY: ${{ secrets.JUPITER_API_KEY }}
+          BUBBLEMAPS_API_KEY: ${{ secrets.BUBBLEMAPS_API_KEY }}
         working-directory: scraper
         run: python safe_scraper.py --once

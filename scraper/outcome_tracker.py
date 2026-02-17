@@ -148,7 +148,7 @@ def _save_pool_cache(cache: dict) -> None:
 # === GeckoTerminal API ===
 
 def _get_pool_address(token_address: str, pool_cache: dict) -> str | None:
-    """Get the top Solana pool address for a token via GeckoTerminal."""
+    """Get the top Solana pool address for a token. Falls back: GeckoTerminal → DexPaprika."""
     global _gecko_consecutive_429s, _gecko_disabled
     if not token_address:
         return None
@@ -157,36 +157,50 @@ def _get_pool_address(token_address: str, pool_cache: dict) -> str | None:
     if cached and (time.time() - cached.get("_ts", 0)) < _POOL_CACHE_TTL:
         return cached.get("pool")
 
-    if _gecko_disabled:
-        return None  # Can't resolve pool without GeckoTerminal
+    pool_address = None
 
-    try:
-        resp = requests.get(
-            GECKOTERMINAL_POOLS_URL.format(token_address=token_address),
-            timeout=10,
-        )
-        if resp.status_code == 429:
-            _gecko_consecutive_429s += 1
-            if _gecko_consecutive_429s >= _GECKO_429_THRESHOLD:
-                _gecko_disabled = True
-                logger.warning("GeckoTerminal disabled (pool lookup 429s)")
-            return None
-        if resp.status_code != 200:
-            return None
+    # 1. Try GeckoTerminal (unless circuit-breaker disabled)
+    if not _gecko_disabled:
+        try:
+            resp = requests.get(
+                GECKOTERMINAL_POOLS_URL.format(token_address=token_address),
+                timeout=10,
+            )
+            if resp.status_code == 429:
+                _gecko_consecutive_429s += 1
+                if _gecko_consecutive_429s >= _GECKO_429_THRESHOLD:
+                    _gecko_disabled = True
+                    logger.warning("GeckoTerminal disabled (pool lookup 429s)")
+            elif resp.status_code == 200:
+                pools = resp.json().get("data") or []
+                if pools:
+                    pool_address = pools[0].get("attributes", {}).get("address")
+        except requests.RequestException as e:
+            logger.debug("GeckoTerminal pool lookup failed for %s: %s", token_address[:8], e)
 
-        pools = resp.json().get("data") or []
-        if not pools:
-            return None
+    # 2. v34 fallback: DexPaprika token→pool lookup (no API key needed, 10K req/day)
+    if not pool_address:
+        try:
+            resp = requests.get(
+                f"{DEXPAPRIKA_BASE}/search?query={token_address}&network=solana",
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                pools = data.get("pools") or []
+                for p in pools:
+                    addr = p.get("id", "")
+                    # DexPaprika pool id format: "solana_<pool_address>"
+                    if addr.startswith("solana_"):
+                        pool_address = addr.replace("solana_", "", 1)
+                        break
+        except requests.RequestException as e:
+            logger.debug("DexPaprika pool lookup failed for %s: %s", token_address[:8], e)
 
-        pool_address = pools[0].get("attributes", {}).get("address")
-        if pool_address:
-            pool_cache[token_address] = {"pool": pool_address, "_ts": time.time()}
+    if pool_address:
+        pool_cache[token_address] = {"pool": pool_address, "_ts": time.time()}
 
-        return pool_address
-
-    except requests.RequestException as e:
-        logger.debug("GeckoTerminal pool lookup failed for %s: %s", token_address[:8], e)
-        return None
+    return pool_address
 
 
 def _ts_to_minutes(ts: float | None, snapshot_ts: float) -> int | None:
@@ -735,55 +749,31 @@ def _fetch_ohlcv_candles(
 
 
 def _mark_no_price(client: "Client", snap: dict, stats: dict) -> None:
-    """Mark all unlabeled horizons as False for a snapshot with no valid price."""
-    update = {}
-    for hz in HORIZONS:
-        if snap.get(hz["flag_col"]) is None:
-            update[hz["price_col"]] = None
-            update[hz["flag_col"]] = False
-    if update:
-        try:
-            client.table("token_snapshots").update(update).eq("id", snap["id"]).execute()
-            stats["no_price"] += 1
-        except Exception as e:
-            logger.error("Failed to update no-price %d: %s", snap["id"], e)
+    """Snapshot has no valid price_at_snapshot. Leave did_2x as NULL (unknown).
+
+    v34 fix: Never set did_2x=False without real price data. See _mark_ohlcv_failed docstring.
+    """
+    stats["no_price"] += 1
 
 
 def _mark_dead_pool(client: "Client", snap: dict, now_ts: float, stats: dict) -> None:
-    """Mark due horizons as False for a token with no resolvable pool address."""
-    snapshot_ts = _parse_snapshot_ts(snap.get("snapshot_at", ""))
-    age_hours = (now_ts - snapshot_ts) / 3600 if snapshot_ts else 999
+    """Token has no resolvable pool address. Leave did_2x as NULL (unknown).
 
-    update = {}
-    for hz in HORIZONS:
-        if snap.get(hz["flag_col"]) is None and age_hours >= hz["hours"]:
-            update[hz["flag_col"]] = False
-            update[hz["price_col"]] = None
-            update[hz["max_col"]] = None
-    if update:
-        try:
-            client.table("token_snapshots").update(update).eq("id", snap["id"]).execute()
-            stats["no_price"] += 1
-        except Exception as e:
-            logger.error("Failed to update dead pool %d (%s): %s", snap["id"], snap.get("symbol"), e)
-    else:
-        stats["skipped"] += 1
+    v34 fix: Never set did_2x=False without real price data. See _mark_ohlcv_failed docstring.
+    """
+    stats["no_price"] += 1
 
 
 def _mark_ohlcv_failed(client: "Client", snap: dict, horizons_to_fill: list[dict], stats: dict) -> None:
-    """Mark horizons as False when all OHLCV sources failed and snapshot is old enough."""
-    update = {}
-    for hz in horizons_to_fill:
-        if snap.get(hz["flag_col"]) is None:
-            update[hz["flag_col"]] = False
-            update[hz["price_col"]] = None
-            update[hz["max_col"]] = None
-    if update:
-        try:
-            client.table("token_snapshots").update(update).eq("id", snap["id"]).execute()
-            stats["no_price"] += 1
-        except Exception as e:
-            logger.error("Failed to update dead OHLCV %d (%s): %s", snap["id"], snap.get("symbol"), e)
+    """Mark snapshot as OHLCV-failed. Leave did_2x as NULL (unknown) — never set False without real price data.
+
+    v34 fix: Previously set did_2x=False here, creating 'phantom labels' — thousands of
+    snapshots marked as losers when we actually had no price data. This poisoned all
+    training data and backtests (reported 2.55% hit rate vs true 16.7%).
+    """
+    # Nothing to update — we intentionally leave did_2x_*h as NULL (unknown)
+    # The snapshot will be retried on the next outcome_tracker run if OHLCV becomes available
+    stats["no_price"] += 1
 
 
 def _label_snapshot(
@@ -1791,8 +1781,10 @@ def _kco_phase_c_update_ath(client: Client, pool_cache: dict, stats: dict, start
                     pass
                 continue
 
-            # Only update if new ATH is higher
+            # Update ATH, max_return, and did_2x
             update_data = {"last_checked_at": datetime.now(timezone.utc).isoformat()}
+            entry = float(row["entry_price"])
+
             if max_high > current_ath:
                 update_data["ath_after_call"] = float(max_high)
                 if ath_ts:
@@ -1800,12 +1792,18 @@ def _kco_phase_c_update_ath(client: Client, pool_cache: dict, stats: dict, start
                 if not row.get("pair_address") and pool_addr:
                     update_data["pair_address"] = pool_addr
 
+            # v34: Always compute max_return and did_2x from best known ATH
+            best_ath = max(max_high, current_ath)
+            if entry > 0 and best_ath > 0:
+                max_return = best_ath / entry
+                update_data["max_return"] = round(float(max_return), 4)
+                update_data["did_2x"] = max_return >= 2.0
+
             try:
                 client.table("kol_call_outcomes").update(update_data).eq("id", row["id"]).execute()
                 if max_high > current_ath:
                     stats["ath_updated"] += 1
-                    entry = float(row["entry_price"])
                     logger.debug("KCO Phase C: %s ATH=%.10f (%.1fx entry)",
-                                 row["symbol"], max_high, max_high / entry if entry > 0 else 0)
+                                 row["symbol"], max_high, max_return if entry > 0 else 0)
             except Exception as e:
                 logger.error("KCO Phase C: update failed for id=%d: %s", row["id"], e)
