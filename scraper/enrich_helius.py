@@ -18,6 +18,8 @@ import os
 import json
 import time
 import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -36,6 +38,21 @@ HELIUS_SMART_MONEY_N = 5   # getSignaturesForAddress (transaction analysis)
 # Rate limiting
 HELIUS_SLEEP = 0.15  # seconds between calls (under 10 RPS)
 HELIUS_MAX_PAGES = 5  # max pagination pages (5000 holders max)
+
+# v34: Thread-safe rate limiter for parallel Helius processing
+_helius_lock = threading.Lock()
+_helius_last_call = 0.0
+
+
+def _helius_rate_limit():
+    """Thread-safe rate limiter: ensures minimum 0.12s between Helius API calls (~8 RPS)."""
+    global _helius_last_call
+    with _helius_lock:
+        now = time.time()
+        elapsed = now - _helius_last_call
+        if elapsed < 0.12:
+            time.sleep(0.12 - elapsed)
+        _helius_last_call = time.time()
 
 
 def _get_api_key() -> str | None:
@@ -136,7 +153,7 @@ def _fetch_token_accounts(mint: str, api_key: str) -> list[dict] | None:
                 if not cursor:
                     break
 
-                time.sleep(HELIUS_SLEEP)
+                _helius_rate_limit()
                 break  # Success — exit retry loop
 
             except requests.RequestException as e:
@@ -573,8 +590,8 @@ def enrich_token_helius(
     result = _empty_helius_result()
 
     # Fetch token accounts (holder analysis)
+    _helius_rate_limit()
     accounts = _fetch_token_accounts(mint, api_key)
-    time.sleep(HELIUS_SLEEP)
 
     if accounts:
         # Holder quality metrics
@@ -591,8 +608,8 @@ def enrich_token_helius(
 
         # On-chain BSR
         # Always fetch signatures for Jito bundle detection (10 credits, negligible)
+        _helius_rate_limit()
         signatures = _fetch_recent_signatures(mint, api_key)
-        time.sleep(HELIUS_SLEEP)
 
         if signatures:
             tx_metrics = _analyze_transactions(signatures)
@@ -622,6 +639,8 @@ def enrich_tokens_helius(ranking: list[dict]) -> list[dict]:
     - Top HELIUS_TOP_N tokens: full holder analysis + bundles
     - Top HELIUS_SMART_MONEY_N tokens: also get transaction signatures
 
+    v34: Parallel processing with ThreadPoolExecutor (3 workers).
+    Rate limited via _helius_rate_limit() to stay under 10 RPS.
     Modifies tokens in-place and returns the list.
     """
     api_key = _get_api_key()
@@ -635,20 +654,33 @@ def enrich_tokens_helius(ranking: list[dict]) -> list[dict]:
     cache = _load_cache()
     enriched_count = 0
 
+    # Build work items: (index, mint, fetch_sigs)
+    work_items = []
     for i, token in enumerate(ranking):
         if i >= HELIUS_TOP_N:
             break
-
         mint = token.get("token_address")
         if not mint:
             continue
-
         fetch_sigs = i < HELIUS_SMART_MONEY_N
-        data = enrich_token_helius(mint, api_key, cache, fetch_signatures=fetch_sigs)
-        token.update(data)
+        work_items.append((i, mint, fetch_sigs))
 
-        if data.get("helius_holder_count") is not None:
-            enriched_count += 1
+    def _process_token(item):
+        idx, mint, fetch_sigs = item
+        return idx, enrich_token_helius(mint, api_key, cache, fetch_signatures=fetch_sigs)
+
+    # v34: 3 workers × rate limiter (0.12s min between calls) ≈ 8 RPS, under Helius 10 RPS limit
+    with ThreadPoolExecutor(max_workers=3, thread_name_prefix="helius") as pool:
+        futures = {pool.submit(_process_token, item): item for item in work_items}
+        for fut in as_completed(futures):
+            try:
+                idx, data = fut.result()
+                ranking[idx].update(data)
+                if data.get("helius_holder_count") is not None:
+                    enriched_count += 1
+            except Exception as e:
+                item = futures[fut]
+                logger.error("Helius enrichment failed for %s: %s", item[1][:8], e)
 
     _save_cache(cache)
     logger.info(

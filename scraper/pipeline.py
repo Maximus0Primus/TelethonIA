@@ -9,6 +9,7 @@ import math
 import time
 import logging
 import statistics
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 from collections import defaultdict
 from typing import TypedDict
@@ -2720,17 +2721,25 @@ def aggregate_ranking(
                 len(ranking), soft_penalized)
 
     # === Expensive enrichment on ALL tokens (v33: no hard gates) ===
-    # Phase 3: Helius enrichment (bundle detection + holder quality + whale tracking)
-    enrich_tokens_helius(ranking)
-
-    # Phase 3B: Jupiter enrichment (tradeability + price impact + routes)
-    enrich_tokens_jupiter(ranking)
-
-    # Algorithm v3.1: Bubblemaps enrichment (wallet clustering + decentralization score)
-    enrich_tokens_bubblemaps(ranking)
-
-    # === Algorithm v4: Birdeye OHLCV enrichment (top 5 survivors) ===
-    enrich_tokens_ohlcv(ranking)
+    # v34: Run all 4 enrichments in parallel — each writes different keys, no conflicts.
+    # Helius → helius_*, Jupiter → jup_*, Bubblemaps → bubblemaps_*, OHLCV → candle_data/ath_*
+    # Python GIL makes dict key assignment atomic; no shared keys between enrichers.
+    logger.info("Starting parallel enrichment (Helius + Jupiter + Bubblemaps + OHLCV)")
+    _enrich_start = time.time()
+    with ThreadPoolExecutor(max_workers=4, thread_name_prefix="enrich") as pool:
+        futures = {
+            pool.submit(enrich_tokens_helius, ranking): "Helius",
+            pool.submit(enrich_tokens_jupiter, ranking): "Jupiter",
+            pool.submit(enrich_tokens_bubblemaps, ranking): "Bubblemaps",
+            pool.submit(enrich_tokens_ohlcv, ranking): "OHLCV",
+        }
+        for fut in as_completed(futures):
+            name = futures[fut]
+            try:
+                fut.result()
+            except Exception as e:
+                logger.error("%s enrichment failed: %s", name, e, exc_info=True)
+    logger.info("Parallel enrichment completed in %.1fs", time.time() - _enrich_start)
 
     # === Algorithm v4: Price Action scoring ===
     for token in ranking:

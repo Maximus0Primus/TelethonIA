@@ -166,7 +166,7 @@ def enrich_tokens_bubblemaps(ranking: list[dict]) -> None:
         cache_entry["_cached_at"] = time.time()
         cache[address] = cache_entry
 
-        time.sleep(1.0)  # Respect API — 1 req/s conservative
+        time.sleep(0.5)  # v34: 1.0→0.5s (Bubblemaps rate limit is daily quota, not RPS)
 
     _save_cache(cache)
     if enriched:

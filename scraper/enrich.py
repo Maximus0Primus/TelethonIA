@@ -488,7 +488,7 @@ def enrich_token(symbol: str, cache: dict, birdeye_key: str | None = None) -> di
             if rug_data:
                 result.update(rug_data)
                 entry["_rug_at"] = now
-            time.sleep(1.0)
+            time.sleep(0.5)  # v34: 1.0→0.5s (RugCheck ~60/min, 0.5s = safe)
         else:
             logger.debug("RugCheck cache hit for %s", symbol)
 
@@ -498,7 +498,7 @@ def enrich_token(symbol: str, cache: dict, birdeye_key: str | None = None) -> di
             if bird_data:
                 result.update(bird_data)
                 entry["_bird_at"] = now
-            time.sleep(1.0)
+            time.sleep(0.5)  # v34: 1.0→0.5s (Birdeye 30K CUs/month, 0.5s = safe)
 
     # Update cache with all data + per-source timestamps
     cache_entry = dict(result)
