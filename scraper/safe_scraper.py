@@ -349,6 +349,7 @@ def _fetch_sol_price() -> float | None:
 
 def process_and_push(messages_data: dict[str, list[dict]], dump: bool = False) -> None:
     """Run the pipeline and push results to Supabase."""
+    _cycle_start = time.time()
     # Load dynamic scoring weights from Supabase (auto-learning loop)
     try:
         from pipeline import load_scoring_config
@@ -452,52 +453,57 @@ def process_and_push(messages_data: dict[str, list[dict]], dump: bool = False) -
     # Auto-retrain ML model when enough labeled data accumulated
     # v22: auto_train does multi-horizon × multi-threshold grid search
     # Conditions: 100+ labeled samples AND >7 days since last training
-    try:
-        from train_model import auto_train, MODEL_DIR
-        import glob as _glob
-        should_train = False
+    # v34: Skip if cycle already consumed >20min (auto_train grid search takes 2-5min,
+    # pushing GH Actions past its 25-min timeout on cold-cache runs)
+    _elapsed_so_far = time.time() - _cycle_start
+    if _elapsed_so_far > 20 * 60:
+        logger.warning("Skipping auto_train: cycle already at %.0fs (>20min)", _elapsed_so_far)
+    else:
+        try:
+            from train_model import auto_train, MODEL_DIR
+            should_train = False
 
-        # Check any existing model meta across all horizons
-        meta_files = list(MODEL_DIR.glob("model_*_meta.json"))
-        if not meta_files:
-            should_train = True
-        else:
-            import json as _json
-            latest_train = None
-            for mf in meta_files:
-                try:
-                    with open(mf) as _f:
-                        meta = _json.load(_f)
-                    trained_at = meta.get("auto_trained_at") or meta.get("trained_at", "")
-                    if trained_at:
-                        from datetime import datetime as _dt
-                        last_dt = _dt.fromisoformat(trained_at)
-                        if latest_train is None or last_dt > latest_train:
-                            latest_train = last_dt
-                except Exception:
-                    pass
-
-            if latest_train:
-                days_since = (datetime.now(timezone.utc).replace(tzinfo=None) - latest_train).days
-                if days_since >= 7:
-                    should_train = True
-                    logger.info("Auto-retrain: %d days since last train, triggering", days_since)
-            else:
+            # Check any existing model meta across all horizons
+            meta_files = list(MODEL_DIR.glob("model_*_meta.json"))
+            if not meta_files:
                 should_train = True
-
-        if should_train:
-            result = auto_train(min_samples=100, trials=50)
-            if result:
-                logger.info(
-                    "Auto-retrain: SUCCESS — %s/%s/%.1fx p@5=%.3f",
-                    result.get("horizon"), result.get("mode"),
-                    result.get("threshold", 2.0),
-                    result.get("metrics", {}).get("precision_at_5", 0),
-                )
             else:
-                logger.info("Auto-retrain: skipped (not enough data or no improvement)")
-    except Exception as e:
-        logger.error("Auto-retrain failed: %s", e)
+                import json as _json
+                latest_train = None
+                for mf in meta_files:
+                    try:
+                        with open(mf) as _f:
+                            meta = _json.load(_f)
+                        trained_at = meta.get("auto_trained_at") or meta.get("trained_at", "")
+                        if trained_at:
+                            from datetime import datetime as _dt
+                            last_dt = _dt.fromisoformat(trained_at)
+                            if latest_train is None or last_dt > latest_train:
+                                latest_train = last_dt
+                    except Exception:
+                        pass
+
+                if latest_train:
+                    days_since = (datetime.now(timezone.utc).replace(tzinfo=None) - latest_train).days
+                    if days_since >= 7:
+                        should_train = True
+                        logger.info("Auto-retrain: %d days since last train, triggering", days_since)
+                else:
+                    should_train = True
+
+            if should_train:
+                result = auto_train(min_samples=100, trials=50)
+                if result:
+                    logger.info(
+                        "Auto-retrain: SUCCESS — %s/%s/%.1fx p@5=%.3f",
+                        result.get("horizon"), result.get("mode"),
+                        result.get("threshold", 2.0),
+                        result.get("metrics", {}).get("precision_at_5", 0),
+                    )
+                else:
+                    logger.info("Auto-retrain: skipped (not enough data or no improvement)")
+        except Exception as e:
+            logger.error("Auto-retrain failed: %s", e)
 
     # v10: Cleanup old data (>90 days) to prevent unbounded growth
     try:

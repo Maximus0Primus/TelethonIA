@@ -23,6 +23,7 @@ import json
 import time
 import logging
 from datetime import datetime, timezone, timedelta
+from collections import defaultdict
 from pathlib import Path
 
 import requests
@@ -75,13 +76,15 @@ HORIZONS = [
 ]
 
 # Max snapshots to process per cycle
-# v21: increased from 150 to 500 — 93% of snapshots were unlabeled, need to catch up
-BATCH_LIMIT = 500
+# v34: increased to 2000 — token-grouping means ~1 API call per unique token, not per snapshot
+BATCH_LIMIT = 2000
 
 # Time budget in seconds — exit gracefully before GH Action timeout
 # v23: 18 min (was 25). Must leave room for _fix_inconsistencies, _fill_first_call,
 # backfill_bot_data, and auto_backtest which run after the main loop.
-TIME_BUDGET_SECONDS = 18 * 60  # 18 minutes
+# v34: 30 min (was 18). outcomes.yml timeout increased to 45min to clear labeling backlog.
+# Feb 17 had only 39% of Feb 15 snapshots labeled (should be 100% after 48h).
+TIME_BUDGET_SECONDS = 30 * 60  # 30 minutes
 
 # Sanity check: max plausible price ratio per horizon.
 # If OHLCV returns max_price/price_at > this, the data is likely wrong
@@ -553,20 +556,345 @@ def _extract_horizons_from_candles(
     return results
 
 
+def _fetch_ohlcv_candles(
+    pool_addr: str,
+    token_addr: str | None,
+    start_ts: float,
+    end_ts: float,
+    price_at: float,
+    symbol: str,
+    stats: dict,
+) -> tuple[list | None, str]:
+    """
+    Fetch OHLCV candles for a pool covering [start_ts, end_ts].
+    Falls back: GeckoTerminal -> DexPaprika -> Birdeye.
+    Returns (sorted_candles, source) where candles are [ts, o, h, l, c, v].
+    """
+    sorted_candles = None
+    source = "none"
+
+    window_seconds = end_ts - start_ts
+    num_candles_5m = int(window_seconds / 300) + 10
+
+    # Try GeckoTerminal
+    try:
+        _gecko_limiter.wait()
+        resp = requests.get(
+            GECKOTERMINAL_OHLCV_URL.format(pool=pool_addr),
+            params={
+                "aggregate": 5,
+                "before_timestamp": int(end_ts),
+                "limit": min(1000, num_candles_5m),
+                "currency": "usd",
+                "token": "base",
+            },
+            timeout=15,
+        )
+        stats["api_calls"] += 1
+
+        if resp.status_code == 200:
+            ohlcv_list = resp.json().get("data", {}).get("attributes", {}).get("ohlcv_list") or []
+            if ohlcv_list:
+                sorted_candles = sorted(ohlcv_list, key=lambda c: c[0])
+                source = "gecko_ohlcv"
+        elif resp.status_code == 429:
+            logger.warning("GeckoTerminal rate limited — falling back to DexPaprika")
+    except requests.RequestException as e:
+        logger.debug("GeckoTerminal OHLCV failed for %s: %s", symbol, e)
+
+    # v32: reject SOL quote price leak before fallback chain short-circuits
+    if sorted_candles and not _check_candle_sanity(sorted_candles, price_at, symbol, source):
+        sorted_candles = None
+
+    # Fallback: DexPaprika
+    if sorted_candles is None:
+        start_dt = datetime.fromtimestamp(start_ts, tz=timezone.utc)
+        end_dt = datetime.fromtimestamp(end_ts, tz=timezone.utc)
+        num_candles_15m = int(window_seconds / 900) + 10
+        try:
+            resp = requests.get(
+                f"{DEXPAPRIKA_BASE}/networks/solana/pools/{pool_addr}/ohlcv",
+                params={
+                    "start": start_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "end": end_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "limit": min(1000, num_candles_15m),
+                    "interval": "15m",
+                },
+                timeout=15,
+            )
+            time.sleep(0.3)
+            stats["api_calls"] += 1
+
+            if resp.status_code == 200:
+                candles_raw = resp.json()
+                if isinstance(candles_raw, list) and candles_raw:
+                    sorted_candles = []
+                    for c in candles_raw:
+                        try:
+                            ts_str = c.get("time") or c.get("timestamp", "")
+                            if ts_str.endswith("Z"):
+                                ts_dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                            else:
+                                ts_dt = datetime.fromisoformat(ts_str)
+                            sorted_candles.append([
+                                int(ts_dt.timestamp()),
+                                float(c.get("open", 0)),
+                                float(c.get("high", 0)),
+                                float(c.get("low", 0)),
+                                float(c.get("close", 0)),
+                                float(c.get("volume", 0)),
+                            ])
+                        except (ValueError, TypeError):
+                            continue
+                    sorted_candles.sort(key=lambda x: x[0])
+                    if sorted_candles:
+                        source = "dexpaprika_ohlcv"
+                    else:
+                        sorted_candles = None
+        except requests.RequestException as e:
+            logger.debug("DexPaprika OHLCV failed for %s: %s", symbol, e)
+
+    # v32: reject SOL quote price leak before Birdeye fallback
+    if sorted_candles and not _check_candle_sanity(sorted_candles, price_at, symbol, source):
+        sorted_candles = None
+
+    # Fallback 3: Birdeye OHLCV (uses token MINT address, not pool)
+    # v31: Recovers tokens deindexed by GeckoTerminal/DexPaprika but still on-chain
+    if sorted_candles is None and token_addr:
+        birdeye_key = os.environ.get("BIRDEYE_API_KEY", "")
+        if birdeye_key:
+            try:
+                _birdeye_limiter.wait()
+                resp = requests.get(
+                    BIRDEYE_OHLCV_URL,
+                    params={
+                        "address": token_addr,
+                        "type": "15m",
+                        "time_from": int(start_ts),
+                        "time_to": int(end_ts),
+                    },
+                    headers={"X-API-KEY": birdeye_key, "x-chain": "solana"},
+                    timeout=15,
+                )
+                stats["api_calls"] += 1
+
+                if resp.status_code == 200:
+                    items = resp.json().get("data", {}).get("items", [])
+                    if items:
+                        sorted_candles = []
+                        for c in items:
+                            sorted_candles.append([
+                                int(c.get("unixTime", 0)),
+                                float(c.get("o", 0)),
+                                float(c.get("h", 0)),
+                                float(c.get("l", 0)),
+                                float(c.get("c", 0)),
+                                float(c.get("v", 0)),
+                            ])
+                        sorted_candles.sort(key=lambda x: x[0])
+                        if sorted_candles:
+                            source = "birdeye_ohlcv"
+                            logger.info("Birdeye recovered %d candles for %s", len(sorted_candles), symbol)
+                        else:
+                            sorted_candles = None
+                elif resp.status_code == 429:
+                    logger.warning("Birdeye rate limited for %s", symbol)
+            except requests.RequestException as e:
+                logger.debug("Birdeye OHLCV failed for %s: %s", symbol, e)
+
+    # v32: final sanity check on Birdeye candles too
+    if sorted_candles and not _check_candle_sanity(sorted_candles, price_at, symbol, source):
+        sorted_candles = None
+
+    return sorted_candles, source
+
+
+def _mark_no_price(client: "Client", snap: dict, stats: dict) -> None:
+    """Mark all unlabeled horizons as False for a snapshot with no valid price."""
+    update = {}
+    for hz in HORIZONS:
+        if snap.get(hz["flag_col"]) is None:
+            update[hz["price_col"]] = None
+            update[hz["flag_col"]] = False
+    if update:
+        try:
+            client.table("token_snapshots").update(update).eq("id", snap["id"]).execute()
+            stats["no_price"] += 1
+        except Exception as e:
+            logger.error("Failed to update no-price %d: %s", snap["id"], e)
+
+
+def _mark_dead_pool(client: "Client", snap: dict, now_ts: float, stats: dict) -> None:
+    """Mark due horizons as False for a token with no resolvable pool address."""
+    snapshot_ts = _parse_snapshot_ts(snap.get("snapshot_at", ""))
+    age_hours = (now_ts - snapshot_ts) / 3600 if snapshot_ts else 999
+
+    update = {}
+    for hz in HORIZONS:
+        if snap.get(hz["flag_col"]) is None and age_hours >= hz["hours"]:
+            update[hz["flag_col"]] = False
+            update[hz["price_col"]] = None
+            update[hz["max_col"]] = None
+    if update:
+        try:
+            client.table("token_snapshots").update(update).eq("id", snap["id"]).execute()
+            stats["no_price"] += 1
+        except Exception as e:
+            logger.error("Failed to update dead pool %d (%s): %s", snap["id"], snap.get("symbol"), e)
+    else:
+        stats["skipped"] += 1
+
+
+def _mark_ohlcv_failed(client: "Client", snap: dict, horizons_to_fill: list[dict], stats: dict) -> None:
+    """Mark horizons as False when all OHLCV sources failed and snapshot is old enough."""
+    update = {}
+    for hz in horizons_to_fill:
+        if snap.get(hz["flag_col"]) is None:
+            update[hz["flag_col"]] = False
+            update[hz["price_col"]] = None
+            update[hz["max_col"]] = None
+    if update:
+        try:
+            client.table("token_snapshots").update(update).eq("id", snap["id"]).execute()
+            stats["no_price"] += 1
+        except Exception as e:
+            logger.error("Failed to update dead OHLCV %d (%s): %s", snap["id"], snap.get("symbol"), e)
+
+
+def _label_snapshot(
+    client: "Client",
+    snap: dict,
+    snapshot_ts: float,
+    price_at: float,
+    horizons_to_fill: list[dict],
+    sorted_candles: list,
+    source: str,
+    stats: dict,
+) -> None:
+    """Label a single snapshot using shared candle data."""
+    hz_results = _extract_horizons_from_candles(
+        sorted_candles, snapshot_ts, price_at, horizons_to_fill,
+    )
+
+    update_data = {}
+    running_max = 0.0
+    running_did_2x = False
+    symbol = snap["symbol"]
+    snap_id = snap["id"]
+
+    # Check already-labeled shorter horizons for consistency
+    for hz in HORIZONS:
+        existing_max = snap.get(hz["max_col"])
+        existing_did = snap.get(hz["flag_col"])
+        if existing_max is not None and float(existing_max) > running_max:
+            running_max = float(existing_max)
+        if existing_did is True:
+            running_did_2x = True
+
+        if hz not in horizons_to_fill:
+            continue
+
+        hours = hz["hours"]
+        result_data = hz_results.get(hours)
+
+        max_price = result_data["max_price"] if result_data else None
+        min_price = result_data["min_price"] if result_data else None
+        last_close = result_data["last_close"] if result_data else None
+        peak_ts_val = result_data["peak_ts"] if result_data else None
+        t2x_hours = result_data["time_to_2x_hours"] if result_data else None
+        bot_data = result_data["bot_data"] if result_data else None
+
+        # Consistency: inherit from shorter horizon if no OHLCV data
+        if max_price is None and running_max > 0:
+            max_price = running_max
+            last_close = None
+            stats["consistent"] += 1
+
+        if max_price is None:
+            continue  # Skip this horizon, retry next cycle
+
+        # Sanity check
+        ratio = max_price / price_at if price_at > 0 else 0
+        max_ratio = MAX_PLAUSIBLE_RATIO.get(hours, 500)
+        if ratio > max_ratio:
+            logger.warning(
+                "Implausible OHLCV for %s/%dh: %.6f -> %.6f (%.0fx) — skipping",
+                symbol, hours, price_at, max_price, ratio,
+            )
+            continue
+
+        # Consistency floor
+        if running_max > 0 and max_price < running_max:
+            max_price = running_max
+
+        did_2x = max_price >= (price_at * 2.0)
+        if running_did_2x and not did_2x:
+            did_2x = True
+
+        # Validate last_close
+        safe_close = last_close
+        if safe_close and price_at > 0 and (safe_close / price_at) > max_ratio:
+            safe_close = None
+
+        # Peak hour
+        peak_hour = None
+        if peak_ts_val and snapshot_ts:
+            peak_hour = round((peak_ts_val - snapshot_ts) / 3600, 2)
+            peak_hour = max(0, min(hours, peak_hour))
+
+        update_data[hz["price_col"]] = safe_close if safe_close else max_price
+        update_data[hz["flag_col"]] = did_2x
+        update_data[hz["max_col"]] = max_price
+        update_data[hz["peak_col"]] = peak_hour
+        update_data[hz["min_col"]] = min_price
+        update_data[hz["t2x_col"]] = t2x_hours
+
+        # Bot simulation columns
+        if bot_data and hours in (12, 24):
+            hz_suffix = f"_{hours}h"
+            update_data[f"time_to_1_3x_min{hz_suffix}"] = bot_data.get("t_1_3x")
+            update_data[f"time_to_1_5x_min{hz_suffix}"] = bot_data.get("t_1_5x")
+            update_data[f"time_to_sl20_min{hz_suffix}"] = bot_data.get("t_sl20")
+            update_data[f"time_to_sl30_min{hz_suffix}"] = bot_data.get("t_sl30")
+            update_data[f"time_to_sl50_min{hz_suffix}"] = bot_data.get("t_sl50")
+            update_data[f"max_dd_before_tp_pct{hz_suffix}"] = bot_data.get("max_dd_pct")
+
+        # Update running max for next horizons
+        if max_price > running_max:
+            running_max = max_price
+        if did_2x:
+            running_did_2x = True
+
+        if did_2x:
+            logger.info(
+                "2x CONFIRMED (%s): %s at %dh (%.10f -> %.10f = %.1fx)",
+                source, symbol, hours, price_at, max_price, max_price / price_at,
+            )
+
+    # Single DB update for ALL horizons of this snapshot
+    if update_data:
+        try:
+            client.table("token_snapshots").update(update_data).eq("id", snap_id).execute()
+            stats["updated"] += 1
+        except Exception as e:
+            logger.error("Failed to update %d (%s): %s", snap_id, symbol, e)
+
+
 def fill_outcomes() -> None:
     """
-    Batch-optimized outcome labeling: 1 OHLCV call per snapshot labels ALL pending horizons.
+    Batch-optimized outcome labeling with token grouping.
 
-    Old approach: loop per horizon × per snapshot = 7 API calls per token.
-    New approach: find snapshots with ANY unlabeled horizon, fetch longest needed window once,
-    extract all shorter horizons from the same candle data.
+    Groups snapshots by token_address and makes 1 OHLCV API call per unique token
+    (covering all snapshots' time ranges), then labels all snapshots from shared candles.
 
-    GeckoTerminal rate limit: 30 req/min. Old: ~100 tokens/run. New: ~700 tokens/run (7x faster).
+    Old approach: 1 API call per snapshot -> ~250 snapshots/run.
+    New approach: 1 API call per unique token -> ~2000+ snapshots/run (5-10x faster).
     """
     client = _get_client()
     now = datetime.now(timezone.utc)
+    now_ts = now.timestamp()
     pool_cache = _load_pool_cache()
-    stats = {"updated": 0, "api_calls": 0, "skipped": 0, "no_price": 0, "consistent": 0}
+    stats = {"updated": 0, "api_calls": 0, "skipped": 0, "no_price": 0, "consistent": 0, "tokens_processed": 0}
     start_time = time.time()
 
     # Find snapshots with fillable unlabeled horizons.
@@ -605,362 +933,120 @@ def fill_outcomes() -> None:
         _save_pool_cache(pool_cache)
         return
 
-    logger.info("Processing %d snapshots (batch-optimized, all horizons per token)", len(snapshots))
-
+    # v34: Group snapshots by token_address — 1 OHLCV fetch per unique token
+    token_groups = defaultdict(list)
     for snap in snapshots:
+        key = snap.get("token_address") or str(snap["id"])
+        token_groups[key].append(snap)
+
+    logger.info(
+        "Processing %d snapshots across %d unique tokens (token-grouped)",
+        len(snapshots), len(token_groups),
+    )
+
+    for token_key, group in token_groups.items():
         # Check time budget
         if time.time() - start_time > TIME_BUDGET_SECONDS:
             logger.warning("Time budget exceeded (%.0fs), stopping gracefully", time.time() - start_time)
             break
 
-        snap_id = snap["id"]
-        symbol = snap["symbol"]
-        price_at = snap.get("price_at_snapshot")
-
-        if not price_at or float(price_at) <= 0:
-            # Mark all unlabeled horizons as False (no price = can't evaluate)
-            update = {}
-            for hz in HORIZONS:
-                if snap.get(hz["flag_col"]) is None:
-                    update[hz["price_col"]] = None
-                    update[hz["flag_col"]] = False
-            if update:
-                try:
-                    client.table("token_snapshots").update(update).eq("id", snap_id).execute()
-                    stats["no_price"] += 1
-                except Exception as e:
-                    logger.error("Failed to update %d: %s", snap_id, e)
+        # 1. Pre-filter: handle no-price snapshots immediately (no API needed)
+        valid_snaps = []
+        for snap in group:
+            if not snap.get("price_at_snapshot") or float(snap["price_at_snapshot"]) <= 0:
+                _mark_no_price(client, snap, stats)
+            else:
+                valid_snaps.append(snap)
+        if not valid_snaps:
             continue
 
-        price_at = float(price_at)
-        snapshot_ts = _parse_snapshot_ts(snap.get("snapshot_at", ""))
-        if not snapshot_ts:
-            stats["skipped"] += 1
-            continue
+        # 2. Resolve pool address ONCE per token
+        pool_addr = None
+        for snap in valid_snaps:
+            if snap.get("pair_address"):
+                pool_addr = snap["pair_address"]
+                break
 
-        # Determine which horizons need filling and are old enough
-        age_hours = (now.timestamp() - snapshot_ts) / 3600
-        horizons_to_fill = []
-        for hz in HORIZONS:
-            if snap.get(hz["flag_col"]) is None and age_hours >= hz["hours"]:
-                horizons_to_fill.append(hz)
-
-        if not horizons_to_fill:
-            continue
-
-        # Resolve pool address (1 API call, cached for 7 days)
-        pool_addr = snap.get("pair_address")
-        token_addr = snap.get("token_address")
-        if not pool_addr and token_addr:
+        actual_token_addr = valid_snaps[0].get("token_address")
+        if not pool_addr and actual_token_addr:
             _gecko_limiter.wait()
-            pool_addr = _get_pool_address(token_addr, pool_cache)
+            pool_addr = _get_pool_address(actual_token_addr, pool_cache)
             stats["api_calls"] += 1
 
         if not pool_addr:
-            # v27: No pool address = dead/unresolvable token. Mark due horizons as did_2x=false
-            # instead of skipping (which left them as NULL forever, skewing ML training).
-            update = {}
-            for hz in horizons_to_fill:
-                if snap.get(hz["flag_col"]) is None:
-                    update[hz["flag_col"]] = False
-                    update[hz["price_col"]] = None
-                    update[hz["max_col"]] = None
-            if update:
-                try:
-                    client.table("token_snapshots").update(update).eq("id", snap_id).execute()
-                    stats["no_price"] += 1
-                except Exception as e:
-                    logger.error("Failed to update dead pool %d (%s): %s", snap_id, symbol, e)
-            else:
+            for snap in valid_snaps:
+                _mark_dead_pool(client, snap, now_ts, stats)
+            continue
+
+        # 3. Parse timestamps and determine horizons for each snapshot
+        snap_data = []  # [(snap, snapshot_ts, price_at, horizons_to_fill)]
+        for snap in valid_snaps:
+            snapshot_ts = _parse_snapshot_ts(snap.get("snapshot_at", ""))
+            if not snapshot_ts:
                 stats["skipped"] += 1
+                continue
+            price_at = float(snap["price_at_snapshot"])
+            age_hours = (now_ts - snapshot_ts) / 3600
+            horizons_to_fill = [hz for hz in HORIZONS if snap.get(hz["flag_col"]) is None and age_hours >= hz["hours"]]
+            if horizons_to_fill:
+                snap_data.append((snap, snapshot_ts, price_at, horizons_to_fill))
+
+        if not snap_data:
             continue
 
-        # ONE OHLCV call for the LONGEST horizon needed → extract all shorter ones
-        longest_hours = max(hz["hours"] for hz in horizons_to_fill)
-        window_end_ts = int(snapshot_ts + longest_hours * 3600)
-        num_candles = (longest_hours * 60) // 5 + 10
+        # 4. Compute the FULL time range covering ALL snapshots + their longest horizon
+        earliest_ts = min(sd[1] for sd in snap_data)
+        latest_end_ts = max(sd[1] + max(hz["hours"] for hz in sd[3]) * 3600 for sd in snap_data)
 
-        sorted_candles = None
-        source = "none"
+        # Use first snap's price_at for sanity check (all same token, close enough)
+        ref_price = snap_data[0][2]
+        ref_symbol = snap_data[0][0]["symbol"]
 
-        # Try GeckoTerminal
-        try:
-            _gecko_limiter.wait()
-            resp = requests.get(
-                GECKOTERMINAL_OHLCV_URL.format(pool=pool_addr),
-                params={
-                    "aggregate": 5,
-                    "before_timestamp": window_end_ts,
-                    "limit": min(1000, num_candles),
-                    "currency": "usd",
-                    "token": "base",
-                },
-                timeout=15,
-            )
-            stats["api_calls"] += 1
-
-            if resp.status_code == 200:
-                ohlcv_list = resp.json().get("data", {}).get("attributes", {}).get("ohlcv_list") or []
-                if ohlcv_list:
-                    sorted_candles = sorted(ohlcv_list, key=lambda c: c[0])
-                    source = "gecko_ohlcv"
-            elif resp.status_code == 429:
-                logger.warning("GeckoTerminal rate limited — falling back to DexPaprika")
-                # Don't sleep 10s — immediately try DexPaprika fallback below
-        except requests.RequestException as e:
-            logger.debug("GeckoTerminal OHLCV failed for %s: %s", symbol, e)
-
-        # v32: reject SOL quote price leak before fallback chain short-circuits
-        if sorted_candles and not _check_candle_sanity(sorted_candles, price_at, symbol, source):
-            sorted_candles = None
-
-        # Fallback: DexPaprika
-        if sorted_candles is None:
-            start_dt = datetime.fromtimestamp(snapshot_ts, tz=timezone.utc)
-            end_dt = start_dt + timedelta(hours=longest_hours)
-            try:
-                resp = requests.get(
-                    f"{DEXPAPRIKA_BASE}/networks/solana/pools/{pool_addr}/ohlcv",
-                    params={
-                        "start": start_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                        "end": end_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                        "limit": (longest_hours * 4) + 10,
-                        "interval": "15m",
-                    },
-                    timeout=15,
-                )
-                time.sleep(0.3)
-                stats["api_calls"] += 1
-
-                if resp.status_code == 200:
-                    candles_raw = resp.json()
-                    if isinstance(candles_raw, list) and candles_raw:
-                        # DexPaprika format: list of dicts with open/high/low/close/time
-                        sorted_candles = []
-                        for c in candles_raw:
-                            try:
-                                ts_str = c.get("time") or c.get("timestamp", "")
-                                if ts_str.endswith("Z"):
-                                    ts_dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-                                else:
-                                    ts_dt = datetime.fromisoformat(ts_str)
-                                sorted_candles.append([
-                                    int(ts_dt.timestamp()),
-                                    float(c.get("open", 0)),
-                                    float(c.get("high", 0)),
-                                    float(c.get("low", 0)),
-                                    float(c.get("close", 0)),
-                                    float(c.get("volume", 0)),
-                                ])
-                            except (ValueError, TypeError):
-                                continue
-                        sorted_candles.sort(key=lambda x: x[0])
-                        if sorted_candles:
-                            source = "dexpaprika_ohlcv"
-                        else:
-                            sorted_candles = None
-            except requests.RequestException as e:
-                logger.debug("DexPaprika OHLCV failed for %s: %s", symbol, e)
-
-        # v32: reject SOL quote price leak before Birdeye fallback
-        if sorted_candles and not _check_candle_sanity(sorted_candles, price_at, symbol, source):
-            sorted_candles = None
-
-        # Fallback 3: Birdeye OHLCV (uses token MINT address, not pool)
-        # v31: Recovers tokens deindexed by GeckoTerminal/DexPaprika but still on-chain
-        if sorted_candles is None and token_addr:
-            birdeye_key = os.environ.get("BIRDEYE_API_KEY", "")
-            if birdeye_key:
-                try:
-                    _birdeye_limiter.wait()
-                    resp = requests.get(
-                        BIRDEYE_OHLCV_URL,
-                        params={
-                            "address": token_addr,
-                            "type": "15m",
-                            "time_from": int(snapshot_ts),
-                            "time_to": int(snapshot_ts + longest_hours * 3600),
-                        },
-                        headers={"X-API-KEY": birdeye_key, "x-chain": "solana"},
-                        timeout=15,
-                    )
-                    stats["api_calls"] += 1
-
-                    if resp.status_code == 200:
-                        items = resp.json().get("data", {}).get("items", [])
-                        if items:
-                            sorted_candles = []
-                            for c in items:
-                                sorted_candles.append([
-                                    int(c.get("unixTime", 0)),
-                                    float(c.get("o", 0)),
-                                    float(c.get("h", 0)),
-                                    float(c.get("l", 0)),
-                                    float(c.get("c", 0)),
-                                    float(c.get("v", 0)),
-                                ])
-                            sorted_candles.sort(key=lambda x: x[0])
-                            if sorted_candles:
-                                source = "birdeye_ohlcv"
-                                logger.info("Birdeye recovered %d candles for %s", len(sorted_candles), symbol)
-                            else:
-                                sorted_candles = None
-                    elif resp.status_code == 429:
-                        logger.warning("Birdeye rate limited for %s", symbol)
-                except requests.RequestException as e:
-                    logger.debug("Birdeye OHLCV failed for %s: %s", symbol, e)
-
-        # v32: final sanity check on Birdeye candles too
-        if sorted_candles and not _check_candle_sanity(sorted_candles, price_at, symbol, source):
-            sorted_candles = None
-
-        if sorted_candles is None:
-            # v27: All OHLCV sources failed (or all rejected by sanity check).
-            # If snapshot is old enough (>48h), mark due horizons as did_2x=false.
-            if age_hours > 48:
-                update = {}
-                for hz in horizons_to_fill:
-                    if snap.get(hz["flag_col"]) is None:
-                        update[hz["flag_col"]] = False
-                        update[hz["price_col"]] = None
-                        update[hz["max_col"]] = None
-                if update:
-                    try:
-                        client.table("token_snapshots").update(update).eq("id", snap_id).execute()
-                        stats["no_price"] += 1
-                    except Exception as e:
-                        logger.error("Failed to update dead OHLCV %d (%s): %s", snap_id, symbol, e)
-                    continue
-            stats["skipped"] += 1
-            continue
-
-        # Extract all horizons from the single candle dataset
-        hz_results = _extract_horizons_from_candles(
-            sorted_candles, snapshot_ts, price_at, horizons_to_fill,
+        # 5. Fetch OHLCV ONCE for the full range
+        sorted_candles, source = _fetch_ohlcv_candles(
+            pool_addr, actual_token_addr,
+            earliest_ts, latest_end_ts,
+            ref_price, ref_symbol, stats,
         )
 
-        # Build the update for all horizons at once
-        update_data = {}
-        running_max = 0.0
-        running_did_2x = False
+        if sorted_candles is None:
+            # Mark as failed if old enough, otherwise skip for retry
+            for snap, snapshot_ts, price_at, horizons_to_fill in snap_data:
+                age = (now_ts - snapshot_ts) / 3600
+                if age > 48:
+                    _mark_ohlcv_failed(client, snap, horizons_to_fill, stats)
+                else:
+                    stats["skipped"] += 1
+            continue
 
-        # Also check already-labeled shorter horizons for consistency
-        for hz in HORIZONS:
-            existing_max = snap.get(hz["max_col"])
-            existing_did = snap.get(hz["flag_col"])
-            if existing_max is not None and float(existing_max) > running_max:
-                running_max = float(existing_max)
-            if existing_did is True:
-                running_did_2x = True
+        # 6. Process each snapshot using SHARED candle data
+        for snap, snapshot_ts, price_at, horizons_to_fill in snap_data:
+            _label_snapshot(client, snap, snapshot_ts, price_at, horizons_to_fill,
+                            sorted_candles, source, stats)
 
-            if hz not in horizons_to_fill:
-                continue
-
-            hours = hz["hours"]
-            result_data = hz_results.get(hours)
-
-            max_price = result_data["max_price"] if result_data else None
-            min_price = result_data["min_price"] if result_data else None
-            last_close = result_data["last_close"] if result_data else None
-            peak_ts_val = result_data["peak_ts"] if result_data else None
-            t2x_hours = result_data["time_to_2x_hours"] if result_data else None
-            bot_data = result_data["bot_data"] if result_data else None
-
-            # Consistency: inherit from shorter horizon if no OHLCV data
-            if max_price is None and running_max > 0:
-                max_price = running_max
-                last_close = None
-                stats["consistent"] += 1
-
-            if max_price is None:
-                continue  # Skip this horizon, retry next cycle
-
-            # Sanity check
-            ratio = max_price / price_at if price_at > 0 else 0
-            max_ratio = MAX_PLAUSIBLE_RATIO.get(hours, 500)
-            if ratio > max_ratio:
-                logger.warning(
-                    "Implausible OHLCV for %s/%dh: %.6f -> %.6f (%.0fx) — skipping",
-                    symbol, hours, price_at, max_price, ratio,
-                )
-                continue
-
-            # Consistency floor
-            if running_max > 0 and max_price < running_max:
-                max_price = running_max
-
-            did_2x = max_price >= (price_at * 2.0)
-            if running_did_2x and not did_2x:
-                did_2x = True
-
-            # Validate last_close
-            safe_close = last_close
-            if safe_close and price_at > 0 and (safe_close / price_at) > max_ratio:
-                safe_close = None
-
-            # Peak hour
-            peak_hour = None
-            if peak_ts_val and snapshot_ts:
-                peak_hour = round((peak_ts_val - snapshot_ts) / 3600, 2)
-                peak_hour = max(0, min(hours, peak_hour))
-
-            update_data[hz["price_col"]] = safe_close if safe_close else max_price
-            update_data[hz["flag_col"]] = did_2x
-            update_data[hz["max_col"]] = max_price
-            update_data[hz["peak_col"]] = peak_hour
-            update_data[hz["min_col"]] = min_price
-            update_data[hz["t2x_col"]] = t2x_hours
-
-            # Bot simulation columns
-            if bot_data and hours in (12, 24):
-                hz_suffix = f"_{hours}h"
-                update_data[f"time_to_1_3x_min{hz_suffix}"] = bot_data.get("t_1_3x")
-                update_data[f"time_to_1_5x_min{hz_suffix}"] = bot_data.get("t_1_5x")
-                update_data[f"time_to_sl20_min{hz_suffix}"] = bot_data.get("t_sl20")
-                update_data[f"time_to_sl30_min{hz_suffix}"] = bot_data.get("t_sl30")
-                update_data[f"time_to_sl50_min{hz_suffix}"] = bot_data.get("t_sl50")
-                update_data[f"max_dd_before_tp_pct{hz_suffix}"] = bot_data.get("max_dd_pct")
-
-            # Update running max for next horizons
-            if max_price > running_max:
-                running_max = max_price
-            if did_2x:
-                running_did_2x = True
-
-            if did_2x:
-                logger.info(
-                    "2x CONFIRMED (%s): %s at %dh (%.10f -> %.10f = %.1fx)",
-                    source, symbol, hours, price_at, max_price, max_price / price_at,
-                )
-
-        # Single DB update for ALL horizons of this snapshot
-        if update_data:
-            try:
-                client.table("token_snapshots").update(update_data).eq("id", snap_id).execute()
-                stats["updated"] += 1
-            except Exception as e:
-                logger.error("Failed to update %d (%s): %s", snap_id, symbol, e)
+        stats["tokens_processed"] += 1
 
     _save_pool_cache(pool_cache)
 
     elapsed = time.time() - start_time
-    throughput = stats["updated"] / max(1, elapsed) * 60  # tokens/minute
+    throughput = stats["updated"] / max(1, elapsed) * 60  # snapshots/minute
     logger.info(
-        "Outcome tracker: updated=%d, api_calls=%d, skipped=%d, no_price=%d, consistency=%d "
-        "(%.0fs elapsed, %.1f tokens/min)",
-        stats["updated"], stats["api_calls"], stats["skipped"], stats["no_price"], stats["consistent"],
+        "Outcome tracker: updated=%d, tokens=%d, api_calls=%d, skipped=%d, no_price=%d, consistency=%d "
+        "(%.0fs elapsed, %.1f snapshots/min)",
+        stats["updated"], stats["tokens_processed"], stats["api_calls"],
+        stats["skipped"], stats["no_price"], stats["consistent"],
         elapsed, throughput,
     )
 
     # Second pass: fix existing inconsistencies (skip if <3 min left for other steps)
-    remaining = 24 * 60 - (time.time() - start_time)  # 24 min total budget for fill_outcomes
+    remaining = 38 * 60 - (time.time() - start_time)  # 38 min total budget for fill_outcomes
     if remaining > 120:
         _fix_existing_inconsistencies(client)
     else:
         logger.warning("Skipping consistency fix (%.0fs remaining)", remaining)
 
     # Third pass: fill price_at_first_call (skip if tight on time)
-    remaining = 24 * 60 - (time.time() - start_time)
+    remaining = 38 * 60 - (time.time() - start_time)
     if remaining > 60:
         _fill_first_call_prices(client, pool_cache)
     else:
@@ -1249,3 +1335,426 @@ def backfill_bot_data(batch_limit: int = 50) -> None:
     _save_pool_cache(pool_cache)
     logger.info("backfill_bot_data: filled=%d, skipped=%d, errors=%d",
                 stats["filled"], stats["skipped"], stats["errors"])
+
+
+# =============================================================================
+# KOL Call Outcomes — accurate winrate tracking per KOL
+# =============================================================================
+# Tracks each KOL's FIRST call per token with:
+#   - Exact entry price (OHLCV close at call_timestamp, not delayed scraper price)
+#   - ATH after call (continuously updated, no fixed time window)
+#   - did_2x = TRUE if token EVER doubled from entry price
+# =============================================================================
+
+KCO_BATCH_LIMIT = 50       # rows per phase per run (rate limit friendly)
+KCO_TIME_BUDGET = 8 * 60   # 8 minutes total budget (v34: was 5, outcomes timeout now 45min)
+
+
+def fill_kol_outcomes() -> None:
+    """
+    Three-phase pipeline for KOL call outcome tracking.
+
+    Phase A: Sync new (kol_group, token_address) pairs from kol_mentions → kol_call_outcomes.
+    Phase B: Fill entry_price for rows missing it (OHLCV at exact call_timestamp).
+    Phase C: Update ath_after_call for rows that have entry_price.
+    """
+    client = _get_client()
+    pool_cache = _load_pool_cache()
+    start_time = time.time()
+    stats = {"synced": 0, "entry_filled": 0, "ath_updated": 0, "skipped": 0, "api_calls": 0}
+
+    # --- Phase A: Sync mentions → kol_call_outcomes ---
+    _kco_phase_a_sync(client, stats)
+
+    # --- Phase B: Fill entry prices ---
+    if time.time() - start_time < KCO_TIME_BUDGET:
+        _kco_phase_b_entry_prices(client, pool_cache, stats, start_time)
+
+    # --- Phase C: Update ATH ---
+    if time.time() - start_time < KCO_TIME_BUDGET:
+        _kco_phase_c_update_ath(client, pool_cache, stats, start_time)
+
+    _save_pool_cache(pool_cache)
+
+    elapsed = time.time() - start_time
+    logger.info(
+        "fill_kol_outcomes: synced=%d, entry_filled=%d, ath_updated=%d, skipped=%d, api_calls=%d (%.0fs)",
+        stats["synced"], stats["entry_filled"], stats["ath_updated"],
+        stats["skipped"], stats["api_calls"], elapsed,
+    )
+
+
+def _kco_paginate_query(client: Client, table: str, select: str, order_col: str = None,
+                         filters: list[tuple] = None, page_size: int = 1000) -> list:
+    """Paginate a supabase-py query to avoid the default 1000-row limit."""
+    all_rows = []
+    offset = 0
+    while True:
+        q = client.table(table).select(select)
+        if filters:
+            for method, args in filters:
+                if method == "not_is_null":
+                    q = q.not_.is_(args, "null")
+        if order_col:
+            q = q.order(order_col, desc=False)
+        q = q.range(offset, offset + page_size - 1)
+        result = q.execute()
+        rows = result.data or []
+        all_rows.extend(rows)
+        if len(rows) < page_size:
+            break
+        offset += page_size
+    return all_rows
+
+
+def _kco_phase_a_sync(client: Client, stats: dict) -> None:
+    """
+    Sync first call per (kol_group, token_address) from kol_mentions into kol_call_outcomes.
+    Paginates kol_mentions to avoid supabase-py's 1000-row default limit.
+    """
+    logger.info("KCO Phase A: syncing mentions → kol_call_outcomes")
+
+    # Step 1: Get all tokens with addresses (symbol → token_address mapping)
+    try:
+        tokens_result = (
+            client.table("tokens")
+            .select("symbol, token_address")
+            .not_.is_("token_address", "null")
+            .execute()
+        )
+    except Exception as e:
+        logger.error("KCO Phase A: failed to query tokens: %s", e)
+        return
+
+    token_map = {}  # UPPER(symbol) → token_address
+    token_addrs = set()
+    for t in (tokens_result.data or []):
+        sym = (t.get("symbol") or "").upper().strip()
+        addr = (t.get("token_address") or "").strip()
+        if sym and addr:
+            token_map[sym] = addr
+            token_addrs.add(addr)
+
+    if not token_map:
+        logger.warning("KCO Phase A: no tokens with addresses found")
+        return
+
+    # Step 2: Get ALL kol_mentions (paginated)
+    try:
+        mentions = _kco_paginate_query(
+            client, "kol_mentions",
+            "id, symbol, kol_group, message_date, extracted_cas",
+            order_col="message_date",
+        )
+    except Exception as e:
+        logger.error("KCO Phase A: failed to query kol_mentions: %s", e)
+        return
+
+    if not mentions:
+        logger.info("KCO Phase A: no mentions found")
+        return
+
+    # Step 3: Find first mention per (kol_group, token_address)
+    first_calls = {}
+    for m in mentions:
+        sym = (m.get("symbol") or "").upper().strip()
+        kol = m.get("kol_group") or ""
+        msg_date = m.get("message_date")
+        mention_id = m.get("id")
+
+        if not sym or not kol or not msg_date:
+            continue
+
+        # Resolve token_address: try symbol match first, then CA match
+        token_addr = token_map.get(sym)
+        if not token_addr:
+            cas = m.get("extracted_cas") or []
+            for ca in cas:
+                ca_clean = (ca or "").strip()
+                if ca_clean in token_addrs:
+                    token_addr = ca_clean
+                    break
+        if not token_addr:
+            continue
+
+        key = (kol, token_addr)
+        if key not in first_calls:
+            first_calls[key] = {
+                "mention_id": mention_id,
+                "call_timestamp": msg_date,
+                "symbol": sym,
+                "token_address": token_addr,
+                "kol_group": kol,
+            }
+        # Already sorted by message_date ASC, so first occurrence wins
+
+    logger.info("KCO Phase A: found %d unique (kol, token) pairs from %d mentions",
+                len(first_calls), len(mentions))
+
+    # Step 4: Get existing kol_call_outcomes to skip duplicates
+    try:
+        existing = _kco_paginate_query(
+            client, "kol_call_outcomes", "kol_group, token_address",
+        )
+    except Exception as e:
+        logger.error("KCO Phase A: failed to query existing outcomes: %s", e)
+        return
+
+    existing_keys = {(r["kol_group"], r["token_address"]) for r in existing}
+
+    # Step 5: Insert new rows
+    new_rows = []
+    for key, call in first_calls.items():
+        if key in existing_keys:
+            continue
+        new_rows.append({
+            "mention_id": call["mention_id"],
+            "token_address": call["token_address"],
+            "symbol": call["symbol"],
+            "kol_group": call["kol_group"],
+            "call_timestamp": call["call_timestamp"],
+        })
+
+    if not new_rows:
+        logger.info("KCO Phase A: all pairs already synced")
+        return
+
+    # Batch insert (upsert with ON CONFLICT skip on mention_id)
+    batch_size = 100
+    for i in range(0, len(new_rows), batch_size):
+        batch = new_rows[i:i + batch_size]
+        try:
+            client.table("kol_call_outcomes").upsert(
+                batch, on_conflict="mention_id"
+            ).execute()
+            stats["synced"] += len(batch)
+        except Exception as e:
+            logger.error("KCO Phase A: insert batch failed: %s", e)
+
+    logger.info("KCO Phase A: inserted %d new call outcomes", stats["synced"])
+
+
+def _kco_phase_b_entry_prices(client: Client, pool_cache: dict, stats: dict, start_time: float) -> None:
+    """Fill entry_price for rows where it's NULL using OHLCV at exact call_timestamp."""
+    logger.info("KCO Phase B: filling entry prices")
+
+    try:
+        result = (
+            client.table("kol_call_outcomes")
+            .select("id, token_address, symbol, call_timestamp, pair_address")
+            .is_("entry_price", "null")
+            .limit(KCO_BATCH_LIMIT)
+            .execute()
+        )
+    except Exception as e:
+        logger.error("KCO Phase B: query failed: %s", e)
+        return
+
+    rows = result.data or []
+    if not rows:
+        logger.info("KCO Phase B: no rows need entry prices")
+        return
+
+    logger.info("KCO Phase B: %d rows need entry prices", len(rows))
+
+    # Group by token_address to minimize API calls
+    token_groups = defaultdict(list)
+    for row in rows:
+        token_groups[row["token_address"]].append(row)
+
+    for token_addr, group in token_groups.items():
+        if time.time() - start_time > KCO_TIME_BUDGET:
+            logger.warning("KCO Phase B: time budget exceeded")
+            break
+
+        # Resolve pool address
+        pool_addr = None
+        for row in group:
+            if row.get("pair_address"):
+                pool_addr = row["pair_address"]
+                break
+        if not pool_addr:
+            _gecko_limiter.wait()
+            pool_addr = _get_pool_address(token_addr, pool_cache)
+            stats["api_calls"] += 1
+
+        if not pool_addr:
+            stats["skipped"] += len(group)
+            continue
+
+        # For each row in this token group, fetch candles around call_timestamp
+        for row in group:
+            if time.time() - start_time > KCO_TIME_BUDGET:
+                break
+
+            call_ts = _parse_snapshot_ts(row["call_timestamp"])
+            if not call_ts:
+                stats["skipped"] += 1
+                continue
+
+            # Fetch candles in a ±30min window around call_timestamp
+            window_start = call_ts - 30 * 60
+            window_end = call_ts + 30 * 60
+
+            candles, source = _fetch_ohlcv_candles(
+                pool_addr, token_addr,
+                window_start, window_end,
+                0.0001,  # dummy price_at for sanity check (we don't know it yet)
+                row["symbol"], stats,
+            )
+
+            if not candles:
+                stats["skipped"] += 1
+                continue
+
+            # Find candle closest to call_timestamp
+            best_candle = min(candles, key=lambda c: abs(c[0] - call_ts))
+            entry_price = best_candle[4]  # close price
+
+            if entry_price <= 0:
+                stats["skipped"] += 1
+                continue
+
+            # Update row
+            update_data = {
+                "entry_price": float(entry_price),
+                "price_source": source,
+                "last_checked_at": datetime.now(timezone.utc).isoformat(),
+            }
+            # Also store pair_address if we resolved it
+            if not row.get("pair_address") and pool_addr:
+                update_data["pair_address"] = pool_addr
+
+            try:
+                client.table("kol_call_outcomes").update(update_data).eq("id", row["id"]).execute()
+                stats["entry_filled"] += 1
+                logger.debug("KCO Phase B: %s entry=%.10f (%s)", row["symbol"], entry_price, source)
+            except Exception as e:
+                logger.error("KCO Phase B: update failed for id=%d: %s", row["id"], e)
+
+
+def _kco_phase_c_update_ath(client: Client, pool_cache: dict, stats: dict, start_time: float) -> None:
+    """Update ath_after_call for rows that have entry_price. Fetches OHLCV from call to now."""
+    logger.info("KCO Phase C: updating ATH")
+
+    try:
+        result = (
+            client.table("kol_call_outcomes")
+            .select("id, token_address, symbol, call_timestamp, pair_address, entry_price, ath_after_call")
+            .not_.is_("entry_price", "null")
+            .order("last_checked_at", desc=False, nullsfirst=True)
+            .limit(KCO_BATCH_LIMIT)
+            .execute()
+        )
+    except Exception as e:
+        logger.error("KCO Phase C: query failed: %s", e)
+        return
+
+    rows = result.data or []
+    if not rows:
+        logger.info("KCO Phase C: no rows to update ATH")
+        return
+
+    logger.info("KCO Phase C: %d rows to check ATH", len(rows))
+
+    # Group by token_address — same token's candles cover multiple KOL calls
+    token_groups = defaultdict(list)
+    for row in rows:
+        token_groups[row["token_address"]].append(row)
+
+    now_ts = time.time()
+
+    for token_addr, group in token_groups.items():
+        if time.time() - start_time > KCO_TIME_BUDGET:
+            logger.warning("KCO Phase C: time budget exceeded")
+            break
+
+        # Resolve pool address
+        pool_addr = None
+        for row in group:
+            if row.get("pair_address"):
+                pool_addr = row["pair_address"]
+                break
+        if not pool_addr:
+            _gecko_limiter.wait()
+            pool_addr = _get_pool_address(token_addr, pool_cache)
+            stats["api_calls"] += 1
+
+        if not pool_addr:
+            stats["skipped"] += len(group)
+            continue
+
+        # Find the earliest call_timestamp in this group to cover all calls
+        call_timestamps = []
+        for row in group:
+            ts = _parse_snapshot_ts(row["call_timestamp"])
+            if ts:
+                call_timestamps.append((row, ts))
+
+        if not call_timestamps:
+            continue
+
+        earliest_ts = min(ts for _, ts in call_timestamps)
+        ref_price = float(call_timestamps[0][0]["entry_price"])
+        ref_symbol = group[0]["symbol"]
+
+        # Fetch OHLCV from earliest call to now
+        candles, source = _fetch_ohlcv_candles(
+            pool_addr, token_addr,
+            earliest_ts, now_ts,
+            ref_price, ref_symbol, stats,
+        )
+
+        if not candles:
+            # Still update last_checked_at so we don't re-check immediately
+            for row, _ in call_timestamps:
+                try:
+                    client.table("kol_call_outcomes").update({
+                        "last_checked_at": datetime.now(timezone.utc).isoformat(),
+                    }).eq("id", row["id"]).execute()
+                except Exception:
+                    pass
+            stats["skipped"] += len(call_timestamps)
+            continue
+
+        # For each row, find max high AFTER its call_timestamp
+        for row, call_ts in call_timestamps:
+            current_ath = float(row.get("ath_after_call") or 0)
+
+            # Filter candles to only those AFTER this row's call_timestamp
+            max_high = 0.0
+            ath_ts = None
+            for candle in candles:
+                if candle[0] >= call_ts:  # candle timestamp >= call time
+                    if candle[2] > max_high:  # candle high
+                        max_high = candle[2]
+                        ath_ts = candle[0]
+
+            if max_high <= 0:
+                # Update last_checked_at even if no improvement
+                try:
+                    client.table("kol_call_outcomes").update({
+                        "last_checked_at": datetime.now(timezone.utc).isoformat(),
+                    }).eq("id", row["id"]).execute()
+                except Exception:
+                    pass
+                continue
+
+            # Only update if new ATH is higher
+            update_data = {"last_checked_at": datetime.now(timezone.utc).isoformat()}
+            if max_high > current_ath:
+                update_data["ath_after_call"] = float(max_high)
+                if ath_ts:
+                    update_data["ath_timestamp"] = datetime.fromtimestamp(ath_ts, tz=timezone.utc).isoformat()
+                if not row.get("pair_address") and pool_addr:
+                    update_data["pair_address"] = pool_addr
+
+            try:
+                client.table("kol_call_outcomes").update(update_data).eq("id", row["id"]).execute()
+                if max_high > current_ath:
+                    stats["ath_updated"] += 1
+                    entry = float(row["entry_price"])
+                    logger.debug("KCO Phase C: %s ATH=%.10f (%.1fx entry)",
+                                 row["symbol"], max_high, max_high / entry if entry > 0 else 0)
+            except Exception as e:
+                logger.error("KCO Phase C: update failed for id=%d: %s", row["id"], e)

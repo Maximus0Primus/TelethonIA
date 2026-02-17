@@ -13,7 +13,7 @@ concurrency:
 jobs:
   fill-outcomes:
     runs-on: ubuntu-latest
-    timeout-minutes: 28
+    timeout-minutes: 45
 
     steps:
       - name: Checkout repository
@@ -57,6 +57,14 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         working-directory: scraper
         run: python -c "from outcome_tracker import backfill_bot_data; backfill_bot_data(batch_limit=50)"
+
+      - name: Fill KOL call outcomes
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          BIRDEYE_API_KEY: ${{ secrets.BIRDEYE_API_KEY }}
+        working-directory: scraper
+        run: python -c "from outcome_tracker import fill_kol_outcomes; fill_kol_outcomes()"
 
       - name: Run auto-backtest
         env:
