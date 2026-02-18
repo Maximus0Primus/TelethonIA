@@ -670,7 +670,10 @@ def _fetch_ohlcv_candles(
                     sorted_candles = []
                     for c in candles_raw:
                         try:
-                            ts_str = c.get("time") or c.get("timestamp", "")
+                            # v36-fix: DexPaprika uses time_open/time_close, NOT time/timestamp
+                            ts_str = c.get("time_open") or c.get("time_close") or c.get("time") or c.get("timestamp", "")
+                            if not ts_str:
+                                continue
                             if ts_str.endswith("Z"):
                                 ts_dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
                             else:
@@ -749,30 +752,68 @@ def _fetch_ohlcv_candles(
 
 
 def _mark_no_price(client: "Client", snap: dict, stats: dict) -> None:
-    """Snapshot has no valid price_at_snapshot. Leave did_2x as NULL (unknown).
+    """Snapshot has no valid price_at_snapshot — can never be labeled.
 
-    v34 fix: Never set did_2x=False without real price data. See _mark_ohlcv_failed docstring.
+    v36-fix: Set max_price sentinels (0) so it exits the batch query.
+    Without this, no-price snapshots are zombies that re-enter every run.
     """
+    update_data = {}
+    for hz in HORIZONS:
+        if snap.get(hz["flag_col"]) is None:
+            update_data[hz["max_col"]] = 0  # sentinel
+    if update_data:
+        try:
+            client.table("token_snapshots").update(update_data).eq("id", snap["id"]).execute()
+        except Exception as e:
+            logger.debug("Failed to mark no_price for snap %d: %s", snap["id"], e)
     stats["no_price"] += 1
 
 
 def _mark_dead_pool(client: "Client", snap: dict, now_ts: float, stats: dict) -> None:
-    """Token has no resolvable pool address. Leave did_2x as NULL (unknown).
+    """Token has no resolvable pool address.
 
-    v34 fix: Never set did_2x=False without real price data. See _mark_ohlcv_failed docstring.
+    v36-fix: Set max_price sentinels (0) so the snapshot exits the batch query.
+    did_2x stays NULL (genuinely unknown). Training filters max_price > 0.
     """
+    snapshot_ts = _parse_snapshot_ts(snap.get("snapshot_at"))
+    age_hours = (now_ts - snapshot_ts) / 3600 if snapshot_ts else 999
+
+    # Only mark as dead if old enough (>36h) — give pool resolution time to work
+    if age_hours > 36:
+        update_data = {}
+        for hz in HORIZONS:
+            if snap.get(hz["flag_col"]) is None:
+                update_data[hz["max_col"]] = 0  # sentinel
+        if update_data:
+            try:
+                client.table("token_snapshots").update(update_data).eq("id", snap["id"]).execute()
+            except Exception as e:
+                logger.debug("Failed to mark dead_pool for snap %d: %s", snap["id"], e)
     stats["no_price"] += 1
 
 
 def _mark_ohlcv_failed(client: "Client", snap: dict, horizons_to_fill: list[dict], stats: dict) -> None:
-    """Mark snapshot as OHLCV-failed. Leave did_2x as NULL (unknown) — never set False without real price data.
+    """Mark snapshot as permanently unfillable after exhausting all OHLCV sources.
 
-    v34 fix: Previously set did_2x=False here, creating 'phantom labels' — thousands of
-    snapshots marked as losers when we actually had no price data. This poisoned all
-    training data and backtests (reported 2.55% hit rate vs true 16.7%).
+    v34 fix: Never set did_2x=False without real price data (phantom labels).
+    v36 fix: But leaving NULL caused zombie snapshots to re-enter the queue forever,
+    wasting API budget on 4,274+ dead tokens every run. Solution: set max_price=0
+    as a sentinel meaning 'checked all sources, no OHLCV available'. Training code
+    must filter max_price_24h > 0 to exclude these.
+    did_2x stays NULL (truly unknown), but the max_price sentinel removes them from
+    the batch query because _extract_horizons_from_candles won't be called.
     """
-    # Nothing to update — we intentionally leave did_2x_*h as NULL (unknown)
-    # The snapshot will be retried on the next outcome_tracker run if OHLCV becomes available
+    update_data = {}
+    for hz in horizons_to_fill:
+        # Set max_price = 0 as sentinel (real prices are always > 0)
+        # This fills the column so the OR filter (flag.is.null AND max.is.null) won't match
+        update_data[hz["max_col"]] = 0
+        # Leave did_2x as NULL — we genuinely don't know, but we can't get the data
+    if update_data:
+        try:
+            client.table("token_snapshots").update(update_data).eq("id", snap["id"]).execute()
+        except Exception as e:
+            logger.debug("Failed to mark ohlcv_failed for snap %d: %s", snap["id"], e)
     stats["no_price"] += 1
 
 
@@ -917,10 +958,13 @@ def fill_outcomes() -> None:
     # Without this, snapshots with only did_2x_7d=NULL (but <7 days old) clog the batch
     # and block newer snapshots from being labeled — the root cause of the labeling backlog.
     # v30: Order by score DESC so high-score tokens get labeled first (most useful for backtesting).
+    # v36-fix: Add max_price.is.null to filter — zombies with max_price=0 (sentinel for
+    # "checked all OHLCV sources, no data") are excluded. Without this, _mark_ohlcv_failed
+    # snapshots re-enter the batch forever, wasting 4,274+ API calls per run.
     or_parts = []
     for hz in HORIZONS:
         cutoff = (now - timedelta(hours=hz["hours"])).strftime("%Y-%m-%dT%H:%M:%SZ")
-        or_parts.append(f'and({hz["flag_col"]}.is.null,snapshot_at.lt.{cutoff})')
+        or_parts.append(f'and({hz["flag_col"]}.is.null,{hz["max_col"]}.is.null,snapshot_at.lt.{cutoff})')
     filter_str = ",".join(or_parts)
 
     try:
@@ -933,7 +977,8 @@ def fill_outcomes() -> None:
             # v33: Skip phantom scores (pre-v28 hard-gated tokens with no components).
             # They have inflated scores (54-69) and jump to front of queue, blocking real tokens.
             .not_.is_("consensus_val", "null")
-            .order("score_at_snapshot", desc=True, nullsfirst=False)
+            # v36-fix: FIFO ordering (oldest first) instead of score-DESC.
+            # Score-DESC caused zombies to starve fresh snapshots.
             .order("snapshot_at", desc=False)
             .limit(BATCH_LIMIT)
             .execute()
@@ -1028,7 +1073,7 @@ def fill_outcomes() -> None:
             # Mark as failed if old enough, otherwise skip for retry
             for snap, snapshot_ts, price_at, horizons_to_fill in snap_data:
                 age = (now_ts - snapshot_ts) / 3600
-                if age > 48:
+                if age > 36:  # v36-fix: was 48h; 36h is enough — OHLCV APIs rarely have data beyond 24-48h
                     _mark_ohlcv_failed(client, snap, horizons_to_fill, stats)
                 else:
                     stats["skipped"] += 1
@@ -1619,7 +1664,10 @@ def _fetch_ohlcv_candles_kco(
                     sorted_candles = []
                     for c in candles_raw:
                         try:
-                            ts_str = c.get("time") or c.get("timestamp", "")
+                            # v36-fix: DexPaprika uses time_open/time_close, NOT time/timestamp
+                            ts_str = c.get("time_open") or c.get("time_close") or c.get("time") or c.get("timestamp", "")
+                            if not ts_str:
+                                continue
                             if ts_str.endswith("Z"):
                                 ts_dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
                             else:
