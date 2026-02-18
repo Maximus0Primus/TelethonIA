@@ -21,8 +21,8 @@ logger = logging.getLogger(__name__)
 CACHE_FILE = Path(__file__).parent / "jupiter_cache.json"
 CACHE_TTL_SECONDS = 2 * 3600  # 2 hours — tradeability rarely changes
 
-# Raised from 10 → 30: Jupiter quote API is free, no cost concern
-JUPITER_TOP_N = 30  # How many tokens to enrich per cycle
+# v36: 30 → 200. Jupiter API is free, 200 × 0.2s = 40s — fits in 15min cycle.
+JUPITER_TOP_N = 200  # How many tokens to enrich per cycle
 JUPITER_SLEEP = 0.2  # seconds between calls (under 10 RPS)
 
 # ~$1000 worth of SOL in lamports (SOL ~$150, so ~6.67 SOL = 6670000000 lamports)

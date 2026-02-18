@@ -31,8 +31,8 @@ CACHE_FILE = Path(__file__).parent / "helius_cache.json"
 CACHE_TTL_SECONDS = 2 * 3600  # 2 hours (on-chain data changes slower than social)
 
 # How many tokens to enrich per cycle
-# Raised from 20 → 50: still under 1M CU/month Helius free tier
-HELIUS_TOP_N = 50          # getTokenAccounts (holder analysis + bundles)
+# v36: 50 → 200. Free tier = 1M CU/month, we use ~2%. 200 covers full ranking.
+HELIUS_TOP_N = 200         # getTokenAccounts (holder analysis + bundles)
 HELIUS_SMART_MONEY_N = 5   # getSignaturesForAddress (transaction analysis)
 
 # Rate limiting
