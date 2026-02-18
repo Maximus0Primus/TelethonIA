@@ -1933,7 +1933,6 @@ def _kco_phase_c_update_ath(client: Client, pool_cache: dict, stats: dict, start
                         if entry > 0:
                             client.table("kol_call_outcomes").update({
                                 "ath_after_call": round(entry * 0.001, 12),
-                                "max_return": 0.001,
                                 "last_checked_at": datetime.now(timezone.utc).isoformat(),
                             }).eq("id", row["id"]).execute()
                     except Exception:
@@ -1973,7 +1972,6 @@ def _kco_phase_c_update_ath(client: Client, pool_cache: dict, stats: dict, start
                         entry = float(row["entry_price"])
                         client.table("kol_call_outcomes").update({
                             "ath_after_call": round(entry * 0.001, 12),  # ~dead
-                            "max_return": 0.001,
                             "last_checked_at": datetime.now(timezone.utc).isoformat(),
                         }).eq("id", row["id"]).execute()
                         stats["ath_updated"] += 1
@@ -2009,7 +2007,6 @@ def _kco_phase_c_update_ath(client: Client, pool_cache: dict, stats: dict, start
                         entry = float(row["entry_price"])
                         client.table("kol_call_outcomes").update({
                             "ath_after_call": round(entry * 0.001, 12),
-                            "max_return": 0.001,
                             "last_checked_at": datetime.now(timezone.utc).isoformat(),
                         }).eq("id", row["id"]).execute()
                         stats["ath_updated"] += 1
@@ -2028,11 +2025,9 @@ def _kco_phase_c_update_ath(client: Client, pool_cache: dict, stats: dict, start
                 if not row.get("pair_address") and pool_addr:
                     update_data["pair_address"] = pool_addr
 
-            # v37: Compute max_return from best known ATH (did_2x is auto-generated)
+            # max_return + did_2x are GENERATED ALWAYS columns — auto-computed from ath_after_call / entry_price
             best_ath = max(max_high, current_ath)
-            if entry > 0 and best_ath > 0:
-                max_return = best_ath / entry
-                update_data["max_return"] = round(float(max_return), 4)
+            max_return = best_ath / entry if entry > 0 else 0
 
             try:
                 client.table("kol_call_outcomes").update(update_data).eq("id", row["id"]).execute()
