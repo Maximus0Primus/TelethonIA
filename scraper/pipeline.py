@@ -152,6 +152,23 @@ def _is_update_or_brag(text: str) -> bool:
     return any(p.search(text) for p in _UPDATE_BRAG_PATTERNS)
 
 
+# === TRACKING BOT DETECTION (v35b) ===
+# KOLscope, SpyDefi, and similar bots that post automatic "multiplier detected" brags.
+# These inflate unique_kols and trigger hype penalties — zero scoring weight.
+_TRACKING_BOT_PATTERNS = [
+    re.compile(r"\U0001f7ea\s*(?:MULTIPLIER\s+DETECTED|DIP\s+MODE)", re.I),  # KOLscope purple square
+    re.compile(r"Achievement\s+Unlocked:\s*x?\d+", re.I),                     # SpyDefi achievement
+    re.compile(r"\U0001f3c6.*?\U0001f550.*?#GROUPATH", re.I),                 # SpyDefi trophy+clock
+    re.compile(r"@\w+\s+made\s+(?:a\s+)?x?\d+x?\+?\s+(?:on|call)", re.I),    # "@user made x15+ on"
+    re.compile(r"(?:\u27a1\ufe0f?|\u2b95|\u279c|\u27a5)\s*\$[\d,.]+[KkMm]", re.I),  # "➡️ $381K ⮕ $5.98M"
+]
+
+
+def _is_tracking_bot_message(text: str) -> bool:
+    """Detect tracking bot brag messages (KOLscope, SpyDefi, etc.)."""
+    return any(p.search(text) for p in _TRACKING_BOT_PATTERNS)
+
+
 # === ENTRY MARKET CAP EXTRACTION ===
 # Captures KOL-stated entry prices like "at 500k", "aped at 1.2m", "called at 3m"
 _ENTRY_MCAP_REGEX = re.compile(
@@ -1692,6 +1709,18 @@ def _compute_onchain_multiplier(token: dict) -> float:
         elif wne >= 1:
             factors.append(1.1)   # at least 1 new whale
 
+    # v35: Whale count — #1 predictor (r=+0.47 on clean deduped data)
+    whale_count = token.get("whale_count")
+    if whale_count is not None:
+        if whale_count >= 5:
+            factors.append(1.4)
+        elif whale_count >= 3:
+            factors.append(1.2)
+        elif whale_count >= 1:
+            factors.append(1.0)   # at least 1 whale = neutral
+        else:
+            factors.append(0.7)   # 0 whales = bearish
+
     # v13: Unique wallet growth — "who buys after me" (guide principle #5)
     uw_change = token.get("unique_wallet_24h_change")
     if uw_change is not None:
@@ -1820,10 +1849,10 @@ def _compute_safety_penalty(token: dict) -> float:
 # === SCORE COMPUTATION WEIGHTS ===
 # Hardcoded fallback — overridden by scoring_config table when available
 _DEFAULT_WEIGHTS = {
-    "consensus": 0.35,      # v34: was 0.10; top correlates on clean data: kol_arrival_rate(+0.42), mention_velocity(+0.41)
+    "consensus": 0.45,      # v35: up from 0.35; KOL freshness + mention heat now in multiplier chain
     "conviction": 0.00,     # v34: still anti-predictive (r=-0.17 on clean deduped data)
-    "breadth": 0.40,        # v34: was 0.05; whale_count(+0.47) = #1 predictor on clean data
-    "price_action": 0.25,   # v34: was 0.85; COLLAPSED from r=+0.26 to r=-0.01 after phantom cleanup!
+    "breadth": 0.45,        # v35: up from 0.40; whale_count(+0.47) now boosted in onchain_mult
+    "price_action": 0.10,   # v35: down from 0.25; PA r=-0.01 on clean data, kept minimal
 }
 
 _DEFAULT_SCORING_PARAMS = {
@@ -2289,6 +2318,8 @@ def aggregate_ranking(
             sentiment = calculate_sentiment(text)
             hours_ago = (now - date).total_seconds() / 3600
 
+            # v35b: Detect tracking bot brags (KOLscope, SpyDefi) — zero weight
+            is_bot_msg = _is_tracking_bot_message(text)
             # v14: Detect update/brag messages — weight reduction
             is_update = _is_update_or_brag(text)
             # Forward/reply detection — forwarded content inflates breadth
@@ -2297,8 +2328,10 @@ def aggregate_ranking(
             # v14: Message length as confidence signal
             msg_len = len(text)
             length_weight = 1.2 if msg_len > 150 else (0.5 if msg_len < 20 else 1.0)
-            # Combined mention weight: forwards 0.2x, updates 0.3x, replies 0.4x
-            if is_forwarded:
+            # Combined mention weight: bots 0x, forwards 0.2x, updates 0.3x, replies 0.4x
+            if is_bot_msg:
+                mention_weight = 0.0
+            elif is_forwarded:
                 mention_weight = 0.2 * length_weight
             elif is_update:
                 mention_weight = 0.3 * length_weight
@@ -2362,20 +2395,21 @@ def aggregate_ranking(
                 if is_positive_mention:
                     # v14: Weighted mentions — updates/brags count 0.3x, short msgs 0.5x
                     token_data[token]["mentions"] += mention_weight
-                    # Forwarded msgs don't count as unique KOL calls for breadth
-                    if not is_forwarded:
+                    # v35b: Bot messages excluded from breadth/conviction/kol_counts
+                    if not is_forwarded and not is_bot_msg:
                         token_data[token]["groups"].add(group_name)
-                    token_data[token]["convictions"].append(conviction)
-                    # Track per-KOL mention counts (weighted) for quality-weighted breadth
-                    kol_counts = token_data[token]["kol_mention_counts"]
-                    kol_counts[group_name] = kol_counts.get(group_name, 0) + mention_weight
-                    # v9: Track hours_ago per group for recency-weighted consensus/breadth
-                    token_data[token]["hours_ago_by_group"][group_name].append(hours_ago)
-                    if msg_conv["has_price_target"]:
-                        token_data[token]["price_target_count"] += 1
-                    # v14: Store KOL-stated entry mcap
-                    if stated_mcap is not None:
-                        token_data[token]["kol_stated_entry_mcaps"].append(stated_mcap)
+                    if not is_bot_msg:
+                        token_data[token]["convictions"].append(conviction)
+                        # Track per-KOL mention counts (weighted) for quality-weighted breadth
+                        kol_counts = token_data[token]["kol_mention_counts"]
+                        kol_counts[group_name] = kol_counts.get(group_name, 0) + mention_weight
+                        # v9: Track hours_ago per group for recency-weighted consensus/breadth
+                        token_data[token]["hours_ago_by_group"][group_name].append(hours_ago)
+                        if msg_conv["has_price_target"]:
+                            token_data[token]["price_target_count"] += 1
+                        # v14: Store KOL-stated entry mcap
+                        if stated_mcap is not None:
+                            token_data[token]["kol_stated_entry_mcaps"].append(stated_mcap)
 
                 if msg_conv["has_hedging"]:
                     token_data[token]["hedging_count"] += 1
@@ -2481,6 +2515,20 @@ def aggregate_ranking(
         second_half = sum(1 for h in data["hours_ago"] if h <= mid)
         mention_acceleration = (second_half - first_half) / max(1, first_half + second_half)
         # -1 (dying) to +1 (accelerating)
+
+        # --- v35: Proxy signals for top predictors (kol_arrival_rate, mention_velocity) ---
+        # kol_freshness: fraction of KOLs with their freshest mention <=2h (proxy for kol_arrival_rate)
+        hours_by_group = data.get("hours_ago_by_group", {})
+        if hours_by_group and unique_kols > 0:
+            fresh_kols = sum(1 for g, hrs in hours_by_group.items() if hrs and min(hrs) <= 2)
+            kol_freshness = fresh_kols / unique_kols
+        else:
+            kol_freshness = None
+
+        # mention_heat_ratio: recent mention density vs older (proxy for mention_velocity)
+        mentions_1h = sum(1 for h in data["hours_ago"] if h <= 1)
+        mentions_2h_6h = sum(1 for h in data["hours_ago"] if 2 < h <= 6)
+        mention_heat_ratio = mentions_1h / (mentions_2h_6h / 4 + 0.1) if data["hours_ago"] else None
 
         # --- ML v2 Phase B: Social momentum phase classification ---
         if mention_acceleration > 0.2 and social_velocity > 0.3:
@@ -2622,6 +2670,9 @@ def aggregate_ranking(
             "data_confidence": data_conf,
             # v11: Raw hours_ago list for activity ratio multiplier
             "_hours_ago": list(data["hours_ago"]),
+            # v35: Proxy signals for top predictors
+            "kol_freshness": round(kol_freshness, 3) if kol_freshness is not None else None,
+            "mention_heat_ratio": round(mention_heat_ratio, 3) if mention_heat_ratio is not None else None,
             # v14: KOL-stated entry mcaps for entry premium calculation
             "kol_stated_entry_mcaps": data.get("kol_stated_entry_mcaps", []),
             # v16: Extraction source counts
@@ -2864,6 +2915,46 @@ def aggregate_ranking(
         elif pc24_act is not None and pc24_act > 50:
             activity_mult = min(activity_mult, 1.10)  # Reduced bonus
 
+        # v35: Momentum multiplier — combines top 3 proxy signals into [0.70, 1.40]
+        # kol_freshness (proxy kol_arrival_rate r=+0.42), mention_heat_ratio (proxy mention_velocity r=+0.41),
+        # short_term_heat (r=+0.36). These were the #2/#3/#4 predictors but weren't in scoring.
+        kol_fresh = token.get("kol_freshness")
+        kol_fresh_factor = 1.0
+        if kol_fresh is not None:
+            if kol_fresh >= 0.6:
+                kol_fresh_factor = 1.20   # most KOLs called recently
+            elif kol_fresh >= 0.3:
+                kol_fresh_factor = 1.10
+            elif kol_fresh > 0:
+                kol_fresh_factor = 1.0
+            else:
+                kol_fresh_factor = 0.85   # no fresh KOL calls
+
+        mhr = token.get("mention_heat_ratio")
+        mention_heat_factor = 1.0
+        if mhr is not None:
+            if mhr >= 3.0:
+                mention_heat_factor = 1.15   # mentions accelerating fast
+            elif mhr >= 1.5:
+                mention_heat_factor = 1.05
+            elif mhr >= 0.5:
+                mention_heat_factor = 1.0
+            else:
+                mention_heat_factor = 0.85   # mentions dying off
+
+        sth = token.get("short_term_heat")
+        vol_heat_factor = 1.0
+        if sth is not None:
+            if sth >= 3.0:
+                vol_heat_factor = 1.10   # volume surge
+            elif sth >= 1.5:
+                vol_heat_factor = 1.05
+            elif sth < 0.5:
+                vol_heat_factor = 0.90   # volume fading
+
+        momentum_mult = max(0.70, min(1.40, kol_fresh_factor * mention_heat_factor * vol_heat_factor))
+        token["momentum_mult"] = momentum_mult
+
         # v15: Breadth floor — low KOL count is a mild flag, not a death sentence
         breadth_raw = float(token.get("breadth_score", 0) or 0)
         if breadth_raw < 0.033:    # ~2 KOLs or fewer
@@ -2987,7 +3078,7 @@ def aggregate_ranking(
         # v27: Explicit default — tokens that bypass _apply_hard_gates get 1.0
         gate_mult = float(token.get("gate_mult", 1.0) or 1.0)
 
-        # v24: Chain (13 multipliers). Added hype_pen (v32).
+        # v35: Chain (14 multipliers). Added momentum_mult.
         # v23 removals: squeeze_mult (dead), trend_mult (dead),
         # wash_pen+pump_pen (merged → manipulation_pen),
         # pump_momentum_pen (folded into crash_pen min()).
@@ -2995,7 +3086,7 @@ def aggregate_ranking(
                         * manipulation_pen * pvp_pen * crash_pen
                         * activity_mult * breadth_pen
                         * size_mult * s_tier_mult * gate_mult
-                        * entry_drift_mult * hype_pen)
+                        * entry_drift_mult * hype_pen * momentum_mult)
         # v16: Floor at 0.25 decompresses the 0-14 band where 97% of tokens stuck.
         # v17: Cap at 2.0 prevents multiplier stacking (activity*s_tier*size)
         # from inflating mediocre base scores beyond 100.

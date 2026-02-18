@@ -105,6 +105,9 @@ NUMERIC_LIMITS = {
     "entry_timing_quality": 1.0,
     "gate_mult": 1.0,
     "hype_pen": 1.0,
+    "kol_freshness": 1.0,
+    "mention_heat_ratio": 999.999,
+    "momentum_mult": 1.5,
     "entry_drift_mult": 1.0,
     "price_velocity": 9999.999,
     "price_drift_from_first_seen": 9999999.999,
@@ -699,6 +702,10 @@ def insert_snapshots(ranking: list[dict]) -> None:
             "kol_arrival_rate": deltas.get("kol_arrival_rate"),
             # ML v2 Phase C: Entry zone detection
             "entry_timing_quality": t.get("entry_timing_quality"),
+            # v35: Proxy signals for top predictors
+            "kol_freshness": t.get("kol_freshness"),
+            "mention_heat_ratio": t.get("mention_heat_ratio"),
+            "momentum_mult": t.get("momentum_mult"),
             # v25: Message-level text features
             "call_type_score": t.get("call_type_score"),
             "avg_msg_length": t.get("avg_msg_length"),

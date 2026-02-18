@@ -37,10 +37,10 @@ from supabase import create_client
 # --- Constants (fallback, overridden by scoring_config table) ---
 
 _DEFAULT_WEIGHTS = {
-    "consensus": 0.35,      # v34: kol_arrival_rate(+0.42), mention_velocity(+0.41) on clean data
+    "consensus": 0.45,      # v35: up from 0.35; KOL freshness + mention heat now in multiplier chain
     "conviction": 0.00,     # v34: still anti-predictive (r=-0.17)
-    "breadth": 0.40,        # v34: whale_count(+0.47) = #1 predictor on clean deduped data
-    "price_action": 0.25,   # v34: collapsed r=+0.26→-0.01 after phantom label cleanup
+    "breadth": 0.45,        # v35: up from 0.40; whale_count(+0.47) boosted in onchain_mult
+    "price_action": 0.10,   # v35: down from 0.25; PA r=-0.01 on clean data, kept minimal
 }
 
 BALANCED_WEIGHTS = _DEFAULT_WEIGHTS.copy()

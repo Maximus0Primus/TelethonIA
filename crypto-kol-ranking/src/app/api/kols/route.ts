@@ -120,10 +120,12 @@ async function callRpcV2(): Promise<{
  * Compute dynamic normalized scores from RPC data.
  * Uses per-horizon win rates so incomplete horizons don't deflate scores.
  * Matches kol_scorer.py logic: score = (hit_rate / baseline), capped [0.1, 3.0].
+ *
+ * v36: Returns both scores map AND baseline so v2 scores can be computed inline.
  */
 function computeDynamicScores(
   rpcRows: RpcRowV1[]
-): Map<string, number> {
+): { scores: Map<string, number>; baseline: number } {
   const MIN_CALLS = 5;
   const scores = new Map<string, number>();
 
@@ -155,7 +157,7 @@ function computeDynamicScores(
     );
   }
 
-  return scores;
+  return { scores, baseline: safeBaseline };
 }
 
 export async function GET(request: Request) {
@@ -180,7 +182,7 @@ export async function GET(request: Request) {
     const rpcRows = v1Result.data;
 
     // Compute dynamic scores from live RPC data
-    const dynamicScores = computeDynamicScores(rpcRows);
+    const { scores: dynamicScores, baseline: safeBaseline } = computeDynamicScores(rpcRows);
 
     // Build maps from RPC data
     const rpcMap = new Map<string, RpcRowV1>();
@@ -208,9 +210,6 @@ export async function GET(request: Request) {
         const hits72h = rpc ? Number(rpc.hits_72h) : 0;
         const hits7d = rpc ? Number(rpc.hits_7d) : 0;
 
-        // Dynamic score primary, static KOL_SCORES fallback
-        const score = dynamicScores.get(name) ?? KOL_SCORES[name] ?? null;
-
         // Overall win rate: hits at ANY horizon / all labeled calls (no minimum threshold)
         const winRateAll = labeledCalls >= 1 ? hitsAny / labeledCalls : null;
 
@@ -218,8 +217,18 @@ export async function GET(request: Request) {
         const totalCalls = v2 ? Number(v2.total_calls) : 0;
         const withEntryPrice = v2 ? Number(v2.with_entry_price) : 0;
         const hits2xExact = v2 ? Number(v2.hits_2x) : 0;
-        // v2 only reliable with enough samples — prevent 1-sample override of v1
-        const winRate2xExact = withEntryPrice >= 5 ? hits2xExact / withEntryPrice : null;
+        // v36: show v2 winrate as soon as any entry price exists (was >= 5)
+        const winRate2xExact = withEntryPrice >= 1 ? hits2xExact / withEntryPrice : null;
+
+        // v36: Score from displayed winrate (v2 preferred → v1 fallback → static fallback)
+        let score: number | null;
+        if (winRate2xExact !== null) {
+          // v2 score: normalize exact call-price winrate against v1 baseline
+          const normalized = winRate2xExact / safeBaseline;
+          score = Math.round(Math.max(0.1, Math.min(3.0, normalized)) * 1000) / 1000;
+        } else {
+          score = dynamicScores.get(name) ?? KOL_SCORES[name] ?? null;
+        }
 
         return {
           name,

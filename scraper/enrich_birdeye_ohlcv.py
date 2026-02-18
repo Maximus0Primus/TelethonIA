@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 BIRDEYE_OHLCV_URL = "https://public-api.birdeye.so/defi/ohlcv"
 OHLCV_TOP_N = 5  # Max tokens — Birdeye free tier = 30K CUs/month, 30 CUs/call
 OHLCV_CACHE_FILE = Path(__file__).parent / "ohlcv_cache.json"
-OHLCV_CACHE_TTL = 15 * 60  # 15 min — memecoin PA changes fast, stale candles mislead scoring
+OHLCV_CACHE_TTL = 30 * 60  # 30 min — survives across consecutive 15-min cron runs
 
 
 def _load_ohlcv_cache() -> dict:

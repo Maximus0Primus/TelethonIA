@@ -2,14 +2,14 @@ name: Scrape Telegram KOLs
 
 on:
   schedule:
-    # Every 30 min — warm caches cut cycle to ~8-12 min, leaving plenty of gap.
-    - cron: '*/30 * * * *'
+    # Every 15 min — warm caches cut cycle to ~8-12 min, fits in window.
+    - cron: '*/15 * * * *'
   workflow_dispatch: {} # Manual trigger from GitHub UI
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 25
 
     steps:
       - name: Checkout repository
@@ -66,6 +66,5 @@ jobs:
           HELIUS_API_KEY: ${{ secrets.HELIUS_API_KEY }}
           BIRDEYE_API_KEY: ${{ secrets.BIRDEYE_API_KEY }}
           JUPITER_API_KEY: ${{ secrets.JUPITER_API_KEY }}
-          BUBBLEMAPS_API_KEY: ${{ secrets.BUBBLEMAPS_API_KEY }}
         working-directory: scraper
         run: python safe_scraper.py --once

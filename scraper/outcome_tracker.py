@@ -283,7 +283,7 @@ def _get_max_price_gecko(
         sorted_candles = sorted(ohlcv_list, key=lambda c: c[0])
         for candle in sorted_candles:
             candle_ts = candle[0]
-            if window_start_ts <= candle_ts <= window_end_ts:
+            if window_start_ts <= candle_ts < window_end_ts:
                 high = float(candle[2])
                 low = float(candle[3])
                 close = float(candle[4])
@@ -521,7 +521,7 @@ def _extract_horizons_from_candles(
 
         for candle in sorted_candles:
             candle_ts = candle[0]
-            if candle_ts < snapshot_ts or candle_ts > window_end_ts:
+            if candle_ts < snapshot_ts or candle_ts >= window_end_ts:
                 continue
             high = float(candle[2])
             low = float(candle[3])
@@ -1361,8 +1361,8 @@ def backfill_bot_data(batch_limit: int = 50) -> None:
 #   - did_2x = TRUE if token EVER doubled from entry price
 # =============================================================================
 
-KCO_BATCH_LIMIT = 200      # v34: was 50, increased to clear 422-row entry_price backlog
-KCO_TIME_BUDGET = 8 * 60   # 8 minutes total budget (v34: was 5, outcomes timeout now 45min)
+KCO_BATCH_LIMIT = 500      # v36: was 200, batch-per-token means fewer API calls
+KCO_TIME_BUDGET = 20 * 60  # v36: 20 minutes (was 8). DexPaprika-first + batch = much faster
 
 
 def fill_kol_outcomes() -> None:
@@ -1575,8 +1575,155 @@ def _kco_phase_a_sync(client: Client, stats: dict) -> None:
     logger.info("KCO Phase A: inserted %d new call outcomes", stats["synced"])
 
 
+def _fetch_ohlcv_candles_kco(
+    pool_addr: str | None,
+    token_addr: str,
+    start_ts: float,
+    end_ts: float,
+    symbol: str,
+    stats: dict,
+) -> tuple[list | None, str]:
+    """
+    Fetch OHLCV candles for KCO Phase B. Order: DexPaprika → Birdeye → GeckoTerminal.
+
+    v36: DexPaprika is primary because GeckoTerminal rate limit is usually exhausted
+    by fill_outcomes which runs first in the workflow. Birdeye uses token MINT address
+    (no pool resolution needed) and recovers deindexed tokens.
+    """
+    sorted_candles = None
+    source = "none"
+    window_seconds = end_ts - start_ts
+
+    # 1. DexPaprika first (pool-based, 15min candles, 10K req/day — plenty for ~300 tokens)
+    if pool_addr:
+        start_dt = datetime.fromtimestamp(start_ts, tz=timezone.utc)
+        end_dt = datetime.fromtimestamp(end_ts, tz=timezone.utc)
+        num_candles_15m = int(window_seconds / 900) + 10
+        try:
+            resp = requests.get(
+                f"{DEXPAPRIKA_BASE}/networks/solana/pools/{pool_addr}/ohlcv",
+                params={
+                    "start": start_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "end": end_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "limit": min(1000, num_candles_15m),
+                    "interval": "15m",
+                },
+                timeout=15,
+            )
+            time.sleep(0.3)  # light rate limit
+            stats["api_calls"] += 1
+
+            if resp.status_code == 200:
+                candles_raw = resp.json()
+                if isinstance(candles_raw, list) and candles_raw:
+                    sorted_candles = []
+                    for c in candles_raw:
+                        try:
+                            ts_str = c.get("time") or c.get("timestamp", "")
+                            if ts_str.endswith("Z"):
+                                ts_dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                            else:
+                                ts_dt = datetime.fromisoformat(ts_str)
+                            sorted_candles.append([
+                                int(ts_dt.timestamp()),
+                                float(c.get("open", 0)),
+                                float(c.get("high", 0)),
+                                float(c.get("low", 0)),
+                                float(c.get("close", 0)),
+                                float(c.get("volume", 0)),
+                            ])
+                        except (ValueError, TypeError):
+                            continue
+                    sorted_candles.sort(key=lambda x: x[0])
+                    if sorted_candles:
+                        source = "dexpaprika_ohlcv"
+                    else:
+                        sorted_candles = None
+        except requests.RequestException as e:
+            logger.debug("KCO DexPaprika OHLCV failed for %s: %s", symbol, e)
+
+    # 2. Birdeye fallback (uses token MINT address — no pool needed, recovers deindexed tokens)
+    if sorted_candles is None and token_addr:
+        birdeye_key = os.environ.get("BIRDEYE_API_KEY", "")
+        if birdeye_key:
+            try:
+                _birdeye_limiter.wait()
+                resp = requests.get(
+                    BIRDEYE_OHLCV_URL,
+                    params={
+                        "address": token_addr,
+                        "type": "15m",
+                        "time_from": int(start_ts),
+                        "time_to": int(end_ts),
+                    },
+                    headers={"X-API-KEY": birdeye_key, "x-chain": "solana"},
+                    timeout=15,
+                )
+                stats["api_calls"] += 1
+
+                if resp.status_code == 200:
+                    items = resp.json().get("data", {}).get("items", [])
+                    if items:
+                        sorted_candles = [
+                            [int(c.get("unixTime", 0)), float(c.get("o", 0)),
+                             float(c.get("h", 0)), float(c.get("l", 0)),
+                             float(c.get("c", 0)), float(c.get("v", 0))]
+                            for c in items
+                        ]
+                        sorted_candles.sort(key=lambda x: x[0])
+                        if sorted_candles:
+                            source = "birdeye_ohlcv"
+                        else:
+                            sorted_candles = None
+                elif resp.status_code == 429:
+                    logger.warning("KCO Birdeye rate limited for %s", symbol)
+            except requests.RequestException as e:
+                logger.debug("KCO Birdeye OHLCV failed for %s: %s", symbol, e)
+
+    # 3. GeckoTerminal last (usually exhausted by main fill_outcomes)
+    global _gecko_consecutive_429s, _gecko_disabled
+    if sorted_candles is None and pool_addr and not _gecko_disabled:
+        num_candles_5m = int(window_seconds / 300) + 10
+        try:
+            _gecko_limiter.wait()
+            resp = requests.get(
+                GECKOTERMINAL_OHLCV_URL.format(pool=pool_addr),
+                params={
+                    "aggregate": 5,
+                    "before_timestamp": int(end_ts),
+                    "limit": min(1000, num_candles_5m),
+                    "currency": "usd",
+                    "token": "base",
+                },
+                timeout=15,
+            )
+            stats["api_calls"] += 1
+
+            if resp.status_code == 200:
+                ohlcv_list = resp.json().get("data", {}).get("attributes", {}).get("ohlcv_list") or []
+                if ohlcv_list:
+                    sorted_candles = sorted(ohlcv_list, key=lambda c: c[0])
+                    source = "gecko_ohlcv"
+                _gecko_consecutive_429s = 0
+            elif resp.status_code == 429:
+                _gecko_consecutive_429s += 1
+                if _gecko_consecutive_429s >= _GECKO_429_THRESHOLD:
+                    _gecko_disabled = True
+                    logger.warning("GeckoTerminal disabled (KCO Phase B)")
+        except requests.RequestException as e:
+            logger.debug("KCO GeckoTerminal OHLCV failed for %s: %s", symbol, e)
+
+    return sorted_candles, source
+
+
 def _kco_phase_b_entry_prices(client: Client, pool_cache: dict, stats: dict, start_time: float) -> None:
-    """Fill entry_price for rows where it's NULL using OHLCV at exact call_timestamp."""
+    """Fill entry_price for rows where it's NULL using OHLCV at exact call_timestamp.
+
+    v36 optimization: Batch by token — fetch OHLCV once per unique token covering all KOL
+    call timestamps, then extract individual entry prices from the same candle data.
+    Uses DexPaprika as primary (10K/day), Birdeye by mint as fallback (deindexed tokens).
+    Previously: 1 API call per row (588 calls). Now: 1 API call per token (~296 calls).
+    """
     logger.info("KCO Phase B: filling entry prices")
 
     try:
@@ -1596,59 +1743,59 @@ def _kco_phase_b_entry_prices(client: Client, pool_cache: dict, stats: dict, sta
         logger.info("KCO Phase B: no rows need entry prices")
         return
 
-    logger.info("KCO Phase B: %d rows need entry prices", len(rows))
-
-    # Group by token_address to minimize API calls
+    # Group by token_address — 1 OHLCV fetch covers all KOL calls for the same token
     token_groups = defaultdict(list)
     for row in rows:
         token_groups[row["token_address"]].append(row)
 
+    logger.info("KCO Phase B: %d rows across %d unique tokens", len(rows), len(token_groups))
+
+    filled = 0
     for token_addr, group in token_groups.items():
         if time.time() - start_time > KCO_TIME_BUDGET:
-            logger.warning("KCO Phase B: time budget exceeded")
+            logger.warning("KCO Phase B: time budget exceeded after %d tokens", filled)
             break
 
-        # Resolve pool address
+        # Resolve pool address from any row in the group
         pool_addr = None
         for row in group:
             if row.get("pair_address"):
                 pool_addr = row["pair_address"]
                 break
         if not pool_addr:
-            _gecko_limiter.wait()
             pool_addr = _get_pool_address(token_addr, pool_cache)
             stats["api_calls"] += 1
 
-        if not pool_addr:
-            stats["skipped"] += len(group)
+        # Parse all call timestamps for this token
+        call_entries = []
+        for row in group:
+            call_ts = _parse_snapshot_ts(row["call_timestamp"])
+            if call_ts:
+                call_entries.append((row, call_ts))
+            else:
+                stats["skipped"] += 1
+
+        if not call_entries:
             continue
 
-        # For each row in this token group, fetch candles around call_timestamp
-        for row in group:
-            if time.time() - start_time > KCO_TIME_BUDGET:
-                break
+        # Compute time window covering ALL KOL calls for this token
+        min_ts = min(ts for _, ts in call_entries)
+        max_ts = max(ts for _, ts in call_entries)
+        window_start = min_ts - 30 * 60   # 30min before earliest call
+        window_end = max_ts + 30 * 60     # 30min after latest call
 
-            call_ts = _parse_snapshot_ts(row["call_timestamp"])
-            if not call_ts:
-                stats["skipped"] += 1
-                continue
+        # Single OHLCV fetch for all KOL calls on this token
+        candles, source = _fetch_ohlcv_candles_kco(
+            pool_addr, token_addr, window_start, window_end,
+            group[0]["symbol"], stats,
+        )
 
-            # Fetch candles in a ±30min window around call_timestamp
-            window_start = call_ts - 30 * 60
-            window_end = call_ts + 30 * 60
+        if not candles:
+            stats["skipped"] += len(call_entries)
+            continue
 
-            candles, source = _fetch_ohlcv_candles(
-                pool_addr, token_addr,
-                window_start, window_end,
-                0.0001,  # dummy price_at for sanity check (we don't know it yet)
-                row["symbol"], stats,
-            )
-
-            if not candles:
-                stats["skipped"] += 1
-                continue
-
-            # Find candle closest to call_timestamp
+        # Extract entry price for each KOL call from the shared candle data
+        for row, call_ts in call_entries:
             best_candle = min(candles, key=lambda c: abs(c[0] - call_ts))
             entry_price = best_candle[4]  # close price
 
@@ -1656,22 +1803,23 @@ def _kco_phase_b_entry_prices(client: Client, pool_cache: dict, stats: dict, sta
                 stats["skipped"] += 1
                 continue
 
-            # Update row
             update_data = {
                 "entry_price": float(entry_price),
                 "price_source": source,
                 "last_checked_at": datetime.now(timezone.utc).isoformat(),
             }
-            # Also store pair_address if we resolved it
             if not row.get("pair_address") and pool_addr:
                 update_data["pair_address"] = pool_addr
 
             try:
                 client.table("kol_call_outcomes").update(update_data).eq("id", row["id"]).execute()
                 stats["entry_filled"] += 1
-                logger.debug("KCO Phase B: %s entry=%.10f (%s)", row["symbol"], entry_price, source)
+                logger.debug("KCO Phase B: %s [%s] entry=%.10f (%s)",
+                             row["symbol"], row.get("kol_group", "?")[:12], entry_price, source)
             except Exception as e:
                 logger.error("KCO Phase B: update failed for id=%d: %s", row["id"], e)
+
+        filled += 1
 
 
 def _kco_phase_c_update_ath(client: Client, pool_cache: dict, stats: dict, start_time: float) -> None:
@@ -1739,11 +1887,11 @@ def _kco_phase_c_update_ath(client: Client, pool_cache: dict, stats: dict, start
         ref_price = float(call_timestamps[0][0]["entry_price"])
         ref_symbol = group[0]["symbol"]
 
-        # Fetch OHLCV from earliest call to now
-        candles, source = _fetch_ohlcv_candles(
+        # v36: Use DexPaprika-first (GeckoTerminal usually exhausted by fill_outcomes)
+        candles, source = _fetch_ohlcv_candles_kco(
             pool_addr, token_addr,
             earliest_ts, now_ts,
-            ref_price, ref_symbol, stats,
+            ref_symbol, stats,
         )
 
         if not candles:
