@@ -1655,7 +1655,7 @@ def _fetch_ohlcv_candles_kco(
                 },
                 timeout=15,
             )
-            time.sleep(0.3)  # light rate limit
+            time.sleep(1.0)  # v37: 0.3→1.0s — DexPaprika rate-limits aggressively
             stats["api_calls"] += 1
 
             if resp.status_code == 200:
@@ -1687,6 +1687,12 @@ def _fetch_ohlcv_candles_kco(
                         source = "dexpaprika_ohlcv"
                     else:
                         sorted_candles = None
+                else:
+                    logger.debug("KCO DexPaprika empty candles for %s", symbol)
+            elif resp.status_code == 429:
+                logger.warning("KCO DexPaprika rate limited for %s (429)", symbol)
+            else:
+                logger.debug("KCO DexPaprika %d for %s", resp.status_code, symbol)
         except requests.RequestException as e:
             logger.debug("KCO DexPaprika OHLCV failed for %s: %s", symbol, e)
 
@@ -1918,6 +1924,20 @@ def _kco_phase_c_update_ath(client: Client, pool_cache: dict, stats: dict, start
             stats["api_calls"] += 1
 
         if not pool_addr:
+            # v37: Mark old calls as dead if no pool can be found
+            for row in group:
+                ts = _parse_snapshot_ts(row["call_timestamp"])
+                if ts and (now_ts - ts) / 3600 > 72:
+                    try:
+                        entry = float(row.get("entry_price") or 0)
+                        if entry > 0:
+                            client.table("kol_call_outcomes").update({
+                                "ath_after_call": round(entry * 0.001, 12),
+                                "max_return": 0.001,
+                                "last_checked_at": datetime.now(timezone.utc).isoformat(),
+                            }).eq("id", row["id"]).execute()
+                    except Exception:
+                        pass
             stats["skipped"] += len(group)
             continue
 
@@ -1943,15 +1963,29 @@ def _kco_phase_c_update_ath(client: Client, pool_cache: dict, stats: dict, start
         )
 
         if not candles:
-            # Still update last_checked_at so we don't re-check immediately
-            for row, _ in call_timestamps:
-                try:
-                    client.table("kol_call_outcomes").update({
-                        "last_checked_at": datetime.now(timezone.utc).isoformat(),
-                    }).eq("id", row["id"]).execute()
-                except Exception:
-                    pass
-            stats["skipped"] += len(call_timestamps)
+            # v37-fix: DON'T update last_checked_at when candles fail —
+            # let the row retry next cycle. Only mark as dead if call is old enough.
+            for row, call_ts_val in call_timestamps:
+                call_age_h = (now_ts - call_ts_val) / 3600
+                if call_age_h > 72:
+                    # Token is 3+ days old with no OHLCV data — mark as dead
+                    try:
+                        entry = float(row["entry_price"])
+                        client.table("kol_call_outcomes").update({
+                            "ath_after_call": round(entry * 0.001, 12),  # ~dead
+                            "max_return": 0.001,
+                            "last_checked_at": datetime.now(timezone.utc).isoformat(),
+                        }).eq("id", row["id"]).execute()
+                        stats["ath_updated"] += 1
+                        logger.debug("KCO Phase C: %s marked dead (no candles, %.0fh old)",
+                                     row["symbol"], call_age_h)
+                    except Exception:
+                        pass
+                else:
+                    # Fresh call — skip without updating last_checked_at (will retry)
+                    stats["skipped"] += 1
+                    logger.debug("KCO Phase C: %s no candles yet (%.0fh old, will retry)",
+                                 row["symbol"], call_age_h)
             continue
 
         # For each row, find max high AFTER its call_timestamp
@@ -1968,16 +2002,22 @@ def _kco_phase_c_update_ath(client: Client, pool_cache: dict, stats: dict, start
                         ath_ts = candle[0]
 
             if max_high <= 0:
-                # Update last_checked_at even if no improvement
-                try:
-                    client.table("kol_call_outcomes").update({
-                        "last_checked_at": datetime.now(timezone.utc).isoformat(),
-                    }).eq("id", row["id"]).execute()
-                except Exception:
-                    pass
+                # v37-fix: same retry logic — don't mark checked if no data
+                call_age_h = (now_ts - call_ts) / 3600
+                if call_age_h > 72:
+                    try:
+                        entry = float(row["entry_price"])
+                        client.table("kol_call_outcomes").update({
+                            "ath_after_call": round(entry * 0.001, 12),
+                            "max_return": 0.001,
+                            "last_checked_at": datetime.now(timezone.utc).isoformat(),
+                        }).eq("id", row["id"]).execute()
+                        stats["ath_updated"] += 1
+                    except Exception:
+                        pass
                 continue
 
-            # Update ATH, max_return, and did_2x
+            # Update ATH and max_return (did_2x is a GENERATED column — never set it!)
             update_data = {"last_checked_at": datetime.now(timezone.utc).isoformat()}
             entry = float(row["entry_price"])
 
@@ -1988,12 +2028,11 @@ def _kco_phase_c_update_ath(client: Client, pool_cache: dict, stats: dict, start
                 if not row.get("pair_address") and pool_addr:
                     update_data["pair_address"] = pool_addr
 
-            # v34: Always compute max_return and did_2x from best known ATH
+            # v37: Compute max_return from best known ATH (did_2x is auto-generated)
             best_ath = max(max_high, current_ath)
             if entry > 0 and best_ath > 0:
                 max_return = best_ath / entry
                 update_data["max_return"] = round(float(max_return), 4)
-                update_data["did_2x"] = max_return >= 2.0
 
             try:
                 client.table("kol_call_outcomes").update(update_data).eq("id", row["id"]).execute()
