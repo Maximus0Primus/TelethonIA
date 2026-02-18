@@ -33,7 +33,7 @@ export function RankingPreview({ tokens }: RankingPreviewProps) {
         {/* Token rows */}
         <div className="max-h-[calc(100vh-200px)] overflow-y-auto">
           {tokens.map((t, i) => (
-            <TokenDetailRow key={t.token_address ?? `${t.symbol}-${i}`} token={t} />
+            <TokenDetailRow key={`${t.symbol}-${i}`} token={t} />
           ))}
         </div>
       </div>
