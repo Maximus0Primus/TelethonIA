@@ -2035,8 +2035,16 @@ def _kco_phase_c_update_ath(client: Client, pool_cache: dict, stats: dict, start
                         max_high = candle[2]
                         ath_ts = candle[0]
 
-            # v39: cross-validate denomination — reject insane ratios
+            # v40: SOL price leak filter — same as Phase B ($50 threshold)
+            # Memecoins are < $1, large-caps like $TRUMP/$HYPE can be $1-$50
             entry = float(row["entry_price"])
+            if max_high > 50.0 and entry < 1.0:
+                logger.warning("KCO Phase C: SOL price leak for %s — entry=%.8f, ath=%.2f (%s), skipping",
+                               row["symbol"], entry, max_high, source)
+                stats["skipped"] += 1
+                continue
+
+            # v39: cross-validate denomination — reject insane ratios
             if max_high > 0 and entry > 0:
                 ratio = max_high / entry
                 if ratio > 10000 or ratio < 0.0001:
