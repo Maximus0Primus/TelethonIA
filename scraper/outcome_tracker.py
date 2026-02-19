@@ -868,7 +868,12 @@ def _label_snapshot(
             stats["consistent"] += 1
 
         if max_price is None:
-            continue  # Skip this horizon, retry next cycle
+            # v39: If snapshot is old enough (2x horizon), mark with sentinel to prevent
+            # infinite retry. Candles exist but don't cover this horizon = permanently unfillable.
+            age_h = (time.time() - snapshot_ts) / 3600
+            if age_h > hours * 2:
+                update_data[hz["max_col"]] = 0  # sentinel: checked, no data
+            continue
 
         # Sanity check
         ratio = max_price / price_at if price_at > 0 else 0
@@ -1872,9 +1877,10 @@ def _kco_phase_b_entry_prices(client: Client, pool_cache: dict, stats: dict, sta
                 stats["skipped"] += 1
                 continue
 
-            # v39: SOL price leak filter — memecoin prices are always < $1.
-            # SOL prices are ~$85-200. If entry > $1, it's almost certainly SOL denomination.
-            if entry_price > 1.0:
+            # v39: SOL price leak filter — SOL trades at ~$80-200.
+            # Memecoins are < $1, but large-caps like $TRUMP/$HYPE can be $1-$50.
+            # Threshold at $50 catches SOL leaks while allowing legitimate large-caps.
+            if entry_price > 50.0:
                 logger.warning("KCO Phase B: SOL price leak for %s — entry=%.2f (%s), skipping",
                                row.get("symbol", "?"), entry_price, source)
                 stats["skipped"] += 1
