@@ -2487,7 +2487,9 @@ def aggregate_ranking(
             freshest = min(group_hours) if group_hours else 999
             decay = _two_phase_decay(freshest)
             recency_weighted_unique += tw(g) * decay
-        kol_consensus = min(1.0, recency_weighted_unique / (total_kols * 0.05))
+        # v41: Was 0.05 (=2.95 with 59 KOLs → 2 S-tier maxed consensus). 0.10 (=5.9)
+        # requires real agreement: ~4 S-tier or ~12 A-tier to reach 1.0.
+        kol_consensus = min(1.0, recency_weighted_unique / (total_kols * 0.10))
 
         avg_sentiment = sum(data["sentiments"]) / len(data["sentiments"])
         sentiment_score = (avg_sentiment + 1) / 2
@@ -2536,6 +2538,8 @@ def aggregate_ranking(
         conviction_score *= kol_count_factor
 
         # v9: Recency-weighted breadth (KOL reputation * tier * count * freshness decay)
+        # v41: Unified normalization (/10) for both paths. Was /8 primary, /12 fallback
+        # — inconsistency penalized tokens without kol_mention_counts unfairly.
         kol_mention_counts = data.get("kol_mention_counts", {})
         if kol_mention_counts and kol_scores:
             weighted_mentions = 0
@@ -2544,15 +2548,12 @@ def aggregate_ranking(
                 freshest = min(group_hours) if group_hours else 24
                 decay = _two_phase_decay(freshest)
                 weighted_mentions += kol_scores.get(kol, 1.0) * tw(kol) * count * decay
-            # v14: Recalibrated from /20 → /8. In memecoin reality, 3-4 KOLs
-            # mentioning a token IS strong breadth. Old formula needed 9+ KOLs for 0.5.
-            breadth_score = min(1.0, weighted_mentions / 8)
+            breadth_score = min(1.0, weighted_mentions / 10)
         else:
             # Fallback: decay total mentions by freshest overall mention
-            # v14: Recalibrated from /30 → /12
             freshest_overall = min(data["hours_ago"]) if data["hours_ago"] else 999
             decay = _two_phase_decay(freshest_overall)
-            breadth_score = min(1.0, (data["mentions"] * decay) / 12)
+            breadth_score = min(1.0, (data["mentions"] * decay) / 10)
 
         # --- Algorithm v3 A3: Sentiment consistency (low std = consensus) ---
         sentiment_consistency = 1.0
@@ -2582,9 +2583,10 @@ def aggregate_ranking(
             kol_freshness = None
 
         # mention_heat_ratio: recent mention density vs older (proxy for mention_velocity)
+        # v41: epsilon 0.1→1.0 (was exploding to 10*mentions when 2-6h=0), cap at 10.0
         mentions_1h = sum(1 for h in data["hours_ago"] if h <= 1)
         mentions_2h_6h = sum(1 for h in data["hours_ago"] if 2 < h <= 6)
-        mention_heat_ratio = mentions_1h / (mentions_2h_6h / 4 + 0.1) if data["hours_ago"] else None
+        mention_heat_ratio = min(10.0, mentions_1h / (mentions_2h_6h / 4 + 1.0)) if data["hours_ago"] else None
 
         # --- ML v2 Phase B: Social momentum phase classification ---
         if mention_acceleration > 0.2 and social_velocity > 0.3:

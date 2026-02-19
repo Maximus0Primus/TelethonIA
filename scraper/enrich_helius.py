@@ -28,7 +28,7 @@ import requests
 logger = logging.getLogger(__name__)
 
 CACHE_FILE = Path(__file__).parent / "helius_cache.json"
-CACHE_TTL_SECONDS = 2 * 3600  # 2 hours (on-chain data changes slower than social)
+CACHE_TTL_SECONDS = 30 * 60  # v41: 30 min (was 2h). whale_new_entries is top predictor (+0.578), detect whales faster
 
 # How many tokens to enrich per cycle
 # v36: 50 → 200. Free tier = 1M CU/month, we use ~2%. 200 covers full ranking.

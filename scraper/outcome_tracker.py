@@ -498,6 +498,27 @@ def _extract_horizons_from_candles(
     This is the key optimization: 1 OHLCV fetch → label all pending horizons.
     """
     results = {}
+
+    # v41: Entry price freshness correction. price_at_snapshot can be 5-15min stale
+    # (from DexScreener enrichment). Use the first OHLCV candle's open price if it
+    # diverges significantly — the candle is time-aligned to the snapshot window.
+    if sorted_candles and price_at > 0:
+        first_candle = None
+        for c in sorted_candles:
+            if c[0] >= snapshot_ts:
+                first_candle = c
+                break
+        if first_candle:
+            candle_open = float(first_candle[1])
+            if candle_open > 0:
+                drift = abs(candle_open - price_at) / price_at
+                if drift > 0.30:
+                    logger.debug(
+                        "Entry price corrected: snapshot=%.6f candle_open=%.6f (drift=%.0f%%)",
+                        price_at, candle_open, drift * 100,
+                    )
+                    price_at = candle_open
+
     target_2x = price_at * 2.0 if price_at > 0 else None
 
     for hz in horizons_to_fill:
