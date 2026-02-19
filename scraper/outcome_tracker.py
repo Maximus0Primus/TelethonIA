@@ -1531,7 +1531,7 @@ def _kco_phase_a_sync(client: Client, stats: dict) -> None:
     try:
         mentions = _kco_paginate_query(
             client, "kol_mentions",
-            "id, symbol, kol_group, message_date, extracted_cas",
+            "id, symbol, kol_group, message_date, extracted_cas, resolved_ca",
             order_col="message_date",
         )
     except Exception as e:
@@ -1553,8 +1553,13 @@ def _kco_phase_a_sync(client: Client, stats: dict) -> None:
         if not sym or not kol or not msg_date:
             continue
 
-        # Resolve token_address: try symbol match first, then CA match
-        token_addr = token_map.get(sym)
+        # v40: Prefer resolved_ca (exact CA from KOL's message), then symbol match, then extracted_cas
+        token_addr = None
+        resolved_ca = (m.get("resolved_ca") or "").strip()
+        if resolved_ca:
+            token_addr = resolved_ca
+        if not token_addr:
+            token_addr = token_map.get(sym)
         if not token_addr:
             cas = m.get("extracted_cas") or []
             for ca in cas:

@@ -453,10 +453,186 @@ def _empty_result() -> dict:
     }
 
 
-def enrich_token(symbol: str, cache: dict, birdeye_key: str | None = None) -> dict:
+def _fetch_dexscreener_by_address(address: str) -> dict | None:
+    """
+    v40: Fetch token data by exact contract address (not by symbol search).
+    Prevents symbol collision where DexScreener search picks the wrong CA.
+    Uses the same /tokens/v1/solana/{address} endpoint as CA resolution.
+    """
+    try:
+        resp = requests.get(
+            f"https://api.dexscreener.com/tokens/v1/solana/{address}",
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            logger.warning("DexScreener by-address %d for %s…", resp.status_code, address[:8])
+            return None
+
+        pairs = resp.json() if isinstance(resp.json(), list) else resp.json().get("pairs", [])
+        if not pairs or not isinstance(pairs, list):
+            return None
+
+        # Filter to pairs where baseToken.address matches our target
+        target_pairs = [
+            p for p in pairs
+            if p.get("baseToken", {}).get("address", "") == address
+            and p.get("chainId") == "solana"
+        ]
+        if not target_pairs:
+            # Fallback: use all pairs (API should only return pairs for this token)
+            target_pairs = [p for p in pairs if p.get("chainId") == "solana"]
+        if not target_pairs:
+            return None
+
+        # Pick highest-volume pair (same logic as _fetch_dexscreener)
+        best = max(target_pairs, key=lambda p: float(p.get("volume", {}).get("h24", 0) or 0))
+
+        pair_count = len(target_pairs)
+        best_address = best.get("baseToken", {}).get("address", "")
+        distinct_addresses = {p.get("baseToken", {}).get("address", "") for p in target_pairs if p.get("baseToken", {}).get("address")}
+        pvp_same_name_count = len(distinct_addresses)
+
+        pvp_recent_count = 0
+        best_created = best.get("pairCreatedAt")
+        if best_created and pvp_same_name_count > 1:
+            for p in target_pairs:
+                p_addr = p.get("baseToken", {}).get("address", "")
+                p_created = p.get("pairCreatedAt")
+                if p_addr != best_address and p_created:
+                    try:
+                        diff_h = abs(int(best_created) - int(p_created)) / (1000 * 3600)
+                        if diff_h <= 4:
+                            pvp_recent_count += 1
+                    except (ValueError, TypeError):
+                        pass
+
+        txns_h24 = best.get("txns", {}).get("h24", {})
+        buys_24h = int(txns_h24.get("buys", 0) or 0)
+        sells_24h = int(txns_h24.get("sells", 0) or 0)
+        total_txns = buys_24h + sells_24h
+
+        txns_h6 = best.get("txns", {}).get("h6", {})
+        buys_6h = int(txns_h6.get("buys", 0) or 0)
+        sells_6h = int(txns_h6.get("sells", 0) or 0)
+
+        txns_h1 = best.get("txns", {}).get("h1", {})
+        buys_1h = int(txns_h1.get("buys", 0) or 0)
+        sells_1h = int(txns_h1.get("sells", 0) or 0)
+
+        txns_m5 = best.get("txns", {}).get("m5", {})
+        buys_5m = int(txns_m5.get("buys", 0) or 0)
+        sells_5m = int(txns_m5.get("sells", 0) or 0)
+
+        buy_sell_ratio_24h = buys_24h / max(1, total_txns)
+        buy_sell_ratio_1h = buys_1h / max(1, buys_1h + sells_1h)
+        buy_sell_ratio_5m = buys_5m / max(1, buys_5m + sells_5m)
+
+        price_changes = best.get("priceChange", {})
+        price_change_5m = _safe_float(price_changes.get("m5"))
+        price_change_1h = _safe_float(price_changes.get("h1"))
+        price_change_6h = _safe_float(price_changes.get("h6"))
+        price_change_24h = _safe_float(price_changes.get("h24"))
+
+        volumes = best.get("volume", {})
+        volume_24h = _safe_float(volumes.get("h24"), 0)
+        volume_6h = _safe_float(volumes.get("h6"), 0)
+        volume_1h = _safe_float(volumes.get("h1"), 0)
+        volume_5m = _safe_float(volumes.get("m5"), 0)
+
+        liquidity_usd = _safe_float(best.get("liquidity", {}).get("usd"), 0)
+        market_cap = _safe_float(best.get("marketCap"), 0) or _safe_float(best.get("fdv"), 0)
+        price_usd = _safe_float(best.get("priceUsd"), 0)
+
+        volume_mcap_ratio = volume_24h / max(1, market_cap) if market_cap else None
+        liq_mcap_ratio = liquidity_usd / max(1, market_cap) if market_cap else None
+        volume_acceleration = (volume_6h * 4) / max(1, volume_24h) if volume_24h else None
+
+        token_age_hours = None
+        created_at = best.get("pairCreatedAt")
+        if created_at:
+            try:
+                created_ts = int(created_at) / 1000
+                age_seconds = time.time() - created_ts
+                token_age_hours = round(max(0, age_seconds / 3600), 1)
+            except (ValueError, TypeError):
+                pass
+
+        dex_id = best.get("dexId", "").lower()
+        is_pump_fun = 1 if "pump" in dex_id else 0
+
+        has_pump_pair = any("pump" in p.get("dexId", "").lower() for p in target_pairs)
+        has_raydium_pair = any("raydium" in p.get("dexId", "").lower() for p in target_pairs)
+        if has_pump_pair and has_raydium_pair:
+            pump_graduation_status = "graduated"
+        elif has_pump_pair:
+            pump_graduation_status = "bonding"
+        else:
+            pump_graduation_status = None
+
+        boosts_active = 0
+        boosts_data = best.get("boosts") or {}
+        if isinstance(boosts_data, dict):
+            boosts_active = int(boosts_data.get("active", 0) or 0)
+        elif isinstance(boosts_data, int):
+            boosts_active = boosts_data
+
+        info = best.get("info") or {}
+        socials = info.get("socials") or []
+        websites = info.get("websites") or []
+        has_twitter = 1 if any(s.get("type") == "twitter" for s in socials if isinstance(s, dict)) else 0
+        has_telegram = 1 if any(s.get("type") == "telegram" for s in socials if isinstance(s, dict)) else 0
+        has_website = 1 if len(websites) > 0 else 0
+        social_count = len(socials)
+
+        return {
+            "token_address": best.get("baseToken", {}).get("address", ""),
+            "pair_address": best.get("pairAddress", ""),
+            "price_usd": price_usd,
+            "volume_24h": volume_24h,
+            "volume_6h": volume_6h,
+            "volume_1h": volume_1h,
+            "volume_5m": volume_5m,
+            "liquidity_usd": liquidity_usd,
+            "market_cap": market_cap,
+            "txn_count_24h": total_txns,
+            "buys_24h": buys_24h,
+            "sells_24h": sells_24h,
+            "buy_sell_ratio_24h": round(buy_sell_ratio_24h, 3),
+            "buy_sell_ratio_1h": round(buy_sell_ratio_1h, 3),
+            "buy_sell_ratio_5m": round(buy_sell_ratio_5m, 3),
+            "price_change_5m": price_change_5m,
+            "price_change_1h": price_change_1h,
+            "price_change_6h": price_change_6h,
+            "price_change_24h": price_change_24h,
+            "volume_mcap_ratio": round(volume_mcap_ratio, 6) if volume_mcap_ratio is not None else None,
+            "liq_mcap_ratio": round(liq_mcap_ratio, 6) if liq_mcap_ratio is not None else None,
+            "volume_acceleration": round(volume_acceleration, 3) if volume_acceleration is not None else None,
+            "token_age_hours": token_age_hours,
+            "is_pump_fun": is_pump_fun,
+            "pair_count": pair_count,
+            "dex_id": dex_id,
+            "pump_graduation_status": pump_graduation_status,
+            "pvp_same_name_count": pvp_same_name_count,
+            "pvp_recent_count": pvp_recent_count,
+            "boosts_active": boosts_active,
+            "has_twitter": has_twitter,
+            "has_telegram": has_telegram,
+            "has_website": has_website,
+            "social_count": social_count,
+        }
+
+    except requests.RequestException as e:
+        logger.warning("DexScreener by-address error for %s…: %s", address[:8], e)
+        return None
+
+
+def enrich_token(symbol: str, cache: dict, birdeye_key: str | None = None, known_ca: str | None = None) -> dict:
     """
     Enrich a single token with on-chain data from DexScreener + RugCheck + Birdeye.
     Uses per-source TTLs: only re-fetches data that is actually stale.
+
+    v40: When known_ca is provided, fetches by exact contract address instead of
+    symbol search, preventing symbol collision where multiple CAs share the same name.
     """
     raw = symbol.lstrip("$")
     now = time.time()
@@ -470,8 +646,15 @@ def enrich_token(symbol: str, cache: dict, birdeye_key: str | None = None) -> di
             result[k] = v
 
     # --- DexScreener (5 min TTL, free, 300/min) ---
-    if now - entry.get("_dex_at", 0) > TTL_DEXSCREENER:
-        dex_data = _fetch_dexscreener(symbol)
+    # v40: Force re-fetch if known_ca differs from cached token_address (CA changed)
+    cached_ca = entry.get("token_address")
+    ca_changed = known_ca and cached_ca and known_ca != cached_ca
+    if now - entry.get("_dex_at", 0) > TTL_DEXSCREENER or ca_changed:
+        # v40: Use exact CA lookup when available to prevent symbol collision
+        if known_ca:
+            dex_data = _fetch_dexscreener_by_address(known_ca)
+        else:
+            dex_data = _fetch_dexscreener(symbol)
         if dex_data:
             result.update(dex_data)
             entry["_dex_at"] = now
@@ -539,7 +722,8 @@ def enrich_tokens(ranking: list[dict]) -> list[dict]:
         # Only use Birdeye for top N tokens
         use_birdeye = birdeye_key if i < BIRDEYE_TOP_N else None
 
-        data = enrich_token(symbol, cache, birdeye_key=use_birdeye)
+        # v40: Pass known_ca to fetch by exact address, preventing symbol collision
+        data = enrich_token(symbol, cache, birdeye_key=use_birdeye, known_ca=token.get("kol_resolved_ca"))
         token.update(data)
 
         if data.get("volume_24h") is not None:

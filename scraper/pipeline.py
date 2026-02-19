@@ -11,7 +11,7 @@ import logging
 import statistics
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
-from collections import defaultdict
+from collections import Counter, defaultdict
 from typing import TypedDict
 from pathlib import Path
 
@@ -493,6 +493,50 @@ def _resolve_pair_to_symbol(chain: str, pair_address: str, ca_cache: dict[str, d
         time.sleep(0.3)
 
 
+def _resolve_pair_to_symbol_and_ca(
+    chain: str, pair_address: str, ca_cache: dict[str, dict]
+) -> tuple[str | None, str | None]:
+    """
+    Resolve a DexScreener pair address to (symbol, token_ca).
+    Returns (symbol, baseToken address) or (None, None).
+    v40: needed to propagate the actual token CA from URL sources.
+    """
+    cache_key = f"pair:{chain}:{pair_address}"
+    if cache_key in ca_cache:
+        entry = ca_cache[cache_key]
+        if time.time() - entry.get("resolved_at", 0) < _CA_CACHE_TTL:
+            return entry.get("symbol"), entry.get("token_ca")
+
+    try:
+        resp = requests.get(
+            _DEXSCREENER_PAIRS_URL.format(chain=chain, pair_address=pair_address),
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            pairs = data.get("pairs") or data if isinstance(data, list) else data.get("pairs", [])
+            if isinstance(pairs, list) and pairs:
+                base_token = pairs[0].get("baseToken", {})
+                symbol = base_token.get("symbol", "").upper().strip()
+                if not symbol or not symbol.isascii():
+                    symbol = base_token.get("name", "").upper().strip()
+                    symbol = re.sub(r"[^A-Z0-9]", "", symbol)
+                token_ca = base_token.get("address", "").strip() or None
+                if symbol and len(symbol) <= 15 and symbol.isascii():
+                    ca_cache[cache_key] = {
+                        "symbol": symbol, "token_ca": token_ca,
+                        "resolved_at": time.time(),
+                    }
+                    return symbol, token_ca
+        ca_cache[cache_key] = {"symbol": None, "token_ca": None, "resolved_at": time.time()}
+        return None, None
+    except requests.RequestException as e:
+        logger.debug("Pair+CA resolution failed for %s/%s…: %s", chain, pair_address[:8], e)
+        return None, None
+    finally:
+        time.sleep(0.3)
+
+
 _CACHE_FALSE_TTL = 4 * 3600  # v28: re-check rejected tokens after 4h
 
 
@@ -863,14 +907,16 @@ def extract_tokens(
     text: str,
     ca_cache: dict[str, dict] | None = None,
     confirmed_symbols: set[str] | None = None,
-) -> list[tuple[str, str]]:
+) -> list[tuple[str, str, str | None]]:
     """
     Extract token symbols from text via three methods:
     1) $TOKEN prefix — high confidence, always extracted
     2) Bare ALL-CAPS words (3+ chars) — only if symbol is confirmed by $ or CA elsewhere
     3) Solana contract addresses → resolved to symbols via DexScreener
 
-    Returns list of (symbol, source) tuples where source is "ticker", "ca", or "url".
+    Returns list of (symbol, source, ca_or_none) tuples.
+    v40: 3rd element is the token contract address when available (from CA/URL sources).
+    This prevents symbol collisions where multiple CAs share the same symbol.
 
     Parameters
     ----------
@@ -880,7 +926,7 @@ def extract_tokens(
         AND are not in BARE_WORD_SUSPECTS. When None (backward compat), bare ALLCAPS
         extraction is unrestricted (legacy behavior).
     """
-    tokens: list[tuple[str, str]] = []
+    tokens: list[tuple[str, str, str | None]] = []
     seen: set[str] = set()
 
     # 1) $-prefixed tokens: always extract (KOL intentionally naming a token)
@@ -890,7 +936,7 @@ def extract_tokens(
             continue
         symbol = f"${upper}"
         if upper not in EXCLUDED_TOKENS and symbol not in seen:
-            tokens.append((symbol, "ticker"))
+            tokens.append((symbol, "ticker", None))
             seen.add(symbol)
 
     # v15: Bare ALLCAPS detection REMOVED.
@@ -921,18 +967,18 @@ def extract_tokens(
             if resolved:
                 symbol = f"${resolved}"
                 if resolved not in EXCLUDED_TOKENS and symbol not in seen:
-                    tokens.append((symbol, "ca"))
+                    tokens.append((symbol, "ca", match))  # v40: CA is the match itself
                     seen.add(symbol)
 
     # 4) DexScreener/pump.fun URLs → resolve pair/token address to symbol
     if ca_cache is not None:
-        # DexScreener: pair address → resolve via pairs API
+        # DexScreener: pair address → resolve via pairs API (v40: also get token CA)
         for chain, pair_addr in DEXSCREENER_URL_REGEX.findall(text):
-            resolved = _resolve_pair_to_symbol(chain, pair_addr, ca_cache)
+            resolved, token_ca = _resolve_pair_to_symbol_and_ca(chain, pair_addr, ca_cache)
             if resolved:
                 symbol = f"${resolved}"
                 if resolved not in EXCLUDED_TOKENS and symbol not in seen:
-                    tokens.append((symbol, "url"))
+                    tokens.append((symbol, "url", token_ca))
                     seen.add(symbol)
 
         # pump.fun: token CA directly → resolve via tokens API
@@ -941,7 +987,7 @@ def extract_tokens(
             if resolved:
                 symbol = f"${resolved}"
                 if resolved not in EXCLUDED_TOKENS and symbol not in seen:
-                    tokens.append((symbol, "url"))
+                    tokens.append((symbol, "url", pump_addr))  # v40: URL contains the CA
                     seen.add(symbol)
 
         # GMGN: token CA directly (same as pump.fun — CA in URL)
@@ -950,16 +996,16 @@ def extract_tokens(
             if resolved:
                 symbol = f"${resolved}"
                 if resolved not in EXCLUDED_TOKENS and symbol not in seen:
-                    tokens.append((symbol, "url"))
+                    tokens.append((symbol, "url", gmgn_addr))  # v40: URL contains the CA
                     seen.add(symbol)
 
-        # Photon-sol: LP pair address → resolve via pairs API (same as DexScreener)
+        # Photon-sol: LP pair address → resolve via pairs API (v40: also get token CA)
         for photon_addr in PHOTON_URL_REGEX.findall(text):
-            resolved = _resolve_pair_to_symbol("solana", photon_addr, ca_cache)
+            resolved, token_ca = _resolve_pair_to_symbol_and_ca("solana", photon_addr, ca_cache)
             if resolved:
                 symbol = f"${resolved}"
                 if resolved not in EXCLUDED_TOKENS and symbol not in seen:
-                    tokens.append((symbol, "url"))
+                    tokens.append((symbol, "url", token_ca))
                     seen.add(symbol)
 
     return tokens
@@ -2222,9 +2268,9 @@ def aggregate_ranking(
                 resolved = _resolve_ca_to_symbol(match, ca_cache)
                 if resolved and resolved not in EXCLUDED_TOKENS:
                     confirmed_symbols.add(resolved)
-            # DexScreener URL pair addresses → confirmed
+            # DexScreener URL pair addresses → confirmed (v40: use _and_ca to warm cache with token_ca)
             for chain, pair_addr in DEXSCREENER_URL_REGEX.findall(text):
-                resolved = _resolve_pair_to_symbol(chain, pair_addr, ca_cache)
+                resolved, _ = _resolve_pair_to_symbol_and_ca(chain, pair_addr, ca_cache)
                 if resolved and resolved not in EXCLUDED_TOKENS:
                     confirmed_symbols.add(resolved)
             # pump.fun URLs → confirmed
@@ -2237,9 +2283,9 @@ def aggregate_ranking(
                 resolved = _resolve_ca_to_symbol(gmgn_addr, ca_cache)
                 if resolved and resolved not in EXCLUDED_TOKENS:
                     confirmed_symbols.add(resolved)
-            # Photon-sol URLs → confirmed
+            # Photon-sol URLs → confirmed (v40: use _and_ca to warm cache with token_ca)
             for photon_addr in PHOTON_URL_REGEX.findall(text):
-                resolved = _resolve_pair_to_symbol("solana", photon_addr, ca_cache)
+                resolved, _ = _resolve_pair_to_symbol_and_ca("solana", photon_addr, ca_cache)
                 if resolved and resolved not in EXCLUDED_TOKENS:
                     confirmed_symbols.add(resolved)
 
@@ -2272,6 +2318,8 @@ def aggregate_ranking(
         "ca_mention_count": 0,
         "ticker_mention_count": 0,
         "url_mention_count": 0,
+        # v40: Track contract addresses from CA/URL sources
+        "known_cas": [],
     })
 
     # v10: Collect raw KOL mentions for NLP storage
@@ -2312,6 +2360,8 @@ def aggregate_ranking(
             tokens = [t[0] for t in token_tuples]
             # v16: Map symbol → extraction_method for per-mention audit
             source_by_symbol = {t[0]: t[1] for t in token_tuples}
+            # v40: Map symbol → resolved CA for per-mention tracking
+            ca_by_symbol = {t[0]: t[2] for t in token_tuples if t[2]}
             # v16: Extract ALL CAs from message text (for extraction audit)
             msg_cas = [m for m in CA_REGEX.findall(text) if m not in KNOWN_PROGRAM_ADDRESSES]
 
@@ -2362,9 +2412,15 @@ def aggregate_ranking(
                     # v16: Extraction audit fields
                     "extraction_method": source_by_symbol.get(token, "unknown"),
                     "extracted_cas": msg_cas if msg_cas else None,
+                    # v40: Resolved CA from this specific extraction
+                    "resolved_ca": ca_by_symbol.get(token),
                 })
 
-            for token, source in token_tuples:
+            for token, source, ca in token_tuples:
+                # v40: Track known CAs from CA/URL sources
+                if ca:
+                    token_data[token]["known_cas"].append(ca)
+
                 # v16: Track extraction source counts
                 if source == "ca":
                     token_data[token]["ca_mention_count"] += 1
@@ -2688,6 +2744,8 @@ def aggregate_ranking(
             "multi_token_ratio": round(multi_token_ratio, 3),
             "question_ratio": round(question_ratio, 3),
             "link_ratio": round(link_ratio, 3),
+            # v40: Best known CA from KOL mentions (most frequently referenced)
+            "kol_resolved_ca": Counter(data["known_cas"]).most_common(1)[0][0] if data["known_cas"] else None,
         })
 
     # Verify tokens exist on-chain via DexScreener (filters false positives)

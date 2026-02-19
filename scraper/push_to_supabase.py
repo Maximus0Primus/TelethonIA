@@ -269,6 +269,8 @@ def upsert_tokens(
                 "token_address": t.get("token_address"),
                 # v27: market_cap for frontend display
                 "market_cap": t.get("market_cap"),
+                # v40: Track CA provenance (kol=from KOL message, dexscreener=from search)
+                "ca_source": "kol" if t.get("kol_resolved_ca") else "dexscreener",
             })
             for t in tokens
         ]
@@ -800,6 +802,8 @@ def insert_kol_mentions(mentions: list[dict]) -> None:
             # v16: Extraction audit fields
             "extraction_method": m.get("extraction_method"),
             "extracted_cas": m.get("extracted_cas"),
+            # v40: Resolved CA from extraction (CA/URL sources)
+            "resolved_ca": m.get("resolved_ca"),
         }))
 
     # Upsert in chunks of 500 — ON CONFLICT (kol_group, message_date, symbol) DO NOTHING
