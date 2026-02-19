@@ -6,7 +6,7 @@ Uses OHLCV candle data to find the MAX PRICE during the window, not just the
 price at a single point in time. This prevents false negatives where a token
 pumps to 3x then dumps back before we check.
 
-Fallback chain: GeckoTerminal OHLCV -> DexPaprika OHLCV -> Birdeye OHLCV -> SKIP.
+Fallback chain: DexPaprika OHLCV -> GeckoTerminal OHLCV -> Birdeye OHLCV -> SKIP.
 Birdeye uses the token MINT address (not pool), so it can find tokens that were
 deindexed by GeckoTerminal/DexPaprika/DexScreener but still exist on-chain.
 DexScreener current price is NOT used as fallback because it gives false negatives
@@ -595,18 +595,74 @@ def _fetch_ohlcv_candles(
 ) -> tuple[list | None, str]:
     """
     Fetch OHLCV candles for a pool covering [start_ts, end_ts].
-    Falls back: GeckoTerminal -> DexPaprika -> Birdeye.
+    v39: Reordered to DexPaprika -> GeckoTerminal -> Birdeye.
+    DexPaprika has 10K req/day (plenty), GeckoTerminal only 30 req/min (rate-limits fast).
+    Consistent with KCO pipeline order — reduces GeckoTerminal 429s and zombie snapshots.
     Returns (sorted_candles, source) where candles are [ts, o, h, l, c, v].
     """
     sorted_candles = None
     source = "none"
 
     window_seconds = end_ts - start_ts
-    num_candles_5m = int(window_seconds / 300) + 10
 
-    # Try GeckoTerminal (skip if circuit breaker tripped)
+    # 1. DexPaprika first (10K req/day — plenty of budget)
+    start_dt = datetime.fromtimestamp(start_ts, tz=timezone.utc)
+    end_dt = datetime.fromtimestamp(end_ts, tz=timezone.utc)
+    num_candles_15m = int(window_seconds / 900) + 10
+    try:
+        resp = requests.get(
+            f"{DEXPAPRIKA_BASE}/networks/solana/pools/{pool_addr}/ohlcv",
+            params={
+                "start": start_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "end": end_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "limit": min(1000, num_candles_15m),
+                "interval": "15m",
+            },
+            timeout=15,
+        )
+        time.sleep(0.3)
+        stats["api_calls"] += 1
+
+        if resp.status_code == 200:
+            candles_raw = resp.json()
+            if isinstance(candles_raw, list) and candles_raw:
+                sorted_candles = []
+                for c in candles_raw:
+                    try:
+                        # v36-fix: DexPaprika uses time_open/time_close, NOT time/timestamp
+                        ts_str = c.get("time_open") or c.get("time_close") or c.get("time") or c.get("timestamp", "")
+                        if not ts_str:
+                            continue
+                        if ts_str.endswith("Z"):
+                            ts_dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                        else:
+                            ts_dt = datetime.fromisoformat(ts_str)
+                        sorted_candles.append([
+                            int(ts_dt.timestamp()),
+                            float(c.get("open", 0)),
+                            float(c.get("high", 0)),
+                            float(c.get("low", 0)),
+                            float(c.get("close", 0)),
+                            float(c.get("volume", 0)),
+                        ])
+                    except (ValueError, TypeError):
+                        continue
+                sorted_candles.sort(key=lambda x: x[0])
+                if sorted_candles:
+                    source = "dexpaprika_ohlcv"
+                else:
+                    sorted_candles = None
+    except requests.RequestException as e:
+        logger.debug("DexPaprika OHLCV failed for %s: %s", symbol, e)
+
+    # v32: reject SOL quote price leak
+    if sorted_candles and not _check_candle_sanity(sorted_candles, price_at, symbol, source):
+        sorted_candles = None
+
+    # 2. GeckoTerminal fallback (30 req/min — rate-limits fast, skip if circuit breaker tripped)
     global _gecko_consecutive_429s, _gecko_disabled
-    if not _gecko_disabled:
+    if sorted_candles is None and not _gecko_disabled:
+        num_candles_5m = int(window_seconds / 300) + 10
         try:
             _gecko_limiter.wait()
             resp = requests.get(
@@ -633,74 +689,19 @@ def _fetch_ohlcv_candles(
                 if _gecko_consecutive_429s >= _GECKO_429_THRESHOLD:
                     _gecko_disabled = True
                     logger.warning(
-                        "GeckoTerminal disabled for this run (%d consecutive 429s) — using DexPaprika/Birdeye",
+                        "GeckoTerminal disabled for this run (%d consecutive 429s) — using Birdeye",
                         _gecko_consecutive_429s,
                     )
                 else:
-                    logger.warning("GeckoTerminal rate limited — falling back to DexPaprika")
+                    logger.warning("GeckoTerminal rate limited — falling back to Birdeye")
         except requests.RequestException as e:
             logger.debug("GeckoTerminal OHLCV failed for %s: %s", symbol, e)
-
-    # v32: reject SOL quote price leak before fallback chain short-circuits
-    if sorted_candles and not _check_candle_sanity(sorted_candles, price_at, symbol, source):
-        sorted_candles = None
-
-    # Fallback: DexPaprika
-    if sorted_candles is None:
-        start_dt = datetime.fromtimestamp(start_ts, tz=timezone.utc)
-        end_dt = datetime.fromtimestamp(end_ts, tz=timezone.utc)
-        num_candles_15m = int(window_seconds / 900) + 10
-        try:
-            resp = requests.get(
-                f"{DEXPAPRIKA_BASE}/networks/solana/pools/{pool_addr}/ohlcv",
-                params={
-                    "start": start_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                    "end": end_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                    "limit": min(1000, num_candles_15m),
-                    "interval": "15m",
-                },
-                timeout=15,
-            )
-            time.sleep(0.3)
-            stats["api_calls"] += 1
-
-            if resp.status_code == 200:
-                candles_raw = resp.json()
-                if isinstance(candles_raw, list) and candles_raw:
-                    sorted_candles = []
-                    for c in candles_raw:
-                        try:
-                            # v36-fix: DexPaprika uses time_open/time_close, NOT time/timestamp
-                            ts_str = c.get("time_open") or c.get("time_close") or c.get("time") or c.get("timestamp", "")
-                            if not ts_str:
-                                continue
-                            if ts_str.endswith("Z"):
-                                ts_dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-                            else:
-                                ts_dt = datetime.fromisoformat(ts_str)
-                            sorted_candles.append([
-                                int(ts_dt.timestamp()),
-                                float(c.get("open", 0)),
-                                float(c.get("high", 0)),
-                                float(c.get("low", 0)),
-                                float(c.get("close", 0)),
-                                float(c.get("volume", 0)),
-                            ])
-                        except (ValueError, TypeError):
-                            continue
-                    sorted_candles.sort(key=lambda x: x[0])
-                    if sorted_candles:
-                        source = "dexpaprika_ohlcv"
-                    else:
-                        sorted_candles = None
-        except requests.RequestException as e:
-            logger.debug("DexPaprika OHLCV failed for %s: %s", symbol, e)
 
     # v32: reject SOL quote price leak before Birdeye fallback
     if sorted_candles and not _check_candle_sanity(sorted_candles, price_at, symbol, source):
         sorted_candles = None
 
-    # Fallback 3: Birdeye OHLCV (uses token MINT address, not pool)
+    # 3. Birdeye OHLCV (uses token MINT address, not pool)
     # v31: Recovers tokens deindexed by GeckoTerminal/DexPaprika but still on-chain
     if sorted_candles is None and token_addr:
         birdeye_key = os.environ.get("BIRDEYE_API_KEY", "")
@@ -1627,13 +1628,15 @@ def _fetch_ohlcv_candles_kco(
     end_ts: float,
     symbol: str,
     stats: dict,
+    ref_price: float = 0.0,
 ) -> tuple[list | None, str]:
     """
-    Fetch OHLCV candles for KCO Phase B. Order: DexPaprika → Birdeye → GeckoTerminal.
+    Fetch OHLCV candles for KCO Phase B/C. Order: DexPaprika → Birdeye → GeckoTerminal.
 
     v36: DexPaprika is primary because GeckoTerminal rate limit is usually exhausted
     by fill_outcomes which runs first in the workflow. Birdeye uses token MINT address
     (no pool resolution needed) and recovers deindexed tokens.
+    v39: Added ref_price sanity check (same as _fetch_ohlcv_candles) to catch SOL price leaks.
     """
     sorted_candles = None
     source = "none"
@@ -1696,6 +1699,10 @@ def _fetch_ohlcv_candles_kco(
         except requests.RequestException as e:
             logger.debug("KCO DexPaprika OHLCV failed for %s: %s", symbol, e)
 
+    # v39: reject SOL quote price leak (same as _fetch_ohlcv_candles)
+    if sorted_candles and ref_price > 0 and not _check_candle_sanity(sorted_candles, ref_price, symbol, source):
+        sorted_candles = None
+
     # 2. Birdeye fallback (uses token MINT address — no pool needed, recovers deindexed tokens)
     if sorted_candles is None and token_addr:
         birdeye_key = os.environ.get("BIRDEYE_API_KEY", "")
@@ -1734,6 +1741,10 @@ def _fetch_ohlcv_candles_kco(
             except requests.RequestException as e:
                 logger.debug("KCO Birdeye OHLCV failed for %s: %s", symbol, e)
 
+    # v39: reject SOL quote price leak after Birdeye
+    if sorted_candles and ref_price > 0 and not _check_candle_sanity(sorted_candles, ref_price, symbol, source):
+        sorted_candles = None
+
     # 3. GeckoTerminal last (usually exhausted by main fill_outcomes)
     global _gecko_consecutive_429s, _gecko_disabled
     if sorted_candles is None and pool_addr and not _gecko_disabled:
@@ -1766,6 +1777,10 @@ def _fetch_ohlcv_candles_kco(
                     logger.warning("GeckoTerminal disabled (KCO Phase B)")
         except requests.RequestException as e:
             logger.debug("KCO GeckoTerminal OHLCV failed for %s: %s", symbol, e)
+
+    # v39: final sanity check on GeckoTerminal candles too
+    if sorted_candles and ref_price > 0 and not _check_candle_sanity(sorted_candles, ref_price, symbol, source):
+        sorted_candles = None
 
     return sorted_candles, source
 
@@ -1857,6 +1872,14 @@ def _kco_phase_b_entry_prices(client: Client, pool_cache: dict, stats: dict, sta
                 stats["skipped"] += 1
                 continue
 
+            # v39: SOL price leak filter — memecoin prices are always < $1.
+            # SOL prices are ~$85-200. If entry > $1, it's almost certainly SOL denomination.
+            if entry_price > 1.0:
+                logger.warning("KCO Phase B: SOL price leak for %s — entry=%.2f (%s), skipping",
+                               row.get("symbol", "?"), entry_price, source)
+                stats["skipped"] += 1
+                continue
+
             update_data = {
                 "entry_price": float(entry_price),
                 "price_source": source,
@@ -1885,6 +1908,7 @@ def _kco_phase_c_update_ath(client: Client, pool_cache: dict, stats: dict, start
             client.table("kol_call_outcomes")
             .select("id, token_address, symbol, call_timestamp, pair_address, entry_price, ath_after_call")
             .not_.is_("entry_price", "null")
+            .or_("outcome_status.is.null,outcome_status.eq.active")
             .order("last_checked_at", desc=False, nullsfirst=True)
             .limit(KCO_BATCH_LIMIT)
             .execute()
@@ -1925,16 +1949,15 @@ def _kco_phase_c_update_ath(client: Client, pool_cache: dict, stats: dict, start
 
         if not pool_addr:
             # v37: Mark old calls as dead if no pool can be found
+            # v39: Use outcome_status instead of fake ath sentinel
             for row in group:
                 ts = _parse_snapshot_ts(row["call_timestamp"])
                 if ts and (now_ts - ts) / 3600 > 72:
                     try:
-                        entry = float(row.get("entry_price") or 0)
-                        if entry > 0:
-                            client.table("kol_call_outcomes").update({
-                                "ath_after_call": round(entry * 0.001, 12),
-                                "last_checked_at": datetime.now(timezone.utc).isoformat(),
-                            }).eq("id", row["id"]).execute()
+                        client.table("kol_call_outcomes").update({
+                            "outcome_status": "dead_no_ohlcv",
+                            "last_checked_at": datetime.now(timezone.utc).isoformat(),
+                        }).eq("id", row["id"]).execute()
                     except Exception:
                         pass
             stats["skipped"] += len(group)
@@ -1955,10 +1978,12 @@ def _kco_phase_c_update_ath(client: Client, pool_cache: dict, stats: dict, start
         ref_symbol = group[0]["symbol"]
 
         # v36: Use DexPaprika-first (GeckoTerminal usually exhausted by fill_outcomes)
+        # v39: Pass ref_price for sanity checking against SOL price leaks
         candles, source = _fetch_ohlcv_candles_kco(
             pool_addr, token_addr,
             earliest_ts, now_ts,
             ref_symbol, stats,
+            ref_price=ref_price,
         )
 
         if not candles:
@@ -1968,10 +1993,10 @@ def _kco_phase_c_update_ath(client: Client, pool_cache: dict, stats: dict, start
                 call_age_h = (now_ts - call_ts_val) / 3600
                 if call_age_h > 72:
                     # Token is 3+ days old with no OHLCV data — mark as dead
+                    # v39: Use outcome_status instead of fake ath sentinel
                     try:
-                        entry = float(row["entry_price"])
                         client.table("kol_call_outcomes").update({
-                            "ath_after_call": round(entry * 0.001, 12),  # ~dead
+                            "outcome_status": "dead_no_ohlcv",
                             "last_checked_at": datetime.now(timezone.utc).isoformat(),
                         }).eq("id", row["id"]).execute()
                         stats["ath_updated"] += 1
@@ -1999,14 +2024,23 @@ def _kco_phase_c_update_ath(client: Client, pool_cache: dict, stats: dict, start
                         max_high = candle[2]
                         ath_ts = candle[0]
 
+            # v39: cross-validate denomination — reject insane ratios
+            entry = float(row["entry_price"])
+            if max_high > 0 and entry > 0:
+                ratio = max_high / entry
+                if ratio > 10000 or ratio < 0.0001:
+                    logger.warning("KCO Phase C: denomination mismatch %s — entry=%.10f, ath=%.10f (%.0fx), skipping",
+                                   row["symbol"], entry, max_high, ratio)
+                    stats["skipped"] += 1
+                    continue
+
             if max_high <= 0:
                 # v37-fix: same retry logic — don't mark checked if no data
                 call_age_h = (now_ts - call_ts) / 3600
                 if call_age_h > 72:
                     try:
-                        entry = float(row["entry_price"])
                         client.table("kol_call_outcomes").update({
-                            "ath_after_call": round(entry * 0.001, 12),
+                            "outcome_status": "dead_no_ohlcv",
                             "last_checked_at": datetime.now(timezone.utc).isoformat(),
                         }).eq("id", row["id"]).execute()
                         stats["ath_updated"] += 1
@@ -2020,6 +2054,7 @@ def _kco_phase_c_update_ath(client: Client, pool_cache: dict, stats: dict, start
 
             if max_high > current_ath:
                 update_data["ath_after_call"] = float(max_high)
+                update_data["ath_price_source"] = source  # v39: track ATH data source
                 if ath_ts:
                     update_data["ath_timestamp"] = datetime.fromtimestamp(ath_ts, tz=timezone.utc).isoformat()
                 if not row.get("pair_address") and pool_addr:
