@@ -21,7 +21,7 @@ from pipeline import (
     KNOWN_PROGRAM_ADDRESSES,
     EXCLUDED_TOKENS,
     _resolve_ca_to_symbol,
-    _resolve_pair_to_symbol,
+    _resolve_pair_to_symbol_and_ca,
     _load_ca_cache,
 )
 
@@ -76,7 +76,7 @@ def dump_debug_data(
                 if resolved and resolved not in EXCLUDED_TOKENS:
                     confirmed_symbols.add(resolved)
             for chain, pair_addr in DEXSCREENER_URL_REGEX.findall(text):
-                resolved = _resolve_pair_to_symbol(chain, pair_addr, ca_cache)
+                resolved, _ca = _resolve_pair_to_symbol_and_ca(chain, pair_addr, ca_cache)
                 if resolved and resolved not in EXCLUDED_TOKENS:
                     confirmed_symbols.add(resolved)
             for pump_addr in PUMP_FUN_URL_REGEX.findall(text):
@@ -88,7 +88,7 @@ def dump_debug_data(
                 if resolved and resolved not in EXCLUDED_TOKENS:
                     confirmed_symbols.add(resolved)
             for photon_addr in PHOTON_URL_REGEX.findall(text):
-                resolved = _resolve_pair_to_symbol("solana", photon_addr, ca_cache)
+                resolved, _ca = _resolve_pair_to_symbol_and_ca("solana", photon_addr, ca_cache)
                 if resolved and resolved not in EXCLUDED_TOKENS:
                     confirmed_symbols.add(resolved)
 

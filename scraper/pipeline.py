@@ -1991,6 +1991,11 @@ def load_scoring_config() -> None:
             "gate_top10_pct": 70,
             "gate_min_liquidity": 10000,
             "gate_min_holders": 30,
+            # v41: Feature computation constants (were hardcoded)
+            "consensus_norm_divisor": 0.10,
+            "breadth_norm_divisor": 10.0,
+            "mention_heat_epsilon": 1.0,
+            "mention_heat_cap": 10.0,
         }
         for key, default in _DYNAMIC_KEYS.items():
             SCORING_PARAMS[key] = float(row.get(key, default))
@@ -2489,7 +2494,7 @@ def aggregate_ranking(
             recency_weighted_unique += tw(g) * decay
         # v41: Was 0.05 (=2.95 with 59 KOLs → 2 S-tier maxed consensus). 0.10 (=5.9)
         # requires real agreement: ~4 S-tier or ~12 A-tier to reach 1.0.
-        kol_consensus = min(1.0, recency_weighted_unique / (total_kols * 0.10))
+        kol_consensus = min(1.0, recency_weighted_unique / (total_kols * SCORING_PARAMS["consensus_norm_divisor"]))
 
         avg_sentiment = sum(data["sentiments"]) / len(data["sentiments"])
         sentiment_score = (avg_sentiment + 1) / 2
@@ -2548,12 +2553,12 @@ def aggregate_ranking(
                 freshest = min(group_hours) if group_hours else 24
                 decay = _two_phase_decay(freshest)
                 weighted_mentions += kol_scores.get(kol, 1.0) * tw(kol) * count * decay
-            breadth_score = min(1.0, weighted_mentions / 10)
+            breadth_score = min(1.0, weighted_mentions / SCORING_PARAMS["breadth_norm_divisor"])
         else:
             # Fallback: decay total mentions by freshest overall mention
             freshest_overall = min(data["hours_ago"]) if data["hours_ago"] else 999
             decay = _two_phase_decay(freshest_overall)
-            breadth_score = min(1.0, (data["mentions"] * decay) / 10)
+            breadth_score = min(1.0, (data["mentions"] * decay) / SCORING_PARAMS["breadth_norm_divisor"])
 
         # --- Algorithm v3 A3: Sentiment consistency (low std = consensus) ---
         sentiment_consistency = 1.0
@@ -2586,7 +2591,9 @@ def aggregate_ranking(
         # v41: epsilon 0.1→1.0 (was exploding to 10*mentions when 2-6h=0), cap at 10.0
         mentions_1h = sum(1 for h in data["hours_ago"] if h <= 1)
         mentions_2h_6h = sum(1 for h in data["hours_ago"] if 2 < h <= 6)
-        mention_heat_ratio = min(10.0, mentions_1h / (mentions_2h_6h / 4 + 1.0)) if data["hours_ago"] else None
+        _mh_eps = SCORING_PARAMS["mention_heat_epsilon"]
+        _mh_cap = SCORING_PARAMS["mention_heat_cap"]
+        mention_heat_ratio = min(_mh_cap, mentions_1h / (mentions_2h_6h / 4 + _mh_eps)) if data["hours_ago"] else None
 
         # --- ML v2 Phase B: Social momentum phase classification ---
         if mention_acceleration > 0.2 and social_velocity > 0.3:

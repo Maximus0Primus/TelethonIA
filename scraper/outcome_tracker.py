@@ -855,23 +855,10 @@ def _label_snapshot(
     )
 
     update_data = {}
-    running_max = 0.0
-    running_did_2x = False
     symbol = snap["symbol"]
     snap_id = snap["id"]
 
-    # Check already-labeled shorter horizons for consistency
-    for hz in HORIZONS:
-        existing_max = snap.get(hz["max_col"])
-        existing_did = snap.get(hz["flag_col"])
-        if existing_max is not None and float(existing_max) > running_max:
-            running_max = float(existing_max)
-        if existing_did is True:
-            running_did_2x = True
-
-        if hz not in horizons_to_fill:
-            continue
-
+    for hz in horizons_to_fill:
         hours = hz["hours"]
         result_data = hz_results.get(hours)
 
@@ -881,12 +868,6 @@ def _label_snapshot(
         peak_ts_val = result_data["peak_ts"] if result_data else None
         t2x_hours = result_data["time_to_2x_hours"] if result_data else None
         bot_data = result_data["bot_data"] if result_data else None
-
-        # Consistency: inherit from shorter horizon if no OHLCV data
-        if max_price is None and running_max > 0:
-            max_price = running_max
-            last_close = None
-            stats["consistent"] += 1
 
         if max_price is None:
             # v39: If snapshot is old enough (2x horizon), mark with sentinel to prevent
@@ -906,13 +887,10 @@ def _label_snapshot(
             )
             continue
 
-        # Consistency floor
-        if running_max > 0 and max_price < running_max:
-            max_price = running_max
-
+        # v41: Removed consistency floor. Each horizon computes its own did_2x
+        # from its own candles. In memecoins, a 5min 2x spike that crashes by 24h
+        # should NOT label 24h as did_2x=True. Realistic labels > mathematical consistency.
         did_2x = max_price >= (price_at * 2.0)
-        if running_did_2x and not did_2x:
-            did_2x = True
 
         # Validate last_close
         safe_close = last_close
@@ -941,12 +919,6 @@ def _label_snapshot(
             update_data[f"time_to_sl30_min{hz_suffix}"] = bot_data.get("t_sl30")
             update_data[f"time_to_sl50_min{hz_suffix}"] = bot_data.get("t_sl50")
             update_data[f"max_dd_before_tp_pct{hz_suffix}"] = bot_data.get("max_dd_pct")
-
-        # Update running max for next horizons
-        if max_price > running_max:
-            running_max = max_price
-        if did_2x:
-            running_did_2x = True
 
         if did_2x:
             logger.info(
@@ -1142,8 +1114,9 @@ def fill_outcomes() -> None:
 
 def _fix_existing_inconsistencies(client: Client) -> None:
     """
-    Fix historical data where max_6h > max_12h (physically impossible).
-    If a shorter horizon has a higher max, propagate it to all longer horizons.
+    v41: Only fix implausible values (SOL price leaks). No longer propagates
+    shorter-horizon max_price to longer horizons — each horizon stands on its own.
+    In memecoins, 1h can spike 2x while 24h doesn't. That's reality, not inconsistency.
     """
     try:
         result = (
@@ -1166,38 +1139,23 @@ def _fix_existing_inconsistencies(client: Client) -> None:
         if price_at <= 0:
             continue
 
-        # Collect all known max prices
-        maxes = {h["hours"]: float(snap[h["max_col"]]) if snap.get(h["max_col"]) else None for h in HORIZONS}
-
-        # Compute running max (longer window must be >= shorter window)
-        running_max = 0.0
         updates = {}
         horizon_map = {h["hours"]: h for h in HORIZONS}
 
         for h in [hz["hours"] for hz in HORIZONS]:
-            val = maxes[h]
+            hz = horizon_map[h]
+            val = float(snap[hz["max_col"]]) if snap.get(hz["max_col"]) else None
             if val is not None:
                 # Sanity check: reject implausible values (SOL price leak)
                 max_ratio = MAX_PLAUSIBLE_RATIO.get(h, 500)
                 if price_at > 0 and val / price_at > max_ratio:
                     logger.warning(
-                        "Implausible consistency val for %s/%dh: %.6f -> %.6f (%.0fx), nullifying",
+                        "Implausible val for %s/%dh: %.6f -> %.6f (%.0fx), nullifying",
                         snap["symbol"], h, price_at, val, val / price_at,
                     )
-                    hz = horizon_map[h]
                     updates[hz["max_col"]] = None
                     updates[hz["price_col"]] = None
                     updates[hz["flag_col"]] = None
-                    continue
-                if val < running_max:
-                    hz = horizon_map[h]
-                    new_did_2x = running_max >= (price_at * 2.0)
-                    updates[hz["max_col"]] = running_max
-                    updates[hz["price_col"]] = running_max
-                    updates[hz["flag_col"]] = new_did_2x
-                else:
-                    running_max = val
-            # Also propagate running_max forward even if this horizon is NULL
 
         if updates:
             try:
@@ -1207,7 +1165,7 @@ def _fix_existing_inconsistencies(client: Client) -> None:
                 logger.warning("Failed to fix inconsistency for %s: %s", snap["symbol"], e)
 
     if fixed > 0:
-        logger.info("Fixed %d snapshots with window inconsistencies", fixed)
+        logger.info("Fixed %d snapshots with implausible values", fixed)
 
 
 def _fill_first_call_prices(client: Client, pool_cache: dict) -> None:
