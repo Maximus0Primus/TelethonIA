@@ -8,7 +8,7 @@ on:
 
 concurrency:
   group: outcome-labels
-  cancel-in-progress: false  # Let running job finish, skip new one
+  cancel-in-progress: true  # v42: Kill stuck runs instead of blocking forever
 
 jobs:
   fill-outcomes:
