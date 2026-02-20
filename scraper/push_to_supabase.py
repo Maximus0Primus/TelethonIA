@@ -111,6 +111,14 @@ NUMERIC_LIMITS = {
     "entry_drift_mult": 1.0,
     "price_velocity": 9999.999,
     "price_drift_from_first_seen": 9999999.999,
+    # v42: price_change columns are numeric(8,4) — max 9999.9999
+    "price_change_1h": 9999.9999,
+    "price_change_5m": 9999.9999,
+    "price_change_6h": 9999.9999,
+    "price_change_24h": 9999.9999,
+    "trade_24h_change": 9999.9999,
+    "unique_wallet_24h_change": 9999.9999,
+    "sentiment_amplification": 99.9999,
     # v25: Message-level text features
     "call_type_score": 999.999,
     "avg_msg_length": 9999999.9,
