@@ -2,8 +2,9 @@ name: Fill Outcome Labels
 
 on:
   schedule:
-    # Every 30 min — batch-optimized: 1 OHLCV call per token labels all horizons
-    - cron: '*/30 * * * *'
+    # Every 60 min — jobs take 35-55min, 60min gives buffer before next trigger.
+    # cancel-in-progress: true means stuck runs (>60min) get killed by the next one.
+    - cron: '0 * * * *'
   workflow_dispatch: {} # Manual trigger
 
 concurrency:
