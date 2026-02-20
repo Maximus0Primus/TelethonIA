@@ -973,9 +973,6 @@ def fill_outcomes() -> None:
                     "max_price_1h, max_price_6h, max_price_12h, max_price_24h, max_price_48h, max_price_72h, max_price_7d, "
                     "did_2x_1h, did_2x_6h, did_2x_12h, did_2x_24h, did_2x_48h, did_2x_72h, did_2x_7d")
             .or_(filter_str)
-            # v33: Skip phantom scores (pre-v28 hard-gated tokens with no components).
-            # They have inflated scores (54-69) and jump to front of queue, blocking real tokens.
-            .not_.is_("consensus_val", "null")
             # v36-fix: FIFO ordering (oldest first) instead of score-DESC.
             # Score-DESC caused zombies to starve fresh snapshots.
             .order("snapshot_at", desc=False)
@@ -1789,6 +1786,8 @@ def _kco_phase_b_entry_prices(client: Client, pool_cache: dict, stats: dict, sta
             client.table("kol_call_outcomes")
             .select("id, token_address, symbol, call_timestamp, pair_address")
             .is_("entry_price", "null")
+            .is_("outcome_status", "null")          # v42: skip already-dead rows
+            .order("call_timestamp", desc=False)     # v42: FIFO — oldest first
             .limit(KCO_BATCH_LIMIT)
             .execute()
         )
@@ -1849,7 +1848,22 @@ def _kco_phase_b_entry_prices(client: Client, pool_cache: dict, stats: dict, sta
         )
 
         if not candles:
-            stats["skipped"] += len(call_entries)
+            # v42: Mark old calls as dead instead of retrying forever.
+            # Calls older than 5 days with no OHLCV data will never resolve.
+            age_cutoff = time.time() - 5 * 24 * 3600
+            old_ids = [row["id"] for row, ts in call_entries if ts < age_cutoff]
+            if old_ids:
+                try:
+                    client.table("kol_call_outcomes").update({
+                        "outcome_status": "dead_no_ohlcv",
+                        "last_checked_at": datetime.now(timezone.utc).isoformat(),
+                    }).in_("id", old_ids).execute()
+                    stats["dead_marked"] = stats.get("dead_marked", 0) + len(old_ids)
+                    logger.info("KCO Phase B: marked %d old calls dead for %s (no OHLCV after 5d)",
+                                len(old_ids), group[0]["symbol"])
+                except Exception as e:
+                    logger.error("KCO Phase B: failed to mark dead for %s: %s", token_addr, e)
+            stats["skipped"] += len(call_entries) - len(old_ids)
             continue
 
         # Extract entry price for each KOL call from the shared candle data

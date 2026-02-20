@@ -2982,32 +2982,29 @@ def aggregate_ranking(
         elif pc24_act is not None and pc24_act > 50:
             activity_mult = min(activity_mult, 1.10)  # Reduced bonus
 
-        # v35: Momentum multiplier — combines top 3 proxy signals into [0.70, 1.40]
-        # kol_freshness (proxy kol_arrival_rate r=+0.42), mention_heat_ratio (proxy mention_velocity r=+0.41),
-        # short_term_heat (r=+0.36). These were the #2/#3/#4 predictors but weren't in scoring.
+        # v35/v42: Momentum multiplier — combines top 3 proxy signals into [0.70, 1.40]
+        # v42 fix: kol_freshness=0 and mention_heat_ratio=0 are NORMAL (90%+ of tokens).
+        # Treat zero as neutral (1.0), only boost tokens with genuine momentum signals.
+        # Old code penalized 0→0.85, causing 79% of tokens to hit the 0.70 floor.
         kol_fresh = token.get("kol_freshness")
         kol_fresh_factor = 1.0
-        if kol_fresh is not None:
-            if kol_fresh >= 0.6:
-                kol_fresh_factor = 1.20   # most KOLs called recently
-            elif kol_fresh >= 0.3:
-                kol_fresh_factor = 1.10
-            elif kol_fresh > 0:
-                kol_fresh_factor = 1.0
+        if kol_fresh is not None and kol_fresh > 0:
+            if kol_fresh >= 0.5:
+                kol_fresh_factor = 1.20   # majority of KOLs called within 2h
+            elif kol_fresh >= 0.2:
+                kol_fresh_factor = 1.10   # solid fresh presence
             else:
-                kol_fresh_factor = 0.85   # no fresh KOL calls
+                kol_fresh_factor = 1.05   # some fresh KOL calls
 
         mhr = token.get("mention_heat_ratio")
         mention_heat_factor = 1.0
-        if mhr is not None:
-            if mhr >= 3.0:
+        if mhr is not None and mhr > 0:
+            if mhr >= 2.0:
                 mention_heat_factor = 1.15   # mentions accelerating fast
-            elif mhr >= 1.5:
+            elif mhr >= 1.0:
+                mention_heat_factor = 1.10
+            elif mhr >= 0.3:
                 mention_heat_factor = 1.05
-            elif mhr >= 0.5:
-                mention_heat_factor = 1.0
-            else:
-                mention_heat_factor = 0.85   # mentions dying off
 
         sth = token.get("short_term_heat")
         vol_heat_factor = 1.0
@@ -3016,8 +3013,8 @@ def aggregate_ranking(
                 vol_heat_factor = 1.10   # volume surge
             elif sth >= 1.5:
                 vol_heat_factor = 1.05
-            elif sth < 0.5:
-                vol_heat_factor = 0.90   # volume fading
+            elif sth < 0.3:
+                vol_heat_factor = 0.95   # volume nearly dead
 
         momentum_mult = max(0.70, min(1.40, kol_fresh_factor * mention_heat_factor * vol_heat_factor))
         token["momentum_mult"] = momentum_mult
