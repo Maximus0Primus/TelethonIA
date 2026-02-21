@@ -11,6 +11,8 @@ fallback to raw DexScreener heuristics when OHLCV data or pandas-ta is missing.
 
 Returns a price_action_multiplier in [pa_norm_floor, pa_norm_cap] applied to the final score.
 Default bounds: [0.4, 1.3]. Overridable via pa_norm_floor/pa_norm_cap kwargs.
+
+v46: All thresholds/factors configurable via pa_config JSONB from scoring_config.
 """
 
 import logging
@@ -28,6 +30,83 @@ try:
 except ImportError:
     _HAS_PANDAS_TA = False
     logger.info("pandas-ta not installed — using raw heuristic fallbacks for price action")
+
+
+# v46: Default PA config — matches all pre-v46 hardcoded behavior exactly.
+_DEFAULT_PA_CONFIG = {
+    # Position vs ATH (ascending thresholds for _tier_lookup)
+    "pos_thresholds": [0.10, 0.20, 0.50, 0.70, 0.90],
+    "pos_factors": [0.4, 0.8, 1.3, 0.9, 0.6, 0.4],
+
+    # RSI-based direction classification
+    "rsi_hard_pump": 80, "rsi_pump": 70,
+    "rsi_freefall": 20, "rsi_dying": 30,
+    "rsi_bounce_upper": 40, "rsi_plateau_lower": 40, "rsi_plateau_upper": 60,
+    "rsi_strong_bounce_slope": 3, "rsi_plateau_slope_max": 3,
+
+    # Direction multipliers (v27: all penalties set to 1.0, now configurable via Optuna)
+    "dir_hard_pump_mult": 1.0,
+    "dir_pump_mult": 1.0,
+    "dir_freefall_mult": 1.0,
+    "dir_dying_mult": 1.0,
+    "dir_strong_bounce_mult": 1.4,
+    "dir_bounce_mult": 1.3,
+    "dir_plateau_mult": 1.1,
+    "dir_macd_bonus": 0.1,
+    "dir_cap": 1.5,
+
+    # Fallback direction thresholds (DexScreener heuristics)
+    "fb_hard_pump_1h": 50, "fb_hard_pump_5m": 25, "fb_hard_pump_mult": 1.0,
+    "fb_pump_1h": 20, "fb_pump_5m": 10, "fb_pump_mult": 1.0,
+    "fb_dying_1h": -10, "fb_dying_6h": -30, "fb_dying_mult": 1.0,
+    "fb_freefall_1h": -20, "fb_freefall_5m": -10, "fb_freefall_mult": 1.0,
+    "fb_plateau_1h": 5, "fb_plateau_6h": 10, "fb_plateau_mult": 1.1,
+    "fb_bounce_6h": -15, "fb_bounce_1h": 5, "fb_bounce_mult": 1.3,
+    "fb_strong_bounce_6h": -30, "fb_strong_bounce_1h": 10, "fb_strong_bounce_mult": 1.4,
+    "fb_bsr_bounce_bonus": 0.1, "fb_bsr_bounce_threshold": 0.6,
+    "fb_bsr_dead_cat_penalty": 0.2, "fb_bsr_dead_cat_threshold": 0.4,
+
+    # pc24h fallback direction
+    "pc24_freefall": -60, "pc24_freefall_mult": 1.0,
+    "pc24_dying": -40, "pc24_dying_mult": 1.0,
+    "pc24_bleeding": -20, "pc24_bleeding_mult": 1.0,
+    "pc24_pumping_hard": 100, "pc24_pumping_hard_mult": 1.0,
+    "pc24_pumping": 50, "pc24_pumping_mult": 1.0,
+
+    # pc24h position fallback
+    "pc24_pos_crash70_mult": 0.4, "pc24_pos_crash50_mult": 0.6, "pc24_pos_crash30_mult": 0.8,
+    "pc24_pos_pump200_mult": 0.5, "pc24_pos_pump100_mult": 0.6,
+
+    # Volume confirmation (OBV path)
+    "obv_strong_accum": 2.0, "obv_strong_mult": 1.3,
+    "obv_mod_accum": 0.5, "obv_mod_mult": 1.2,
+    "obv_dead_cat": -0.5, "obv_dead_cat_mult": 0.6,
+    "obv_pump_exhaust": -0.5, "obv_pump_exhaust_mult": 0.7,
+    "obv_bottom_accum": 1.0, "obv_bottom_mult": 1.2,
+
+    # Volume confirmation fallback
+    "ush_high": 2.0, "ush_high_mult": 1.3,
+    "ush_mid": 1.2, "ush_mid_mult": 1.1,
+    "ush_low": 0.3, "ush_low_mult": 0.6,
+    "vol_conc_high": 0.3, "vol_conc_high_mult": 1.2,
+    "vol_conc_mid": 0.1, "vol_conc_mid_mult": 1.05,
+    "vol_conc_dead": 0.02, "vol_conc_dead_mult": 0.6,
+
+    # Support detection
+    "bb_strong_pctb": 0.1, "bb_strong_mult": 1.2,
+    "bb_near_pctb": 0.2, "bb_near_mult": 1.15,
+    "candle_strong_count": 3, "candle_strong_mult": 1.15,
+    "candle_bounce_count": 2, "candle_bounce_mult": 1.2,
+    "support_tolerance": 0.03,
+}
+
+
+def _pa_tier_lookup(value: float, thresholds: list, factors: list) -> float:
+    """Generic tier lookup: walk ascending thresholds, return matching factor."""
+    for i, t in enumerate(thresholds):
+        if value < t:
+            return factors[i]
+    return factors[-1]
 
 
 def _candles_to_dataframe(candle_data: list[dict] | None) -> pd.DataFrame | None:
@@ -119,20 +198,33 @@ def _compute_ta_indicators(df: pd.DataFrame) -> dict:
     return indicators
 
 
-def compute_price_action_score(token: dict, *, pa_norm_floor: float = 0.4, pa_norm_cap: float = 1.3) -> dict:
+def compute_price_action_score(
+    token: dict,
+    *,
+    pa_norm_floor: float = 0.4,
+    pa_norm_cap: float = 1.3,
+    pa_config: dict | None = None,
+) -> dict:
     """
     Analyze price action from OHLCV candles and DexScreener price changes.
 
     Dual-path: uses pandas-ta indicators when candle data is available,
     falls back to raw DexScreener heuristics per submultiplier.
 
+    v46: All thresholds read from pa_config. Defaults match pre-v46 behavior.
+
     Returns dict with:
-        price_action_mult: float [0.4, 1.3] — multiplier for final score
+        price_action_mult: float [pa_norm_floor, pa_norm_cap] — multiplier for final score
         position_mult, direction_mult, vol_confirm, support_mult
         momentum_direction: str — human-readable label
         price_action_score: float — normalized [0, 1] for base score component
         rsi_14, macd_histogram, bb_width, bb_pct_b, obv_slope_norm — ML features
     """
+    # v46: Merge config with defaults (config overrides defaults)
+    cfg = _DEFAULT_PA_CONFIG.copy()
+    if pa_config:
+        cfg.update(pa_config)
+
     # Compute TA indicators from OHLCV candles (if available)
     candle_data = token.get("candle_data")
     df = _candles_to_dataframe(candle_data)
@@ -148,27 +240,21 @@ def compute_price_action_score(token: dict, *, pa_norm_floor: float = 0.4, pa_no
     }
 
     # ===================================================================
-    # 1. Position vs ATH (unchanged — ath_ratio buckets work well)
+    # 1. Position vs ATH — v46: thresholds from config
     # ===================================================================
     ath_ratio = token.get("ath_ratio")
     position_mult = 1.0
 
     if ath_ratio is not None:
-        if ath_ratio > 0.90:
-            position_mult = 0.4
-        elif ath_ratio > 0.70:
-            position_mult = 0.6
-        elif ath_ratio > 0.50:
-            position_mult = 0.9
-        elif ath_ratio >= 0.20:
-            position_mult = 1.3    # Sweet spot: 50-80% dip from ATH
-        elif ath_ratio >= 0.10:
-            position_mult = 0.8
-        else:
-            position_mult = 0.4
+        position_mult = _pa_tier_lookup(
+            ath_ratio,
+            cfg["pos_thresholds"],
+            cfg["pos_factors"],
+        )
 
     # ===================================================================
     # 2. Momentum Direction — RSI + MACD if available, else raw thresholds
+    # v46: all multipliers from config (direction penalties now tunable)
     # ===================================================================
     pc_5m = token.get("price_change_5m") or 0
     pc_1h = token.get("price_change_1h") or 0
@@ -183,110 +269,107 @@ def compute_price_action_score(token: dict, *, pa_norm_floor: float = 0.4, pa_no
 
     if rsi is not None:
         # RSI-based momentum classification
-        # v27: direction_mult only applies BONUSES (>=1.0). Pump/crash penalties
-        # are handled by pump_momentum_pen and death_penalty in the chain,
-        # so penalizing here too was double-counting.
-        if rsi > 80:
-            direction_mult = 1.0  # v27: was 0.3 — pump_momentum_pen handles this
+        if rsi > cfg["rsi_hard_pump"]:
+            direction_mult = cfg["dir_hard_pump_mult"]
             momentum_direction = "hard_pumping"
-        elif rsi > 70:
-            direction_mult = 1.0  # v27: was 0.5 — pump_momentum_pen handles this
+        elif rsi > cfg["rsi_pump"]:
+            direction_mult = cfg["dir_pump_mult"]
             momentum_direction = "pumping"
-        elif rsi < 20:
-            direction_mult = 1.0  # v27: was 0.3 — death_penalty handles this
+        elif rsi < cfg["rsi_freefall"]:
+            direction_mult = cfg["dir_freefall_mult"]
             momentum_direction = "freefall"
-        elif rsi < 30 and rsi_slope <= 0:
-            direction_mult = 1.0  # v27: was 0.5 — death_penalty handles this
+        elif rsi < cfg["rsi_dying"] and rsi_slope <= 0:
+            direction_mult = cfg["dir_dying_mult"]
             momentum_direction = "dying"
-        elif rsi < 40 and rsi_slope > 3 and macd_hist is not None and macd_hist > 0:
-            direction_mult = 1.4
+        elif (rsi < cfg["rsi_bounce_upper"]
+              and rsi_slope > cfg["rsi_strong_bounce_slope"]
+              and macd_hist is not None and macd_hist > 0):
+            direction_mult = cfg["dir_strong_bounce_mult"]
             momentum_direction = "strong_bounce"
-        elif 30 <= rsi < 40 and rsi_slope > 0:
-            direction_mult = 1.3
+        elif cfg["rsi_dying"] <= rsi < cfg["rsi_bounce_upper"] and rsi_slope > 0:
+            direction_mult = cfg["dir_bounce_mult"]
             momentum_direction = "bouncing"
-        elif 40 <= rsi <= 60 and abs(rsi_slope) < 3:
-            direction_mult = 1.1
+        elif (cfg["rsi_plateau_lower"] <= rsi <= cfg["rsi_plateau_upper"]
+              and abs(rsi_slope) < cfg["rsi_plateau_slope_max"]):
+            direction_mult = cfg["dir_plateau_mult"]
             momentum_direction = "plateau"
 
-        # MACD confirmation adjustment (only for bonuses now)
+        # MACD confirmation adjustment
         if macd_hist is not None:
             if momentum_direction in ("bouncing", "strong_bounce") and macd_hist > 0:
-                direction_mult = min(1.5, direction_mult + 0.1)
+                direction_mult = min(cfg["dir_cap"], direction_mult + cfg["dir_macd_bonus"])
     else:
         # Fallback: multi-signal DexScreener heuristics (no OHLCV candles)
-        # Uses price changes, buy/sell ratios, and volume concentration
         bsr_5m = token.get("buy_sell_ratio_5m") or 0.5
         bsr_1h = token.get("buy_sell_ratio_1h") or 0.5
 
-        is_hard_pumping = pc_1h > 50 or pc_5m > 25
-        is_pumping = pc_1h > 20 or pc_5m > 10
-        is_dying = pc_1h < -10 and pc_6h < -30
-        is_freefall = pc_1h < -20 and pc_5m < -10
-        is_plateau = abs(pc_1h) < 5 and abs(pc_6h) < 10
-        is_bouncing = pc_6h < -15 and pc_1h > 5
-        is_strong_bounce = pc_6h < -30 and pc_1h > 10
+        is_hard_pumping = pc_1h > cfg["fb_hard_pump_1h"] or pc_5m > cfg["fb_hard_pump_5m"]
+        is_pumping = pc_1h > cfg["fb_pump_1h"] or pc_5m > cfg["fb_pump_5m"]
+        is_dying = pc_1h < cfg["fb_dying_1h"] and pc_6h < cfg["fb_dying_6h"]
+        is_freefall = pc_1h < cfg["fb_freefall_1h"] and pc_5m < cfg["fb_freefall_5m"]
+        is_plateau = abs(pc_1h) < cfg["fb_plateau_1h"] and abs(pc_6h) < cfg["fb_plateau_6h"]
+        is_bouncing_fb = pc_6h < cfg["fb_bounce_6h"] and pc_1h > cfg["fb_bounce_1h"]
+        is_strong_bounce = pc_6h < cfg["fb_strong_bounce_6h"] and pc_1h > cfg["fb_strong_bounce_1h"]
 
-        # v27: direction_mult only applies BONUSES — penalties handled by chain multipliers
         if is_hard_pumping:
-            direction_mult = 1.0  # v27: was 0.3
+            direction_mult = cfg["fb_hard_pump_mult"]
             momentum_direction = "hard_pumping"
         elif is_pumping:
-            direction_mult = 1.0  # v27: was 0.5
+            direction_mult = cfg["fb_pump_mult"]
             momentum_direction = "pumping"
         elif is_freefall:
-            direction_mult = 1.0  # v27: was 0.3
+            direction_mult = cfg["fb_freefall_mult"]
             momentum_direction = "freefall"
         elif is_dying:
-            direction_mult = 1.0  # v27: was 0.5
+            direction_mult = cfg["fb_dying_mult"]
             momentum_direction = "dying"
         elif is_strong_bounce:
-            direction_mult = 1.4
+            direction_mult = cfg["fb_strong_bounce_mult"]
             momentum_direction = "strong_bounce"
-        elif is_bouncing:
-            direction_mult = 1.3
+        elif is_bouncing_fb:
+            direction_mult = cfg["fb_bounce_mult"]
             momentum_direction = "bouncing"
         elif is_plateau:
-            direction_mult = 1.1
+            direction_mult = cfg["fb_plateau_mult"]
             momentum_direction = "plateau"
 
         # Buy/sell ratio confirmation: adjust direction_mult for bounce bonuses
-        if momentum_direction in ("bouncing", "strong_bounce") and bsr_1h > 0.6:
-            direction_mult = min(1.5, direction_mult + 0.1)  # buyers confirm bounce
-        elif momentum_direction in ("bouncing", "strong_bounce") and bsr_1h < 0.4:
-            direction_mult = max(1.0, direction_mult - 0.2)  # v27: floor at 1.0
+        if momentum_direction in ("bouncing", "strong_bounce") and bsr_1h > cfg["fb_bsr_bounce_threshold"]:
+            direction_mult = min(cfg["dir_cap"], direction_mult + cfg["fb_bsr_bounce_bonus"])
+        elif momentum_direction in ("bouncing", "strong_bounce") and bsr_1h < cfg["fb_bsr_dead_cat_threshold"]:
+            direction_mult = max(1.0, direction_mult - cfg["fb_bsr_dead_cat_penalty"])
 
     # v9: When fallback leaves momentum "neutral", use pc24h as tiebreaker
-    # v27: Only set direction label, no penalty (chain multipliers handle penalties)
     pc_24h = token.get("price_change_24h") or 0
     if rsi is None and momentum_direction == "neutral" and pc_24h:
-        if pc_24h < -60:
-            direction_mult = 1.0  # v27: was 0.3
+        if pc_24h < cfg["pc24_freefall"]:
+            direction_mult = cfg["pc24_freefall_mult"]
             momentum_direction = "freefall"
-        elif pc_24h < -40:
-            direction_mult = 1.0  # v27: was 0.5
+        elif pc_24h < cfg["pc24_dying"]:
+            direction_mult = cfg["pc24_dying_mult"]
             momentum_direction = "dying"
-        elif pc_24h < -20:
-            direction_mult = 1.0  # v27: was 0.7
+        elif pc_24h < cfg["pc24_bleeding"]:
+            direction_mult = cfg["pc24_bleeding_mult"]
             momentum_direction = "bleeding"
-        elif pc_24h > 100:
-            direction_mult = 1.0  # v27: was 0.5
+        elif pc_24h > cfg["pc24_pumping_hard"]:
+            direction_mult = cfg["pc24_pumping_hard_mult"]
             momentum_direction = "pumping"
-        elif pc_24h > 50:
-            direction_mult = 1.0  # v27: was 0.7
+        elif pc_24h > cfg["pc24_pumping"]:
+            direction_mult = cfg["pc24_pumping_mult"]
             momentum_direction = "pumping"
 
     # v9: When ath_ratio is missing, use pc24h as proxy for position
     if ath_ratio is None and pc_24h:
         if pc_24h < -70:
-            position_mult = 0.4
+            position_mult = cfg["pc24_pos_crash70_mult"]
         elif pc_24h < -50:
-            position_mult = 0.6
+            position_mult = cfg["pc24_pos_crash50_mult"]
         elif pc_24h < -30:
-            position_mult = 0.8
+            position_mult = cfg["pc24_pos_crash30_mult"]
         elif pc_24h > 200:
-            position_mult = 0.5
+            position_mult = cfg["pc24_pos_pump200_mult"]
         elif pc_24h > 100:
-            position_mult = 0.6
+            position_mult = cfg["pc24_pos_pump100_mult"]
 
     # Derive boolean flags from momentum_direction for use in vol_confirm/support
     is_bouncing = momentum_direction in ("bouncing", "strong_bounce")
@@ -295,22 +378,23 @@ def compute_price_action_score(token: dict, *, pa_norm_floor: float = 0.4, pa_no
 
     # ===================================================================
     # 3. Volume Confirmation — OBV if available, else ultra_short_heat
+    # v46: all thresholds from config
     # ===================================================================
     obv_slope = indicators.get("obv_slope_norm")
     vol_confirm = 1.0
 
     if obv_slope is not None:
         # OBV-based volume confirmation
-        if is_bouncing and obv_slope > 2.0:
-            vol_confirm = 1.3    # Strong accumulation
-        elif is_bouncing and obv_slope > 0.5:
-            vol_confirm = 1.2    # Moderate accumulation
-        elif is_bouncing and obv_slope < -0.5:
-            vol_confirm = 0.6    # Dead cat bounce
-        elif is_pumping and obv_slope < -0.5:
-            vol_confirm = 0.7    # Pump losing steam
-        elif is_deep_dip and obv_slope > 1.0:
-            vol_confirm = 1.2    # Accumulation at bottom
+        if is_bouncing and obv_slope > cfg["obv_strong_accum"]:
+            vol_confirm = cfg["obv_strong_mult"]
+        elif is_bouncing and obv_slope > cfg["obv_mod_accum"]:
+            vol_confirm = cfg["obv_mod_mult"]
+        elif is_bouncing and obv_slope < cfg["obv_dead_cat"]:
+            vol_confirm = cfg["obv_dead_cat_mult"]
+        elif is_pumping and obv_slope < cfg["obv_pump_exhaust"]:
+            vol_confirm = cfg["obv_pump_exhaust_mult"]
+        elif is_deep_dip and obv_slope > cfg["obv_bottom_accum"]:
+            vol_confirm = cfg["obv_bottom_mult"]
     else:
         # Fallback: multi-signal volume confirmation from DexScreener
         vol_5m = token.get("volume_5m") or 0
@@ -331,22 +415,22 @@ def compute_price_action_score(token: dict, *, pa_norm_floor: float = 0.4, pa_no
         vol_signals = []
 
         # Signal 1: Ultra-short heat (is volume accelerating?)
-        if ultra_short_heat > 2.0:
-            vol_signals.append(1.3)
-        elif ultra_short_heat > 1.2:
-            vol_signals.append(1.1)
-        elif ultra_short_heat < 0.3:
-            vol_signals.append(0.6)
+        if ultra_short_heat > cfg["ush_high"]:
+            vol_signals.append(cfg["ush_high_mult"])
+        elif ultra_short_heat > cfg["ush_mid"]:
+            vol_signals.append(cfg["ush_mid_mult"])
+        elif ultra_short_heat < cfg["ush_low"]:
+            vol_signals.append(cfg["ush_low_mult"])
         else:
             vol_signals.append(1.0)
 
         # Signal 2: Volume concentration (is activity happening NOW?)
-        if vol_concentration > 0.3:    # >30% of daily vol in last hour
-            vol_signals.append(1.2)
-        elif vol_concentration > 0.1:
-            vol_signals.append(1.05)
-        elif vol_concentration < 0.02 and vol_24h > 0:  # <2% = dead
-            vol_signals.append(0.6)
+        if vol_concentration > cfg["vol_conc_high"]:
+            vol_signals.append(cfg["vol_conc_high_mult"])
+        elif vol_concentration > cfg["vol_conc_mid"]:
+            vol_signals.append(cfg["vol_conc_mid_mult"])
+        elif vol_concentration < cfg["vol_conc_dead"] and vol_24h > 0:
+            vol_signals.append(cfg["vol_conc_dead_mult"])
         else:
             vol_signals.append(1.0)
 
@@ -366,29 +450,30 @@ def compute_price_action_score(token: dict, *, pa_norm_floor: float = 0.4, pa_no
 
     # ===================================================================
     # 4. Support Detection — BBands %B + candle clustering
+    # v46: thresholds from config
     # ===================================================================
     support_mult = 1.0
     support_bounces = 0
     bb_pct_b = indicators.get("bb_pct_b")
 
     if candle_data:
-        support_bounces = count_support_touches(candle_data, tolerance=0.03)
+        support_bounces = count_support_touches(candle_data, tolerance=cfg["support_tolerance"])
 
     if bb_pct_b is not None:
         # BBands-enhanced support detection
-        if bb_pct_b <= 0.1 and is_bouncing:
-            support_mult = 1.2    # At lower band + bouncing = strong support
-        elif bb_pct_b <= 0.2 and support_bounces >= 2:
-            support_mult = 1.15   # Near lower band + candle support
-        elif support_bounces >= 3:
-            support_mult = 1.15   # Strong candle support regardless of BBands
+        if bb_pct_b <= cfg["bb_strong_pctb"] and is_bouncing:
+            support_mult = cfg["bb_strong_mult"]
+        elif bb_pct_b <= cfg["bb_near_pctb"] and support_bounces >= cfg["candle_bounce_count"]:
+            support_mult = cfg["bb_near_mult"]
+        elif support_bounces >= cfg["candle_strong_count"]:
+            support_mult = cfg["candle_strong_mult"]
     else:
         # Fallback: candle support only
         if candle_data:
-            if support_bounces >= 2 and is_bouncing:
-                support_mult = 1.2
-            elif support_bounces >= 3:
-                support_mult = 1.15
+            if support_bounces >= cfg["candle_bounce_count"] and is_bouncing:
+                support_mult = cfg["candle_bounce_mult"]
+            elif support_bounces >= cfg["candle_strong_count"]:
+                support_mult = cfg["candle_strong_mult"]
 
     # ===================================================================
     # Final: average of all 4 sub-multipliers, clamped to [pa_norm_floor, pa_norm_cap]

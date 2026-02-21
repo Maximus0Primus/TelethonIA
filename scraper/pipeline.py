@@ -2006,6 +2006,51 @@ _DEFAULT_SCORING_PARAMS = {
         "social_weights": [0.30, 0.25, 0.30, 0.15],
         "drift_factor": 0.25, "drift_floor": 0.50,
     },
+    # v46: Price Action config — all PA thresholds/factors configurable
+    "pa_config": {
+        "pos_thresholds": [0.10, 0.20, 0.50, 0.70, 0.90],
+        "pos_factors": [0.4, 0.8, 1.3, 0.9, 0.6, 0.4],
+        "rsi_hard_pump": 80, "rsi_pump": 70,
+        "rsi_freefall": 20, "rsi_dying": 30,
+        "rsi_bounce_upper": 40, "rsi_plateau_lower": 40, "rsi_plateau_upper": 60,
+        "rsi_strong_bounce_slope": 3, "rsi_plateau_slope_max": 3,
+        "dir_hard_pump_mult": 1.0, "dir_pump_mult": 1.0,
+        "dir_freefall_mult": 1.0, "dir_dying_mult": 1.0,
+        "dir_strong_bounce_mult": 1.4, "dir_bounce_mult": 1.3,
+        "dir_plateau_mult": 1.1, "dir_macd_bonus": 0.1, "dir_cap": 1.5,
+        "fb_hard_pump_1h": 50, "fb_hard_pump_5m": 25, "fb_hard_pump_mult": 1.0,
+        "fb_pump_1h": 20, "fb_pump_5m": 10, "fb_pump_mult": 1.0,
+        "fb_dying_1h": -10, "fb_dying_6h": -30, "fb_dying_mult": 1.0,
+        "fb_freefall_1h": -20, "fb_freefall_5m": -10, "fb_freefall_mult": 1.0,
+        "fb_plateau_1h": 5, "fb_plateau_6h": 10, "fb_plateau_mult": 1.1,
+        "fb_bounce_6h": -15, "fb_bounce_1h": 5, "fb_bounce_mult": 1.3,
+        "fb_strong_bounce_6h": -30, "fb_strong_bounce_1h": 10, "fb_strong_bounce_mult": 1.4,
+        "fb_bsr_bounce_bonus": 0.1, "fb_bsr_bounce_threshold": 0.6,
+        "fb_bsr_dead_cat_penalty": 0.2, "fb_bsr_dead_cat_threshold": 0.4,
+        "pc24_freefall": -60, "pc24_freefall_mult": 1.0,
+        "pc24_dying": -40, "pc24_dying_mult": 1.0,
+        "pc24_bleeding": -20, "pc24_bleeding_mult": 1.0,
+        "pc24_pumping_hard": 100, "pc24_pumping_hard_mult": 1.0,
+        "pc24_pumping": 50, "pc24_pumping_mult": 1.0,
+        "pc24_pos_crash70_mult": 0.4, "pc24_pos_crash50_mult": 0.6, "pc24_pos_crash30_mult": 0.8,
+        "pc24_pos_pump200_mult": 0.5, "pc24_pos_pump100_mult": 0.6,
+        "obv_strong_accum": 2.0, "obv_strong_mult": 1.3,
+        "obv_mod_accum": 0.5, "obv_mod_mult": 1.2,
+        "obv_dead_cat": -0.5, "obv_dead_cat_mult": 0.6,
+        "obv_pump_exhaust": -0.5, "obv_pump_exhaust_mult": 0.7,
+        "obv_bottom_accum": 1.0, "obv_bottom_mult": 1.2,
+        "ush_high": 2.0, "ush_high_mult": 1.3,
+        "ush_mid": 1.2, "ush_mid_mult": 1.1,
+        "ush_low": 0.3, "ush_low_mult": 0.6,
+        "vol_conc_high": 0.3, "vol_conc_high_mult": 1.2,
+        "vol_conc_mid": 0.1, "vol_conc_mid_mult": 1.05,
+        "vol_conc_dead": 0.02, "vol_conc_dead_mult": 0.6,
+        "bb_strong_pctb": 0.1, "bb_strong_mult": 1.2,
+        "bb_near_pctb": 0.2, "bb_near_mult": 1.15,
+        "candle_strong_count": 3, "candle_strong_mult": 1.15,
+        "candle_bounce_count": 2, "candle_bounce_mult": 1.2,
+        "support_tolerance": 0.03,
+    },
 }
 
 # Module-level cache: refreshed once per scrape cycle via load_scoring_config()
@@ -2109,6 +2154,8 @@ def load_scoring_config() -> None:
             # v45: Full multiplier chain optimization
             "safety_config", "onchain_config", "death_config",
             "entry_premium_config", "lifecycle_config", "entry_drift_config",
+            # v46: Price Action config
+            "pa_config",
         ]
         for key in _V44_JSONB_KEYS:
             val = row.get(key)
@@ -2961,6 +3008,7 @@ def aggregate_ranking(
             token,
             pa_norm_floor=SCORING_PARAMS["pa_norm_floor"],
             pa_norm_cap=SCORING_PARAMS["pa_norm_cap"],
+            pa_config=SCORING_PARAMS.get("pa_config"),
         )
         token.update(pa)
 

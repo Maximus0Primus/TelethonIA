@@ -2708,6 +2708,44 @@ def _compute_score_with_params(
         pa = row.get("price_action_score")
         pa_val = float(pa) if pd.notna(pa) else None
 
+    # v46: Recompute PA with trial direction penalties + norm bounds
+    pa_cfg = params.get("pa_config", {})
+    if pa_cfg and pa_val is not None:
+        stored_score = pa_val  # [0, 1] normalized
+        # Reverse normalization to get raw PA mult (stored with floor=0.4, cap=1.3)
+        orig_floor, orig_cap = 0.4, 1.3
+        if stored_score <= 0.5:
+            stored_pa_mult = orig_floor + stored_score * 2 * (1.0 - orig_floor)
+        else:
+            stored_pa_mult = 1.0 + (stored_score - 0.5) * 2 * (orig_cap - 1.0)
+        # Since v27 set direction=1.0: other_3 = position + vol_confirm + support
+        other_3_sum = 4 * stored_pa_mult - 1.0
+        # Recompute direction_mult from stored RSI
+        rsi_v = row.get("rsi_14")
+        new_direction = 1.0
+        if pd.notna(rsi_v):
+            rsi_f = float(rsi_v)
+            if rsi_f > pa_cfg.get("rsi_hard_pump", 80):
+                new_direction = pa_cfg.get("dir_hard_pump_mult", 1.0)
+            elif rsi_f > pa_cfg.get("rsi_pump", 70):
+                new_direction = pa_cfg.get("dir_pump_mult", 1.0)
+            elif rsi_f < pa_cfg.get("rsi_freefall", 20):
+                new_direction = pa_cfg.get("dir_freefall_mult", 1.0)
+            elif rsi_f < pa_cfg.get("rsi_dying", 30):
+                new_direction = pa_cfg.get("dir_dying_mult", 1.0)
+        # Corrected PA mult
+        corrected_pa_mult = (other_3_sum + new_direction) / 4.0
+        trial_floor = params.get("pa_norm_floor", orig_floor)
+        trial_cap = params.get("pa_norm_cap", orig_cap)
+        corrected_pa_mult = max(trial_floor, min(trial_cap, corrected_pa_mult))
+        # Re-normalize to [0, 1]
+        below = 1.0 - trial_floor
+        above = trial_cap - 1.0
+        if corrected_pa_mult <= 1.0:
+            pa_val = (corrected_pa_mult - trial_floor) / (below * 2) if below > 0 else 0.5
+        else:
+            pa_val = 0.5 + (corrected_pa_mult - 1.0) / (above * 2) if above > 0 else 0.5
+
     components = {
         "consensus": consensus,
         "conviction": conviction_val,
@@ -3076,7 +3114,7 @@ def _optuna_optimize_params(
     timeout: int = 900,
 ) -> dict | None:
     """
-    v45: Optuna study with ~59 search space parameters.
+    v46: Optuna study with ~65 search space parameters.
     Walk-forward inside objective: 70% oldest → train, 30% newest → evaluate.
     Returns best_params dict or None if no improvement.
     """
@@ -3253,6 +3291,27 @@ def _optuna_optimize_params(
             "drift_factor": ed_drift_factor, "drift_floor": ed_drift_floor,
         }
 
+        # --- v46: pa_config params (direction penalties + norm bounds) ---
+        pa_dir_pump = trial.suggest_float("pa_dir_pump_mult", 0.3, 1.0, step=0.05)
+        pa_dir_hard_pump = trial.suggest_float("pa_dir_hard_pump_mult", 0.3, 1.0, step=0.05)
+        pa_dir_freefall = trial.suggest_float("pa_dir_freefall_mult", 0.3, 1.0, step=0.05)
+        pa_dir_dying = trial.suggest_float("pa_dir_dying_mult", 0.5, 1.0, step=0.05)
+        # Ordered: hard_pump <= pump, freefall <= dying
+        if pa_dir_hard_pump > pa_dir_pump:
+            return -999.0
+        if pa_dir_freefall > pa_dir_dying:
+            return -999.0
+        params["pa_norm_floor"] = trial.suggest_float("pa_norm_floor", 0.2, 0.6, step=0.05)
+        params["pa_norm_cap"] = trial.suggest_float("pa_norm_cap", 1.0, 1.8, step=0.1)
+        params["pa_config"] = {
+            "rsi_hard_pump": 80, "rsi_pump": 70,
+            "rsi_freefall": 20, "rsi_dying": 30,
+            "dir_hard_pump_mult": pa_dir_hard_pump,
+            "dir_pump_mult": pa_dir_pump,
+            "dir_freefall_mult": pa_dir_freefall,
+            "dir_dying_mult": pa_dir_dying,
+        }
+
         # Evaluate on TRAIN set
         train_score = _evaluate_params(df_train, weights, params, horizon, threshold)
         return train_score
@@ -3347,6 +3406,17 @@ def _optuna_optimize_params(
                                max(0.1, 1.0 - bp["ed_kol_weight"] - bp["ed_fresh_weight"]) * 0.4],
             "drift_factor": bp["ed_drift_factor"], "drift_floor": bp["ed_drift_floor"],
         },
+        # v46: PA config
+        "pa_norm_floor": bp["pa_norm_floor"],
+        "pa_norm_cap": bp["pa_norm_cap"],
+        "pa_config": {
+            "rsi_hard_pump": 80, "rsi_pump": 70,
+            "rsi_freefall": 20, "rsi_dying": 30,
+            "dir_hard_pump_mult": bp["pa_dir_hard_pump_mult"],
+            "dir_pump_mult": bp["pa_dir_pump_mult"],
+            "dir_freefall_mult": bp["pa_dir_freefall_mult"],
+            "dir_dying_mult": bp["pa_dir_dying_mult"],
+        },
     }
 
     # Evaluate on TEST set (walk-forward validation)
@@ -3405,6 +3475,15 @@ def _optuna_optimize_params(
             "stier_divisor": 2, "social_weights": [0.30, 0.25, 0.30, 0.15],
             "drift_factor": 0.25, "drift_floor": 0.50,
         },
+        # v46: PA baseline (all direction penalties at 1.0 = current v27 behavior)
+        "pa_norm_floor": 0.4,
+        "pa_norm_cap": 1.3,
+        "pa_config": {
+            "rsi_hard_pump": 80, "rsi_pump": 70,
+            "rsi_freefall": 20, "rsi_dying": 30,
+            "dir_hard_pump_mult": 1.0, "dir_pump_mult": 1.0,
+            "dir_freefall_mult": 1.0, "dir_dying_mult": 1.0,
+        },
     }
     baseline_score = _evaluate_params(df_test, BALANCED_WEIGHTS, baseline_params, horizon, threshold)
 
@@ -3444,7 +3523,8 @@ def _optuna_optimize_params(
     # Guard-rail: no param > 30% change from current
     for key in ["activity_mult_floor", "activity_mult_cap", "s_tier_bonus",
                  "combined_floor", "combined_cap",
-                 "safety_floor", "onchain_mult_floor", "onchain_mult_cap"]:
+                 "safety_floor", "onchain_mult_floor", "onchain_mult_cap",
+                 "pa_norm_floor", "pa_norm_cap"]:
         current = baseline_params.get(key, best_params[key])
         new_val = best_params[key]
         if current > 0:
@@ -3498,8 +3578,12 @@ def _apply_optuna_params(client, best_weights: dict, best_params: dict, reason: 
             "entry_premium_config": best_params.get("entry_premium_config"),
             "lifecycle_config": best_params.get("lifecycle_config"),
             "entry_drift_config": best_params.get("entry_drift_config"),
+            # v46: PA config + norm bounds
+            "pa_norm_floor": best_params.get("pa_norm_floor", 0.4),
+            "pa_norm_cap": best_params.get("pa_norm_cap", 1.3),
+            "pa_config": best_params.get("pa_config"),
             "updated_at": datetime.now(timezone.utc).isoformat(),
-            "updated_by": "optuna_v45",
+            "updated_by": "optuna_v46",
             "change_reason": reason,
         }
         # Remove None values (don't write nulls for missing configs)
@@ -3570,7 +3654,7 @@ def run_optuna_optimization(n_trials: int = 200, dry_run: bool = False) -> dict 
         return result
 
     reason = (
-        f"optuna_v44: {n_labeled} tokens, {result['n_trials']} trials, "
+        f"optuna_v46: {n_labeled} tokens, {result['n_trials']} trials, "
         f"test_score {result['baseline_score']:.4f} -> {result['test_score']:.4f} "
         f"(+{result.get('improvement_pct', 0):.1f}%)"
     )
