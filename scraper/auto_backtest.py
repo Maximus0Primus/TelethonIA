@@ -163,7 +163,12 @@ SNAPSHOT_COLUMNS = (
     "time_to_2x_12h, time_to_2x_24h, "
     "jup_price_impact_1k, min_price_12h, min_price_24h, "
     "median_peak_return, entry_vs_median_peak, win_rate_7d, market_heat_24h, relative_volume, kol_saturation, "
-    "kol_freshness, mention_heat_ratio, momentum_mult, activity_ratio_raw, hype_pen, unique_kols"
+    "kol_freshness, mention_heat_ratio, momentum_mult, activity_ratio_raw, hype_pen, unique_kols, "
+    "whale_change, whale_direction, volume_mcap_ratio, liq_mcap_ratio, token_age_hours, "
+    "risk_score, helius_gini, bundle_pct, bundle_detected, helius_recent_tx_count, "
+    "helius_holder_count, helius_onchain_bsr, jup_tradeable, jito_max_slot_txns, "
+    "bubblemaps_score, bubblemaps_cluster_max_pct, bubblemaps_cex_pct, "
+    "is_pump_fun, price_change_1h, price_change_5m, pvp_recent_count"
 )
 
 
@@ -210,6 +215,14 @@ def _safe_mult(row: pd.Series, col: str, default: float = 1.0) -> float:
     """Read a multiplier from a snapshot row, defaulting if absent/null."""
     val = row.get(col)
     return float(val) if pd.notna(val) else default
+
+
+def _bt_tier_lookup(value: float, thresholds: list, factors: list) -> float:
+    """Config-driven tier lookup (mirrors pipeline._tier_lookup). Returns factor for first threshold above value."""
+    for i, t in enumerate(thresholds):
+        if value < t:
+            return factors[i]
+    return factors[-1]
 
 
 def _compute_score(row: pd.Series, weights: dict) -> int:
@@ -2767,22 +2780,154 @@ def _compute_score_with_params(
     raw = sum(v * (w / total_w) for v, w in available.values())
     base_score = raw * 100
 
-    # --- Multiplier chain (recompute what we can, use stored for the rest) ---
-    onchain = _safe_mult(row, "onchain_multiplier")
-    safety = _safe_mult(row, "safety_penalty")
+    # --- Multiplier chain (v48: recompute ALL multipliers from raw fields) ---
     pump_bonus = _safe_mult(row, "pump_bonus")
     manipulation_pen = _safe_mult(row, "wash_pen")
     pvp_pen = _safe_mult(row, "pvp_pen")
     gate_mult = _safe_mult(row, "gate_mult")
 
-    # v45: Apply trial safety_floor (at 1.0, safety is fully disabled)
-    safety_floor = params.get("safety_floor", 0.75)
-    safety = max(safety_floor, safety)
+    # v48: Recompute onchain_multiplier from raw fields + trial onchain_config
+    oc_cfg = params.get("onchain_config", {})
+    if oc_cfg:
+        oc_factors = []
+        vmr = row.get("volume_mcap_ratio")
+        if pd.notna(vmr):
+            oc_factors.append(min(1.5, 0.5 + float(vmr) * 2))
+        lmr = row.get("liq_mcap_ratio")
+        if pd.notna(lmr):
+            lmr_v = float(lmr)
+            if lmr_v < oc_cfg["lmr_low"]:
+                oc_factors.append(oc_cfg["lmr_low_factor"])
+            elif lmr_v > oc_cfg["lmr_high"]:
+                oc_factors.append(oc_cfg["lmr_high_factor"])
+            else:
+                oc_factors.append(0.8 + lmr_v * 4)
+        age = row.get("token_age_hours")
+        if pd.notna(age):
+            oc_factors.append(_bt_tier_lookup(float(age), oc_cfg["age_thresholds"], oc_cfg["age_factors"]))
+        recent_tx = row.get("helius_recent_tx_count")
+        if pd.notna(recent_tx):
+            rtx = float(recent_tx)
+            if rtx > 40:
+                oc_factors.append(1.3)
+            elif rtx > 20:
+                oc_factors.append(1.1)
+            elif rtx < 5:
+                oc_factors.append(0.7)
+        h_bsr = row.get("helius_onchain_bsr")
+        if pd.notna(h_bsr):
+            oc_factors.append(0.5 + float(h_bsr))
+        jup_t_val = row.get("jup_tradeable")
+        jup_imp = row.get("jup_price_impact_1k")
+        if pd.notna(jup_t_val):
+            if int(jup_t_val) == 0:
+                oc_factors.append(0.5)
+            elif pd.notna(jup_imp):
+                oc_factors.append(_bt_tier_lookup(float(jup_imp), oc_cfg["jup_impact_thresholds"], oc_cfg["jup_impact_factors"]))
+        wc_val = row.get("whale_change")
+        if pd.notna(wc_val):
+            oc_factors.append(_bt_tier_lookup(float(wc_val), oc_cfg["whale_change_thresholds"], oc_cfg["whale_change_factors"]))
+        txn_cnt = row.get("txn_count_24h")
+        h_holders = row.get("helius_holder_count") if pd.notna(row.get("helius_holder_count")) else row.get("holder_count")
+        if pd.notna(txn_cnt) and pd.notna(h_holders) and float(h_holders) > 0:
+            velocity = float(txn_cnt) / float(h_holders)
+            oc_factors.append(_bt_tier_lookup(velocity, oc_cfg["velocity_thresholds"], oc_cfg["velocity_factors"]))
+        elif pd.notna(txn_cnt) and float(txn_cnt) > 0:
+            oc_factors.append(_bt_tier_lookup(float(txn_cnt), oc_cfg.get("tx_thresholds", [5, 20, 40]), oc_cfg.get("tx_factors", [0.7, 1.0, 1.1, 1.3])))
+        vol_proxy = row.get("volatility_proxy")
+        if pd.notna(vol_proxy) and float(vol_proxy) > oc_cfg["vol_proxy_threshold"]:
+            oc_factors.append(oc_cfg["vol_proxy_penalty"])
+        whale_dir = row.get("whale_direction")
+        if whale_dir == "accumulating":
+            oc_factors.append(oc_cfg["whale_accum_bonus"])
+        wne = row.get("whale_new_entries")
+        if pd.notna(wne):
+            oc_factors.append(_bt_tier_lookup(float(wne), oc_cfg["wne_thresholds"], oc_cfg["wne_factors"]))
+        wct_v = row.get("whale_count")
+        if pd.notna(wct_v):
+            oc_factors.append(_bt_tier_lookup(float(wct_v), oc_cfg["whale_count_thresholds"], oc_cfg["whale_count_factors"]))
+        uw_ch = row.get("unique_wallet_24h_change")
+        if pd.notna(uw_ch):
+            oc_factors.append(_bt_tier_lookup(float(uw_ch), oc_cfg["uw_change_thresholds"], oc_cfg["uw_change_factors"]))
+        if oc_factors:
+            onchain = max(params.get("onchain_mult_floor", 0.3),
+                          min(params.get("onchain_mult_cap", 1.5), sum(oc_factors) / len(oc_factors)))
+        else:
+            onchain = 1.0
+    else:
+        onchain = _safe_mult(row, "onchain_multiplier")
+        onchain = max(params.get("onchain_mult_floor", 0.3), min(params.get("onchain_mult_cap", 1.5), onchain))
 
-    # v45: Apply trial onchain bounds
-    onchain_floor = params.get("onchain_mult_floor", 0.3)
-    onchain_cap = params.get("onchain_mult_cap", 1.5)
-    onchain = max(onchain_floor, min(onchain_cap, onchain))
+    # v48: Recompute safety_penalty from raw fields + trial safety_config
+    sf_cfg = params.get("safety_config", {})
+    if sf_cfg:
+        safety = 1.0
+        ins = row.get("insider_pct")
+        if pd.notna(ins) and float(ins) > sf_cfg["insider_threshold"]:
+            safety *= max(sf_cfg["insider_floor"], 1.0 - (float(ins) - sf_cfg["insider_threshold"]) / 100)
+        t10 = row.get("top10_holder_pct")
+        if pd.notna(t10) and float(t10) > sf_cfg["top10_threshold"]:
+            safety *= max(sf_cfg["top10_floor"], 1.0 - (float(t10) - sf_cfg["top10_threshold"]) / 100)
+        rsk = row.get("risk_score")
+        if pd.notna(rsk) and float(rsk) > sf_cfg["risk_score_threshold"]:
+            safety *= max(sf_cfg["risk_score_floor"], 1.0 - (float(rsk) - sf_cfg["risk_score_threshold"]) / 5000)
+        rc_raw = row.get("risk_count")
+        if pd.notna(rc_raw) and int(rc_raw) >= sf_cfg["risk_count_threshold"]:
+            safety *= sf_cfg["risk_count_penalty"]
+        jito_txns = int(row.get("jito_max_slot_txns") or 0) if pd.notna(row.get("jito_max_slot_txns")) else 0
+        if jito_txns >= sf_cfg["jito_hard_threshold"]:
+            safety *= sf_cfg["jito_hard_penalty"]
+        elif jito_txns >= sf_cfg["jito_soft_threshold"]:
+            safety *= sf_cfg["jito_soft_penalty"]
+        else:
+            bd = row.get("bundle_detected")
+            bp_v = float(row.get("bundle_pct") or 0) if pd.notna(row.get("bundle_pct")) else 0
+            if pd.notna(bd) and bool(bd):
+                if bp_v > sf_cfg["bundle_hard_threshold"]:
+                    safety *= sf_cfg["bundle_hard_penalty"]
+                elif bp_v > sf_cfg["bundle_soft_threshold"]:
+                    safety *= sf_cfg["bundle_soft_penalty"]
+        h_gini = row.get("helius_gini")
+        if pd.notna(h_gini) and float(h_gini) > sf_cfg["gini_threshold"]:
+            safety *= sf_cfg["gini_penalty"]
+        h_hc = row.get("helius_holder_count")
+        if pd.notna(h_hc) and float(h_hc) < sf_cfg["holder_count_threshold"]:
+            safety *= sf_cfg["holder_count_penalty"]
+        wtp = row.get("whale_total_pct")
+        if pd.notna(wtp) and float(wtp) > sf_cfg["whale_conc_threshold"]:
+            safety *= max(sf_cfg["whale_conc_floor"], 1.0 - (float(wtp) - sf_cfg["whale_conc_threshold"]) / 80)
+        bb_s = row.get("bubblemaps_score")
+        if pd.notna(bb_s):
+            bb_t = sf_cfg["bb_score_thresholds"]
+            bb_p = sf_cfg["bb_score_penalties"]
+            if float(bb_s) < bb_t[0]:
+                safety *= bb_p[0]
+            elif float(bb_s) < bb_t[1]:
+                safety *= bb_p[1]
+        bb_cm = row.get("bubblemaps_cluster_max_pct")
+        if pd.notna(bb_cm) and float(bb_cm) > sf_cfg["bb_cluster_threshold"]:
+            safety *= max(sf_cfg["bb_cluster_floor"], 1.0 - (float(bb_cm) - sf_cfg["bb_cluster_threshold"]) / 70)
+        wd = row.get("whale_dominance")
+        if pd.notna(wd) and float(wd) > sf_cfg["whale_dom_threshold"]:
+            safety *= sf_cfg["whale_dom_penalty"]
+        w_dir = row.get("whale_direction")
+        if w_dir == "distributing":
+            safety *= sf_cfg["whale_dist_penalty"]
+        elif w_dir == "dumping":
+            safety *= sf_cfg["whale_dump_penalty"]
+        lp_l = row.get("lp_locked_pct")
+        if pd.notna(lp_l):
+            if float(lp_l) == 0:
+                safety *= sf_cfg["lp_unlock_penalty"]
+            elif float(lp_l) < sf_cfg["lp_partial_threshold"]:
+                safety *= sf_cfg["lp_partial_penalty"]
+        cex = row.get("bubblemaps_cex_pct")
+        if pd.notna(cex) and float(cex) > sf_cfg["cex_threshold"]:
+            safety *= max(sf_cfg["cex_floor"], 1.0 - (float(cex) - sf_cfg["cex_threshold"]) / 100)
+        safety = max(params.get("safety_floor", 0.75), safety)
+    else:
+        safety = _safe_mult(row, "safety_penalty")
+        safety = max(params.get("safety_floor", 0.75), safety)
 
     # Activity_mult: recompute from raw ratio if available
     act_ratio_raw = row.get("activity_ratio_raw")
@@ -2857,9 +3002,84 @@ def _compute_score_with_params(
     else:
         s_tier_mult = 1.0
 
-    # Size_mult and momentum_mult: use stored values (raw inputs not fully stored)
-    size_mult = _safe_mult(row, "size_mult")
-    momentum_mult = _safe_mult(row, "momentum_mult")
+    # v48: Recompute size_mult from raw fields + trial size_mult_config
+    sm_cfg = params.get("size_mult_config", {})
+    if sm_cfg:
+        t_mcap = float(row.get("market_cap") or 0) if pd.notna(row.get("market_cap")) else 0
+        sm_mcap_thresh = sm_cfg.get("mcap_thresholds", [300000, 1000000, 5000000, 20000000, 50000000, 200000000, 500000000])
+        sm_mcap_factors = sm_cfg.get("mcap_factors", [1.3, 1.15, 1.0, 0.85, 0.70, 0.50, 0.35, 0.25])
+        sm_fresh_thresh = sm_cfg.get("fresh_thresholds", [4, 12])
+        sm_fresh_factors = sm_cfg.get("fresh_factors", [1.2, 1.1, 1.0])
+        sm_large_cap = sm_cfg.get("large_cap_threshold", 50000000)
+        sm_floor = sm_cfg.get("floor", 0.25)
+        sm_cap_v = sm_cfg.get("cap", 1.5)
+        if t_mcap <= 0:
+            mcap_factor = 1.0
+        else:
+            mcap_factor = sm_mcap_factors[-1]
+            for i, thresh in enumerate(sm_mcap_thresh):
+                if t_mcap < thresh:
+                    mcap_factor = sm_mcap_factors[i]
+                    break
+        freshest_h_sm = float(row.get("freshest_mention_hours") or 0) if pd.notna(row.get("freshest_mention_hours")) else 0
+        if t_mcap >= sm_large_cap:
+            fresh_factor = 1.0
+        elif freshest_h_sm < sm_fresh_thresh[0]:
+            fresh_factor = sm_fresh_factors[0]
+        elif freshest_h_sm < sm_fresh_thresh[1]:
+            fresh_factor = sm_fresh_factors[1]
+        else:
+            fresh_factor = sm_fresh_factors[2]
+        size_mult = max(sm_floor, min(sm_cap_v, mcap_factor * fresh_factor))
+    else:
+        size_mult = _safe_mult(row, "size_mult")
+
+    # v48: Recompute momentum_mult from raw fields + trial momentum_config
+    mom_cfg = params.get("momentum_config", {})
+    if mom_cfg:
+        kf = row.get("kol_freshness")
+        kol_fresh_factor = 1.0
+        kf_thresh = mom_cfg.get("kol_fresh_thresholds", [0.5, 0.2])
+        kf_factors = mom_cfg.get("kol_fresh_factors", [1.20, 1.10, 1.05])
+        if pd.notna(kf) and float(kf) > 0:
+            kf_v = float(kf)
+            if kf_v >= kf_thresh[0]:
+                kol_fresh_factor = kf_factors[0]
+            elif kf_v >= kf_thresh[1]:
+                kol_fresh_factor = kf_factors[1]
+            else:
+                kol_fresh_factor = kf_factors[2]
+        mhr = row.get("mention_heat_ratio")
+        mention_heat_factor = 1.0
+        mhr_thresh = mom_cfg.get("mhr_thresholds", [2.0, 1.0, 0.3])
+        mhr_factors = mom_cfg.get("mhr_factors", [1.15, 1.10, 1.05])
+        if pd.notna(mhr) and float(mhr) > 0:
+            mhr_v = float(mhr)
+            if mhr_v >= mhr_thresh[0]:
+                mention_heat_factor = mhr_factors[0]
+            elif mhr_v >= mhr_thresh[1]:
+                mention_heat_factor = mhr_factors[1]
+            elif mhr_v >= mhr_thresh[2]:
+                mention_heat_factor = mhr_factors[2]
+        sth = row.get("short_term_heat")
+        vol_heat_factor = 1.0
+        sth_thresh = mom_cfg.get("sth_thresholds", [3.0, 1.5])
+        sth_factors_v = mom_cfg.get("sth_factors", [1.10, 1.05])
+        sth_pen_thresh = mom_cfg.get("sth_penalty_threshold", 0.3)
+        sth_pen_factor = mom_cfg.get("sth_penalty_factor", 0.95)
+        if pd.notna(sth):
+            sth_v = float(sth)
+            if sth_v >= sth_thresh[0]:
+                vol_heat_factor = sth_factors_v[0]
+            elif sth_v >= sth_thresh[1]:
+                vol_heat_factor = sth_factors_v[1]
+            elif sth_v < sth_pen_thresh:
+                vol_heat_factor = sth_pen_factor
+        mom_floor = mom_cfg.get("floor", 0.70)
+        mom_cap = mom_cfg.get("cap", 1.40)
+        momentum_mult = max(mom_floor, min(mom_cap, kol_fresh_factor * mention_heat_factor * vol_heat_factor))
+    else:
+        momentum_mult = _safe_mult(row, "momentum_mult")
 
     # --- v47: Recompute pump_momentum_pen from trial pump_pen_config ---
     pp_cfg = params.get("pump_pen_config", {})
@@ -3154,7 +3374,7 @@ def _optuna_optimize_params(
     timeout: int = 900,
 ) -> dict | None:
     """
-    v47: Optuna study with 67 search space parameters.
+    v48: Optuna study with ~102 search space parameters (14/14 multipliers recomputable).
     Walk-forward inside objective: 70% oldest → train, 30% newest → evaluate.
     Returns best_params dict or None if no improvement.
     """
@@ -3374,6 +3594,113 @@ def _optuna_optimize_params(
             "pvp_normal_scale": 0.1,
         }
 
+        # --- v48: onchain_config params (~11 new) ---
+        oc_lmr_low = trial.suggest_float("oc_lmr_low", 0.01, 0.05, step=0.005)
+        oc_lmr_high = trial.suggest_float("oc_lmr_high", 0.05, 0.20, step=0.01)
+        if oc_lmr_low >= oc_lmr_high:
+            return -999.0
+        oc_whale_count_f0 = trial.suggest_float("oc_whale_count_f0", 0.4, 0.9, step=0.05)
+        oc_whale_count_f3 = trial.suggest_float("oc_whale_count_f3", 1.2, 1.8, step=0.1)
+        oc_wne_f2 = trial.suggest_float("oc_wne_f2", 1.1, 1.5, step=0.05)
+        oc_whale_accum = trial.suggest_float("oc_whale_accum_bonus", 1.0, 1.3, step=0.05)
+        oc_vol_proxy_t = trial.suggest_float("oc_vol_proxy_threshold", 30, 80, step=5)
+        oc_vol_proxy_p = trial.suggest_float("oc_vol_proxy_penalty", 0.6, 0.95, step=0.05)
+        oc_velocity_f0 = trial.suggest_float("oc_velocity_f0", 0.4, 0.8, step=0.05)
+        oc_velocity_f3 = trial.suggest_float("oc_velocity_f3", 1.1, 1.5, step=0.05)
+        oc_age_f0 = trial.suggest_float("oc_age_f0", 0.3, 0.7, step=0.05)
+        params["onchain_config"] = {
+            "lmr_low": oc_lmr_low, "lmr_low_factor": 0.5,
+            "lmr_high": oc_lmr_high, "lmr_high_factor": 1.2,
+            "age_thresholds": [1, 6, 48, 168],
+            "age_factors": [oc_age_f0, 1.0, 1.2, 1.0, 0.8],
+            "tx_thresholds": [5, 20, 40], "tx_factors": [0.7, 1.0, 1.1, 1.3],
+            "jup_impact_thresholds": [1.0, 5.0], "jup_impact_factors": [1.3, 1.0, 0.7],
+            "whale_change_thresholds": [-10.0, 0, 5.0],
+            "whale_change_factors": [0.6, 0.8, 1.1, 1.3],
+            "velocity_thresholds": [0.2, 1.0, 5.0],
+            "velocity_factors": [oc_velocity_f0, 1.0, 1.1, oc_velocity_f3],
+            "wne_thresholds": [1, 3], "wne_factors": [1.0, 1.1, oc_wne_f2],
+            "whale_count_thresholds": [1, 3, 5],
+            "whale_count_factors": [oc_whale_count_f0, 1.0, 1.2, oc_whale_count_f3],
+            "uw_change_thresholds": [-20, -5, 5, 20],
+            "uw_change_factors": [0.6, 0.8, 1.0, 1.15, 1.3],
+            "vol_proxy_threshold": oc_vol_proxy_t, "vol_proxy_penalty": oc_vol_proxy_p,
+            "whale_accum_bonus": oc_whale_accum,
+        }
+
+        # --- v48: safety_config params (~10 new) ---
+        sf_insider_t = trial.suggest_float("sf_insider_threshold", 20, 50, step=5)
+        sf_insider_f = trial.suggest_float("sf_insider_floor", 0.3, 0.7, step=0.05)
+        sf_gini_t = trial.suggest_float("sf_gini_threshold", 0.70, 0.95, step=0.05)
+        sf_gini_p = trial.suggest_float("sf_gini_penalty", 0.6, 0.95, step=0.05)
+        sf_holder_t = trial.suggest_float("sf_holder_count_threshold", 30, 100, step=10)
+        sf_holder_p = trial.suggest_float("sf_holder_count_penalty", 0.6, 0.95, step=0.05)
+        sf_whale_conc_t = trial.suggest_float("sf_whale_conc_threshold", 40, 80, step=5)
+        sf_whale_dist_p = trial.suggest_float("sf_whale_dist_penalty", 0.5, 0.9, step=0.05)
+        sf_whale_dump_p = trial.suggest_float("sf_whale_dump_penalty", 0.4, 0.8, step=0.05)
+        sf_lp_unlock_p = trial.suggest_float("sf_lp_unlock_penalty", 0.3, 0.8, step=0.05)
+        # Ordered: dump <= dist
+        if sf_whale_dump_p > sf_whale_dist_p:
+            return -999.0
+        params["safety_config"] = {
+            "insider_threshold": sf_insider_t, "insider_floor": sf_insider_f,
+            "top10_threshold": 50, "top10_floor": 0.7,
+            "risk_score_threshold": 5000, "risk_score_floor": 0.5,
+            "risk_count_threshold": 3, "risk_count_penalty": 0.9,
+            "jito_hard_threshold": 5, "jito_hard_penalty": 0.4,
+            "jito_soft_threshold": 3, "jito_soft_penalty": 0.6,
+            "bundle_hard_threshold": 20, "bundle_hard_penalty": 0.5,
+            "bundle_soft_threshold": 10, "bundle_soft_penalty": 0.7,
+            "gini_threshold": sf_gini_t, "gini_penalty": sf_gini_p,
+            "holder_count_threshold": sf_holder_t, "holder_count_penalty": sf_holder_p,
+            "whale_conc_threshold": sf_whale_conc_t, "whale_conc_floor": 0.7,
+            "bb_score_thresholds": [20, 40], "bb_score_penalties": [0.6, 0.85],
+            "bb_cluster_threshold": 30, "bb_cluster_floor": 0.6,
+            "whale_dom_threshold": 0.5, "whale_dom_penalty": 0.85,
+            "whale_dist_penalty": sf_whale_dist_p, "whale_dump_penalty": sf_whale_dump_p,
+            "lp_unlock_penalty": sf_lp_unlock_p, "lp_partial_threshold": 50, "lp_partial_penalty": 0.85,
+            "cex_threshold": 20, "cex_floor": 0.7,
+        }
+
+        # --- v48: momentum_config params (~8 new) ---
+        mom_kf_t0 = trial.suggest_float("mom_kf_t0", 0.3, 0.7, step=0.05)
+        mom_kf_f0 = trial.suggest_float("mom_kf_f0", 1.10, 1.35, step=0.05)
+        mom_mhr_t0 = trial.suggest_float("mom_mhr_t0", 1.0, 4.0, step=0.5)
+        mom_mhr_f0 = trial.suggest_float("mom_mhr_f0", 1.05, 1.25, step=0.05)
+        mom_sth_t0 = trial.suggest_float("mom_sth_t0", 1.5, 5.0, step=0.5)
+        mom_sth_pen_t = trial.suggest_float("mom_sth_pen_threshold", 0.1, 0.5, step=0.05)
+        mom_floor_v = trial.suggest_float("mom_floor", 0.50, 0.85, step=0.05)
+        mom_cap_v = trial.suggest_float("mom_cap", 1.2, 1.6, step=0.05)
+        params["momentum_config"] = {
+            "kol_fresh_thresholds": [mom_kf_t0, mom_kf_t0 * 0.4],
+            "kol_fresh_factors": [mom_kf_f0, mom_kf_f0 * 0.92, 1.05],
+            "mhr_thresholds": [mom_mhr_t0, mom_mhr_t0 * 0.5, 0.3],
+            "mhr_factors": [mom_mhr_f0, mom_mhr_f0 * 0.87, 1.05],
+            "sth_thresholds": [mom_sth_t0, mom_sth_t0 * 0.5],
+            "sth_factors": [1.10, 1.05],
+            "sth_penalty_threshold": mom_sth_pen_t,
+            "sth_penalty_factor": 0.95,
+            "floor": mom_floor_v,
+            "cap": mom_cap_v,
+        }
+
+        # --- v48: size_mult_config params (~6 new) ---
+        sm_mcap_f0 = trial.suggest_float("sm_mcap_f0", 1.1, 1.5, step=0.05)
+        sm_mcap_f6 = trial.suggest_float("sm_mcap_f6", 0.15, 0.40, step=0.05)
+        sm_fresh_f0 = trial.suggest_float("sm_fresh_f0", 1.05, 1.35, step=0.05)
+        sm_large_cap_t = trial.suggest_float("sm_large_cap_threshold", 20000000, 100000000, step=10000000)
+        sm_floor_v = trial.suggest_float("sm_floor", 0.15, 0.40, step=0.05)
+        sm_cap_opt = trial.suggest_float("sm_cap", 1.2, 1.8, step=0.1)
+        params["size_mult_config"] = {
+            "mcap_thresholds": [300000, 1000000, 5000000, 20000000, 50000000, 200000000, 500000000],
+            "mcap_factors": [sm_mcap_f0, 1.15, 1.0, 0.85, 0.70, 0.50, 0.35, sm_mcap_f6],
+            "fresh_thresholds": [4, 12],
+            "fresh_factors": [sm_fresh_f0, 1.1, 1.0],
+            "large_cap_threshold": sm_large_cap_t,
+            "floor": sm_floor_v,
+            "cap": sm_cap_opt,
+        }
+
         # Evaluate on TRAIN set
         train_score = _evaluate_params(df_train, weights, params, horizon, threshold)
         return train_score
@@ -3493,6 +3820,69 @@ def _optuna_optimize_params(
             "pvp_normal_floor": bp["pvp_normal_floor"],
             "pvp_normal_scale": 0.1,
         },
+        # v48: 4 new JSONB configs for full multiplier recomputation
+        "onchain_config": {
+            "lmr_low": bp["oc_lmr_low"], "lmr_low_factor": 0.5,
+            "lmr_high": bp["oc_lmr_high"], "lmr_high_factor": 1.2,
+            "age_thresholds": [1, 6, 48, 168],
+            "age_factors": [bp["oc_age_f0"], 1.0, 1.2, 1.0, 0.8],
+            "tx_thresholds": [5, 20, 40], "tx_factors": [0.7, 1.0, 1.1, 1.3],
+            "jup_impact_thresholds": [1.0, 5.0], "jup_impact_factors": [1.3, 1.0, 0.7],
+            "whale_change_thresholds": [-10.0, 0, 5.0],
+            "whale_change_factors": [0.6, 0.8, 1.1, 1.3],
+            "velocity_thresholds": [0.2, 1.0, 5.0],
+            "velocity_factors": [bp["oc_velocity_f0"], 1.0, 1.1, bp["oc_velocity_f3"]],
+            "wne_thresholds": [1, 3], "wne_factors": [1.0, 1.1, bp["oc_wne_f2"]],
+            "whale_count_thresholds": [1, 3, 5],
+            "whale_count_factors": [bp["oc_whale_count_f0"], 1.0, 1.2, bp["oc_whale_count_f3"]],
+            "uw_change_thresholds": [-20, -5, 5, 20],
+            "uw_change_factors": [0.6, 0.8, 1.0, 1.15, 1.3],
+            "vol_proxy_threshold": bp["oc_vol_proxy_threshold"], "vol_proxy_penalty": bp["oc_vol_proxy_penalty"],
+            "whale_accum_bonus": bp["oc_whale_accum_bonus"],
+        },
+        "safety_config": {
+            "insider_threshold": bp["sf_insider_threshold"], "insider_floor": bp["sf_insider_floor"],
+            "top10_threshold": 50, "top10_floor": 0.7,
+            "risk_score_threshold": 5000, "risk_score_floor": 0.5,
+            "risk_count_threshold": 3, "risk_count_penalty": 0.9,
+            "jito_hard_threshold": 5, "jito_hard_penalty": 0.4,
+            "jito_soft_threshold": 3, "jito_soft_penalty": 0.6,
+            "bundle_hard_threshold": 20, "bundle_hard_penalty": 0.5,
+            "bundle_soft_threshold": 10, "bundle_soft_penalty": 0.7,
+            "gini_threshold": bp["sf_gini_threshold"], "gini_penalty": bp["sf_gini_penalty"],
+            "holder_count_threshold": bp["sf_holder_count_threshold"],
+            "holder_count_penalty": bp["sf_holder_count_penalty"],
+            "whale_conc_threshold": bp["sf_whale_conc_threshold"], "whale_conc_floor": 0.7,
+            "bb_score_thresholds": [20, 40], "bb_score_penalties": [0.6, 0.85],
+            "bb_cluster_threshold": 30, "bb_cluster_floor": 0.6,
+            "whale_dom_threshold": 0.5, "whale_dom_penalty": 0.85,
+            "whale_dist_penalty": bp["sf_whale_dist_penalty"],
+            "whale_dump_penalty": bp["sf_whale_dump_penalty"],
+            "lp_unlock_penalty": bp["sf_lp_unlock_penalty"],
+            "lp_partial_threshold": 50, "lp_partial_penalty": 0.85,
+            "cex_threshold": 20, "cex_floor": 0.7,
+        },
+        "momentum_config": {
+            "kol_fresh_thresholds": [bp["mom_kf_t0"], bp["mom_kf_t0"] * 0.4],
+            "kol_fresh_factors": [bp["mom_kf_f0"], bp["mom_kf_f0"] * 0.92, 1.05],
+            "mhr_thresholds": [bp["mom_mhr_t0"], bp["mom_mhr_t0"] * 0.5, 0.3],
+            "mhr_factors": [bp["mom_mhr_f0"], bp["mom_mhr_f0"] * 0.87, 1.05],
+            "sth_thresholds": [bp["mom_sth_t0"], bp["mom_sth_t0"] * 0.5],
+            "sth_factors": [1.10, 1.05],
+            "sth_penalty_threshold": bp["mom_sth_pen_threshold"],
+            "sth_penalty_factor": 0.95,
+            "floor": bp["mom_floor"],
+            "cap": bp["mom_cap"],
+        },
+        "size_mult_config": {
+            "mcap_thresholds": [300000, 1000000, 5000000, 20000000, 50000000, 200000000, 500000000],
+            "mcap_factors": [bp["sm_mcap_f0"], 1.15, 1.0, 0.85, 0.70, 0.50, 0.35, bp["sm_mcap_f6"]],
+            "fresh_thresholds": [4, 12],
+            "fresh_factors": [bp["sm_fresh_f0"], 1.1, 1.0],
+            "large_cap_threshold": bp["sm_large_cap_threshold"],
+            "floor": bp["sm_floor"],
+            "cap": bp["sm_cap"],
+        },
     }
 
     # Evaluate on TEST set (walk-forward validation)
@@ -3574,6 +3964,66 @@ def _optuna_optimize_params(
             "pvp_normal_floor": 0.5,
             "pvp_normal_scale": 0.1,
         },
+        # v48: 4 new JSONB baseline configs (matching pipeline.py defaults)
+        "onchain_config": {
+            "lmr_low": 0.02, "lmr_low_factor": 0.5,
+            "lmr_high": 0.10, "lmr_high_factor": 1.2,
+            "age_thresholds": [1, 6, 48, 168],
+            "age_factors": [0.5, 1.0, 1.2, 1.0, 0.8],
+            "tx_thresholds": [5, 20, 40], "tx_factors": [0.7, 1.0, 1.1, 1.3],
+            "jup_impact_thresholds": [1.0, 5.0], "jup_impact_factors": [1.3, 1.0, 0.7],
+            "whale_change_thresholds": [-10.0, 0, 5.0],
+            "whale_change_factors": [0.6, 0.8, 1.1, 1.3],
+            "velocity_thresholds": [0.2, 1.0, 5.0],
+            "velocity_factors": [0.6, 1.0, 1.1, 1.3],
+            "wne_thresholds": [1, 3], "wne_factors": [1.0, 1.1, 1.25],
+            "whale_count_thresholds": [1, 3, 5],
+            "whale_count_factors": [0.7, 1.0, 1.2, 1.4],
+            "uw_change_thresholds": [-20, -5, 5, 20],
+            "uw_change_factors": [0.6, 0.8, 1.0, 1.15, 1.3],
+            "vol_proxy_threshold": 50, "vol_proxy_penalty": 0.8,
+            "whale_accum_bonus": 1.15,
+        },
+        "safety_config": {
+            "insider_threshold": 30, "insider_floor": 0.5,
+            "top10_threshold": 50, "top10_floor": 0.7,
+            "risk_score_threshold": 5000, "risk_score_floor": 0.5,
+            "risk_count_threshold": 3, "risk_count_penalty": 0.9,
+            "jito_hard_threshold": 5, "jito_hard_penalty": 0.4,
+            "jito_soft_threshold": 3, "jito_soft_penalty": 0.6,
+            "bundle_hard_threshold": 20, "bundle_hard_penalty": 0.5,
+            "bundle_soft_threshold": 10, "bundle_soft_penalty": 0.7,
+            "gini_threshold": 0.85, "gini_penalty": 0.8,
+            "holder_count_threshold": 50, "holder_count_penalty": 0.85,
+            "whale_conc_threshold": 60, "whale_conc_floor": 0.7,
+            "bb_score_thresholds": [20, 40], "bb_score_penalties": [0.6, 0.85],
+            "bb_cluster_threshold": 30, "bb_cluster_floor": 0.6,
+            "whale_dom_threshold": 0.5, "whale_dom_penalty": 0.85,
+            "whale_dist_penalty": 0.75, "whale_dump_penalty": 0.65,
+            "lp_unlock_penalty": 0.6, "lp_partial_threshold": 50, "lp_partial_penalty": 0.85,
+            "cex_threshold": 20, "cex_floor": 0.7,
+        },
+        "momentum_config": {
+            "kol_fresh_thresholds": [0.5, 0.2],
+            "kol_fresh_factors": [1.20, 1.10, 1.05],
+            "mhr_thresholds": [2.0, 1.0, 0.3],
+            "mhr_factors": [1.15, 1.10, 1.05],
+            "sth_thresholds": [3.0, 1.5],
+            "sth_factors": [1.10, 1.05],
+            "sth_penalty_threshold": 0.3,
+            "sth_penalty_factor": 0.95,
+            "floor": 0.70,
+            "cap": 1.40,
+        },
+        "size_mult_config": {
+            "mcap_thresholds": [300000, 1000000, 5000000, 20000000, 50000000, 200000000, 500000000],
+            "mcap_factors": [1.3, 1.15, 1.0, 0.85, 0.70, 0.50, 0.35, 0.25],
+            "fresh_thresholds": [4, 12],
+            "fresh_factors": [1.2, 1.1, 1.0],
+            "large_cap_threshold": 50000000,
+            "floor": 0.25,
+            "cap": 1.5,
+        },
     }
     baseline_score = _evaluate_params(df_test, BALANCED_WEIGHTS, baseline_params, horizon, threshold)
 
@@ -3610,7 +4060,8 @@ def _optuna_optimize_params(
     else:
         improvement = float("inf")
 
-    # Guard-rail: no param > 30% change from current
+    # Guard-rail: no scalar param > 30% change from current
+    # Note: JSONB configs (onchain_config, safety_config, etc.) are bounded by Optuna ranges
     for key in ["activity_mult_floor", "activity_mult_cap", "s_tier_bonus",
                  "combined_floor", "combined_cap",
                  "safety_floor", "onchain_mult_floor", "onchain_mult_cap",
@@ -3680,8 +4131,13 @@ def _apply_optuna_params(client, best_weights: dict, best_params: dict, reason: 
             "consensus_pump_divisor": best_params.get("consensus_pump_divisor", 400),
             "activity_mid_mult": best_params.get("activity_mid_mult", 1.10),
             "pump_pen_config": best_params.get("pump_pen_config"),
+            # v48: 4 new JSONB configs for full multiplier recomputation
+            "onchain_config": best_params.get("onchain_config"),
+            "safety_config": best_params.get("safety_config"),
+            "momentum_config": best_params.get("momentum_config"),
+            "size_mult_config": best_params.get("size_mult_config"),
             "updated_at": datetime.now(timezone.utc).isoformat(),
-            "updated_by": "optuna_v47",
+            "updated_by": "optuna_v48",
             "change_reason": reason,
         }
         # Remove None values (don't write nulls for missing configs)
