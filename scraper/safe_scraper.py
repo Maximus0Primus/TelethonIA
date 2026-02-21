@@ -423,6 +423,15 @@ def process_and_push(messages_data: dict[str, list[dict]], dump: bool = False) -
             insert_snapshots(extra_7d)
             logger.info("Inserted %d extra snapshots from 7d window", len(extra_7d))
 
+    # Paper trading: open new positions on top 5
+    try:
+        from paper_trader import open_paper_trades
+        if data_24h:
+            sb_pt = _get_supabase()
+            open_paper_trades(sb_pt, data_24h, cycle_ts=datetime.now(timezone.utc))
+    except Exception as e:
+        logger.error("Paper trading (open) failed: %s", e)
+
     # v10: Store raw KOL mention texts for NLP analysis
     if all_raw_mentions:
         try:
@@ -538,6 +547,17 @@ async def run_one_cycle(client: TelegramClient, dump: bool = False) -> None:
             logger.info("Post-cycle price refresh: %d tokens updated", updated)
         except Exception as e:
             logger.error("Post-cycle price refresh failed: %s", e)
+
+        # Paper trading: check open positions + log summary
+        try:
+            from paper_trader import check_paper_trades, paper_trade_summary
+            sb_pt = _get_supabase()
+            check_paper_trades(sb_pt)
+            summary = paper_trade_summary(sb_pt)
+            if summary:
+                logger.info("paper_trader: %s", summary)
+        except Exception as e:
+            logger.error("Paper trading (cycle-end) failed: %s", e)
     else:
         logger.warning("No messages scraped — skipping push")
 
@@ -582,6 +602,13 @@ async def main():
                     None, refresh_top_tokens
                 )
                 logger.info("Price refresh: %d tokens updated", updated)
+                # Paper trading: check open positions every 3 min
+                try:
+                    from paper_trader import check_paper_trades
+                    sb_pt = _get_supabase()
+                    check_paper_trades(sb_pt)
+                except Exception as e:
+                    logger.error("Paper trading (check) failed: %s", e)
             except Exception as e:
                 logger.error("Price refresh failed: %s", e)
 

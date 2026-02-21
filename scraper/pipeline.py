@@ -2618,8 +2618,23 @@ def aggregate_ranking(
             # v14: Extract entry market cap from message text
             stated_mcap = _extract_entry_mcap(text)
 
+            # v50: Deduplicate msg_cas for fallback resolution
+            unique_msg_cas = list(dict.fromkeys(msg_cas)) if msg_cas else []
+
             # v10: Store raw mention for each token in this message
             for token in tokens:
+                # v50: Resolve CA — prefer direct extraction, fallback to msg CAs
+                # If token extracted via ticker-only but message contains CAs,
+                # use the CA if it's unambiguous (1 token + CAs, or 1 unique CA)
+                resolved = ca_by_symbol.get(token)
+                if not resolved and unique_msg_cas:
+                    if len(tokens) == 1:
+                        # Single token in message — all CAs belong to it
+                        resolved = unique_msg_cas[0]
+                    elif len(unique_msg_cas) == 1:
+                        # Multiple tokens but only 1 CA — likely belongs to this token
+                        resolved = unique_msg_cas[0]
+
                 raw_kol_mentions.append({
                     "symbol": token,
                     "kol_group": group_name,
@@ -2634,14 +2649,17 @@ def aggregate_ranking(
                     # v16: Extraction audit fields
                     "extraction_method": source_by_symbol.get(token, "unknown"),
                     "extracted_cas": msg_cas if msg_cas else None,
-                    # v40: Resolved CA from this specific extraction
-                    "resolved_ca": ca_by_symbol.get(token),
+                    # v40+v50: Resolved CA — direct extraction or msg fallback
+                    "resolved_ca": resolved,
                 })
 
             for token, source, ca in token_tuples:
-                # v40: Track known CAs from CA/URL sources
+                # v40+v50: Track known CAs — direct extraction OR msg fallback
                 if ca:
                     token_data[token]["known_cas"].append(ca)
+                elif unique_msg_cas and (len(tokens) == 1 or len(unique_msg_cas) == 1):
+                    # v50: Same fallback logic as resolved_ca above
+                    token_data[token]["known_cas"].append(unique_msg_cas[0])
 
                 # v16: Track extraction source counts
                 if source == "ca":

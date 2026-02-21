@@ -209,7 +209,7 @@ def _ts_to_minutes(ts: float | None, snapshot_ts: float) -> int | None:
 
 
 # TP/SL thresholds for bot simulation
-TP_MULTS = [1.3, 1.5]   # +30%, +50%  (2.0x already tracked as time_to_2x)
+TP_MULTS = [1.3, 1.5, 2.0, 3.0, 5.0]   # +30%, +50%, +100%, +200%, +400%
 SL_MULTS = [0.8, 0.7, 0.5]  # -20%, -30%, -50%
 
 logger.info(
@@ -321,12 +321,15 @@ def _get_max_price_gecko(
             time_to_2x_hours = round((time_to_2x_ts - snapshot_ts) / 3600, 2)
             time_to_2x_hours = max(0, min(window_hours, time_to_2x_hours))
 
-        # Build bot_data dict (only meaningful for 12h/24h horizons)
+        # Build bot_data dict (for 12h/24h/48h horizons)
         bot_data = None
-        if window_hours in (12, 24) and price_at and price_at > 0:
+        if window_hours in (12, 24, 48) and price_at and price_at > 0:
             bot_data = {
                 "t_1_3x": _ts_to_minutes(tp_timestamps.get(1.3), snapshot_ts),
                 "t_1_5x": _ts_to_minutes(tp_timestamps.get(1.5), snapshot_ts),
+                "t_2x":   _ts_to_minutes(tp_timestamps.get(2.0), snapshot_ts),
+                "t_3x":   _ts_to_minutes(tp_timestamps.get(3.0), snapshot_ts),
+                "t_5x":   _ts_to_minutes(tp_timestamps.get(5.0), snapshot_ts),
                 "t_sl20": _ts_to_minutes(sl_timestamps.get(0.8), snapshot_ts),
                 "t_sl30": _ts_to_minutes(sl_timestamps.get(0.7), snapshot_ts),
                 "t_sl50": _ts_to_minutes(sl_timestamps.get(0.5), snapshot_ts),
@@ -444,12 +447,15 @@ def _get_max_price_dexpaprika(
             time_to_2x_hours = round((time_to_2x_ts - snapshot_ts) / 3600, 2)
             time_to_2x_hours = max(0, min(window_hours, time_to_2x_hours))
 
-        # Build bot_data dict (only meaningful for 12h/24h horizons)
+        # Build bot_data dict (for 12h/24h/48h horizons)
         bot_data = None
-        if window_hours in (12, 24) and price_at and price_at > 0:
+        if window_hours in (12, 24, 48) and price_at and price_at > 0:
             bot_data = {
                 "t_1_3x": _ts_to_minutes(tp_timestamps.get(1.3), snapshot_ts),
                 "t_1_5x": _ts_to_minutes(tp_timestamps.get(1.5), snapshot_ts),
+                "t_2x":   _ts_to_minutes(tp_timestamps.get(2.0), snapshot_ts),
+                "t_3x":   _ts_to_minutes(tp_timestamps.get(3.0), snapshot_ts),
+                "t_5x":   _ts_to_minutes(tp_timestamps.get(5.0), snapshot_ts),
                 "t_sl20": _ts_to_minutes(sl_timestamps.get(0.8), snapshot_ts),
                 "t_sl30": _ts_to_minutes(sl_timestamps.get(0.7), snapshot_ts),
                 "t_sl50": _ts_to_minutes(sl_timestamps.get(0.5), snapshot_ts),
@@ -561,7 +567,7 @@ def _extract_horizons_from_candles(
             candles_in_window += 1
 
             # Bot: TP/SL detection
-            if hours in (12, 24):
+            if hours in (12, 24, 48):
                 for mult, target in tp_prices.items():
                     if tp_timestamps[mult] is None and high >= target:
                         tp_timestamps[mult] = candle_ts
@@ -583,10 +589,13 @@ def _extract_horizons_from_candles(
             time_to_2x_hours = max(0, min(hours, time_to_2x_hours))
 
         bot_data = None
-        if hours in (12, 24) and price_at > 0:
+        if hours in (12, 24, 48) and price_at > 0:
             bot_data = {
                 "t_1_3x": _ts_to_minutes(tp_timestamps.get(1.3), snapshot_ts),
                 "t_1_5x": _ts_to_minutes(tp_timestamps.get(1.5), snapshot_ts),
+                "t_2x":   _ts_to_minutes(tp_timestamps.get(2.0), snapshot_ts),
+                "t_3x":   _ts_to_minutes(tp_timestamps.get(3.0), snapshot_ts),
+                "t_5x":   _ts_to_minutes(tp_timestamps.get(5.0), snapshot_ts),
                 "t_sl20": _ts_to_minutes(sl_timestamps.get(0.8), snapshot_ts),
                 "t_sl30": _ts_to_minutes(sl_timestamps.get(0.7), snapshot_ts),
                 "t_sl50": _ts_to_minutes(sl_timestamps.get(0.5), snapshot_ts),
@@ -911,10 +920,13 @@ def _label_snapshot(
         update_data[hz["t2x_col"]] = t2x_hours
 
         # Bot simulation columns
-        if bot_data and hours in (12, 24):
+        if bot_data and hours in (12, 24, 48):
             hz_suffix = f"_{hours}h"
             update_data[f"time_to_1_3x_min{hz_suffix}"] = bot_data.get("t_1_3x")
             update_data[f"time_to_1_5x_min{hz_suffix}"] = bot_data.get("t_1_5x")
+            update_data[f"time_to_2x_min{hz_suffix}"] = bot_data.get("t_2x")
+            update_data[f"time_to_3x_min{hz_suffix}"] = bot_data.get("t_3x")
+            update_data[f"time_to_5x_min{hz_suffix}"] = bot_data.get("t_5x")
             update_data[f"time_to_sl20_min{hz_suffix}"] = bot_data.get("t_sl20")
             update_data[f"time_to_sl30_min{hz_suffix}"] = bot_data.get("t_sl30")
             update_data[f"time_to_sl50_min{hz_suffix}"] = bot_data.get("t_sl50")
@@ -1280,7 +1292,7 @@ def backfill_bot_data(batch_limit: int = 50) -> None:
     pool_cache = _load_pool_cache()
     stats = {"filled": 0, "skipped": 0, "errors": 0}
 
-    for hours in [12, 24]:
+    for hours in [12, 24, 48]:
         hz = f"_{hours}h"
         bot_col = f"time_to_1_3x_min{hz}"  # sentinel: if this is NULL, bot data is missing
         max_col = f"max_price_{hours}h"
@@ -1359,6 +1371,9 @@ def backfill_bot_data(batch_limit: int = 50) -> None:
             update_data = {
                 f"time_to_1_3x_min{hz}": bot_data.get("t_1_3x"),
                 f"time_to_1_5x_min{hz}": bot_data.get("t_1_5x"),
+                f"time_to_2x_min{hz}": bot_data.get("t_2x"),
+                f"time_to_3x_min{hz}": bot_data.get("t_3x"),
+                f"time_to_5x_min{hz}": bot_data.get("t_5x"),
                 f"time_to_sl20_min{hz}": bot_data.get("t_sl20"),
                 f"time_to_sl30_min{hz}": bot_data.get("t_sl30"),
                 f"time_to_sl50_min{hz}": bot_data.get("t_sl50"),

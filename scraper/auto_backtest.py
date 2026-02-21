@@ -157,10 +157,16 @@ SNAPSHOT_COLUMNS = (
     "score_velocity, score_acceleration, mention_velocity, volume_velocity, "
     "social_momentum_phase, kol_arrival_rate, entry_timing_quality, gate_mult, "
     "time_to_1_3x_min_12h, time_to_1_5x_min_12h, time_to_1_3x_min_24h, time_to_1_5x_min_24h, "
+    "time_to_2x_min_12h, time_to_3x_min_12h, time_to_5x_min_12h, "
+    "time_to_2x_min_24h, time_to_3x_min_24h, time_to_5x_min_24h, "
     "time_to_sl20_min_12h, time_to_sl30_min_12h, time_to_sl50_min_12h, "
     "time_to_sl20_min_24h, time_to_sl30_min_24h, time_to_sl50_min_24h, "
     "max_dd_before_tp_pct_12h, max_dd_before_tp_pct_24h, "
     "time_to_2x_12h, time_to_2x_24h, "
+    "time_to_1_3x_min_48h, time_to_1_5x_min_48h, time_to_2x_min_48h, "
+    "time_to_3x_min_48h, time_to_5x_min_48h, "
+    "time_to_sl20_min_48h, time_to_sl30_min_48h, time_to_sl50_min_48h, "
+    "max_dd_before_tp_pct_48h, "
     "jup_price_impact_1k, min_price_12h, min_price_24h, "
     "median_peak_return, entry_vs_median_peak, win_rate_7d, market_heat_24h, relative_volume, kol_saturation, "
     "kol_freshness, mention_heat_ratio, momentum_mult, activity_ratio_raw, hype_pen, unique_kols, "
@@ -841,12 +847,15 @@ BOT_STRATEGIES = [
     # Conservative: small gain, wide stop (memecoins drop 30-50% routinely before pumping)
     {"name": "TP30_SL50", "tp_col": "time_to_1_3x_min", "sl_col": "time_to_sl50_min",
      "tp_pct": 0.30, "sl_pct": -0.50, "description": "+30% TP / -50% SL"},
-    # Moderate: medium gain, medium stop
+    # Paper-trade baseline: matches paper_trader TP50_SL30
     {"name": "TP50_SL30", "tp_col": "time_to_1_5x_min", "sl_col": "time_to_sl30_min",
      "tp_pct": 0.50, "sl_pct": -0.30, "description": "+50% TP / -30% SL"},
     # Moderate+: medium gain, wide stop (best risk/reward for memecoins)
     {"name": "TP50_SL50", "tp_col": "time_to_1_5x_min", "sl_col": "time_to_sl50_min",
      "tp_pct": 0.50, "sl_pct": -0.50, "description": "+50% TP / -50% SL"},
+    # Paper-trade strategy: matches paper_trader TP100_SL30
+    {"name": "TP100_SL30", "tp_col": "time_to_2x_min", "sl_col": "time_to_sl30_min",
+     "tp_pct": 1.00, "sl_pct": -0.30, "description": "+100% TP / -30% SL"},
     # Aggressive: big gain, wide stop — the classic 2x
     {"name": "TP100_SL50", "tp_col": "time_to_2x_min", "sl_col": "time_to_sl50_min",
      "tp_pct": 1.00, "sl_pct": -0.50, "description": "+100% TP / -50% SL"},
@@ -874,13 +883,13 @@ def _realistic_bot_simulation(df: pd.DataFrame) -> dict:
 
     results = {}
 
-    for hz in ["12h", "24h"]:
+    for hz in ["12h", "24h", "48h"]:
         hz_suffix = f"_{hz}"
 
         for strat in BOT_STRATEGIES:
             # Build column names for this horizon
-            if strat["name"] == "TP100_SL50":
-                # time_to_2x is stored in hours, convert to minutes for comparison
+            if strat["name"] == "TP100_SL50" and hz in ("12h", "24h"):
+                # Legacy: time_to_2x is stored in hours, convert to minutes for comparison
                 tp_col_raw = f"time_to_2x_{hz}"
                 tp_is_hours = True
             else:
@@ -1050,6 +1059,182 @@ def _realistic_bot_simulation(df: pd.DataFrame) -> dict:
     return results
 
 
+def _multi_tranche_bot_simulation(df: pd.DataFrame) -> dict:
+    """
+    Simulate SCALE_OUT and MOONBAG strategies using event-driven tranche logic.
+
+    SCALE_OUT (48h, -30% SL): 25% at 2x, 25% at 3x, 25% at 5x, 25% moonbag
+    MOONBAG (24h, -50% SL): 80% at 2x, 20% moonbag (no TP)
+
+    For each token, collects time-ordered events (TP hits + SL hit), then
+    processes tranches in chronological order. Moonbag closes at timeout price.
+
+    v49-style first-appearance dedup applied.
+    """
+    df = df.sort_values("snapshot_at").drop_duplicates(subset=["token_address"], keep="first").copy()
+    df["score"] = df.apply(lambda r: _get_score(r, BALANCED_WEIGHTS), axis=1)
+    df["cycle"] = df["snapshot_at"].dt.floor("15min")
+
+    results = {}
+
+    MULTI_STRATEGIES = {
+        "SCALE_OUT": {
+            "horizons": ["24h", "48h"],
+            "sl_col_suffix": "time_to_sl30_min",
+            "sl_pct": -0.30,
+            "tranches": [
+                {"pct": 0.25, "tp_col_suffix": "time_to_2x_min", "tp_pct": 1.00, "label": "tp_2x"},
+                {"pct": 0.25, "tp_col_suffix": "time_to_3x_min", "tp_pct": 2.00, "label": "tp_3x"},
+                {"pct": 0.25, "tp_col_suffix": "time_to_5x_min", "tp_pct": 4.00, "label": "tp_5x"},
+                {"pct": 0.25, "tp_col_suffix": None, "tp_pct": None, "label": "moonbag"},
+            ],
+        },
+        "MOONBAG": {
+            "horizons": ["24h", "48h"],
+            "sl_col_suffix": "time_to_sl50_min",
+            "sl_pct": -0.50,
+            "tranches": [
+                {"pct": 0.80, "tp_col_suffix": "time_to_2x_min", "tp_pct": 1.00, "label": "main"},
+                {"pct": 0.20, "tp_col_suffix": None, "tp_pct": None, "label": "moonbag"},
+            ],
+        },
+    }
+
+    for strat_name, strat in MULTI_STRATEGIES.items():
+        for hz in strat["horizons"]:
+            hz_suffix = f"_{hz}"
+            sl_col = strat["sl_col_suffix"] + hz_suffix
+            price_col = f"price_after_{hz}"
+            hz_min = HORIZON_MINUTES.get(hz, 1440)
+
+            # Check required columns exist
+            if sl_col not in df.columns:
+                continue
+
+            for top_n in [1, 3, 5]:
+                strat_key = f"{strat_name}_{hz}_top{top_n}"
+
+                trades = []
+                open_positions = {}
+
+                for cycle_ts, group in df.sort_values("snapshot_at").groupby("cycle"):
+                    labeled = group[
+                        group["price_at_snapshot"].notna()
+                        & (group[sl_col].notna() | group[price_col].notna())
+                    ]
+                    if labeled.empty:
+                        continue
+
+                    top_tokens = labeled.nlargest(top_n, "score")
+
+                    for _, row in top_tokens.iterrows():
+                        addr = row.get("token_address") or row["symbol"]
+
+                        if addr in open_positions:
+                            if cycle_ts < open_positions[addr]:
+                                continue
+
+                        price_at = float(row["price_at_snapshot"])
+                        if price_at <= 0:
+                            continue
+
+                        # Get SL time
+                        sl_raw = row.get(sl_col)
+                        sl_min = int(sl_raw) if pd.notna(sl_raw) else None
+
+                        # Collect TP events: (time_min, tranche_pct, tranche_tp_pct)
+                        events = []
+                        for tranche in strat["tranches"]:
+                            if tranche["tp_col_suffix"] is None:
+                                continue  # moonbag — no TP event
+                            tp_col = tranche["tp_col_suffix"] + hz_suffix
+                            tp_raw = row.get(tp_col)
+                            if pd.notna(tp_raw):
+                                events.append((int(tp_raw), "TP", tranche["pct"], tranche["tp_pct"]))
+
+                        # Add SL event
+                        if sl_min is not None:
+                            events.append((sl_min, "SL", None, None))
+
+                        events.sort(key=lambda e: e[0])
+
+                        remaining = 1.0
+                        pnl = 0.0
+                        exit_min = None
+
+                        for ev_time, ev_type, ev_pct, ev_tp_pct in events:
+                            if remaining <= 0:
+                                break
+                            if ev_type == "TP":
+                                take = min(ev_pct, remaining)
+                                pnl += take * ev_tp_pct
+                                remaining -= take
+                                if exit_min is None:
+                                    exit_min = ev_time
+                            elif ev_type == "SL":
+                                pnl += remaining * strat["sl_pct"]
+                                remaining = 0
+                                exit_min = ev_time
+
+                        # Moonbag remainder: timeout at actual price
+                        if remaining > 0:
+                            p_after = row.get(price_col)
+                            if pd.notna(p_after) and float(p_after) > 0:
+                                pnl += remaining * ((float(p_after) / price_at) - 1.0)
+                            else:
+                                continue  # No exit data
+
+                        exit_type = "SL" if remaining == 0 and events and events[-1][1] == "SL" else "MIXED"
+                        if remaining == 0 and events:
+                            last_ev = [e for e in events if e[1] == "SL"]
+                            if last_ev:
+                                # Check if SL was last action
+                                pass
+
+                        pos_exit_time = cycle_ts + pd.Timedelta(minutes=exit_min if exit_min else hz_min)
+                        open_positions[addr] = pos_exit_time
+
+                        trades.append({
+                            "symbol": row["symbol"],
+                            "pnl": pnl,
+                            "exit_min": exit_min,
+                            "score": int(row["score"]),
+                        })
+
+                if len(trades) < 3:
+                    continue
+
+                pnl_values = [t["pnl"] for t in trades]
+                n_wins = sum(1 for p in pnl_values if p > 0)
+                n_losses = sum(1 for p in pnl_values if p < 0)
+                total_gains = sum(p for p in pnl_values if p > 0)
+                total_losses = abs(sum(p for p in pnl_values if p < 0))
+                profit_factor = total_gains / total_losses if total_losses > 0 else (999.0 if total_gains > 0 else 0)
+                expectancy = sum(pnl_values) / len(pnl_values)
+
+                results[strat_key] = {
+                    "description": f"{strat_name} multi-tranche",
+                    "horizon": hz,
+                    "top_n": top_n,
+                    "trades": len(trades),
+                    "wins": n_wins,
+                    "losses": n_losses,
+                    "win_rate": round(n_wins / len(trades), 4) if trades else 0,
+                    "profit_factor": round(profit_factor, 4),
+                    "expectancy": round(expectancy, 4),
+                    "total_pnl_pct": round(sum(pnl_values) * 100, 2),
+                }
+
+    # Find best multi-tranche strategy
+    top1_results = {k: v for k, v in results.items() if v.get("top_n") == 1 and v["trades"] >= 5}
+    if top1_results:
+        best_key = max(top1_results, key=lambda k: top1_results[k]["expectancy"])
+        results["best_multi_strategy"] = best_key
+        results["best_multi_expectancy"] = top1_results[best_key]["expectancy"]
+
+    return results
+
+
 def _adaptive_bot_simulation(df: pd.DataFrame) -> dict:
     """
     ML v3.1: Simulate adaptive SL based on actual DD data (oracle upper bound).
@@ -1075,7 +1260,7 @@ def _adaptive_bot_simulation(df: pd.DataFrame) -> dict:
 
     # Load RR model meta for dd_by_rr_band (informational)
     model_dir = Path(__file__).parent
-    for hz in ["12h", "24h"]:
+    for hz in ["12h", "24h", "48h"]:
         rr_meta_path = model_dir / f"model_{hz}_rr_meta.json"
         if rr_meta_path.exists():
             try:
@@ -1089,7 +1274,7 @@ def _adaptive_bot_simulation(df: pd.DataFrame) -> dict:
 
     FIXED_SL_PCTS = [30, 50]  # v49: removed SL20 — too tight for memecoins
 
-    for hz in ["12h", "24h"]:
+    for hz in ["12h", "24h", "48h"]:
         dd_col = f"max_dd_before_tp_pct_{hz}"
         max_price_col = f"max_price_{hz}"
         price_col = f"price_after_{hz}"
@@ -2604,6 +2789,10 @@ def run_auto_backtest() -> dict | None:
     # === REALISTIC BOT SIMULATION (TP/SL candle-by-candle) ===
     logger.info("Auto-backtest: running realistic bot simulation")
     report["realistic_bot"] = _realistic_bot_simulation(df)
+
+    # === MULTI-TRANCHE BOT SIMULATION (SCALE_OUT + MOONBAG) ===
+    logger.info("Auto-backtest: running multi-tranche bot simulation (SCALE_OUT + MOONBAG)")
+    report["multi_tranche_bot"] = _multi_tranche_bot_simulation(df)
 
     # === ADAPTIVE SL SIMULATION (ML v3.1 — oracle upper bound) ===
     logger.info("Auto-backtest: running adaptive SL simulation")
