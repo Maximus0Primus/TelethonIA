@@ -315,7 +315,8 @@ def _detect_bundles(accounts: list[dict], total_supply: int | None = None) -> di
 def _analyze_holder_quality(accounts: list[dict]) -> dict:
     """
     Analyze holder distribution quality from token accounts.
-    Returns helius_holder_count, helius_top5_pct, helius_top20_pct, helius_gini.
+    Returns helius_holder_count, helius_top5_pct, helius_top20_pct, helius_gini,
+    and v53: small_holder_pct (% of holders with < 0.1% of supply).
     """
     if not accounts:
         return {
@@ -323,6 +324,7 @@ def _analyze_holder_quality(accounts: list[dict]) -> dict:
             "helius_top5_pct": None,
             "helius_top20_pct": None,
             "helius_gini": None,
+            "small_holder_pct": None,
         }
 
     amounts = [a["amount"] for a in accounts]
@@ -333,6 +335,7 @@ def _analyze_holder_quality(accounts: list[dict]) -> dict:
             "helius_top5_pct": None,
             "helius_top20_pct": None,
             "helius_gini": None,
+            "small_holder_pct": None,
         }
 
     # Sort descending for top-N calculations
@@ -341,11 +344,17 @@ def _analyze_holder_quality(accounts: list[dict]) -> dict:
     top5_sum = sum(sorted_amounts[:5])
     top20_sum = sum(sorted_amounts[:20])
 
+    # v53: Small holder pct — % of holders with < 0.1% of total supply (retail = organic)
+    threshold_01pct = total * 0.001
+    small_count = sum(1 for a in amounts if a < threshold_01pct)
+    small_holder_pct = round((small_count / len(amounts)) * 100, 2) if amounts else None
+
     return {
         "helius_holder_count": len(accounts),
         "helius_top5_pct": round((top5_sum / total) * 100, 2),
         "helius_top20_pct": round((top20_sum / total) * 100, 2),
         "helius_gini": round(_compute_gini_coefficient(amounts), 4),
+        "small_holder_pct": small_holder_pct,
     }
 
 
@@ -517,6 +526,37 @@ def _analyze_whales(accounts: list[dict], cache: dict, mint: str) -> dict:
         else:
             whale_direction = "mixed"
 
+    # v53: Holder churn — track top 50 holders for turnover + smart money retention
+    sorted_by_amount = sorted(accounts, key=lambda x: x["amount"], reverse=True)
+    top50_addrs = set(a["owner"] for a in sorted_by_amount[:50])
+    top10_addrs = set(a["owner"] for a in sorted_by_amount[:10])
+
+    holder_cache_key = f"holders_{mint}"
+    prev_holders = cache.get(holder_cache_key)
+    holder_turnover_pct = None
+    smart_money_retention = None
+
+    if prev_holders and isinstance(prev_holders, dict):
+        prev_top50 = set(prev_holders.get("top50", []))
+        prev_top10 = set(prev_holders.get("top10", []))
+
+        if prev_top50:
+            # % of previous top 50 NOT present anymore
+            departed = prev_top50 - top50_addrs
+            holder_turnover_pct = round((len(departed) / len(prev_top50)) * 100, 2)
+
+        if prev_top10:
+            # % of previous top 10 still anywhere in top 50
+            retained = prev_top10 & top50_addrs
+            smart_money_retention = round((len(retained) / len(prev_top10)) * 100, 2)
+
+    # Store top 50/10 for next cycle
+    cache[holder_cache_key] = {
+        "top50": list(top50_addrs),
+        "top10": list(top10_addrs),
+        "_cached_at": time.time(),
+    }
+
     # Store for next cycle (no TTL — we want to compare across cycles)
     cache[whale_cache_key] = {
         "whales": current_whales,
@@ -531,6 +571,8 @@ def _analyze_whales(accounts: list[dict], cache: dict, mint: str) -> dict:
         "whale_change": whale_change,
         "whale_new_entries": whale_new_entries,
         "whale_direction": whale_direction,
+        "holder_turnover_pct": holder_turnover_pct,
+        "smart_money_retention": smart_money_retention,
     }
 
 
@@ -557,6 +599,10 @@ def _empty_helius_result() -> dict:
         "whale_new_entries": None,
         # Algorithm v4: Whale direction tracking
         "whale_direction": None,
+        # v53: Holder churn + distribution
+        "holder_turnover_pct": None,
+        "smart_money_retention": None,
+        "small_holder_pct": None,
     }
 
 

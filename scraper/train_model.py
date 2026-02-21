@@ -120,6 +120,13 @@ CORE_FEATURES = [
     "first_call_age_minutes",
     "kol_cascade_rate",
     "price_vs_first_call",
+    # v53: 4 feature blocks (holder stability, buy distribution, KOL coordination, liquidity depth)
+    "holder_turnover_pct",
+    "small_holder_pct",
+    "avg_tx_size_usd",
+    "kol_cooccurrence_avg",
+    "kol_combo_novelty",
+    "liquidity_depth_score",
 ]
 
 # Tier 2 (extended): Add these when 500-2000 samples. ~30 features total.
@@ -258,6 +265,16 @@ ALL_FEATURE_COLS = [
     "first_call_age_minutes",
     "kol_cascade_rate",
     "price_vs_first_call",
+    # v53: 4 feature blocks (9 signals)
+    "holder_turnover_pct",
+    "smart_money_retention",
+    "small_holder_pct",
+    "avg_tx_size_usd",
+    "kol_cooccurrence_avg",
+    "kol_combo_novelty",
+    "jup_price_impact_500",
+    "jup_price_impact_5k",
+    "liquidity_depth_score",
 ]
 
 HORIZONS = {

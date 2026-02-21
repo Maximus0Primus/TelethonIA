@@ -720,6 +720,16 @@ def insert_snapshots(ranking: list[dict]) -> None:
             "first_call_age_minutes": t.get("first_call_age_minutes"),
             "kol_cascade_rate": t.get("kol_cascade_rate"),
             "price_vs_first_call": t.get("price_vs_first_call"),
+            # v53: 4 feature blocks (9 signals)
+            "holder_turnover_pct": t.get("holder_turnover_pct"),
+            "smart_money_retention": t.get("smart_money_retention"),
+            "small_holder_pct": t.get("small_holder_pct"),
+            "avg_tx_size_usd": t.get("avg_tx_size_usd"),
+            "kol_cooccurrence_avg": t.get("kol_cooccurrence_avg"),
+            "kol_combo_novelty": t.get("kol_combo_novelty"),
+            "jup_price_impact_500": t.get("jup_price_impact_500"),
+            "jup_price_impact_5k": t.get("jup_price_impact_5k"),
+            "liquidity_depth_score": t.get("liquidity_depth_score"),
             "momentum_mult": t.get("momentum_mult"),
             # v44: Raw activity ratio for Optuna re-scoring
             "activity_ratio_raw": t.get("activity_ratio_raw"),

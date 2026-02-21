@@ -1612,6 +1612,110 @@ def _compute_trend_strength(token: dict) -> float:
         return magnitude * 0.3  # Conflicting signals = weak trend
 
 
+# v53: KOL co-occurrence matrix — cached per cycle (15min TTL)
+_cooc_cache: dict = {"matrix": None, "token_kols": None, "kol_tokens": None, "total_tokens": 0, "_ts": 0}
+_COOC_TTL = 15 * 60  # 15 min
+
+
+def _build_cooccurrence_matrix() -> tuple[dict, dict, dict, int]:
+    """
+    v53: Build KOL co-occurrence matrix from kol_mentions (last 7 days).
+    Returns (token_kols, kol_tokens, cooccurrence_matrix, total_tokens).
+    Cached for 15min (same as scrape cycle).
+    """
+    now = time.time()
+    if _cooc_cache["matrix"] is not None and (now - _cooc_cache["_ts"]) < _COOC_TTL:
+        return _cooc_cache["token_kols"], _cooc_cache["kol_tokens"], _cooc_cache["matrix"], _cooc_cache["total_tokens"]
+
+    token_kols: dict[str, set] = defaultdict(set)
+    kol_tokens: dict[str, set] = defaultdict(set)
+
+    try:
+        from supabase import create_client
+        url = os.environ.get("SUPABASE_URL")
+        key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+        if not url or not key:
+            return {}, {}, {}, 0
+
+        client = create_client(url, key)
+        # Paginated fetch: max 10K rows from last 7 days
+        cutoff_iso = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+        offset = 0
+        page_size = 1000
+        while offset < 10000:
+            resp = client.table("kol_mentions").select("symbol, kol_group").gte("message_date", cutoff_iso).range(offset, offset + page_size - 1).execute()
+            if not resp.data:
+                break
+            for row in resp.data:
+                sym = row.get("symbol")
+                kol = row.get("kol_group")
+                if sym and kol:
+                    token_kols[sym].add(kol)
+                    kol_tokens[kol].add(sym)
+            if len(resp.data) < page_size:
+                break
+            offset += page_size
+
+    except Exception as e:
+        logger.warning("v53: co-occurrence matrix build failed: %s", e)
+        return {}, {}, {}, 0
+
+    # Build pairwise co-occurrence: for each pair of KOLs, count shared tokens
+    matrix: dict[tuple, int] = {}
+    kol_list = list(kol_tokens.keys())
+    for i in range(len(kol_list)):
+        for j in range(i + 1, len(kol_list)):
+            shared = len(kol_tokens[kol_list[i]] & kol_tokens[kol_list[j]])
+            if shared > 0:
+                matrix[(kol_list[i], kol_list[j])] = shared
+                matrix[(kol_list[j], kol_list[i])] = shared
+
+    total_tokens = len(token_kols)
+    _cooc_cache.update({"matrix": matrix, "token_kols": dict(token_kols), "kol_tokens": dict(kol_tokens), "total_tokens": total_tokens, "_ts": now})
+    logger.info("v53: Co-occurrence matrix built: %d tokens, %d KOLs, %d pairs", total_tokens, len(kol_list), len(matrix) // 2)
+    return dict(token_kols), dict(kol_tokens), matrix, total_tokens
+
+
+def _compute_kol_cooccurrence(symbol: str, token_kol_set: set, kol_tokens: dict, matrix: dict, total_tokens: int) -> tuple[float | None, float | None]:
+    """
+    v53: Compute KOL co-occurrence metrics for a token.
+    Returns (kol_cooccurrence_avg, kol_combo_novelty).
+    """
+    if not token_kol_set or len(token_kol_set) < 2 or not matrix:
+        return None, None
+
+    kol_list = list(token_kol_set)
+    pairwise_scores = []
+    for i in range(len(kol_list)):
+        for j in range(i + 1, len(kol_list)):
+            shared = matrix.get((kol_list[i], kol_list[j]), 0)
+            min_tokens = min(len(kol_tokens.get(kol_list[i], set())), len(kol_tokens.get(kol_list[j], set())))
+            if min_tokens > 0:
+                pairwise_scores.append(shared / min_tokens)
+
+    if not pairwise_scores:
+        return None, None
+
+    cooc_avg = round(sum(pairwise_scores) / len(pairwise_scores), 4)
+
+    # Novelty: 1 - (observed overlap / expected random overlap)
+    # Expected: if KOL_i mentions k_i tokens and KOL_j mentions k_j tokens out of N total,
+    # expected shared = k_i * k_j / N
+    novelty_scores = []
+    for i in range(len(kol_list)):
+        for j in range(i + 1, len(kol_list)):
+            k_i = len(kol_tokens.get(kol_list[i], set()))
+            k_j = len(kol_tokens.get(kol_list[j], set()))
+            shared = matrix.get((kol_list[i], kol_list[j]), 0)
+            expected = (k_i * k_j) / max(1, total_tokens)
+            if expected > 0:
+                novelty_scores.append(1 - min(1, shared / expected))
+
+    combo_novelty = round(sum(novelty_scores) / len(novelty_scores), 4) if novelty_scores else None
+
+    return cooc_avg, combo_novelty
+
+
 def _tier_lookup(value: float, thresholds: list, factors: list) -> float:
     """v45: Generic tier-based lookup. thresholds=[t0,t1,...], factors=[f0,f1,...,f_last].
     Returns factors[i] for the first threshold[i] where value < threshold[i].
@@ -1738,6 +1842,27 @@ def _compute_onchain_multiplier(token: dict) -> float:
         uwt = cfg["uw_change_thresholds"]
         uwf = cfg["uw_change_factors"]
         factors.append(_tier_lookup(uw_change, uwt, uwf))
+
+    # v53: Smart money retention — high retention = bullish
+    smr = token.get("smart_money_retention")
+    if smr is not None:
+        smr_t = cfg.get("smr_thresholds", [50, 70, 90])
+        smr_f = cfg.get("smr_factors", [0.8, 1.0, 1.15, 1.3])
+        factors.append(_tier_lookup(smr, smr_t, smr_f))
+
+    # v53: Small holder pct — more retail = organic
+    shp = token.get("small_holder_pct")
+    if shp is not None:
+        shp_t = cfg.get("shp_thresholds", [50, 70, 85])
+        shp_f = cfg.get("shp_factors", [0.7, 0.9, 1.1, 1.3])
+        factors.append(_tier_lookup(shp, shp_t, shp_f))
+
+    # v53: Liquidity depth score — deep liquidity = safer
+    lds = token.get("liquidity_depth_score")
+    if lds is not None:
+        lds_t = cfg.get("lds_thresholds", [0.2, 0.5, 0.8])
+        lds_f = cfg.get("lds_factors", [0.6, 0.85, 1.05, 1.2])
+        factors.append(_tier_lookup(lds, lds_t, lds_f))
 
     if not factors:
         return 1.0
@@ -1922,6 +2047,8 @@ _DEFAULT_SCORING_PARAMS = {
     "hype_pen_config": {
         "thresholds": [2, 4, 7],
         "penalties": [1.0, 0.85, 0.65, 0.50],
+        # v53: KOL co-occurrence penalty — shill rings get penalized
+        "cooc_config": {"threshold": 0.5, "penalty": 0.85},
     },
     "size_mult_config": {
         "mcap_thresholds": [300_000, 1_000_000, 5_000_000, 20_000_000, 50_000_000, 200_000_000, 500_000_000],
@@ -1974,6 +2101,10 @@ _DEFAULT_SCORING_PARAMS = {
         "uw_change_factors": [0.6, 0.8, 1.0, 1.15, 1.3],
         "vol_proxy_threshold": 50, "vol_proxy_penalty": 0.8,
         "whale_accum_bonus": 1.15,
+        # v53: Holder stability + liquidity depth sub-factors
+        "smr_thresholds": [50, 70, 90], "smr_factors": [0.8, 1.0, 1.15, 1.3],
+        "shp_thresholds": [50, 70, 85], "shp_factors": [0.7, 0.9, 1.1, 1.3],
+        "lds_thresholds": [0.2, 0.5, 0.8], "lds_factors": [0.6, 0.85, 1.05, 1.2],
     },
     "death_config": {
         "stale_start_hours": 12,
@@ -3197,6 +3328,24 @@ def aggregate_ranking(
         if sent_std > 0 and pc24 > 0:
             token["sentiment_amplification"] = round(sent_std * (pc24 / 100), 4)
 
+    # v53: Compute avg_tx_size_usd (derived from existing DexScreener data)
+    for token in ranking:
+        vol_24h = token.get("volume_24h")
+        txn_24h = token.get("txn_count_24h")
+        if vol_24h and txn_24h and txn_24h > 0:
+            token["avg_tx_size_usd"] = round(float(vol_24h) / int(txn_24h), 2)
+        else:
+            token["avg_tx_size_usd"] = None
+
+    # v53: KOL co-occurrence detection
+    token_kols, kol_tokens_map, cooc_matrix, total_tokens_cooc = _build_cooccurrence_matrix()
+    for token in ranking:
+        sym = token.get("symbol")
+        kol_set = token_kols.get(sym, set()) if sym else set()
+        cooc_avg, combo_novelty = _compute_kol_cooccurrence(sym or "", kol_set, kol_tokens_map, cooc_matrix, total_tokens_cooc)
+        token["kol_cooccurrence_avg"] = cooc_avg
+        token["kol_combo_novelty"] = combo_novelty
+
     # Algorithm v3 A5: Flag artificial pumps
     for token in ranking:
         token["is_artificial_pump"] = _detect_artificial_pump(token)
@@ -3486,6 +3635,11 @@ def aggregate_ranking(
             hype_pen = hp_pens[2]     # crowded trade
         else:
             hype_pen = hp_pens[3]     # everyone knows — probably too late
+        # v53: KOL co-occurrence penalty — shill ring detection
+        cooc_cfg = hpcfg.get("cooc_config", {"threshold": 0.5, "penalty": 0.85})
+        cooc = token.get("kol_cooccurrence_avg")
+        if cooc is not None and cooc > cooc_cfg["threshold"]:
+            hype_pen *= cooc_cfg["penalty"]
         token["hype_pen"] = hype_pen
 
         # v21: gate_mult — soft safety penalties (top10, risk, liquidity, holders, single_a_tier)

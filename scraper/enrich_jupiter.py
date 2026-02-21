@@ -28,6 +28,9 @@ JUPITER_SLEEP = 0.2  # seconds between calls (under 10 RPS)
 # ~$1000 worth of SOL in lamports (SOL ~$150, so ~6.67 SOL = 6670000000 lamports)
 WSOL_MINT = "So11111111111111111111111111111111111111112"
 QUOTE_AMOUNT_LAMPORTS = 6_670_000_000  # ~$1000 in SOL
+# v53: Liquidity depth profile — test at $500 and $5K
+QUOTE_AMOUNT_500 = 3_335_000_000      # ~$500 SOL
+QUOTE_AMOUNT_5K = 33_350_000_000      # ~$5K SOL
 
 
 # === Cache ===
@@ -58,9 +61,9 @@ def _get_api_key() -> str | None:
     return os.environ.get("JUPITER_API_KEY")
 
 
-def _fetch_jupiter_quote(mint: str) -> dict | None:
+def _fetch_jupiter_quote(mint: str, amount_lamports: int = QUOTE_AMOUNT_LAMPORTS) -> dict | None:
     """
-    Get a swap quote from Jupiter: WSOL -> token for ~$1000.
+    Get a swap quote from Jupiter: WSOL -> token for given SOL amount.
     Returns quote data or None if the token is not routable.
     A 400 response means the token is not tradeable on Jupiter.
     """
@@ -75,7 +78,7 @@ def _fetch_jupiter_quote(mint: str) -> dict | None:
             params={
                 "inputMint": WSOL_MINT,
                 "outputMint": mint,
-                "amount": str(QUOTE_AMOUNT_LAMPORTS),
+                "amount": str(amount_lamports),
                 "slippageBps": "50",
             },
             headers=headers,
@@ -170,6 +173,10 @@ def _empty_jupiter_result() -> dict:
         "jup_price_impact_1k": None,
         "jup_route_count": None,
         "jup_price_usd": None,
+        # v53: Liquidity depth profile
+        "jup_price_impact_500": None,
+        "jup_price_impact_5k": None,
+        "liquidity_depth_score": None,
     }
 
 
@@ -223,6 +230,24 @@ def enrich_tokens_jupiter(ranking: list[dict]) -> list[dict]:
                 result["jup_route_count"] = quote.get("route_count")
                 mints_to_price.append(mint)
                 mint_to_index[mint] = i
+
+                # v53: Liquidity depth profile — $500 and $5K quotes
+                quote_500 = _fetch_jupiter_quote(mint, QUOTE_AMOUNT_500)
+                time.sleep(JUPITER_SLEEP)
+                if quote_500 and quote_500.get("tradeable"):
+                    result["jup_price_impact_500"] = quote_500.get("price_impact_pct")
+
+                quote_5k = _fetch_jupiter_quote(mint, QUOTE_AMOUNT_5K)
+                time.sleep(JUPITER_SLEEP)
+                if quote_5k and quote_5k.get("tradeable"):
+                    result["jup_price_impact_5k"] = quote_5k.get("price_impact_pct")
+
+                # Compute liquidity depth score
+                impact_500 = result.get("jup_price_impact_500")
+                impact_5k = result.get("jup_price_impact_5k")
+                if impact_500 is not None and impact_5k is not None and impact_500 > 0:
+                    ratio = impact_5k / max(0.001, impact_500)
+                    result["liquidity_depth_score"] = round(min(1.0, 10.0 / max(1.0, ratio)), 4)
 
         # Cache result (price filled later)
         cache_entry = dict(result)

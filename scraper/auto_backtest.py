@@ -176,7 +176,10 @@ SNAPSHOT_COLUMNS = (
     "helius_holder_count, helius_onchain_bsr, jup_tradeable, jito_max_slot_txns, "
     "bubblemaps_score, bubblemaps_cluster_max_pct, bubblemaps_cex_pct, "
     "is_pump_fun, price_change_1h, price_change_5m, pvp_recent_count, "
-    "score_at_snapshot"
+    "score_at_snapshot, "
+    "holder_turnover_pct, smart_money_retention, small_holder_pct, avg_tx_size_usd, "
+    "kol_cooccurrence_avg, kol_combo_novelty, "
+    "jup_price_impact_500, jup_price_impact_5k, liquidity_depth_score"
 )
 
 
@@ -3063,6 +3066,18 @@ def _compute_score_with_params(
         uw_ch = row.get("unique_wallet_24h_change")
         if pd.notna(uw_ch):
             oc_factors.append(_bt_tier_lookup(float(uw_ch), oc_cfg["uw_change_thresholds"], oc_cfg["uw_change_factors"]))
+        # v53: Smart money retention
+        smr_v = row.get("smart_money_retention")
+        if pd.notna(smr_v):
+            oc_factors.append(_bt_tier_lookup(float(smr_v), oc_cfg.get("smr_thresholds", [50, 70, 90]), oc_cfg.get("smr_factors", [0.8, 1.0, 1.15, 1.3])))
+        # v53: Small holder pct
+        shp_v = row.get("small_holder_pct")
+        if pd.notna(shp_v):
+            oc_factors.append(_bt_tier_lookup(float(shp_v), oc_cfg.get("shp_thresholds", [50, 70, 85]), oc_cfg.get("shp_factors", [0.7, 0.9, 1.1, 1.3])))
+        # v53: Liquidity depth score
+        lds_v = row.get("liquidity_depth_score")
+        if pd.notna(lds_v):
+            oc_factors.append(_bt_tier_lookup(float(lds_v), oc_cfg.get("lds_thresholds", [0.2, 0.5, 0.8]), oc_cfg.get("lds_factors", [0.6, 0.85, 1.05, 1.2])))
         if oc_factors:
             onchain = max(params.get("onchain_mult_floor", 0.3),
                           min(params.get("onchain_mult_cap", 1.5), sum(oc_factors) / len(oc_factors)))
@@ -3207,6 +3222,11 @@ def _compute_score_with_params(
             hype_pen = hp_p[3]
     else:
         hype_pen = _safe_mult(row, "hype_pen")
+    # v53: KOL co-occurrence penalty
+    cooc_cfg = hp_cfg.get("cooc_config", {"threshold": 0.5, "penalty": 0.85})
+    cooc_avg = row.get("kol_cooccurrence_avg")
+    if pd.notna(cooc_avg) and float(cooc_avg) > cooc_cfg["threshold"]:
+        hype_pen *= cooc_cfg["penalty"]
 
     # S-tier_mult: recompute from s_tier_count
     s_tier_count = row.get("s_tier_count")
@@ -3727,6 +3747,11 @@ def _optuna_optimize_params(
                 trial.suggest_float("hp_p2", 0.40, 0.85, step=0.05),
                 trial.suggest_float("hp_p3", 0.20, 0.70, step=0.05),
             ],
+            # v53: KOL co-occurrence penalty params
+            "cooc_config": {
+                "threshold": trial.suggest_float("cooc_threshold", 0.3, 0.7, step=0.05),
+                "penalty": trial.suggest_float("cooc_penalty", 0.70, 0.95, step=0.05),
+            },
         }
         # Ordered constraints for hype_pen thresholds
         hpt = params["hype_pen_config"]["thresholds"]
@@ -3889,6 +3914,13 @@ def _optuna_optimize_params(
         oc_lmr_interp_base = trial.suggest_float("oc_lmr_interp_base", 0.5, 1.0, step=0.05)
         oc_lmr_interp_slope = trial.suggest_float("oc_lmr_interp_slope", 2, 8, step=1)
         oc_jup_nt_factor = trial.suggest_float("oc_jup_nt_factor", 0.3, 0.7, step=0.05)
+        # v53: onchain sub-factor params (6 new: floor+cap for smr, shp, lds)
+        oc_smr_f0 = trial.suggest_float("oc_smr_f0", 0.5, 0.95, step=0.05)
+        oc_smr_f3 = trial.suggest_float("oc_smr_f3", 1.1, 1.5, step=0.05)
+        oc_shp_f0 = trial.suggest_float("oc_shp_f0", 0.5, 0.9, step=0.05)
+        oc_shp_f3 = trial.suggest_float("oc_shp_f3", 1.1, 1.5, step=0.05)
+        oc_lds_f0 = trial.suggest_float("oc_lds_f0", 0.4, 0.8, step=0.05)
+        oc_lds_f3 = trial.suggest_float("oc_lds_f3", 1.05, 1.4, step=0.05)
         params["onchain_config"] = {
             "lmr_low": oc_lmr_low, "lmr_low_factor": 0.5,
             "lmr_high": oc_lmr_high, "lmr_high_factor": 1.2,
@@ -3910,6 +3942,10 @@ def _optuna_optimize_params(
             "uw_change_factors": [0.6, 0.8, 1.0, 1.15, 1.3],
             "vol_proxy_threshold": oc_vol_proxy_t, "vol_proxy_penalty": oc_vol_proxy_p,
             "whale_accum_bonus": oc_whale_accum,
+            # v53: holder stability + liquidity depth
+            "smr_thresholds": [50, 70, 90], "smr_factors": [oc_smr_f0, 1.0, 1.15, oc_smr_f3],
+            "shp_thresholds": [50, 70, 85], "shp_factors": [oc_shp_f0, 0.9, 1.1, oc_shp_f3],
+            "lds_thresholds": [0.2, 0.5, 0.8], "lds_factors": [oc_lds_f0, 0.85, 1.05, oc_lds_f3],
         }
 
         # --- v48: safety_config params (~10 new) + v49: 6 slope params ---
@@ -4053,6 +4089,10 @@ def _optuna_optimize_params(
         "hype_pen_config": {
             "thresholds": [bp["hp_t0"], bp["hp_t1"], bp["hp_t2"]],
             "penalties": [1.0, bp["hp_p1"], bp["hp_p2"], bp["hp_p3"]],
+            "cooc_config": {
+                "threshold": bp.get("cooc_threshold", 0.5),
+                "penalty": bp.get("cooc_penalty", 0.85),
+            },
         },
         # v45: new scalar params
         "safety_floor": bp["safety_floor"],
@@ -4155,6 +4195,10 @@ def _optuna_optimize_params(
             "uw_change_factors": [0.6, 0.8, 1.0, 1.15, 1.3],
             "vol_proxy_threshold": bp["oc_vol_proxy_threshold"], "vol_proxy_penalty": bp["oc_vol_proxy_penalty"],
             "whale_accum_bonus": bp["oc_whale_accum_bonus"],
+            # v53: holder stability + liquidity depth
+            "smr_thresholds": [50, 70, 90], "smr_factors": [bp.get("oc_smr_f0", 0.8), 1.0, 1.15, bp.get("oc_smr_f3", 1.3)],
+            "shp_thresholds": [50, 70, 85], "shp_factors": [bp.get("oc_shp_f0", 0.7), 0.9, 1.1, bp.get("oc_shp_f3", 1.3)],
+            "lds_thresholds": [0.2, 0.5, 0.8], "lds_factors": [bp.get("oc_lds_f0", 0.6), 0.85, 1.05, bp.get("oc_lds_f3", 1.2)],
         },
         "safety_config": {
             "insider_threshold": bp["sf_insider_threshold"], "insider_floor": bp["sf_insider_floor"],
@@ -4231,7 +4275,7 @@ def _optuna_optimize_params(
         "conviction_offset": 6,
         "conviction_divisor": 4,
         "breadth_pen_config": {"thresholds": [0.033, 0.05, 0.08], "penalties": [0.75, 0.85, 0.95]},
-        "hype_pen_config": {"thresholds": [2, 4, 7], "penalties": [1.0, 0.85, 0.65, 0.50]},
+        "hype_pen_config": {"thresholds": [2, 4, 7], "penalties": [1.0, 0.85, 0.65, 0.50], "cooc_config": {"threshold": 0.5, "penalty": 0.85}},
         # v45: new baseline defaults
         "safety_floor": 0.75,
         "onchain_mult_floor": 0.3,
@@ -4321,6 +4365,10 @@ def _optuna_optimize_params(
             "uw_change_factors": [0.6, 0.8, 1.0, 1.15, 1.3],
             "vol_proxy_threshold": 50, "vol_proxy_penalty": 0.8,
             "whale_accum_bonus": 1.15,
+            # v53: holder stability + liquidity depth defaults
+            "smr_thresholds": [50, 70, 90], "smr_factors": [0.8, 1.0, 1.15, 1.3],
+            "shp_thresholds": [50, 70, 85], "shp_factors": [0.7, 0.9, 1.1, 1.3],
+            "lds_thresholds": [0.2, 0.5, 0.8], "lds_factors": [0.6, 0.85, 1.05, 1.2],
         },
         "safety_config": {
             "insider_threshold": 30, "insider_floor": 0.5, "insider_slope": 100,
