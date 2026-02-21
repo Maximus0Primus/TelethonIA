@@ -1673,7 +1673,23 @@ def _fetch_ohlcv_candles_kco(
                             continue
                     sorted_candles.sort(key=lambda x: x[0])
                     if sorted_candles:
-                        source = "dexpaprika_ohlcv"
+                        # v43: Detect SOL-denominated price leak heuristically.
+                        # Memecoins are always < $1. If median close > $50, DexPaprika
+                        # returned SOL quote price instead of token price → reject and
+                        # fall through to Birdeye which uses mint address (correct denom).
+                        closes = [c[4] for c in sorted_candles if c[4] > 0]
+                        if closes:
+                            median_close = sorted(closes)[len(closes) // 2]
+                            if median_close > 50.0:
+                                logger.info(
+                                    "KCO DexPaprika SOL price leak for %s — median_close=%.2f, rejecting → Birdeye fallback",
+                                    symbol, median_close,
+                                )
+                                sorted_candles = None
+                            else:
+                                source = "dexpaprika_ohlcv"
+                        else:
+                            sorted_candles = None
                     else:
                         sorted_candles = None
                 else:
