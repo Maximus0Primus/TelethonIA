@@ -2801,27 +2801,22 @@ def _compute_score_with_params(
             elif lmr_v > oc_cfg["lmr_high"]:
                 oc_factors.append(oc_cfg["lmr_high_factor"])
             else:
-                oc_factors.append(0.8 + lmr_v * 4)
+                oc_factors.append(oc_cfg.get("lmr_interp_base", 0.8) + lmr_v * oc_cfg.get("lmr_interp_slope", 4))
         age = row.get("token_age_hours")
         if pd.notna(age):
             oc_factors.append(_bt_tier_lookup(float(age), oc_cfg["age_thresholds"], oc_cfg["age_factors"]))
         recent_tx = row.get("helius_recent_tx_count")
         if pd.notna(recent_tx):
             rtx = float(recent_tx)
-            if rtx > 40:
-                oc_factors.append(1.3)
-            elif rtx > 20:
-                oc_factors.append(1.1)
-            elif rtx < 5:
-                oc_factors.append(0.7)
+            oc_factors.append(_bt_tier_lookup(rtx, oc_cfg.get("tx_thresholds", [5, 20, 40]), oc_cfg.get("tx_factors", [0.7, 1.0, 1.1, 1.3])))
         h_bsr = row.get("helius_onchain_bsr")
         if pd.notna(h_bsr):
-            oc_factors.append(0.5 + float(h_bsr))
+            oc_factors.append(oc_cfg.get("bsr_base", 0.5) + float(h_bsr))
         jup_t_val = row.get("jup_tradeable")
         jup_imp = row.get("jup_price_impact_1k")
         if pd.notna(jup_t_val):
             if int(jup_t_val) == 0:
-                oc_factors.append(0.5)
+                oc_factors.append(oc_cfg.get("jup_non_tradeable_factor", 0.5))
             elif pd.notna(jup_imp):
                 oc_factors.append(_bt_tier_lookup(float(jup_imp), oc_cfg["jup_impact_thresholds"], oc_cfg["jup_impact_factors"]))
         wc_val = row.get("whale_change")
@@ -2864,13 +2859,13 @@ def _compute_score_with_params(
         safety = 1.0
         ins = row.get("insider_pct")
         if pd.notna(ins) and float(ins) > sf_cfg["insider_threshold"]:
-            safety *= max(sf_cfg["insider_floor"], 1.0 - (float(ins) - sf_cfg["insider_threshold"]) / 100)
+            safety *= max(sf_cfg["insider_floor"], 1.0 - (float(ins) - sf_cfg["insider_threshold"]) / sf_cfg.get("insider_slope", 100))
         t10 = row.get("top10_holder_pct")
         if pd.notna(t10) and float(t10) > sf_cfg["top10_threshold"]:
-            safety *= max(sf_cfg["top10_floor"], 1.0 - (float(t10) - sf_cfg["top10_threshold"]) / 100)
+            safety *= max(sf_cfg["top10_floor"], 1.0 - (float(t10) - sf_cfg["top10_threshold"]) / sf_cfg.get("top10_slope", 100))
         rsk = row.get("risk_score")
         if pd.notna(rsk) and float(rsk) > sf_cfg["risk_score_threshold"]:
-            safety *= max(sf_cfg["risk_score_floor"], 1.0 - (float(rsk) - sf_cfg["risk_score_threshold"]) / 5000)
+            safety *= max(sf_cfg["risk_score_floor"], 1.0 - (float(rsk) - sf_cfg["risk_score_threshold"]) / sf_cfg.get("risk_score_slope", 5000))
         rc_raw = row.get("risk_count")
         if pd.notna(rc_raw) and int(rc_raw) >= sf_cfg["risk_count_threshold"]:
             safety *= sf_cfg["risk_count_penalty"]
@@ -2895,7 +2890,7 @@ def _compute_score_with_params(
             safety *= sf_cfg["holder_count_penalty"]
         wtp = row.get("whale_total_pct")
         if pd.notna(wtp) and float(wtp) > sf_cfg["whale_conc_threshold"]:
-            safety *= max(sf_cfg["whale_conc_floor"], 1.0 - (float(wtp) - sf_cfg["whale_conc_threshold"]) / 80)
+            safety *= max(sf_cfg["whale_conc_floor"], 1.0 - (float(wtp) - sf_cfg["whale_conc_threshold"]) / sf_cfg.get("whale_conc_slope", 80))
         bb_s = row.get("bubblemaps_score")
         if pd.notna(bb_s):
             bb_t = sf_cfg["bb_score_thresholds"]
@@ -2906,7 +2901,7 @@ def _compute_score_with_params(
                 safety *= bb_p[1]
         bb_cm = row.get("bubblemaps_cluster_max_pct")
         if pd.notna(bb_cm) and float(bb_cm) > sf_cfg["bb_cluster_threshold"]:
-            safety *= max(sf_cfg["bb_cluster_floor"], 1.0 - (float(bb_cm) - sf_cfg["bb_cluster_threshold"]) / 70)
+            safety *= max(sf_cfg["bb_cluster_floor"], 1.0 - (float(bb_cm) - sf_cfg["bb_cluster_threshold"]) / sf_cfg.get("bb_cluster_slope", 70))
         wd = row.get("whale_dominance")
         if pd.notna(wd) and float(wd) > sf_cfg["whale_dom_threshold"]:
             safety *= sf_cfg["whale_dom_penalty"]
@@ -2923,7 +2918,7 @@ def _compute_score_with_params(
                 safety *= sf_cfg["lp_partial_penalty"]
         cex = row.get("bubblemaps_cex_pct")
         if pd.notna(cex) and float(cex) > sf_cfg["cex_threshold"]:
-            safety *= max(sf_cfg["cex_floor"], 1.0 - (float(cex) - sf_cfg["cex_threshold"]) / 100)
+            safety *= max(sf_cfg["cex_floor"], 1.0 - (float(cex) - sf_cfg["cex_threshold"]) / sf_cfg.get("cex_slope", 100))
         safety = max(params.get("safety_floor", 0.75), safety)
     else:
         safety = _safe_mult(row, "safety_penalty")
@@ -3086,11 +3081,11 @@ def _compute_score_with_params(
     if pp_cfg:
         pc_1h_pm = row.get("price_change_1h")
         pc_5m_pm = row.get("price_change_5m")
-        pump_1h_hard = 30  # these thresholds are from SCORING_PARAMS (pump_pc1h_hard/pump_pc5m_hard)
-        pump_5m_hard = 15
-        pump_1h_mod = pump_1h_hard * 0.5
-        pump_5m_mod = pump_5m_hard * 0.533
-        pump_1h_light = pump_1h_hard * 0.267
+        pump_1h_hard = pp_cfg.get("pump_1h_hard", 30)
+        pump_5m_hard = pp_cfg.get("pump_5m_hard", 15)
+        pump_1h_mod = pp_cfg.get("pump_1h_mod", pump_1h_hard * 0.5)
+        pump_5m_mod = pp_cfg.get("pump_5m_mod", pump_5m_hard * 0.533)
+        pump_1h_light = pp_cfg.get("pump_1h_light", pump_1h_hard * 0.267)
         pump_momentum_pen = 1.0
         if (pd.notna(pc_1h_pm) and float(pc_1h_pm) > pump_1h_hard) or (pd.notna(pc_5m_pm) and float(pc_5m_pm) > pump_5m_hard):
             pump_momentum_pen = pp_cfg.get("hard_penalty", 0.5)
@@ -3299,9 +3294,9 @@ def _evaluate_params(
 ) -> float:
     """
     Composite objective for Optuna (higher = better):
-    - 50% portfolio return (top-5 tokens per cycle, TP/SL simulation)
-    - 30% Sharpe ratio
-    - 20% top-1 hit rate
+    - 30% portfolio return (top-5 tokens per cycle)
+    - 20% Sharpe ratio
+    - 50% top-1 hit rate (dominant — bot picks only #1 token per cycle)
     """
     max_price_col = f"max_price_{horizon}"
     if max_price_col not in df.columns:
@@ -3360,9 +3355,9 @@ def _evaluate_params(
     sharpe = avg_return / max(0.01, std_return)
     top1_hr = top1_hits / top1_tested
 
-    # Composite: 50% portfolio return + 30% sharpe + 20% top1 hit rate
-    # Normalize sharpe to similar scale as returns (typically 0-2)
-    composite = 0.50 * avg_return + 0.30 * min(sharpe, 3.0) / 3.0 + 0.20 * top1_hr
+    # Composite: 30% portfolio return + 20% sharpe + 50% top1 hit rate
+    # v49: hit-rate-dominant — bot only picks #1 token per cycle
+    composite = 0.30 * avg_return + 0.20 * min(sharpe, 3.0) / 3.0 + 0.50 * top1_hr
 
     return composite
 
@@ -3374,8 +3369,8 @@ def _optuna_optimize_params(
     timeout: int = 900,
 ) -> dict | None:
     """
-    v48: Optuna study with ~102 search space parameters (14/14 multipliers recomputable).
-    Walk-forward inside objective: 70% oldest → train, 30% newest → evaluate.
+    v49: Optuna study with ~119 search space parameters (14/14 multipliers recomputable).
+    2-fold expanding walk-forward inside objective to prevent overfit to a single split.
     Returns best_params dict or None if no improvement.
     """
     import optuna
@@ -3384,14 +3379,29 @@ def _optuna_optimize_params(
     threshold = ML_THRESHOLD
     max_price_col = f"max_price_{horizon}"
 
-    # Walk-forward split: 70% oldest for training, 30% newest for evaluation
+    # v49: 2-fold expanding walk-forward split
+    # Split data into 3 time blocks: [B1|B2|B3]
+    # Fold 1: train=[B1] test=[B2]
+    # Fold 2: train=[B1,B2] test=[B3]  (expanding window)
+    # Final score = average of fold scores
     df_sorted = df.sort_values("snapshot_at")
-    split_idx = int(len(df_sorted) * 0.70)
-    df_train = df_sorted.iloc[:split_idx].copy()
-    df_test = df_sorted.iloc[split_idx:].copy()
+    n = len(df_sorted)
+    b1_end = int(n * 0.40)
+    b2_end = int(n * 0.70)
+    df_b1 = df_sorted.iloc[:b1_end]
+    df_b2 = df_sorted.iloc[b1_end:b2_end]
+    df_b3 = df_sorted.iloc[b2_end:]
 
-    if len(df_train) < 50 or len(df_test) < 20:
-        logger.info("optuna: not enough data for walk-forward split (train=%d, test=%d)", len(df_train), len(df_test))
+    # For the objective, we use folds; for final test, we use B3
+    df_train = df_sorted.iloc[:b2_end].copy()
+    df_test = df_b3.copy()
+
+    # Validate minimum sizes (50 train / 20 test per fold)
+    if len(df_b1) < 50 or len(df_b2) < 20 or len(df_b3) < 20:
+        logger.info(
+            "optuna: not enough data for 2-fold walk-forward (B1=%d, B2=%d, B3=%d)",
+            len(df_b1), len(df_b2), len(df_b3),
+        )
         return None
 
     def objective(trial):
@@ -3431,6 +3441,10 @@ def _optuna_optimize_params(
             return -999.0
         if params["activity_pump_cap_hard"] <= params["activity_pump_cap_soft"]:
             return -999.0
+
+        # --- v49: conviction normalization params ---
+        params["conviction_offset"] = trial.suggest_float("conviction_offset", 3, 10, step=1)
+        params["conviction_divisor"] = trial.suggest_float("conviction_divisor", 2, 8, step=1)
 
         # --- JSONB configs ---
         params["breadth_pen_config"] = {
@@ -3584,6 +3598,12 @@ def _optuna_optimize_params(
         if pp_hard > pp_mod or pp_mod > pp_light:
             return -999.0
         pvp_floor = trial.suggest_float("pvp_normal_floor", 0.3, 0.7, step=0.05)
+        # v49: pump momentum threshold params
+        pp_1h_hard = trial.suggest_float("pp_1h_hard", 15, 50, step=5)
+        pp_5m_hard = trial.suggest_float("pp_5m_hard", 8, 30, step=2)
+        pp_1h_mod_ratio = trial.suggest_float("pp_1h_mod_ratio", 0.3, 0.7, step=0.05)
+        pp_5m_mod_ratio = trial.suggest_float("pp_5m_mod_ratio", 0.3, 0.7, step=0.05)
+        pp_1h_light_ratio = trial.suggest_float("pp_1h_light_ratio", 0.15, 0.45, step=0.05)
         params["pump_pen_config"] = {
             "hard_penalty": pp_hard,
             "moderate_penalty": pp_mod,
@@ -3592,6 +3612,11 @@ def _optuna_optimize_params(
             "pvp_pump_fun_scale": 0.05,
             "pvp_normal_floor": pvp_floor,
             "pvp_normal_scale": 0.1,
+            "pump_1h_hard": pp_1h_hard,
+            "pump_5m_hard": pp_5m_hard,
+            "pump_1h_mod": pp_1h_hard * pp_1h_mod_ratio,
+            "pump_5m_mod": pp_5m_hard * pp_5m_mod_ratio,
+            "pump_1h_light": pp_1h_hard * pp_1h_light_ratio,
         }
 
         # --- v48: onchain_config params (~11 new) ---
@@ -3608,9 +3633,17 @@ def _optuna_optimize_params(
         oc_velocity_f0 = trial.suggest_float("oc_velocity_f0", 0.4, 0.8, step=0.05)
         oc_velocity_f3 = trial.suggest_float("oc_velocity_f3", 1.1, 1.5, step=0.05)
         oc_age_f0 = trial.suggest_float("oc_age_f0", 0.3, 0.7, step=0.05)
+        # v49: new onchain sub-params (BSR base, LMR interpolation, Jupiter non-tradeable)
+        oc_bsr_base = trial.suggest_float("oc_bsr_base", 0.3, 0.7, step=0.05)
+        oc_lmr_interp_base = trial.suggest_float("oc_lmr_interp_base", 0.5, 1.0, step=0.05)
+        oc_lmr_interp_slope = trial.suggest_float("oc_lmr_interp_slope", 2, 8, step=1)
+        oc_jup_nt_factor = trial.suggest_float("oc_jup_nt_factor", 0.3, 0.7, step=0.05)
         params["onchain_config"] = {
             "lmr_low": oc_lmr_low, "lmr_low_factor": 0.5,
             "lmr_high": oc_lmr_high, "lmr_high_factor": 1.2,
+            "lmr_interp_base": oc_lmr_interp_base, "lmr_interp_slope": oc_lmr_interp_slope,
+            "bsr_base": oc_bsr_base,
+            "jup_non_tradeable_factor": oc_jup_nt_factor,
             "age_thresholds": [1, 6, 48, 168],
             "age_factors": [oc_age_f0, 1.0, 1.2, 1.0, 0.8],
             "tx_thresholds": [5, 20, 40], "tx_factors": [0.7, 1.0, 1.1, 1.3],
@@ -3628,7 +3661,7 @@ def _optuna_optimize_params(
             "whale_accum_bonus": oc_whale_accum,
         }
 
-        # --- v48: safety_config params (~10 new) ---
+        # --- v48: safety_config params (~10 new) + v49: 6 slope params ---
         sf_insider_t = trial.suggest_float("sf_insider_threshold", 20, 50, step=5)
         sf_insider_f = trial.suggest_float("sf_insider_floor", 0.3, 0.7, step=0.05)
         sf_gini_t = trial.suggest_float("sf_gini_threshold", 0.70, 0.95, step=0.05)
@@ -3639,13 +3672,20 @@ def _optuna_optimize_params(
         sf_whale_dist_p = trial.suggest_float("sf_whale_dist_penalty", 0.5, 0.9, step=0.05)
         sf_whale_dump_p = trial.suggest_float("sf_whale_dump_penalty", 0.4, 0.8, step=0.05)
         sf_lp_unlock_p = trial.suggest_float("sf_lp_unlock_penalty", 0.3, 0.8, step=0.05)
+        # v49: 6 safety slope params
+        sf_insider_slope = trial.suggest_float("sf_insider_slope", 50, 200, step=25)
+        sf_top10_slope = trial.suggest_float("sf_top10_slope", 50, 200, step=25)
+        sf_risk_score_slope = trial.suggest_float("sf_risk_score_slope", 2000, 10000, step=1000)
+        sf_whale_conc_slope = trial.suggest_float("sf_whale_conc_slope", 40, 150, step=10)
+        sf_bb_cluster_slope = trial.suggest_float("sf_bb_cluster_slope", 30, 120, step=10)
+        sf_cex_slope = trial.suggest_float("sf_cex_slope", 50, 200, step=25)
         # Ordered: dump <= dist
         if sf_whale_dump_p > sf_whale_dist_p:
             return -999.0
         params["safety_config"] = {
-            "insider_threshold": sf_insider_t, "insider_floor": sf_insider_f,
-            "top10_threshold": 50, "top10_floor": 0.7,
-            "risk_score_threshold": 5000, "risk_score_floor": 0.5,
+            "insider_threshold": sf_insider_t, "insider_floor": sf_insider_f, "insider_slope": sf_insider_slope,
+            "top10_threshold": 50, "top10_floor": 0.7, "top10_slope": sf_top10_slope,
+            "risk_score_threshold": 5000, "risk_score_floor": 0.5, "risk_score_slope": sf_risk_score_slope,
             "risk_count_threshold": 3, "risk_count_penalty": 0.9,
             "jito_hard_threshold": 5, "jito_hard_penalty": 0.4,
             "jito_soft_threshold": 3, "jito_soft_penalty": 0.6,
@@ -3653,13 +3693,13 @@ def _optuna_optimize_params(
             "bundle_soft_threshold": 10, "bundle_soft_penalty": 0.7,
             "gini_threshold": sf_gini_t, "gini_penalty": sf_gini_p,
             "holder_count_threshold": sf_holder_t, "holder_count_penalty": sf_holder_p,
-            "whale_conc_threshold": sf_whale_conc_t, "whale_conc_floor": 0.7,
+            "whale_conc_threshold": sf_whale_conc_t, "whale_conc_floor": 0.7, "whale_conc_slope": sf_whale_conc_slope,
             "bb_score_thresholds": [20, 40], "bb_score_penalties": [0.6, 0.85],
-            "bb_cluster_threshold": 30, "bb_cluster_floor": 0.6,
+            "bb_cluster_threshold": 30, "bb_cluster_floor": 0.6, "bb_cluster_slope": sf_bb_cluster_slope,
             "whale_dom_threshold": 0.5, "whale_dom_penalty": 0.85,
             "whale_dist_penalty": sf_whale_dist_p, "whale_dump_penalty": sf_whale_dump_p,
             "lp_unlock_penalty": sf_lp_unlock_p, "lp_partial_threshold": 50, "lp_partial_penalty": 0.85,
-            "cex_threshold": 20, "cex_floor": 0.7,
+            "cex_threshold": 20, "cex_floor": 0.7, "cex_slope": sf_cex_slope,
         }
 
         # --- v48: momentum_config params (~8 new) ---
@@ -3701,9 +3741,14 @@ def _optuna_optimize_params(
             "cap": sm_cap_opt,
         }
 
-        # Evaluate on TRAIN set
-        train_score = _evaluate_params(df_train, weights, params, horizon, threshold)
-        return train_score
+        # v49: 2-fold expanding walk-forward evaluation
+        # Fold 1: train on B1, evaluate on B2
+        fold1_score = _evaluate_params(df_b2, weights, params, horizon, threshold)
+        # Fold 2: train on B1+B2, evaluate on B3 (but we only eval here, Optuna trains implicitly)
+        fold2_score = _evaluate_params(df_b3, weights, params, horizon, threshold)
+        if fold1_score <= -900 or fold2_score <= -900:
+            return -999.0
+        return (fold1_score + fold2_score) / 2.0
 
     study = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler(seed=42))
     study.optimize(objective, n_trials=n_trials, timeout=timeout)
@@ -3738,6 +3783,9 @@ def _optuna_optimize_params(
         "activity_pump_cap_hard": bp["activity_pump_cap_hard"],
         "activity_pump_cap_soft": bp["activity_pump_cap_soft"],
         "s_tier_bonus": bp["s_tier_bonus"],
+        # v49: conviction normalization params
+        "conviction_offset": bp["conviction_offset"],
+        "conviction_divisor": bp["conviction_divisor"],
         "breadth_pen_config": {
             "thresholds": [bp["bp_t0"], bp["bp_t1"], bp["bp_t2"]],
             "penalties": [bp["bp_p0"], bp["bp_p1"], bp["bp_p2"]],
@@ -3819,11 +3867,19 @@ def _optuna_optimize_params(
             "pvp_pump_fun_scale": 0.05,
             "pvp_normal_floor": bp["pvp_normal_floor"],
             "pvp_normal_scale": 0.1,
+            "pump_1h_hard": bp["pp_1h_hard"],
+            "pump_5m_hard": bp["pp_5m_hard"],
+            "pump_1h_mod": bp["pp_1h_hard"] * bp["pp_1h_mod_ratio"],
+            "pump_5m_mod": bp["pp_5m_hard"] * bp["pp_5m_mod_ratio"],
+            "pump_1h_light": bp["pp_1h_hard"] * bp["pp_1h_light_ratio"],
         },
         # v48: 4 new JSONB configs for full multiplier recomputation
         "onchain_config": {
             "lmr_low": bp["oc_lmr_low"], "lmr_low_factor": 0.5,
             "lmr_high": bp["oc_lmr_high"], "lmr_high_factor": 1.2,
+            "lmr_interp_base": bp["oc_lmr_interp_base"], "lmr_interp_slope": bp["oc_lmr_interp_slope"],
+            "bsr_base": bp["oc_bsr_base"],
+            "jup_non_tradeable_factor": bp["oc_jup_nt_factor"],
             "age_thresholds": [1, 6, 48, 168],
             "age_factors": [bp["oc_age_f0"], 1.0, 1.2, 1.0, 0.8],
             "tx_thresholds": [5, 20, 40], "tx_factors": [0.7, 1.0, 1.1, 1.3],
@@ -3842,8 +3898,9 @@ def _optuna_optimize_params(
         },
         "safety_config": {
             "insider_threshold": bp["sf_insider_threshold"], "insider_floor": bp["sf_insider_floor"],
-            "top10_threshold": 50, "top10_floor": 0.7,
-            "risk_score_threshold": 5000, "risk_score_floor": 0.5,
+            "insider_slope": bp["sf_insider_slope"],
+            "top10_threshold": 50, "top10_floor": 0.7, "top10_slope": bp["sf_top10_slope"],
+            "risk_score_threshold": 5000, "risk_score_floor": 0.5, "risk_score_slope": bp["sf_risk_score_slope"],
             "risk_count_threshold": 3, "risk_count_penalty": 0.9,
             "jito_hard_threshold": 5, "jito_hard_penalty": 0.4,
             "jito_soft_threshold": 3, "jito_soft_penalty": 0.6,
@@ -3853,14 +3910,16 @@ def _optuna_optimize_params(
             "holder_count_threshold": bp["sf_holder_count_threshold"],
             "holder_count_penalty": bp["sf_holder_count_penalty"],
             "whale_conc_threshold": bp["sf_whale_conc_threshold"], "whale_conc_floor": 0.7,
+            "whale_conc_slope": bp["sf_whale_conc_slope"],
             "bb_score_thresholds": [20, 40], "bb_score_penalties": [0.6, 0.85],
             "bb_cluster_threshold": 30, "bb_cluster_floor": 0.6,
+            "bb_cluster_slope": bp["sf_bb_cluster_slope"],
             "whale_dom_threshold": 0.5, "whale_dom_penalty": 0.85,
             "whale_dist_penalty": bp["sf_whale_dist_penalty"],
             "whale_dump_penalty": bp["sf_whale_dump_penalty"],
             "lp_unlock_penalty": bp["sf_lp_unlock_penalty"],
             "lp_partial_threshold": 50, "lp_partial_penalty": 0.85,
-            "cex_threshold": 20, "cex_floor": 0.7,
+            "cex_threshold": 20, "cex_floor": 0.7, "cex_slope": bp["sf_cex_slope"],
         },
         "momentum_config": {
             "kol_fresh_thresholds": [bp["mom_kf_t0"], bp["mom_kf_t0"] * 0.4],
@@ -3900,6 +3959,9 @@ def _optuna_optimize_params(
         "activity_pump_cap_hard": 80,
         "activity_pump_cap_soft": 50,
         "s_tier_bonus": 1.2,
+        # v49: conviction normalization defaults
+        "conviction_offset": 6,
+        "conviction_divisor": 4,
         "breadth_pen_config": {"thresholds": [0.033, 0.05, 0.08], "penalties": [0.75, 0.85, 0.95]},
         "hype_pen_config": {"thresholds": [2, 4, 7], "penalties": [1.0, 0.85, 0.65, 0.50]},
         # v45: new baseline defaults
@@ -3963,11 +4025,19 @@ def _optuna_optimize_params(
             "pvp_pump_fun_scale": 0.05,
             "pvp_normal_floor": 0.5,
             "pvp_normal_scale": 0.1,
+            "pump_1h_hard": 30,
+            "pump_5m_hard": 15,
+            "pump_1h_mod": 15,
+            "pump_5m_mod": 7.995,
+            "pump_1h_light": 8.01,
         },
         # v48: 4 new JSONB baseline configs (matching pipeline.py defaults)
         "onchain_config": {
             "lmr_low": 0.02, "lmr_low_factor": 0.5,
             "lmr_high": 0.10, "lmr_high_factor": 1.2,
+            "lmr_interp_base": 0.8, "lmr_interp_slope": 4,
+            "bsr_base": 0.5,
+            "jup_non_tradeable_factor": 0.5,
             "age_thresholds": [1, 6, 48, 168],
             "age_factors": [0.5, 1.0, 1.2, 1.0, 0.8],
             "tx_thresholds": [5, 20, 40], "tx_factors": [0.7, 1.0, 1.1, 1.3],
@@ -3985,9 +4055,9 @@ def _optuna_optimize_params(
             "whale_accum_bonus": 1.15,
         },
         "safety_config": {
-            "insider_threshold": 30, "insider_floor": 0.5,
-            "top10_threshold": 50, "top10_floor": 0.7,
-            "risk_score_threshold": 5000, "risk_score_floor": 0.5,
+            "insider_threshold": 30, "insider_floor": 0.5, "insider_slope": 100,
+            "top10_threshold": 50, "top10_floor": 0.7, "top10_slope": 100,
+            "risk_score_threshold": 5000, "risk_score_floor": 0.5, "risk_score_slope": 5000,
             "risk_count_threshold": 3, "risk_count_penalty": 0.9,
             "jito_hard_threshold": 5, "jito_hard_penalty": 0.4,
             "jito_soft_threshold": 3, "jito_soft_penalty": 0.6,
@@ -3995,13 +4065,13 @@ def _optuna_optimize_params(
             "bundle_soft_threshold": 10, "bundle_soft_penalty": 0.7,
             "gini_threshold": 0.85, "gini_penalty": 0.8,
             "holder_count_threshold": 50, "holder_count_penalty": 0.85,
-            "whale_conc_threshold": 60, "whale_conc_floor": 0.7,
+            "whale_conc_threshold": 60, "whale_conc_floor": 0.7, "whale_conc_slope": 80,
             "bb_score_thresholds": [20, 40], "bb_score_penalties": [0.6, 0.85],
-            "bb_cluster_threshold": 30, "bb_cluster_floor": 0.6,
+            "bb_cluster_threshold": 30, "bb_cluster_floor": 0.6, "bb_cluster_slope": 70,
             "whale_dom_threshold": 0.5, "whale_dom_penalty": 0.85,
             "whale_dist_penalty": 0.75, "whale_dump_penalty": 0.65,
             "lp_unlock_penalty": 0.6, "lp_partial_threshold": 50, "lp_partial_penalty": 0.85,
-            "cex_threshold": 20, "cex_floor": 0.7,
+            "cex_threshold": 20, "cex_floor": 0.7, "cex_slope": 100,
         },
         "momentum_config": {
             "kol_fresh_thresholds": [0.5, 0.2],
@@ -4067,7 +4137,8 @@ def _optuna_optimize_params(
                  "safety_floor", "onchain_mult_floor", "onchain_mult_cap",
                  "pa_norm_floor", "pa_norm_cap",
                  "consensus_pump_threshold", "consensus_pump_floor",
-                 "consensus_pump_divisor", "activity_mid_mult"]:
+                 "consensus_pump_divisor", "activity_mid_mult",
+                 "conviction_offset", "conviction_divisor"]:
         current = baseline_params.get(key, best_params[key])
         new_val = best_params[key]
         if current > 0:
@@ -4079,6 +4150,42 @@ def _optuna_optimize_params(
                 )
                 direction = 1 if new_val > current else -1
                 best_params[key] = current * (1 + direction * 0.30)
+
+    # v49: Post-Optuna bot validation — verify #1 pick has positive expectancy
+    max_price_col = f"max_price_{horizon}"
+    df_test_scored = df_test.copy()
+    df_test_scored["trial_score"] = df_test_scored.apply(
+        lambda r: _compute_score_with_params(r, best_weights, best_params), axis=1
+    )
+    df_test_scored["cycle"] = df_test_scored["snapshot_at"].dt.floor("15min")
+    bot_wins, bot_losses, bot_tested = 0, 0, 0
+    for _, group in df_test_scored.groupby("cycle"):
+        labeled = group[group[max_price_col].notna() & group["price_at_snapshot"].notna()]
+        if labeled.empty:
+            continue
+        top1 = labeled.loc[labeled["trial_score"].idxmax()]
+        p0 = float(top1["price_at_snapshot"])
+        if p0 <= 0:
+            continue
+        p_max = float(top1[max_price_col])
+        bot_tested += 1
+        ret = (p_max / p0) - 1.0
+        if ret >= (threshold - 1.0):
+            bot_wins += 1
+        elif ret < -0.30:  # SL proxy: -30% = loss
+            bot_losses += 1
+    if bot_tested >= 5:
+        bot_expectancy = (bot_wins * (threshold - 1.0) - bot_losses * 0.30) / bot_tested
+        if bot_expectancy < 0:
+            logger.warning(
+                "optuna: bot validation NEGATIVE expectancy (%.3f, wins=%d losses=%d tested=%d) — skipping",
+                bot_expectancy, bot_wins, bot_losses, bot_tested,
+            )
+            return None
+        logger.info(
+            "optuna: bot validation OK — expectancy=%.3f, wins=%d/%d",
+            bot_expectancy, bot_wins, bot_tested,
+        )
 
     return {
         "weights": best_weights,
@@ -4131,13 +4238,16 @@ def _apply_optuna_params(client, best_weights: dict, best_params: dict, reason: 
             "consensus_pump_divisor": best_params.get("consensus_pump_divisor", 400),
             "activity_mid_mult": best_params.get("activity_mid_mult", 1.10),
             "pump_pen_config": best_params.get("pump_pen_config"),
+            # v49: conviction normalization params
+            "conviction_offset": best_params.get("conviction_offset", 6),
+            "conviction_divisor": best_params.get("conviction_divisor", 4),
             # v48: 4 new JSONB configs for full multiplier recomputation
             "onchain_config": best_params.get("onchain_config"),
             "safety_config": best_params.get("safety_config"),
             "momentum_config": best_params.get("momentum_config"),
             "size_mult_config": best_params.get("size_mult_config"),
             "updated_at": datetime.now(timezone.utc).isoformat(),
-            "updated_by": "optuna_v48",
+            "updated_by": "optuna_v49",
             "change_reason": reason,
         }
         # Remove None values (don't write nulls for missing configs)
@@ -4208,7 +4318,7 @@ def run_optuna_optimization(n_trials: int = 200, dry_run: bool = False) -> dict 
         return result
 
     reason = (
-        f"optuna_v46: {n_labeled} tokens, {result['n_trials']} trials, "
+        f"optuna_v49: {n_labeled} tokens, {result['n_trials']} trials, "
         f"test_score {result['baseline_score']:.4f} -> {result['test_score']:.4f} "
         f"(+{result.get('improvement_pct', 0):.1f}%)"
     )

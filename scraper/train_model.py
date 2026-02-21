@@ -54,8 +54,8 @@ logger = logging.getLogger(__name__)
 MODEL_DIR = Path(__file__).parent
 
 # Quality gate: model must exceed this precision@5 to be saved
-# v22: relaxed from 0.40 — lower thresholds (e.g. +50%) are easier to predict
-MIN_PRECISION_AT_5 = 0.30
+# v49: dynamic threshold based on sample size (see quality gate below)
+MIN_PRECISION_AT_5 = 0.30  # fallback default
 
 # Minimum test set size for quality gate to be meaningful
 # Need 200+ unique tokens for p@5 to be statistically reliable.
@@ -944,13 +944,31 @@ def train_regression(
         return {"quality_gate": "FAILED", "reason": "insufficient_test_data",
                 "n_test": len(y_test), "min_required": MIN_N_TEST}
 
-    if p_at_5 < MIN_PRECISION_AT_5:
+    # v49: Spearman correlation check
+    if spearman < 0.10:
         logger.warning(
-            "QUALITY GATE FAILED: precision@5 = %.3f < %.2f minimum. "
-            "Model NOT saved. Collect more data and retrain.",
-            p_at_5, MIN_PRECISION_AT_5,
+            "QUALITY GATE FAILED: Spearman=%.3f < 0.10 minimum",
+            spearman,
         )
-        return {"quality_gate": "FAILED", "precision_at_5": float(p_at_5)}
+        return {"quality_gate": "FAILED", "reason": "low_spearman",
+                "spearman": float(spearman)}
+
+    # v49: Dynamic precision threshold based on sample size
+    if len(y_test) < 500:
+        min_p5 = 0.25
+    elif len(y_test) < 1000:
+        min_p5 = 0.30
+    else:
+        min_p5 = 0.35
+
+    if p_at_5 < min_p5:
+        logger.warning(
+            "QUALITY GATE FAILED: precision@5 = %.3f < %.2f minimum (n_test=%d). "
+            "Model NOT saved. Collect more data and retrain.",
+            p_at_5, min_p5, len(y_test),
+        )
+        return {"quality_gate": "FAILED", "precision_at_5": float(p_at_5),
+                "dynamic_threshold": float(min_p5)}
 
     # SHAP analysis
     logger.info("=== SHAP Analysis ===")
