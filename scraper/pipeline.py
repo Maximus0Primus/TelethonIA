@@ -3158,6 +3158,7 @@ def aggregate_ranking(
 
         # PVP penalty: same-name tokens — softer on pump.fun where copycats are inevitable
         # v47: floors/scales from pump_pen_config (Optuna-tunable).
+        _ppcfg = SCORING_PARAMS["pump_pen_config"]
         pvp_recent = token.get("pvp_recent_count") or 0
         if token.get("is_pump_fun"):
             # pump.fun: copycats are normal, scraper already resolves to highest-volume pair
@@ -3284,7 +3285,6 @@ def aggregate_ranking(
         # This multiplier acts on the FINAL score to directly penalize active pumps.
         # v20: thresholds from SCORING_PARAMS (dynamic).
         # v47: penalty values from pump_pen_config (Optuna-tunable).
-        _ppcfg = SCORING_PARAMS["pump_pen_config"]
         pump_1h_hard = SCORING_PARAMS["pump_pc1h_hard"]  # default 30
         pump_5m_hard = SCORING_PARAMS["pump_pc5m_hard"]  # default 15
         pump_1h_mod = pump_1h_hard * 0.5   # 15 at default
