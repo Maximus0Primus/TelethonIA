@@ -1943,7 +1943,9 @@ def _kco_phase_c_update_ath(client: Client, pool_cache: dict, stats: dict, start
             client.table("kol_call_outcomes")
             .select("id, token_address, symbol, call_timestamp, pair_address, entry_price, ath_after_call")
             .not_.is_("entry_price", "null")
-            .or_("outcome_status.is.null,outcome_status.eq.active")
+            # v51: include dead_no_ohlcv — Phase B may have found entry_price
+            # but Phase C never ran. Give them a chance to compute ATH.
+            .or_("outcome_status.is.null,outcome_status.eq.active,outcome_status.eq.dead_no_ohlcv")
             .order("last_checked_at", desc=False, nullsfirst=True)
             .limit(KCO_BATCH_LIMIT)
             .execute()
@@ -2098,6 +2100,8 @@ def _kco_phase_c_update_ath(client: Client, pool_cache: dict, stats: dict, start
             if max_high > current_ath:
                 update_data["ath_after_call"] = float(max_high)
                 update_data["ath_price_source"] = source  # v39: track ATH data source
+                # v51: resurrect dead rows — Phase C found ATH for previously-dead rows
+                update_data["outcome_status"] = "active"
                 if ath_ts:
                     update_data["ath_timestamp"] = datetime.fromtimestamp(ath_ts, tz=timezone.utc).isoformat()
                 if not row.get("pair_address") and pool_addr:
