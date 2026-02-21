@@ -1,5 +1,5 @@
 """
-Paper Trading System v2 — Multi-strategy with tranche support.
+Paper Trading System v3 — Multi-strategy with tranche support + portfolio allocation.
 
 4 strategies run in parallel per token:
 - TP50_SL30:  100% at 1.5x, -30% SL, 12h horizon (conservative baseline)
@@ -10,6 +10,9 @@ Paper Trading System v2 — Multi-strategy with tranche support.
 Each tranche = 1 row in paper_trades. SL triggers close ALL open tranches
 for the same token+strategy. Moonbag tranches (tp_price=NULL) only close
 on SL or timeout.
+
+v3: Score-weighted portfolio allocation. $50 budget per cycle split
+proportionally by token score. Tracks position_usd and pnl_usd.
 """
 
 import logging
@@ -23,6 +26,7 @@ DEXSCREENER_BATCH_URL = "https://api.dexscreener.com/tokens/v1/solana/{addresses
 BATCH_SIZE = 30
 
 TOP_N = 5
+PORTFOLIO_BUDGET = 50.0  # USD per cycle, score-weighted across top N
 
 # --- Strategy Definitions ---
 # Each strategy has a list of tranches. Moonbag tranches have tp_mult=None.
@@ -102,6 +106,12 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime) -> int:
     if not candidates:
         return 0
 
+    # Score-weighted portfolio allocation
+    scores = [max(t.get("score", 1), 1) for t in candidates]
+    total_score = sum(scores)
+    for i, token in enumerate(candidates):
+        token["_alloc_usd"] = round(PORTFOLIO_BUDGET * scores[i] / total_score, 2)
+
     # Check which (token_address, strategy) combos already have open trades
     addrs = [t["token_address"] for t in candidates]
     try:
@@ -123,6 +133,7 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime) -> int:
     for rank_idx, token in enumerate(candidates, 1):
         addr = token["token_address"]
         entry_price = float(token["price_usd"])
+        alloc_usd = token.get("_alloc_usd", PORTFOLIO_BUDGET / TOP_N)
 
         # Common fields for all tranches of this token
         base_row = {
@@ -137,6 +148,7 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime) -> int:
             "unique_kols": token.get("unique_kols"),
             "whale_new_entries": token.get("whale_new_entries"),
             "momentum_mult": float(token["momentum_mult"]) if token.get("momentum_mult") else None,
+            "portfolio_budget": PORTFOLIO_BUDGET,
         }
         if token.get("snapshot_id"):
             base_row["snapshot_id"] = int(token["snapshot_id"])
@@ -157,6 +169,7 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime) -> int:
                     "horizon_minutes": tranche["horizon_min"],
                     "tranche_pct": tranche["pct"],
                     "tranche_label": tranche["label"],
+                    "position_usd": round(alloc_usd * tranche["pct"], 2),
                 }
 
                 try:
@@ -168,10 +181,10 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime) -> int:
                         token.get("symbol"), strat_name, tranche["label"], e,
                     )
 
-    symbols = [t.get("symbol", "?") for t in candidates]
+    allocs = [f"{t.get('symbol','?')}=${t.get('_alloc_usd',0):.1f}" for t in candidates]
     logger.info(
-        "paper_trader: opened %d new trade rows for top%d (%s) across %d strategies",
-        opened, TOP_N, ", ".join(symbols), len(STRATEGIES),
+        "paper_trader: opened %d rows, $%.0f budget → %s (%d strategies)",
+        opened, PORTFOLIO_BUDGET, ", ".join(allocs), len(STRATEGIES),
     )
     return opened
 
@@ -265,12 +278,15 @@ def check_paper_trades(client) -> dict:
             continue
 
         pnl_pct = round((exit_price / entry_price) - 1, 4) if exit_price and entry_price else 0
+        pos_usd = float(trade.get("position_usd") or 0)
+        pnl_usd = round(pos_usd * pnl_pct, 2) if pos_usd else None
 
         update = {
             "status": new_status,
             "exit_price": exit_price,
             "exit_at": now.isoformat(),
             "pnl_pct": pnl_pct,
+            "pnl_usd": pnl_usd,
             "exit_minutes": int(elapsed_minutes),
         }
 
@@ -280,10 +296,11 @@ def check_paper_trades(client) -> dict:
             counts["closed"] += 1
             status_key = new_status.replace("_hit", "")
             counts[status_key] = counts.get(status_key, 0) + 1
+            usd_str = f" ${pnl_usd:+.2f}" if pnl_usd is not None else ""
             logger.info(
-                "paper_trader: CLOSED %s %s/%s/%s — %s pnl=%.1f%% after %dmin",
+                "paper_trader: CLOSED %s %s/%s/%s — %s pnl=%.1f%%%s after %dmin",
                 trade["symbol"], trade["strategy"], trade.get("tranche_label", "main"),
-                addr[:8], new_status, pnl_pct * 100, int(elapsed_minutes),
+                addr[:8], new_status, pnl_pct * 100, usd_str, int(elapsed_minutes),
             )
         except Exception as e:
             logger.error("paper_trader: update failed for trade %s: %s", trade["id"], e)
@@ -310,12 +327,15 @@ def check_paper_trades(client) -> dict:
 
         exit_price = current_price if current_price else entry_price * (sl_price / entry_price)
         pnl_pct = round((exit_price / entry_price) - 1, 4) if exit_price and entry_price else 0
+        pos_usd = float(trade.get("position_usd") or 0)
+        pnl_usd = round(pos_usd * pnl_pct, 2) if pos_usd else None
 
         update = {
             "status": "sl_hit",
             "exit_price": exit_price,
             "exit_at": now.isoformat(),
             "pnl_pct": pnl_pct,
+            "pnl_usd": pnl_usd,
             "exit_minutes": int(elapsed_minutes),
         }
 
@@ -324,10 +344,11 @@ def check_paper_trades(client) -> dict:
             closed_ids.add(trade["id"])
             counts["closed"] += 1
             counts["sl"] = counts.get("sl", 0) + 1
+            usd_str = f" ${pnl_usd:+.2f}" if pnl_usd is not None else ""
             logger.info(
-                "paper_trader: CLOSED (SL cascade) %s %s/%s — pnl=%.1f%%",
+                "paper_trader: CLOSED (SL cascade) %s %s/%s — pnl=%.1f%%%s",
                 trade["symbol"], trade["strategy"], trade.get("tranche_label", ""),
-                pnl_pct * 100,
+                pnl_pct * 100, usd_str,
             )
         except Exception as e:
             logger.error("paper_trader: update failed for trade %s: %s", trade["id"], e)
@@ -375,6 +396,11 @@ def paper_trade_summary(client) -> dict | None:
     win_rate = len(winners) / total if total else 0
     avg_pnl = sum(pnls) / len(pnls) if pnls else 0
 
+    # Dollar PnL
+    total_invested = sum(float(t.get("position_usd") or 0) for t in trades)
+    total_pnl_usd = sum(float(t.get("pnl_usd") or 0) for t in trades)
+    roi_pct = round(total_pnl_usd / total_invested * 100, 2) if total_invested else 0
+
     # Per-strategy breakdown
     strategy_stats = {}
     for strat_name in STRATEGIES:
@@ -409,6 +435,9 @@ def paper_trade_summary(client) -> dict | None:
         s_losers = [p for p in pos_pnls if p < 0]
         s_pf = abs(sum(s_winners) / sum(s_losers)) if s_losers and sum(s_losers) != 0 else float("inf")
 
+        s_invested = sum(float(t.get("position_usd") or 0) for t in strat_trades)
+        s_pnl_usd = sum(float(t.get("pnl_usd") or 0) for t in strat_trades)
+
         strategy_stats[strat_name] = {
             "positions": n_positions,
             "trade_rows": len(strat_trades),
@@ -419,6 +448,8 @@ def paper_trade_summary(client) -> dict | None:
             "avg_pnl": round(s_avg_pnl, 4),
             "profit_factor": round(s_pf, 2) if s_pf != float("inf") else "inf",
             "total_pnl_pct": round(sum(pos_pnls) * 100, 2),
+            "invested_usd": round(s_invested, 2),
+            "pnl_usd": round(s_pnl_usd, 2),
         }
 
     summary = {
@@ -428,17 +459,24 @@ def paper_trade_summary(client) -> dict | None:
         "timeout": timeout_count,
         "win_rate": round(win_rate, 3),
         "avg_pnl": round(avg_pnl, 4),
+        "total_invested_usd": round(total_invested, 2),
+        "total_pnl_usd": round(total_pnl_usd, 2),
+        "roi_pct": roi_pct,
         "strategies": strategy_stats,
     }
 
     logger.info(
-        "paper_trader SUMMARY (7d): %d rows, WR=%.1f%%, avgPnL=%.2f%% | TP=%d SL=%d TO=%d",
-        total, win_rate * 100, avg_pnl * 100, tp_count, sl_count, timeout_count,
+        "paper_trader SUMMARY (7d): %d rows, WR=%.1f%%, avgPnL=%.2f%% | "
+        "$%.2f invested, $%+.2f PnL (ROI %.1f%%) | TP=%d SL=%d TO=%d",
+        total, win_rate * 100, avg_pnl * 100,
+        total_invested, total_pnl_usd, roi_pct,
+        tp_count, sl_count, timeout_count,
     )
     for name, s in strategy_stats.items():
         logger.info(
-            "  %s: %d pos, WR=%.1f%%, avgPnL=%.2f%%, PF=%s",
-            name, s["positions"], s["win_rate"] * 100, s["avg_pnl"] * 100, s["profit_factor"],
+            "  %s: %d pos, WR=%.1f%%, avgPnL=%.2f%%, PF=%s | $%.2f→$%+.2f",
+            name, s["positions"], s["win_rate"] * 100, s["avg_pnl"] * 100,
+            s["profit_factor"], s["invested_usd"], s["pnl_usd"],
         )
     return summary
 

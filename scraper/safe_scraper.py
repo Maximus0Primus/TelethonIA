@@ -514,17 +514,31 @@ def process_and_push(messages_data: dict[str, list[dict]], dump: bool = False) -
         except Exception as e:
             logger.error("Auto-retrain failed: %s", e)
 
-    # v10: Cleanup old data (>90 days) to prevent unbounded growth
+    # v10: Cleanup old data to prevent unbounded growth
     try:
         sb = _get_supabase()
+        # Existing: snapshots > 90d, kol_mentions > 90d
         result = sb.rpc("cleanup_old_snapshots").execute()
         deleted = result.data if result.data else 0
         if deleted and deleted > 0:
-            logger.info("Snapshot retention: cleaned %d rows older than 90 days", deleted)
+            logger.info("Retention: cleaned %d snapshots (>90d)", deleted)
         result2 = sb.rpc("cleanup_old_kol_mentions").execute()
         deleted2 = result2.data if result2.data else 0
         if deleted2 and deleted2 > 0:
-            logger.info("KOL mentions retention: cleaned %d rows older than 90 days", deleted2)
+            logger.info("Retention: cleaned %d kol_mentions (>90d)", deleted2)
+        # v51: closed paper_trades > 30d, backtest_reports > 60d, scoring_history > 90d
+        for rpc_name, label in [
+            ("cleanup_closed_paper_trades", "closed paper_trades (>30d)"),
+            ("cleanup_old_backtest_reports", "backtest_reports (>60d)"),
+            ("cleanup_old_scoring_history", "scoring_config_history (>90d)"),
+        ]:
+            try:
+                r = sb.rpc(rpc_name).execute()
+                d = r.data if r.data else 0
+                if d and d > 0:
+                    logger.info("Retention: cleaned %d %s", d, label)
+            except Exception as e2:
+                logger.debug("Retention %s skipped: %s", rpc_name, e2)
     except Exception as e:
         logger.debug("Retention cleanup skipped: %s", e)
 
