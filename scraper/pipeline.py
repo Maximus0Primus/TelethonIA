@@ -1895,10 +1895,10 @@ def _compute_safety_penalty(token: dict) -> float:
 # === SCORE COMPUTATION WEIGHTS ===
 # Hardcoded fallback — overridden by scoring_config table when available
 _DEFAULT_WEIGHTS = {
-    "consensus": 0.45,      # v35: up from 0.35; KOL freshness + mention heat now in multiplier chain
-    "conviction": 0.00,     # v34: still anti-predictive (r=-0.17 on clean deduped data)
-    "breadth": 0.45,        # v35: up from 0.40; whale_count(+0.47) now boosted in onchain_mult
-    "price_action": 0.10,   # v35: down from 0.25; PA r=-0.01 on clean data, kept minimal
+    "consensus": 0.35,      # v43: synced with scoring_config (auto_backtest Feb 18)
+    "conviction": 0.10,     # v43: synced with scoring_config (was 0.00)
+    "breadth": 0.55,        # v43: synced with scoring_config (was 0.45)
+    "price_action": 0.00,   # v43: synced with scoring_config (PA r=-0.01)
 }
 
 _DEFAULT_SCORING_PARAMS = {
