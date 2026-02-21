@@ -2688,15 +2688,22 @@ def _compute_score_with_params(
         b_raw = row.get("breadth")
         consensus = min(1.0, float(b_raw) / 0.15) if pd.notna(b_raw) else None
 
+    # v47: Consensus pump discount from trial params
+    _cp_thresh = params.get("consensus_pump_threshold", 50)
+    _cp_floor = params.get("consensus_pump_floor", 0.5)
+    _cp_divisor = params.get("consensus_pump_divisor", 400)
     pc24_raw = row.get("price_change_24h") if "price_change_24h" in row.index else None
-    if consensus is not None and pd.notna(pc24_raw) and float(pc24_raw) > 50:
-        consensus_discount = max(0.5, 1.0 - (float(pc24_raw) / 400))
+    if consensus is not None and pd.notna(pc24_raw) and float(pc24_raw) > _cp_thresh:
+        consensus_discount = max(_cp_floor, 1.0 - (float(pc24_raw) / _cp_divisor))
         consensus *= consensus_discount
 
+    # v47: Conviction normalization from trial params
+    _conv_offset = params.get("conviction_offset", 6)
+    _conv_divisor = params.get("conviction_divisor", 4)
     conviction_val = _safe_mult(row, "conviction_val", default=0)
     if not pd.notna(row.get("conviction_val")):
         ac = row.get("avg_conviction")
-        conviction_val = max(0, min(1, (float(ac) - 6) / 4)) if pd.notna(ac) else None
+        conviction_val = max(0, min(1, (float(ac) - _conv_offset) / _conv_divisor)) if pd.notna(ac) else None
 
     breadth_val = _safe_mult(row, "breadth_val", default=0)
     if not pd.notna(row.get("breadth_val")):
@@ -2786,10 +2793,11 @@ def _compute_score_with_params(
         act_high = params.get("activity_ratio_high", 0.6)
         act_mid = params.get("activity_ratio_mid", 0.3)
         act_low = params.get("activity_ratio_low", 0.1)
+        act_mid_mult = params.get("activity_mid_mult", 1.10)  # v47
         if act_ratio > act_high:
             activity_mult = act_cap
         elif act_ratio > act_mid:
-            activity_mult = 1.10
+            activity_mult = act_mid_mult
         elif act_ratio > act_low:
             activity_mult = 1.0
         else:
@@ -2801,7 +2809,7 @@ def _compute_score_with_params(
         if pd.notna(pc24_act) and float(pc24_act) > pump_hard:
             activity_mult = min(activity_mult, 1.0)
         elif pd.notna(pc24_act) and float(pc24_act) > pump_soft:
-            activity_mult = min(activity_mult, 1.10)
+            activity_mult = min(activity_mult, act_mid_mult)
     else:
         activity_mult = _safe_mult(row, "activity_mult")
 
@@ -2852,6 +2860,38 @@ def _compute_score_with_params(
     # Size_mult and momentum_mult: use stored values (raw inputs not fully stored)
     size_mult = _safe_mult(row, "size_mult")
     momentum_mult = _safe_mult(row, "momentum_mult")
+
+    # --- v47: Recompute pump_momentum_pen from trial pump_pen_config ---
+    pp_cfg = params.get("pump_pen_config", {})
+    if pp_cfg:
+        pc_1h_pm = row.get("price_change_1h")
+        pc_5m_pm = row.get("price_change_5m")
+        pump_1h_hard = 30  # these thresholds are from SCORING_PARAMS (pump_pc1h_hard/pump_pc5m_hard)
+        pump_5m_hard = 15
+        pump_1h_mod = pump_1h_hard * 0.5
+        pump_5m_mod = pump_5m_hard * 0.533
+        pump_1h_light = pump_1h_hard * 0.267
+        pump_momentum_pen = 1.0
+        if (pd.notna(pc_1h_pm) and float(pc_1h_pm) > pump_1h_hard) or (pd.notna(pc_5m_pm) and float(pc_5m_pm) > pump_5m_hard):
+            pump_momentum_pen = pp_cfg.get("hard_penalty", 0.5)
+        elif (pd.notna(pc_1h_pm) and float(pc_1h_pm) > pump_1h_mod) or (pd.notna(pc_5m_pm) and float(pc_5m_pm) > pump_5m_mod):
+            pump_momentum_pen = pp_cfg.get("moderate_penalty", 0.7)
+        elif pd.notna(pc_1h_pm) and float(pc_1h_pm) > pump_1h_light:
+            pump_momentum_pen = pp_cfg.get("light_penalty", 0.85)
+    else:
+        pump_momentum_pen = _safe_mult(row, "pump_momentum_pen")
+
+    # --- v47: Recompute pvp_pen from trial pump_pen_config ---
+    pvp_recent = row.get("pvp_recent_count")
+    if pp_cfg and pd.notna(pvp_recent):
+        pvp_cnt = int(pvp_recent)
+        is_pf = row.get("is_pump_fun")
+        if pd.notna(is_pf) and bool(is_pf):
+            pvp_pen = max(pp_cfg.get("pvp_pump_fun_floor", 0.7),
+                          1.0 / (1 + pp_cfg.get("pvp_pump_fun_scale", 0.05) * pvp_cnt))
+        else:
+            pvp_pen = max(pp_cfg.get("pvp_normal_floor", 0.5),
+                          1.0 / (1 + pp_cfg.get("pvp_normal_scale", 0.1) * pvp_cnt))
 
     # --- v45: Recompute death_penalty from snapshot raw values ---
     death_cfg = params.get("death_config", {})
@@ -3010,9 +3050,9 @@ def _compute_score_with_params(
     else:
         entry_drift_mult = _safe_mult(row, "entry_drift_mult")
 
-    # v45: crash_pen = min(lifecycle, death, entry_premium) when recomputed
-    if death_cfg or ep_cfg or lc_cfg:
-        crash_pen = min(lifecycle_mult, death_penalty, entry_premium_mult)
+    # v45/v47: crash_pen = min(lifecycle, death, entry_premium, pump_momentum_pen)
+    if death_cfg or ep_cfg or lc_cfg or pp_cfg:
+        crash_pen = min(lifecycle_mult, death_penalty, entry_premium_mult, pump_momentum_pen)
     else:
         crash_pen = _safe_mult(row, "crash_pen")
 
@@ -3114,7 +3154,7 @@ def _optuna_optimize_params(
     timeout: int = 900,
 ) -> dict | None:
     """
-    v46: Optuna study with ~65 search space parameters.
+    v47: Optuna study with 67 search space parameters.
     Walk-forward inside objective: 70% oldest → train, 30% newest → evaluate.
     Returns best_params dict or None if no improvement.
     """
@@ -3312,6 +3352,28 @@ def _optuna_optimize_params(
             "dir_dying_mult": pa_dir_dying,
         }
 
+        # --- v47: Remaining hardcoded params ---
+        params["consensus_pump_threshold"] = trial.suggest_float("consensus_pump_threshold", 30, 100, step=10)
+        params["consensus_pump_floor"] = trial.suggest_float("consensus_pump_floor", 0.3, 0.8, step=0.05)
+        params["consensus_pump_divisor"] = trial.suggest_float("consensus_pump_divisor", 200, 600, step=50)
+        params["activity_mid_mult"] = trial.suggest_float("activity_mid_mult", 1.0, 1.20, step=0.02)
+        pp_hard = trial.suggest_float("pump_hard_penalty", 0.3, 0.7, step=0.05)
+        pp_mod = trial.suggest_float("pump_moderate_penalty", 0.5, 0.85, step=0.05)
+        pp_light = trial.suggest_float("pump_light_penalty", 0.70, 0.95, step=0.05)
+        # Ordered: hard <= moderate <= light
+        if pp_hard > pp_mod or pp_mod > pp_light:
+            return -999.0
+        pvp_floor = trial.suggest_float("pvp_normal_floor", 0.3, 0.7, step=0.05)
+        params["pump_pen_config"] = {
+            "hard_penalty": pp_hard,
+            "moderate_penalty": pp_mod,
+            "light_penalty": pp_light,
+            "pvp_pump_fun_floor": 0.7,
+            "pvp_pump_fun_scale": 0.05,
+            "pvp_normal_floor": pvp_floor,
+            "pvp_normal_scale": 0.1,
+        }
+
         # Evaluate on TRAIN set
         train_score = _evaluate_params(df_train, weights, params, horizon, threshold)
         return train_score
@@ -3417,6 +3479,20 @@ def _optuna_optimize_params(
             "dir_freefall_mult": bp["pa_dir_freefall_mult"],
             "dir_dying_mult": bp["pa_dir_dying_mult"],
         },
+        # v47: Remaining hardcoded params
+        "consensus_pump_threshold": bp["consensus_pump_threshold"],
+        "consensus_pump_floor": bp["consensus_pump_floor"],
+        "consensus_pump_divisor": bp["consensus_pump_divisor"],
+        "activity_mid_mult": bp["activity_mid_mult"],
+        "pump_pen_config": {
+            "hard_penalty": bp["pump_hard_penalty"],
+            "moderate_penalty": bp["pump_moderate_penalty"],
+            "light_penalty": bp["pump_light_penalty"],
+            "pvp_pump_fun_floor": 0.7,
+            "pvp_pump_fun_scale": 0.05,
+            "pvp_normal_floor": bp["pvp_normal_floor"],
+            "pvp_normal_scale": 0.1,
+        },
     }
 
     # Evaluate on TEST set (walk-forward validation)
@@ -3484,6 +3560,20 @@ def _optuna_optimize_params(
             "dir_hard_pump_mult": 1.0, "dir_pump_mult": 1.0,
             "dir_freefall_mult": 1.0, "dir_dying_mult": 1.0,
         },
+        # v47: Remaining hardcoded params baseline
+        "consensus_pump_threshold": 50,
+        "consensus_pump_floor": 0.5,
+        "consensus_pump_divisor": 400,
+        "activity_mid_mult": 1.10,
+        "pump_pen_config": {
+            "hard_penalty": 0.5,
+            "moderate_penalty": 0.7,
+            "light_penalty": 0.85,
+            "pvp_pump_fun_floor": 0.7,
+            "pvp_pump_fun_scale": 0.05,
+            "pvp_normal_floor": 0.5,
+            "pvp_normal_scale": 0.1,
+        },
     }
     baseline_score = _evaluate_params(df_test, BALANCED_WEIGHTS, baseline_params, horizon, threshold)
 
@@ -3524,7 +3614,9 @@ def _optuna_optimize_params(
     for key in ["activity_mult_floor", "activity_mult_cap", "s_tier_bonus",
                  "combined_floor", "combined_cap",
                  "safety_floor", "onchain_mult_floor", "onchain_mult_cap",
-                 "pa_norm_floor", "pa_norm_cap"]:
+                 "pa_norm_floor", "pa_norm_cap",
+                 "consensus_pump_threshold", "consensus_pump_floor",
+                 "consensus_pump_divisor", "activity_mid_mult"]:
         current = baseline_params.get(key, best_params[key])
         new_val = best_params[key]
         if current > 0:
@@ -3582,8 +3674,14 @@ def _apply_optuna_params(client, best_weights: dict, best_params: dict, reason: 
             "pa_norm_floor": best_params.get("pa_norm_floor", 0.4),
             "pa_norm_cap": best_params.get("pa_norm_cap", 1.3),
             "pa_config": best_params.get("pa_config"),
+            # v47: Remaining hardcoded params
+            "consensus_pump_threshold": best_params.get("consensus_pump_threshold", 50),
+            "consensus_pump_floor": best_params.get("consensus_pump_floor", 0.5),
+            "consensus_pump_divisor": best_params.get("consensus_pump_divisor", 400),
+            "activity_mid_mult": best_params.get("activity_mid_mult", 1.10),
+            "pump_pen_config": best_params.get("pump_pen_config"),
             "updated_at": datetime.now(timezone.utc).isoformat(),
-            "updated_by": "optuna_v46",
+            "updated_by": "optuna_v47",
             "change_reason": reason,
         }
         # Remove None values (don't write nulls for missing configs)

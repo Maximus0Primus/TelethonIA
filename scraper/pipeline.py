@@ -2051,6 +2051,45 @@ _DEFAULT_SCORING_PARAMS = {
         "candle_bounce_count": 2, "candle_bounce_mult": 1.2,
         "support_tolerance": 0.03,
     },
+    # v47: Message mention weighting — type weights, length thresholds, call type adjustments
+    "mention_weight_config": {
+        "bot_weight": 0.0,
+        "forward_weight": 0.2,
+        "update_weight": 0.3,
+        "reply_weight": 0.4,
+        "original_weight": 1.0,
+        "long_length_threshold": 150,
+        "long_length_weight": 1.2,
+        "short_length_threshold": 20,
+        "short_length_weight": 0.5,
+        "alpha_framing_score": 1.0,
+        "gamble_framing_score": -1.0,
+        "chart_analysis_score": 0.5,
+        "positive_mention_threshold": -0.3,
+    },
+    # v47: Conviction normalization + dampening + data confidence
+    "conviction_config": {
+        "norm_offset": 6,
+        "norm_divisor": 4,
+        "kol_dampening": 2,
+        "confidence_w_component": 0.4,
+        "confidence_w_kol": 0.3,
+        "confidence_w_breadth": 0.2,
+        "confidence_w_enrichment": 0.1,
+        "kol_conf_max": 3,
+        "breadth_conf_min": 0.15,
+        "breadth_conf_default": 0.3,
+    },
+    # v47: Pump momentum penalties + PVP penalty scaling
+    "pump_pen_config": {
+        "hard_penalty": 0.5,
+        "moderate_penalty": 0.7,
+        "light_penalty": 0.85,
+        "pvp_pump_fun_floor": 0.7,
+        "pvp_pump_fun_scale": 0.05,
+        "pvp_normal_floor": 0.5,
+        "pvp_normal_scale": 0.1,
+    },
 }
 
 # Module-level cache: refreshed once per scrape cycle via load_scoring_config()
@@ -2143,6 +2182,12 @@ def load_scoring_config() -> None:
             "s_tier_bonus": 1.2,
             "ml_mult_floor": 0.3,
             "ml_mult_cap": 2.0,
+            # v47: Remaining hardcoded scalar params
+            "consensus_pump_threshold": 50,
+            "consensus_pump_floor": 0.5,
+            "consensus_pump_divisor": 400,
+            "activity_mid_mult": 1.10,
+            "mention_heat_divisor": 4,
         }
         for key, default in _V44_SCALAR_KEYS.items():
             SCORING_PARAMS[key] = float(row.get(key, default))
@@ -2156,6 +2201,8 @@ def load_scoring_config() -> None:
             "entry_premium_config", "lifecycle_config", "entry_drift_config",
             # v46: Price Action config
             "pa_config",
+            # v47: Remaining hardcoded params
+            "mention_weight_config", "conviction_config", "pump_pen_config",
         ]
         for key in _V44_JSONB_KEYS:
             val = row.get(key)
@@ -2202,8 +2249,8 @@ def _get_component_value(token: dict, component: str) -> float | None:
                 weighted = sum(tw_func(g) for g in kol_tiers)
             else:
                 weighted = uk
-            return min(1.0, weighted / (tk * 0.05))
-        return min(1.0, uk / (tk * 0.05))
+            return min(1.0, weighted / (tk * SCORING_PARAMS["consensus_norm_divisor"]))
+        return min(1.0, uk / (tk * SCORING_PARAMS["consensus_norm_divisor"]))
     elif component == "sentiment":
         s = token.get("sentiment")
         if s is None:
@@ -2214,7 +2261,9 @@ def _get_component_value(token: dict, component: str) -> float | None:
         if ac is None:
             return None
         # v14: Compressed range — 7→0.25, 8→0.5, 10→1.0
-        return max(0, min(1, (ac - 6) / 4))
+        # v47: offset/divisor from conviction_config
+        ccfg = SCORING_PARAMS["conviction_config"]
+        return max(0, min(1, (ac - ccfg["norm_offset"]) / ccfg["norm_divisor"]))
     elif component == "breadth":
         bs = token.get("breadth_score")
         if bs is not None:
@@ -2222,8 +2271,8 @@ def _get_component_value(token: dict, component: str) -> float | None:
         m = token.get("mentions")
         if m is None:
             return None
-        # v14: Recalibrated from /30 → /12
-        return min(1.0, m / 12)
+        # v14/v41: Recalibrated — now uses breadth_norm_divisor from config
+        return min(1.0, m / SCORING_PARAMS["breadth_norm_divisor"])
     elif component == "price_action":
         pa = token.get("price_action_score")
         return pa  # None if no OHLCV data
@@ -2246,9 +2295,13 @@ def _compute_score_with_renormalization(token: dict) -> tuple[float, float]:
 
     # v17: Consensus discount when token already pumped — late KOL mentions
     # (arriving after the pump) are worth less than early calls.
+    # v47: thresholds from scoring_config (Optuna-tunable).
+    _cp_thresh = SCORING_PARAMS["consensus_pump_threshold"]   # default 50
+    _cp_floor = SCORING_PARAMS["consensus_pump_floor"]        # default 0.5
+    _cp_divisor = SCORING_PARAMS["consensus_pump_divisor"]    # default 400
     pc24 = token.get("price_change_24h")
-    if "consensus" in available and pc24 is not None and pc24 > 50:
-        consensus_discount = max(0.5, 1.0 - (pc24 / 400))
+    if "consensus" in available and pc24 is not None and pc24 > _cp_thresh:
+        consensus_discount = max(_cp_floor, 1.0 - (pc24 / _cp_divisor))
         old_val, old_weight = available["consensus"]
         available["consensus"] = (old_val * consensus_discount, old_weight)
         token["_consensus_pump_discount"] = round(consensus_discount, 3)
@@ -2262,17 +2315,22 @@ def _compute_score_with_renormalization(token: dict) -> tuple[float, float]:
     renormalized_score = sum(v * (w / total_available_weight) for v, w in available.values())
 
     # v14: Multi-factor data confidence
+    # v47: All weights/thresholds from conviction_config (Optuna-tunable).
+    ccfg = SCORING_PARAMS["conviction_config"]
     component_conf = total_available_weight / sum(BALANCED_WEIGHTS.values())
     # KOL coverage: 1 KOL = low confidence, 3+ KOLs = full
     uk = token.get("unique_kols", 1)
-    kol_conf = min(1.0, uk / 3)
+    kol_conf = min(1.0, uk / ccfg["kol_conf_max"])
     # Breadth quality: near-zero breadth = low confidence
     breadth = token.get("breadth_score", 0) or 0
-    breadth_conf = min(1.0, breadth / 0.15) if breadth > 0 else 0.3
+    breadth_conf = min(1.0, breadth / ccfg["breadth_conf_min"]) if breadth > 0 else ccfg["breadth_conf_default"]
     # Enrichment: has on-chain data?
     enrichment_conf = 1.0 if token.get("token_address") else 0.5
 
-    data_confidence = component_conf * 0.4 + kol_conf * 0.3 + breadth_conf * 0.2 + enrichment_conf * 0.1
+    data_confidence = (component_conf * ccfg["confidence_w_component"]
+                       + kol_conf * ccfg["confidence_w_kol"]
+                       + breadth_conf * ccfg["confidence_w_breadth"]
+                       + enrichment_conf * ccfg["confidence_w_enrichment"])
 
     return renormalized_score, round(data_confidence, 3)
 
@@ -2533,19 +2591,26 @@ def aggregate_ranking(
             is_forwarded = msg.get("is_forwarded", False)
             is_reply = msg.get("is_reply", False)
             # v14: Message length as confidence signal
+            # v47: All type weights + length thresholds from mention_weight_config.
+            mwcfg = SCORING_PARAMS["mention_weight_config"]
             msg_len = len(text)
-            length_weight = 1.2 if msg_len > 150 else (0.5 if msg_len < 20 else 1.0)
+            if msg_len > mwcfg["long_length_threshold"]:
+                length_weight = mwcfg["long_length_weight"]
+            elif msg_len < mwcfg["short_length_threshold"]:
+                length_weight = mwcfg["short_length_weight"]
+            else:
+                length_weight = 1.0
             # Combined mention weight: bots 0x, forwards 0.2x, updates 0.3x, replies 0.4x
             if is_bot_msg:
-                mention_weight = 0.0
+                mention_weight = mwcfg["bot_weight"]
             elif is_forwarded:
-                mention_weight = 0.2 * length_weight
+                mention_weight = mwcfg["forward_weight"] * length_weight
             elif is_update:
-                mention_weight = 0.3 * length_weight
+                mention_weight = mwcfg["update_weight"] * length_weight
             elif is_reply:
-                mention_weight = 0.4 * length_weight
+                mention_weight = mwcfg["reply_weight"] * length_weight
             else:
-                mention_weight = 1.0 * length_weight
+                mention_weight = mwcfg["original_weight"] * length_weight
 
             # Per-message conviction NLP (Sprint 6)
             msg_conv = _compute_message_conviction(text)
@@ -2563,7 +2628,7 @@ def aggregate_ranking(
                     "sentiment": round(sentiment, 3),
                     "msg_conviction_score": round(msg_conv["msg_conviction_score"], 3),
                     "hours_ago": round(hours_ago, 2),
-                    "is_positive": sentiment >= -0.3,
+                    "is_positive": sentiment >= mwcfg["positive_mention_threshold"],
                     "narrative": None,
                     "tokens_in_message": list(tokens),
                     # v16: Extraction audit fields
@@ -2591,19 +2656,21 @@ def aggregate_ranking(
                 token_data[token]["hours_ago"].append(hours_ago)
                 token_data[token]["msg_conviction_scores"].append(msg_conv["msg_conviction_score"])
                 # v25: Message-level text features
+                # v47: call type weights from mention_weight_config
                 ct = 0
-                if msg_conv.get("has_alpha_framing"): ct += 1
-                if msg_conv.get("has_gamble_framing"): ct -= 1
-                if msg_conv.get("has_chart_analysis"): ct += 0.5
+                if msg_conv.get("has_alpha_framing"): ct += mwcfg["alpha_framing_score"]
+                if msg_conv.get("has_gamble_framing"): ct += mwcfg["gamble_framing_score"]
+                if msg_conv.get("has_chart_analysis"): ct += mwcfg["chart_analysis_score"]
                 token_data[token]["call_type_scores"].append(ct)
                 token_data[token]["msg_lengths"].append(msg_len)
                 token_data[token]["msg_has_ca"].append(bool(msg_cas))
                 token_data[token]["msg_tokens_count"].append(len(token_tuples))
                 token_data[token]["msg_texts_raw"].append(text)
 
-                # Negative mentions (sentiment < -0.3) = KOL is warning, not calling
+                # Negative mentions = KOL is warning, not calling
                 # Don't count toward mentions/breadth/conviction — prevents false positives
-                is_positive_mention = sentiment >= -0.3
+                # v47: threshold from mention_weight_config
+                is_positive_mention = sentiment >= mwcfg["positive_mention_threshold"]
 
                 if is_positive_mention:
                     # v14: Weighted mentions — updates/brags count 0.3x, short msgs 0.5x
@@ -2688,10 +2755,12 @@ def aggregate_ranking(
 
         avg_conviction = sum(data["convictions"]) / len(data["convictions"])
         # v14: Compressed range — 7→0.25, 8→0.5, 10→1.0 (was 5-10→0-1, clustering at 0.4-1.0)
-        conviction_score = max(0, min(1, (effective_conviction - 6) / 4))
+        # v47: offset/divisor/dampening from conviction_config (Optuna-tunable).
+        _ccfg = SCORING_PARAMS["conviction_config"]
+        conviction_score = max(0, min(1, (effective_conviction - _ccfg["norm_offset"]) / _ccfg["norm_divisor"]))
 
         # v15: Conviction dampening — single KOL shouldn't max conviction
-        kol_count_factor = min(1.0, unique_kols / 2)  # 1 KOL → 0.5x, 2+ → 1.0x
+        kol_count_factor = min(1.0, unique_kols / _ccfg["kol_dampening"])
         conviction_score *= kol_count_factor
 
         # v9: Recency-weighted breadth (KOL reputation * tier * count * freshness decay)
@@ -2745,7 +2814,8 @@ def aggregate_ranking(
         mentions_2h_6h = sum(1 for h in data["hours_ago"] if 2 < h <= 6)
         _mh_eps = SCORING_PARAMS["mention_heat_epsilon"]
         _mh_cap = SCORING_PARAMS["mention_heat_cap"]
-        mention_heat_ratio = min(_mh_cap, mentions_1h / (mentions_2h_6h / 4 + _mh_eps)) if data["hours_ago"] else None
+        _mh_div = SCORING_PARAMS["mention_heat_divisor"]  # v47: was hardcoded 4
+        mention_heat_ratio = min(_mh_cap, mentions_1h / (mentions_2h_6h / _mh_div + _mh_eps)) if data["hours_ago"] else None
 
         # --- ML v2 Phase B: Social momentum phase classification ---
         if mention_acceleration > 0.2 and social_velocity > 0.3:
@@ -3087,12 +3157,13 @@ def aggregate_ranking(
         token["pump_pen"] = manipulation_pen  # backward compat
 
         # PVP penalty: same-name tokens — softer on pump.fun where copycats are inevitable
+        # v47: floors/scales from pump_pen_config (Optuna-tunable).
         pvp_recent = token.get("pvp_recent_count") or 0
         if token.get("is_pump_fun"):
             # pump.fun: copycats are normal, scraper already resolves to highest-volume pair
-            pvp_pen = max(0.7, 1.0 / (1 + 0.05 * pvp_recent))
+            pvp_pen = max(_ppcfg["pvp_pump_fun_floor"], 1.0 / (1 + _ppcfg["pvp_pump_fun_scale"] * pvp_recent))
         else:
-            pvp_pen = max(0.5, 1.0 / (1 + 0.1 * pvp_recent))
+            pvp_pen = max(_ppcfg["pvp_normal_floor"], 1.0 / (1 + _ppcfg["pvp_normal_scale"] * pvp_recent))
 
         # Algorithm v7: Minsky lifecycle phase classification
         # Replaces flat already_pumped_penalty with 5-phase model
@@ -3125,7 +3196,7 @@ def aggregate_ranking(
             if activity_ratio > act_high:
                 activity_mult = act_cap   # most mentions are fresh
             elif activity_ratio > act_mid:
-                activity_mult = 1.10
+                activity_mult = SCORING_PARAMS["activity_mid_mult"]  # v47: was hardcoded 1.10
             elif activity_ratio > act_low:
                 activity_mult = 1.0       # neutral
             else:
@@ -3212,6 +3283,8 @@ def aggregate_ranking(
         # This is NOT a duplicate of price_action (which averages 4 sub-components).
         # This multiplier acts on the FINAL score to directly penalize active pumps.
         # v20: thresholds from SCORING_PARAMS (dynamic).
+        # v47: penalty values from pump_pen_config (Optuna-tunable).
+        _ppcfg = SCORING_PARAMS["pump_pen_config"]
         pump_1h_hard = SCORING_PARAMS["pump_pc1h_hard"]  # default 30
         pump_5m_hard = SCORING_PARAMS["pump_pc5m_hard"]  # default 15
         pump_1h_mod = pump_1h_hard * 0.5   # 15 at default
@@ -3221,11 +3294,11 @@ def aggregate_ranking(
         pc_5m = token.get("price_change_5m")
         pump_momentum_pen = 1.0
         if (pc_1h is not None and pc_1h > pump_1h_hard) or (pc_5m is not None and pc_5m > pump_5m_hard):
-            pump_momentum_pen = 0.5   # active pump
+            pump_momentum_pen = _ppcfg["hard_penalty"]   # active pump
         elif (pc_1h is not None and pc_1h > pump_1h_mod) or (pc_5m is not None and pc_5m > pump_5m_mod):
-            pump_momentum_pen = 0.7   # moderate pump
+            pump_momentum_pen = _ppcfg["moderate_penalty"]  # moderate pump
         elif pc_1h is not None and pc_1h > pump_1h_light:
-            pump_momentum_pen = 0.85  # light pump
+            pump_momentum_pen = _ppcfg["light_penalty"]  # light pump
         token["pump_momentum_pen"] = pump_momentum_pen
 
         # v12: KOL entry premium — penalize tokens that pumped far above KOL call prices
@@ -3294,7 +3367,8 @@ def aggregate_ranking(
         token["_consensus_val"] = _get_component_value(token, "consensus")
         token["_sentiment_val"] = (token.get("sentiment", 0) + 1) / 2 if token.get("sentiment") is not None else None
         # v14: Use same compressed range as _get_component_value
-        token["_conviction_val"] = max(0, min(1, (token.get("avg_conviction", 6) - 6) / 4)) if token.get("avg_conviction") is not None else None
+        _ccfg2 = SCORING_PARAMS["conviction_config"]
+        token["_conviction_val"] = max(0, min(1, (token.get("avg_conviction", _ccfg2["norm_offset"]) - _ccfg2["norm_offset"]) / _ccfg2["norm_divisor"])) if token.get("avg_conviction") is not None else None
         token["_breadth_val"] = _get_component_value(token, "breadth")
         token["_price_action_val"] = _get_component_value(token, "price_action")
 
