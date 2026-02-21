@@ -1249,51 +1249,47 @@ def _compute_entry_timing_quality(token: dict) -> float:
     return round(sum(signals) / len(signals), 3) if signals else 0.5
 
 
+def _entry_premium_tier_mult(premium: float, cfg: dict) -> float:
+    """v45: Compute entry premium multiplier from config tier breakpoints."""
+    bps = cfg["tier_breakpoints"]
+    mults = cfg["tier_multipliers"]
+    slopes = cfg["tier_slopes"]
+    # Walk breakpoints: return flat multiplier if below breakpoint,
+    # or interpolate with slope between breakpoints.
+    for i in range(len(bps)):
+        if premium <= bps[i]:
+            return mults[i]
+        if i < len(bps) - 1 and premium <= bps[i + 1]:
+            base_mult = mults[i + 1]
+            slope = slopes[i + 1] if i + 1 < len(slopes) else 0
+            return base_mult + (bps[i + 1] - premium) * slope
+    return mults[-1]
+
+
 def _compute_kol_entry_premium(token: dict) -> tuple[float, float]:
     """
     Compute how much the price has moved since KOLs called the token.
-    Returns (entry_premium, entry_premium_mult) where:
-    - entry_premium = current_price / decay-weighted avg entry price
-    - entry_premium_mult = penalty multiplier [0.25, 1.1]
-
-    ONLY uses real OHLCV candle data — no interpolation, no estimation.
-    If no candle data exists for a token, returns neutral (1.0, 1.0).
-    Scales penalty by how long the pump has been running (duration factor).
+    v45: Tier breakpoints + duration + mcap fallback read from SCORING_PARAMS["entry_premium_config"].
     """
+    cfg = SCORING_PARAMS["entry_premium_config"]
     current_price = token.get("price_usd")
     current_mcap = token.get("market_cap") or token.get("fdv")
     hours_ago_list = token.get("_hours_ago", [])
 
-    # v14: Primary source — KOL-stated entry mcap (more accurate than OHLCV interpolation)
+    # Primary source — KOL-stated entry mcap
     stated_mcaps = token.get("kol_stated_entry_mcaps", [])
     if stated_mcaps and current_mcap and current_mcap > 0:
         avg_stated = sum(stated_mcaps) / len(stated_mcaps)
         if avg_stated > 0:
             entry_premium = current_mcap / avg_stated
-            if entry_premium < 1.0:
-                mult = 1.1
-            elif entry_premium <= 1.2:
-                mult = 1.0
-            elif entry_premium <= 2.0:
-                mult = 0.9
-            elif entry_premium <= 4.0:
-                mult = 0.9 - (entry_premium - 2.0) * (0.2 / 2.0)
-            elif entry_premium <= 8.0:
-                mult = 0.7 - (entry_premium - 4.0) * (0.2 / 4.0)
-            elif entry_premium <= 20.0:
-                mult = 0.5 - (entry_premium - 8.0) * (0.15 / 12.0)
-            else:
-                mult = 0.25
+            mult = _entry_premium_tier_mult(entry_premium, cfg)
             return round(entry_premium, 3), round(mult, 3)
 
     # Fallback 2: OHLCV candle data
-    # Need both price and candle data — no candles = try mcap fallback
     candle_result = None
     if current_price and current_price > 0 and hours_ago_list and token.get("candle_data"):
-        # Only consider mentions > 5 min old (too fresh = no meaningful price diff)
         valid_hours = [h for h in hours_ago_list if h > 5 / 60]
         if valid_hours:
-            # Compute decay-weighted average entry price from REAL candle data
             weighted_sum = 0.0
             weight_sum = 0.0
             matched_count = 0
@@ -1309,53 +1305,35 @@ def _compute_kol_entry_premium(token: dict) -> tuple[float, float]:
                 avg_entry = weighted_sum / weight_sum
                 entry_premium = current_price / avg_entry
 
-                # Duration scaling: longer pumps = more dangerous
+                # Duration scaling from config
+                dur_t = cfg["duration_thresholds"]
+                dur_f = cfg["duration_factors"]
                 oldest_mention = max(valid_hours)
-                if oldest_mention > 48:
-                    duration_factor = 1.5
-                elif oldest_mention > 24:
-                    duration_factor = 1.3
-                elif oldest_mention > 12:
-                    duration_factor = 1.15
-                else:
-                    duration_factor = 1.0
+                duration_factor = dur_f[0]  # default for shortest
+                for i in range(len(dur_t) - 1, -1, -1):
+                    if oldest_mention > dur_t[i]:
+                        duration_factor = dur_f[i + 1]
+                        break
 
                 effective_premium = entry_premium ** duration_factor
-
-                # Tier-based multiplier
-                if effective_premium < 1.0:
-                    mult = 1.1  # dip buy — mild bonus
-                elif effective_premium <= 1.2:
-                    mult = 1.0  # buying at KOL price — neutral
-                elif effective_premium <= 2.0:
-                    mult = 0.9  # slight premium
-                elif effective_premium <= 4.0:
-                    mult = 0.9 - (effective_premium - 2.0) * (0.2 / 2.0)
-                elif effective_premium <= 8.0:
-                    mult = 0.7 - (effective_premium - 4.0) * (0.2 / 4.0)
-                elif effective_premium <= 20.0:
-                    mult = 0.5 - (effective_premium - 8.0) * (0.15 / 12.0)
-                else:
-                    mult = 0.25
+                mult = _entry_premium_tier_mult(effective_premium, cfg)
                 candle_result = (round(entry_premium, 3), round(mult, 3))
 
     if candle_result is not None:
         return candle_result
 
-    # v19 Fallback 3: Market cap magnitude — for established tokens where
-    # KOLs don't state entry mcap AND candles don't show meaningful diff.
-    # A $700M memecoin has already pumped 700x+ from launch ($1M typical).
-    # Even if KOLs call it today at current price, the 2x potential is near zero.
-    if current_mcap and current_mcap > 50_000_000:
-        implied_premium = current_mcap / 1_000_000  # vs typical $1M launch
-        if implied_premium <= 50:
-            mult = 0.85   # $50M — established, limited upside
-        elif implied_premium <= 200:
-            mult = 0.70   # $200M — very limited
-        elif implied_premium <= 500:
-            mult = 0.50   # $500M — extremely unlikely to 2x
-        else:
-            mult = 0.35   # >$500M — near impossible
+    # Fallback 3: Market cap magnitude
+    mcap_threshold = cfg["mcap_fallback_threshold"]
+    mcap_launch = cfg["mcap_launch_assumed"]
+    if current_mcap and current_mcap > mcap_threshold:
+        implied_premium = current_mcap / mcap_launch
+        mcap_tiers = cfg["mcap_tiers"]
+        mcap_mults = cfg["mcap_multipliers"]
+        mult = mcap_mults[-1]
+        for i, tier in enumerate(mcap_tiers):
+            if implied_premium <= tier:
+                mult = mcap_mults[i]
+                break
         return round(implied_premium, 3), round(mult, 3)
 
     return 1.0, 1.0
@@ -1363,45 +1341,40 @@ def _compute_kol_entry_premium(token: dict) -> tuple[float, float]:
 
 def _compute_entry_drift_mult(token: dict) -> float:
     """
-    v24: Penalizes when price outpaced social growth since first KOL calls.
-    Continuous multiplier in [0.5, 1.0].
-
-    entry_premium = how much price drifted up since KOL calls.
-    social_strength = how much new interest justifies it.
-    When social keeps pace -> no penalty.
-    When price runs ahead -> progressive penalty.
+    Penalizes when price outpaced social growth since first KOL calls.
+    v45: All weights/thresholds read from SCORING_PARAMS["entry_drift_config"].
     """
+    cfg = SCORING_PARAMS["entry_drift_config"]
     entry_premium = token.get("entry_premium") or 1.0
-    if entry_premium <= 1.2:
+    if entry_premium <= cfg["premium_gate"]:
         return 1.0
 
     # Social strength [0, 1]
     unique_kols = token.get("unique_kols") or 1
-    kol_score = min(1.0, (unique_kols - 1) / 7)  # 1 KOL=0, 8+=1.0
+    kol_score = min(1.0, (unique_kols - 1) / cfg["kol_divisor"])
 
     activity_mult = token.get("activity_mult") or 1.0
-    activity_score = max(0, min(1.0, (activity_mult - 0.80) / 0.45))
+    activity_score = max(0, min(1.0, (activity_mult - cfg["activity_base"]) / cfg["activity_range"]))
 
     freshest_h = token.get("freshest_mention_hours") or 999
-    if freshest_h <= 1:
-        fresh_score = 1.0
-    elif freshest_h <= 4:
-        fresh_score = 0.7
-    elif freshest_h <= 8:
-        fresh_score = 0.4
-    else:
-        fresh_score = 0.1
+    fresh_tiers = cfg["fresh_tiers"]
+    fresh_scores = cfg["fresh_scores"]
+    fresh_score = fresh_scores[-1]
+    for i, tier in enumerate(fresh_tiers):
+        if freshest_h <= tier:
+            fresh_score = fresh_scores[i]
+            break
 
     s_count = sum(1 for t in token.get("kol_tiers", {}).values() if t == "S")
-    s_tier_score = min(1.0, s_count / 2)
+    s_tier_score = min(1.0, s_count / cfg["stier_divisor"])
 
-    social_strength = (kol_score * 0.30 + activity_score * 0.25
-                       + fresh_score * 0.30 + s_tier_score * 0.15)
+    sw = cfg["social_weights"]
+    social_strength = (kol_score * sw[0] + activity_score * sw[1]
+                       + fresh_score * sw[2] + s_tier_score * sw[3])
 
-    # Net drift = unjustified price increase
     drift = entry_premium - 1.0
     net_drift = max(0, drift - social_strength * 1.0)
-    mult = max(0.50, 1.0 - net_drift * 0.25)
+    mult = max(cfg["drift_floor"], 1.0 - net_drift * cfg["drift_factor"])
     return round(mult, 3)
 
 
@@ -1435,82 +1408,75 @@ def _detect_artificial_pump(token: dict) -> bool:
 
 def _detect_death_penalty(token: dict, freshest_mention_hours: float) -> float:
     """
-    v11: Detect dead/rugged tokens. Returns penalty multiplier [0.1, 1.0].
-    Combines price collapse + volume death + social abandonment.
-    Takes the MINIMUM (most pessimistic) of all death signals to catch tokens
-    rugged 3+ days ago where 24h price change is near 0 but volume is dead.
+    Detect dead/rugged tokens. Returns penalty multiplier [0.1, 1.0].
+    v45: All thresholds read from SCORING_PARAMS["death_config"].
     """
+    cfg = SCORING_PARAMS["death_config"]
     penalties = []
 
-    # --- Signal 1: Price collapse (original v9 logic) ---
-    # v20: thresholds from SCORING_PARAMS (dynamic)
-    death_severe = SCORING_PARAMS["death_pc24_severe"]   # default -80
-    death_moderate = SCORING_PARAMS["death_pc24_moderate"]  # default -50
+    # --- Signal 1: Price collapse ---
+    death_severe = SCORING_PARAMS["death_pc24_severe"]
+    death_moderate = SCORING_PARAMS["death_pc24_moderate"]
     pc24 = token.get("price_change_24h")
     if pc24 is not None:
         pc24 = float(pc24)
 
         if pc24 < death_severe:
             penalties.append(0.1)
-        elif pc24 < (death_severe + 10):  # -70 when severe=-80
+        elif pc24 < (death_severe + 10):
             penalties.append(0.15 if freshest_mention_hours > 3 else 0.3)
         elif pc24 < death_moderate:
             va = token.get("volume_acceleration")
-            volume_alive = va is not None and float(va) > 0.5
-            social_alive = freshest_mention_hours < 6
+            volume_alive = va is not None and float(va) > cfg["price_moderate_vol_alive"]
+            social_alive = freshest_mention_hours < cfg["price_moderate_social_alive_h"]
             if volume_alive and social_alive:
                 penalties.append(0.6)
             elif volume_alive or social_alive:
                 penalties.append(0.4)
             else:
                 penalties.append(0.2)
-        elif pc24 < -30:
-            if freshest_mention_hours > 24:
+        elif pc24 < cfg["price_mild_threshold"]:
+            if freshest_mention_hours > cfg["price_mild_stale_h"]:
                 penalties.append(0.4)
             else:
                 penalties.append(0.8)
 
-    # --- Signal 2: Volume death (catches tokens rugged days ago with stable price) ---
+    # --- Signal 2: Volume death ---
     vol_24h = token.get("volume_24h")
     vol_1h = token.get("volume_1h")
     if vol_24h is not None and vol_1h is not None:
-        if vol_24h < 5000 and vol_1h < 500:
-            penalties.append(0.15)  # practically dead volume
-        elif vol_24h < 1000:
-            penalties.append(0.1)   # absolute volume floor — no trading happening
+        if vol_24h < cfg["vol_death_24h"] and vol_1h < cfg["vol_death_1h"]:
+            penalties.append(cfg["vol_death_penalty"])
+        elif vol_24h < cfg["vol_floor_24h"]:
+            penalties.append(cfg["vol_floor_penalty"])
 
-    # --- Signal 3 (v15): Social staleness — volume-modulated ---
-    # User guidance: "after 12h without mentions, start losing, but mostly look at PA + volume"
-    # Time-based decay that's SOFTENED by healthy volume (token still actively traded).
-    if freshest_mention_hours > 12:
-        if freshest_mention_hours > 72:
-            stale_base = 0.15    # 3+ days = very stale
-        elif freshest_mention_hours > 48:
-            stale_base = 0.25    # 2+ days = stale
-        elif freshest_mention_hours > 24:
-            stale_base = 0.45    # 1+ day = aging
-        else:
-            stale_base = 0.7     # 12-24h = mildly stale
+    # --- Signal 3: Social staleness — volume-modulated ---
+    if freshest_mention_hours > cfg["stale_start_hours"]:
+        stale_tiers = cfg["stale_tiers"]
+        stale_bases = cfg["stale_bases"]
+        # Walk tiers in reverse (highest first) to find the matching base
+        stale_base = stale_bases[0]  # default: stale_start_hours to first tier
+        for i in range(len(stale_tiers) - 1, -1, -1):
+            if freshest_mention_hours > stale_tiers[i]:
+                stale_base = stale_bases[i + 1]
+                break
 
-        # Volume modulator: healthy trading proves the token is still alive
-        # If no volume data, use stale_base without modulation (no false softening)
+        # Volume modulator
         vol_24h = token.get("volume_24h")
         if vol_24h is None:
             stale_pen = stale_base
-        elif vol_24h > 1_000_000:
-            stale_pen = min(0.95, stale_base + 0.45)   # massive volume = barely penalized
-        elif vol_24h > 500_000:
-            stale_pen = min(0.9, stale_base + 0.35)
-        elif vol_24h > 100_000:
-            stale_pen = min(0.85, stale_base + 0.25)
-        elif vol_24h > 50_000:
-            stale_pen = min(0.8, stale_base + 0.15)
         else:
+            mod_tiers = cfg["vol_modulation_tiers"]
+            mod_bonuses = cfg["vol_modulation_bonuses"]
+            mod_caps = cfg["vol_modulation_caps"]
             stale_pen = stale_base
+            for i in range(len(mod_tiers) - 1, -1, -1):
+                if vol_24h > mod_tiers[i]:
+                    stale_pen = min(mod_caps[i], stale_base + mod_bonuses[i])
+                    break
 
         penalties.append(stale_pen)
 
-    # Return the most pessimistic signal (lowest penalty = harshest)
     if not penalties:
         return 1.0
     return min(penalties)
@@ -1646,11 +1612,22 @@ def _compute_trend_strength(token: dict) -> float:
         return magnitude * 0.3  # Conflicting signals = weak trend
 
 
+def _tier_lookup(value: float, thresholds: list, factors: list) -> float:
+    """v45: Generic tier-based lookup. thresholds=[t0,t1,...], factors=[f0,f1,...,f_last].
+    Returns factors[i] for the first threshold[i] where value < threshold[i].
+    If value >= all thresholds, returns factors[-1]."""
+    for i, t in enumerate(thresholds):
+        if value < t:
+            return factors[i]
+    return factors[-1]
+
+
 def _compute_onchain_multiplier(token: dict) -> float:
     """
     Returns a multiplier [0.3, 1.5] based on on-chain health.
-    Applied to the base Telegram score. Neutral (1.0) if no data available.
+    v45: Tier thresholds read from SCORING_PARAMS["onchain_config"].
     """
+    cfg = SCORING_PARAMS["onchain_config"]
     factors = []
 
     # 1. Volume/MCap ratio (healthy > 0.1, great > 0.5)
@@ -1658,35 +1635,22 @@ def _compute_onchain_multiplier(token: dict) -> float:
     if vmr is not None:
         factors.append(min(1.5, 0.5 + vmr * 2))
 
-    # 2. Buy pressure — REMOVED (v10: already in price_action.py direction_mult + vol_confirm)
-
-    # 3. Liquidity adequacy (liq/mcap > 0.05 = healthy)
+    # 3. Liquidity adequacy
     lmr = token.get("liq_mcap_ratio")
     if lmr is not None:
-        if lmr < 0.02:
-            factors.append(0.5)
-        elif lmr > 0.10:
-            factors.append(1.2)
+        if lmr < cfg["lmr_low"]:
+            factors.append(cfg["lmr_low_factor"])
+        elif lmr > cfg["lmr_high"]:
+            factors.append(cfg["lmr_high_factor"])
         else:
             factors.append(0.8 + lmr * 4)
 
-    # 4. Volume acceleration — REMOVED (v10: already in price_action.py vol_confirm)
-
-    # 5. Token age penalty (v4: 6-48h optimal window)
+    # 5. Token age
     age = token.get("token_age_hours")
     if age is not None:
-        if age < 1:
-            factors.append(0.5)     # Too fresh, no data
-        elif age < 6:
-            factors.append(1.0)     # Young, unproven
-        elif age < 48:
-            factors.append(1.2)     # Sweet spot: survived early hours
-        elif age < 168:
-            factors.append(1.0)     # Established
-        else:
-            factors.append(0.8)     # Old, less likely to 2x
+        factors.append(_tier_lookup(age, cfg["age_thresholds"], cfg["age_factors"]))
 
-    # 6. Phase 3: Helius recent transaction activity
+    # 6. Helius recent transaction activity
     recent_tx = token.get("helius_recent_tx_count")
     if recent_tx is not None:
         if recent_tx > 40:
@@ -1696,39 +1660,30 @@ def _compute_onchain_multiplier(token: dict) -> float:
         elif recent_tx < 5:
             factors.append(0.7)
 
-    # 7. Phase 3: Helius on-chain buy/sell ratio (complement DexScreener)
+    # 7. Helius on-chain buy/sell ratio
     helius_bsr = token.get("helius_onchain_bsr")
     if helius_bsr is not None:
-        factors.append(0.5 + helius_bsr)  # 0.5-1.5
+        factors.append(0.5 + helius_bsr)
 
-    # 8. Phase 3B: Jupiter tradeability + liquidity depth
+    # 8. Jupiter tradeability + liquidity depth
     jup_tradeable = token.get("jup_tradeable")
     jup_impact = token.get("jup_price_impact_1k")
     if jup_tradeable is not None:
         if jup_tradeable == 0:
-            factors.append(0.5)  # not tradeable = less liquid
+            factors.append(0.5)
         elif jup_impact is not None:
-            if jup_impact < 1.0:
-                factors.append(1.3)   # deep liquidity
-            elif jup_impact < 5.0:
-                factors.append(1.0)   # normal
-            else:
-                factors.append(0.7)   # thin liquidity
+            jup_t = cfg["jup_impact_thresholds"]
+            jup_f = cfg["jup_impact_factors"]
+            factors.append(_tier_lookup(jup_impact, jup_t, jup_f))
 
-    # 9. Phase 3B: Whale accumulation signal
+    # 9. Whale accumulation signal
     whale_change = token.get("whale_change")
     if whale_change is not None:
-        if whale_change > 5.0:
-            factors.append(1.3)
-        elif whale_change > 0:
-            factors.append(1.1)
-        elif whale_change < -10.0:
-            factors.append(0.6)
-        elif whale_change < 0:
-            factors.append(0.8)
+        wc_t = cfg["whale_change_thresholds"]
+        wc_f = cfg["whale_change_factors"]
+        factors.append(_tier_lookup(whale_change, wc_t, wc_f))
 
     # 10. Short-term volume heat — compute for data but NOT in factors
-    # v10: volume already counted in price_action.py vol_confirm + _detect_volume_squeeze
     vol_1h = token.get("volume_1h")
     vol_6h = token.get("volume_6h")
     if vol_1h and vol_6h and vol_6h > 0:
@@ -1740,75 +1695,53 @@ def _compute_onchain_multiplier(token: dict) -> float:
         ultra_heat = (vol_5m * 12) / vol_1h
         token["ultra_short_heat"] = round(ultra_heat, 3)
 
-    # 11. Algorithm v3 A2: Transaction velocity (txn/holder — activity density)
+    # 11. Transaction velocity
     txn_count = token.get("txn_count_24h")
     holders = token.get("helius_holder_count") or token.get("holder_count")
     if txn_count and holders and holders > 0:
         velocity = txn_count / holders
         token["txn_velocity"] = round(velocity, 3)
-        if velocity > 5.0:
-            factors.append(1.3)    # very active
-        elif velocity > 1.0:
-            factors.append(1.1)    # healthy
-        elif velocity < 0.2:
-            factors.append(0.6)    # stagnant
+        vel_t = cfg["velocity_thresholds"]
+        vel_f = cfg["velocity_factors"]
+        factors.append(_tier_lookup(velocity, vel_t, vel_f))
     elif txn_count and txn_count > 0:
-        # Fallback: absolute txn density (no holder normalization)
-        # Thresholds calibrated on DexScreener 24h txn counts for Solana memecoins
-        token["txn_velocity"] = None  # Can't compute real velocity without holders
-        if txn_count > 5000:
-            factors.append(1.2)    # very active trading
-        elif txn_count > 1000:
-            factors.append(1.05)   # moderate activity
-        elif txn_count < 100:
-            factors.append(0.7)    # very low activity
+        token["txn_velocity"] = None
+        factors.append(_tier_lookup(txn_count, cfg["tx_thresholds"], cfg["tx_factors"]))
 
-    # Algorithm v4: Volatility proxy penalty (high volatility = unstable)
+    # Volatility proxy penalty
     vol_proxy = token.get("volatility_proxy")
-    if vol_proxy is not None and vol_proxy > 50:
-        factors.append(0.8)
+    if vol_proxy is not None and vol_proxy > cfg["vol_proxy_threshold"]:
+        factors.append(cfg["vol_proxy_penalty"])
 
-    # Algorithm v4 Sprint 4: Whale direction accumulation bonus
+    # Whale direction accumulation bonus
     whale_dir = token.get("whale_direction")
     if whale_dir == "accumulating":
-        factors.append(1.15)  # Whales consistently buying = bullish
+        factors.append(cfg["whale_accum_bonus"])
 
-    # v13: New whale entries — smart money entering (guide principle #8)
+    # New whale entries
     wne = token.get("whale_new_entries")
     if wne is not None:
-        if wne >= 3:
-            factors.append(1.25)  # multiple new whales = strong signal
-        elif wne >= 1:
-            factors.append(1.1)   # at least 1 new whale
+        wne_t = cfg["wne_thresholds"]
+        wne_f = cfg["wne_factors"]
+        factors.append(_tier_lookup(wne, wne_t, wne_f))
 
-    # v35: Whale count — #1 predictor (r=+0.47 on clean deduped data)
+    # Whale count — #1 predictor (r=+0.47)
     whale_count = token.get("whale_count")
     if whale_count is not None:
-        if whale_count >= 5:
-            factors.append(1.4)
-        elif whale_count >= 3:
-            factors.append(1.2)
-        elif whale_count >= 1:
-            factors.append(1.0)   # at least 1 whale = neutral
-        else:
-            factors.append(0.7)   # 0 whales = bearish
+        wct = cfg["whale_count_thresholds"]
+        wcf = cfg["whale_count_factors"]
+        factors.append(_tier_lookup(whale_count, wct, wcf))
 
-    # v13: Unique wallet growth — "who buys after me" (guide principle #5)
+    # Unique wallet growth
     uw_change = token.get("unique_wallet_24h_change")
     if uw_change is not None:
-        if uw_change > 20:
-            factors.append(1.3)   # >20% wallet growth = strong demand
-        elif uw_change > 5:
-            factors.append(1.15)
-        elif uw_change < -20:
-            factors.append(0.6)   # wallets leaving = dying
-        elif uw_change < -5:
-            factors.append(0.8)
+        uwt = cfg["uw_change_thresholds"]
+        uwf = cfg["uw_change_factors"]
+        factors.append(_tier_lookup(uw_change, uwt, uwf))
 
     if not factors:
-        return 1.0  # v10: no data = neutral, not a penalty
+        return 1.0
 
-    # v20: bounds from SCORING_PARAMS (dynamic)
     return max(SCORING_PARAMS["onchain_mult_floor"],
                min(SCORING_PARAMS["onchain_mult_cap"], sum(factors) / len(factors)))
 
@@ -1817,104 +1750,102 @@ def _compute_safety_penalty(token: dict) -> float:
     """
     Returns a penalty multiplier [0.3, 1.0].
     1.0 = safe, 0.3 = floor (never destroy a token completely).
-    v5.1: Softened all factors — memecoin-typical patterns shouldn't obliterate scores.
+    v45: All thresholds read from SCORING_PARAMS["safety_config"].
     """
+    cfg = SCORING_PARAMS["safety_config"]
     penalty = 1.0
 
-    # NOTE: mint_authority and freeze_authority are now handled by _apply_hard_gates()
-    # (hard reject, score=0). No soft penalty needed here.
-
-    # High insider concentration (bundled) — softer curve, higher floor
+    # High insider concentration (bundled)
     insider_pct = token.get("insider_pct")
-    if insider_pct is not None and insider_pct > 30:
-        penalty *= max(0.5, 1.0 - (insider_pct - 30) / 100)
+    if insider_pct is not None and insider_pct > cfg["insider_threshold"]:
+        penalty *= max(cfg["insider_floor"], 1.0 - (insider_pct - cfg["insider_threshold"]) / 100)
 
-    # Top 10 holders own too much — 50-60% is common on pump.fun
+    # Top 10 holders own too much
     top10 = token.get("top10_holder_pct")
-    if top10 is not None and top10 > 50:
-        penalty *= max(0.7, 1.0 - (top10 - 50) / 100)
+    if top10 is not None and top10 > cfg["top10_threshold"]:
+        penalty *= max(cfg["top10_floor"], 1.0 - (top10 - cfg["top10_threshold"]) / 100)
 
-    # RugCheck risk score (0=safe, 10000=dangerous) — higher floor
+    # RugCheck risk score (0=safe, 10000=dangerous)
     risk = token.get("risk_score")
-    if risk is not None and risk > 5000:
-        penalty *= max(0.5, 1.0 - (risk - 5000) / 5000)
+    if risk is not None and risk > cfg["risk_score_threshold"]:
+        penalty *= max(cfg["risk_score_floor"], 1.0 - (risk - cfg["risk_score_threshold"]) / 5000)
 
-    # Multiple risk flags — 3 flags is common on pump.fun tokens
+    # Multiple risk flags
     risk_count = token.get("risk_count", 0) or 0
-    if risk_count >= 3:
-        penalty *= 0.9
+    if risk_count >= cfg["risk_count_threshold"]:
+        penalty *= cfg["risk_count_penalty"]
 
-    # Jito slot-based bundle detection (high confidence, low false positives)
+    # Jito slot-based bundle detection
     jito_max_txns = token.get("jito_max_slot_txns") or 0
-    if jito_max_txns >= 5:
-        penalty *= 0.4  # definite Jito bundle — still harsh but not near-zero
-    elif jito_max_txns >= 3:
-        penalty *= 0.6  # suspicious slot clustering
+    if jito_max_txns >= cfg["jito_hard_threshold"]:
+        penalty *= cfg["jito_hard_penalty"]
+    elif jito_max_txns >= cfg["jito_soft_threshold"]:
+        penalty *= cfg["jito_soft_penalty"]
     else:
-        # Fallback: balance-based bundle detection (higher false positive rate)
+        # Fallback: balance-based bundle detection
         bundle_detected = token.get("bundle_detected")
         bundle_pct = token.get("bundle_pct") or 0
         if bundle_detected:
-            if bundle_pct > 20:
-                penalty *= 0.5  # bundling common in memecoins
-            elif bundle_pct > 10:
-                penalty *= 0.7  # mild bundling
+            if bundle_pct > cfg["bundle_hard_threshold"]:
+                penalty *= cfg["bundle_hard_penalty"]
+            elif bundle_pct > cfg["bundle_soft_threshold"]:
+                penalty *= cfg["bundle_soft_penalty"]
 
-    # Phase 3: High Gini = wealth too concentrated — normal for small tokens
+    # High Gini = wealth too concentrated
     helius_gini = token.get("helius_gini")
-    if helius_gini is not None and helius_gini > 0.85:
-        penalty *= 0.8
+    if helius_gini is not None and helius_gini > cfg["gini_threshold"]:
+        penalty *= cfg["gini_penalty"]
 
-    # Phase 3: Too few holders — expected for new tokens
+    # Too few holders
     helius_holder_count = token.get("helius_holder_count")
-    if helius_holder_count is not None and helius_holder_count < 50:
-        penalty *= 0.85
+    if helius_holder_count is not None and helius_holder_count < cfg["holder_count_threshold"]:
+        penalty *= cfg["holder_count_penalty"]
 
-    # Phase 3B: Whale concentration too high — softer curve
+    # Whale concentration too high
     whale_total_pct = token.get("whale_total_pct")
-    if whale_total_pct is not None and whale_total_pct > 60:
-        penalty *= max(0.7, 1.0 - (whale_total_pct - 60) / 80)
+    if whale_total_pct is not None and whale_total_pct > cfg["whale_conc_threshold"]:
+        penalty *= max(cfg["whale_conc_floor"], 1.0 - (whale_total_pct - cfg["whale_conc_threshold"]) / 80)
 
-    # Algorithm v3.1: Bubblemaps — low decentralization = clustered supply
+    # Bubblemaps — low decentralization = clustered supply
     bb_score = token.get("bubblemaps_score")
     if bb_score is not None:
-        if bb_score < 20:
-            penalty *= 0.6  # very centralized
-        elif bb_score < 40:
-            penalty *= 0.85  # moderately centralized
+        bb_thresholds = cfg["bb_score_thresholds"]
+        bb_penalties = cfg["bb_score_penalties"]
+        if bb_score < bb_thresholds[0]:
+            penalty *= bb_penalties[0]
+        elif bb_score < bb_thresholds[1]:
+            penalty *= bb_penalties[1]
 
-    # Algorithm v3.1: Bubblemaps — largest wallet cluster holds too much
+    # Bubblemaps — largest wallet cluster holds too much
     bb_cluster_max = token.get("bubblemaps_cluster_max_pct")
-    if bb_cluster_max is not None and bb_cluster_max > 30:
-        penalty *= max(0.6, 1.0 - (bb_cluster_max - 30) / 70)
+    if bb_cluster_max is not None and bb_cluster_max > cfg["bb_cluster_threshold"]:
+        penalty *= max(cfg["bb_cluster_floor"], 1.0 - (bb_cluster_max - cfg["bb_cluster_threshold"]) / 70)
 
-    # Algorithm v4: Whale dominance (concentration * inequality) — mild flag
+    # Whale dominance (concentration * inequality)
     whale_dom = token.get("whale_dominance")
-    if whale_dom is not None and whale_dom > 0.5:
-        penalty *= 0.85
+    if whale_dom is not None and whale_dom > cfg["whale_dom_threshold"]:
+        penalty *= cfg["whale_dom_penalty"]
 
-    # Algorithm v4 Sprint 4: Whale direction tracking — softer
+    # Whale direction tracking
     whale_dir = token.get("whale_direction")
     if whale_dir == "distributing":
-        penalty *= 0.75   # Whales switching from buy to sell = uncertain
+        penalty *= cfg["whale_dist_penalty"]
     elif whale_dir == "dumping":
-        penalty *= 0.65   # Consistent selling = bearish
+        penalty *= cfg["whale_dump_penalty"]
 
-    # v13: LP lock — unlocked LP = rug vector (guide principle #7)
+    # LP lock — unlocked LP = rug vector
     lp_locked = token.get("lp_locked_pct")
     if lp_locked is not None:
         if lp_locked == 0:
-            penalty *= 0.6    # LP not locked = rug risk
-        elif lp_locked < 50:
-            penalty *= 0.85   # partially locked
+            penalty *= cfg["lp_unlock_penalty"]
+        elif lp_locked < cfg["lp_partial_threshold"]:
+            penalty *= cfg["lp_partial_penalty"]
 
-    # v13: CEX supply pressure (guide principle #13)
+    # CEX supply pressure
     cex_pct = token.get("bubblemaps_cex_pct")
-    if cex_pct is not None and cex_pct > 20:
-        penalty *= max(0.7, 1.0 - (cex_pct - 20) / 100)
+    if cex_pct is not None and cex_pct > cfg["cex_threshold"]:
+        penalty *= max(cfg["cex_floor"], 1.0 - (cex_pct - cfg["cex_threshold"]) / 100)
 
-    # FLOOR: v16 raised from 0.6 to 0.75. Safety is still anti-predictive
-    # (winners 0.930, losers 0.897 in 131 labeled v15.3 snapshots).
     return max(SCORING_PARAMS["safety_floor"], penalty)
 
 
@@ -1997,6 +1928,84 @@ _DEFAULT_SCORING_PARAMS = {
     "ml_mult_cap": 2.0,
     # v44: Scoring mode — formula (default), hybrid, ml_primary
     "scoring_mode": "formula",
+    # v45: Full multiplier chain optimization — 6 new JSONB configs
+    "safety_config": {
+        "insider_threshold": 30, "insider_floor": 0.5,
+        "top10_threshold": 50, "top10_floor": 0.7,
+        "risk_score_threshold": 5000, "risk_score_floor": 0.5,
+        "risk_count_threshold": 3, "risk_count_penalty": 0.9,
+        "jito_hard_threshold": 5, "jito_hard_penalty": 0.4,
+        "jito_soft_threshold": 3, "jito_soft_penalty": 0.6,
+        "bundle_hard_threshold": 20, "bundle_hard_penalty": 0.5,
+        "bundle_soft_threshold": 10, "bundle_soft_penalty": 0.7,
+        "gini_threshold": 0.85, "gini_penalty": 0.8,
+        "holder_count_threshold": 50, "holder_count_penalty": 0.85,
+        "whale_conc_threshold": 60, "whale_conc_floor": 0.7,
+        "bb_score_thresholds": [20, 40], "bb_score_penalties": [0.6, 0.85],
+        "bb_cluster_threshold": 30, "bb_cluster_floor": 0.6,
+        "whale_dom_threshold": 0.5, "whale_dom_penalty": 0.85,
+        "whale_dist_penalty": 0.75, "whale_dump_penalty": 0.65,
+        "lp_unlock_penalty": 0.6, "lp_partial_threshold": 50, "lp_partial_penalty": 0.85,
+        "cex_threshold": 20, "cex_floor": 0.7,
+    },
+    "onchain_config": {
+        "lmr_low": 0.02, "lmr_low_factor": 0.5,
+        "lmr_high": 0.10, "lmr_high_factor": 1.2,
+        "age_thresholds": [1, 6, 48, 168],
+        "age_factors": [0.5, 1.0, 1.2, 1.0, 0.8],
+        "tx_thresholds": [5, 20, 40], "tx_factors": [0.7, 1.0, 1.1, 1.3],
+        "jup_impact_thresholds": [1.0, 5.0], "jup_impact_factors": [1.3, 1.0, 0.7],
+        "whale_change_thresholds": [-10.0, 0, 5.0],
+        "whale_change_factors": [0.6, 0.8, 1.1, 1.3],
+        "velocity_thresholds": [0.2, 1.0, 5.0], "velocity_factors": [0.6, 1.0, 1.1, 1.3],
+        "wne_thresholds": [1, 3], "wne_factors": [1.0, 1.1, 1.25],
+        "whale_count_thresholds": [1, 3, 5],
+        "whale_count_factors": [0.7, 1.0, 1.2, 1.4],
+        "uw_change_thresholds": [-20, -5, 5, 20],
+        "uw_change_factors": [0.6, 0.8, 1.0, 1.15, 1.3],
+        "vol_proxy_threshold": 50, "vol_proxy_penalty": 0.8,
+        "whale_accum_bonus": 1.15,
+    },
+    "death_config": {
+        "stale_start_hours": 12,
+        "stale_tiers": [24, 48, 72],
+        "stale_bases": [0.7, 0.45, 0.25, 0.15],
+        "vol_modulation_tiers": [50000, 100000, 500000, 1000000],
+        "vol_modulation_bonuses": [0.15, 0.25, 0.35, 0.45],
+        "vol_modulation_caps": [0.8, 0.85, 0.9, 0.95],
+        "vol_death_24h": 5000, "vol_death_1h": 500, "vol_death_penalty": 0.15,
+        "vol_floor_24h": 1000, "vol_floor_penalty": 0.1,
+        "price_moderate_social_alive_h": 6, "price_moderate_vol_alive": 0.5,
+        "price_mild_threshold": -30, "price_mild_stale_h": 24,
+    },
+    "entry_premium_config": {
+        "tier_breakpoints": [1.0, 1.2, 2.0, 4.0, 8.0, 20.0],
+        "tier_multipliers": [1.1, 1.0, 0.9, 0.7, 0.5, 0.35, 0.25],
+        "tier_slopes": [0, 0, 0, 0.1, 0.05, 0.0125, 0],
+        "duration_thresholds": [12, 24, 48],
+        "duration_factors": [1.0, 1.15, 1.3, 1.5],
+        "mcap_fallback_threshold": 50000000,
+        "mcap_launch_assumed": 1000000,
+        "mcap_tiers": [50, 200, 500],
+        "mcap_multipliers": [0.85, 0.70, 0.50, 0.35],
+    },
+    "lifecycle_config": {
+        "panic_pc24": -30, "panic_va": 0.5, "panic_penalty": 0.25,
+        "profit_taking_pc24": 100, "profit_taking_vol_proxy": 40, "profit_taking_penalty": 0.35,
+        "euphoria_uk": 3, "euphoria_pc24": 100, "euphoria_sent": 0.2, "euphoria_penalty": 0.5,
+        "boom_uk": 2, "boom_pc24_low": 10, "boom_pc24_high": 200, "boom_va": 1.0,
+        "boom_bonus": 1.1, "boom_large_cap_penalty": 0.85, "boom_large_cap_mcap": 50000000,
+        "displacement_age": 6, "displacement_uk": 1, "displacement_pc24": 50, "displacement_penalty": 0.9,
+    },
+    "entry_drift_config": {
+        "premium_gate": 1.2,
+        "kol_divisor": 7,
+        "activity_base": 0.80, "activity_range": 0.45,
+        "fresh_tiers": [1, 4, 8], "fresh_scores": [1.0, 0.7, 0.4, 0.1],
+        "stier_divisor": 2,
+        "social_weights": [0.30, 0.25, 0.30, 0.15],
+        "drift_factor": 0.25, "drift_floor": 0.50,
+    },
 }
 
 # Module-level cache: refreshed once per scrape cycle via load_scoring_config()
@@ -2097,6 +2106,9 @@ def load_scoring_config() -> None:
         _V44_JSONB_KEYS = [
             "momentum_config", "breadth_pen_config",
             "hype_pen_config", "size_mult_config",
+            # v45: Full multiplier chain optimization
+            "safety_config", "onchain_config", "death_config",
+            "entry_premium_config", "lifecycle_config", "entry_drift_config",
         ]
         for key in _V44_JSONB_KEYS:
             val = row.get(key)
@@ -2221,9 +2233,9 @@ def _compute_score_with_renormalization(token: dict) -> tuple[float, float]:
 def _classify_lifecycle_phase(token: dict) -> tuple[str, float]:
     """
     Classify token into Minsky lifecycle phase.
-    Returns (phase_name, phase_penalty) where penalty is [0.2, 1.1].
-    Priority: panic > profit_taking > euphoria > boom > displacement > unknown.
+    v45: All thresholds read from SCORING_PARAMS["lifecycle_config"].
     """
+    cfg = SCORING_PARAMS["lifecycle_config"]
     pc24 = token.get("price_change_24h")
     uk = token.get("unique_kols", 0)
     va = token.get("volume_acceleration")
@@ -2235,38 +2247,35 @@ def _classify_lifecycle_phase(token: dict) -> tuple[str, float]:
     age = token.get("token_age_hours")
 
     # Panic: dump in progress
-    if pc24 is not None and pc24 < -30:
-        if (va is not None and va < 0.5) or whale_dir == "dumping":
-            return "panic", 0.25
+    if pc24 is not None and pc24 < cfg["panic_pc24"]:
+        if (va is not None and va < cfg["panic_va"]) or whale_dir == "dumping":
+            return "panic", cfg["panic_penalty"]
 
     # Profit-taking: smart money exiting
-    if pc24 is not None and pc24 > 100:
-        vol_spike = vol_proxy is not None and vol_proxy > 40
+    if pc24 is not None and pc24 > cfg["profit_taking_pc24"]:
+        vol_spike = vol_proxy is not None and vol_proxy > cfg["profit_taking_vol_proxy"]
         whale_exit = whale_dir in ("distributing", "dumping")
         if (vol_spike or whale_exit) and ma < 0:
-            return "profit_taking", 0.35
+            return "profit_taking", cfg["profit_taking_penalty"]
 
-    # Euphoria: over-saturated, most KOLs already in
-    # v17: Lowered thresholds — 4 KOLs at +150% is clearly euphoria, not boom
-    if uk >= 3 and pc24 is not None and pc24 > 100 and sent > 0.2:
-        return "euphoria", 0.5
+    # Euphoria: over-saturated
+    if uk >= cfg["euphoria_uk"] and pc24 is not None and pc24 > cfg["euphoria_pc24"] and sent > cfg["euphoria_sent"]:
+        return "euphoria", cfg["euphoria_penalty"]
 
-    # Boom: sweet spot — growing interest + price confirming
-    # v19: No boom bonus for large-cap tokens (>$50M). A $700M token pumping
-    # +25% is NOT a "boom" entry — it's an established token getting attention.
+    # Boom: sweet spot
     t_mcap = token.get("market_cap") or 0
-    if uk >= 2 and pc24 is not None and 10 < pc24 <= 200:
-        has_vol = va is not None and va > 1.0
+    if uk >= cfg["boom_uk"] and pc24 is not None and cfg["boom_pc24_low"] < pc24 <= cfg["boom_pc24_high"]:
+        has_vol = va is not None and va > cfg["boom_va"]
         has_social = sv > 0.3 or ma > 0.2
         if has_vol and has_social:
-            if t_mcap > 50_000_000:
-                return "boom", 0.85  # large cap "boom" = penalty, not bonus
-            return "boom", 1.1
+            if t_mcap > cfg["boom_large_cap_mcap"]:
+                return "boom", cfg["boom_large_cap_penalty"]
+            return "boom", cfg["boom_bonus"]
 
     # Displacement: fresh, unproven
-    if age is not None and age < 6 and uk <= 1:
-        if pc24 is None or pc24 < 50:
-            return "displacement", 0.9
+    if age is not None and age < cfg["displacement_age"] and uk <= cfg["displacement_uk"]:
+        if pc24 is None or pc24 < cfg["displacement_pc24"]:
+            return "displacement", cfg["displacement_penalty"]
 
     return "unknown", 1.0
 

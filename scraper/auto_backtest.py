@@ -2728,9 +2728,16 @@ def _compute_score_with_params(
     pump_bonus = _safe_mult(row, "pump_bonus")
     manipulation_pen = _safe_mult(row, "wash_pen")
     pvp_pen = _safe_mult(row, "pvp_pen")
-    crash_pen = _safe_mult(row, "crash_pen")
     gate_mult = _safe_mult(row, "gate_mult")
-    entry_drift_mult = _safe_mult(row, "entry_drift_mult")
+
+    # v45: Apply trial safety_floor (at 1.0, safety is fully disabled)
+    safety_floor = params.get("safety_floor", 0.75)
+    safety = max(safety_floor, safety)
+
+    # v45: Apply trial onchain bounds
+    onchain_floor = params.get("onchain_mult_floor", 0.3)
+    onchain_cap = params.get("onchain_mult_cap", 1.5)
+    onchain = max(onchain_floor, min(onchain_cap, onchain))
 
     # Activity_mult: recompute from raw ratio if available
     act_ratio_raw = row.get("activity_ratio_raw")
@@ -2808,7 +2815,170 @@ def _compute_score_with_params(
     size_mult = _safe_mult(row, "size_mult")
     momentum_mult = _safe_mult(row, "momentum_mult")
 
-    # Combined chain (matching pipeline.py v35)
+    # --- v45: Recompute death_penalty from snapshot raw values ---
+    death_cfg = params.get("death_config", {})
+    freshest_h = row.get("freshest_mention_hours")
+    if death_cfg and pd.notna(freshest_h):
+        freshest_h = float(freshest_h)
+        death_penalties = []
+        pc24_death = row.get("price_change_24h")
+        # Price collapse (uses existing SCORING_PARAMS-level thresholds, not in death_config)
+        if pd.notna(pc24_death):
+            pc24_v = float(pc24_death)
+            if pc24_v < -80:
+                death_penalties.append(0.1)
+            elif pc24_v < -70:
+                death_penalties.append(0.15 if freshest_h > 3 else 0.3)
+            elif pc24_v < -50:
+                death_penalties.append(0.2)
+            elif pc24_v < death_cfg.get("price_mild_threshold", -30):
+                if freshest_h > death_cfg.get("price_mild_stale_h", 24):
+                    death_penalties.append(0.4)
+                else:
+                    death_penalties.append(0.8)
+        # Volume death
+        vol_24h_d = row.get("volume_24h")
+        vol_1h_d = row.get("volume_1h")
+        if pd.notna(vol_24h_d) and pd.notna(vol_1h_d):
+            v24 = float(vol_24h_d)
+            v1 = float(vol_1h_d)
+            if v24 < death_cfg.get("vol_death_24h", 5000) and v1 < death_cfg.get("vol_death_1h", 500):
+                death_penalties.append(death_cfg.get("vol_death_penalty", 0.15))
+            elif v24 < death_cfg.get("vol_floor_24h", 1000):
+                death_penalties.append(death_cfg.get("vol_floor_penalty", 0.1))
+        # Social staleness
+        stale_start = death_cfg.get("stale_start_hours", 12)
+        if freshest_h > stale_start:
+            stale_tiers = death_cfg.get("stale_tiers", [24, 48, 72])
+            stale_bases = death_cfg.get("stale_bases", [0.7, 0.45, 0.25, 0.15])
+            stale_base = stale_bases[0]
+            for i in range(len(stale_tiers) - 1, -1, -1):
+                if freshest_h > stale_tiers[i]:
+                    stale_base = stale_bases[i + 1]
+                    break
+            # Volume modulation
+            if pd.notna(vol_24h_d):
+                v24 = float(vol_24h_d)
+                mod_tiers = death_cfg.get("vol_modulation_tiers", [50000, 100000, 500000, 1000000])
+                mod_bonuses = death_cfg.get("vol_modulation_bonuses", [0.15, 0.25, 0.35, 0.45])
+                mod_caps = death_cfg.get("vol_modulation_caps", [0.8, 0.85, 0.9, 0.95])
+                stale_pen = stale_base
+                for i in range(len(mod_tiers) - 1, -1, -1):
+                    if v24 > mod_tiers[i]:
+                        stale_pen = min(mod_caps[i], stale_base + mod_bonuses[i])
+                        break
+            else:
+                stale_pen = stale_base
+            death_penalties.append(stale_pen)
+        death_penalty = min(death_penalties) if death_penalties else 1.0
+    else:
+        death_penalty = _safe_mult(row, "death_penalty")
+
+    # --- v45: Recompute entry_premium_mult from stored entry_premium ---
+    ep_cfg = params.get("entry_premium_config", {})
+    ep_raw = row.get("entry_premium")
+    if ep_cfg and pd.notna(ep_raw):
+        ep_val = float(ep_raw)
+        bps = ep_cfg.get("tier_breakpoints", [1.0, 1.2, 2.0, 4.0, 8.0, 20.0])
+        mults = ep_cfg.get("tier_multipliers", [1.1, 1.0, 0.9, 0.7, 0.5, 0.35, 0.25])
+        slopes = ep_cfg.get("tier_slopes", [0, 0, 0, 0.1, 0.05, 0.0125, 0])
+        entry_premium_mult = mults[-1]
+        for i in range(len(bps)):
+            if ep_val <= bps[i]:
+                entry_premium_mult = mults[i]
+                break
+            if i < len(bps) - 1 and ep_val <= bps[i + 1]:
+                base_m = mults[i + 1]
+                slope = slopes[i + 1] if i + 1 < len(slopes) else 0
+                entry_premium_mult = base_m + (bps[i + 1] - ep_val) * slope
+                break
+        # MCap fallback
+        mcap_v = row.get("market_cap")
+        mcap_thresh = ep_cfg.get("mcap_fallback_threshold", 50000000)
+        if pd.notna(mcap_v) and float(mcap_v) > mcap_thresh and ep_val <= 1.0:
+            mcap_tiers = ep_cfg.get("mcap_tiers", [50, 200, 500])
+            mcap_mults = ep_cfg.get("mcap_multipliers", [0.85, 0.70, 0.50, 0.35])
+            implied = float(mcap_v) / ep_cfg.get("mcap_launch_assumed", 1000000)
+            for j, t in enumerate(mcap_tiers):
+                if implied <= t:
+                    entry_premium_mult = mcap_mults[j]
+                    break
+            else:
+                entry_premium_mult = mcap_mults[-1]
+    else:
+        entry_premium_mult = _safe_mult(row, "entry_premium_mult")
+
+    # --- v45: Recompute lifecycle_mult from snapshot values ---
+    lc_cfg = params.get("lifecycle_config", {})
+    if lc_cfg and pd.notna(row.get("price_change_24h")):
+        pc24_lc = float(row.get("price_change_24h"))
+        uk_lc = int(row.get("unique_kols") or 0) if pd.notna(row.get("unique_kols")) else 0
+        va_lc = float(row.get("volume_acceleration")) if pd.notna(row.get("volume_acceleration")) else None
+        sent_lc = float(row.get("sentiment") or 0) if pd.notna(row.get("sentiment")) else 0
+        mcap_lc = float(row.get("market_cap") or 0) if pd.notna(row.get("market_cap")) else 0
+        # Panic
+        if pc24_lc < lc_cfg.get("panic_pc24", -30):
+            if va_lc is not None and va_lc < lc_cfg.get("panic_va", 0.5):
+                lifecycle_mult = lc_cfg.get("panic_penalty", 0.25)
+            else:
+                lifecycle_mult = 1.0
+        # Euphoria
+        elif (uk_lc >= lc_cfg.get("euphoria_uk", 3)
+              and pc24_lc > lc_cfg.get("euphoria_pc24", 100)
+              and sent_lc > lc_cfg.get("euphoria_sent", 0.2)):
+            lifecycle_mult = lc_cfg.get("euphoria_penalty", 0.5)
+        # Boom
+        elif (uk_lc >= lc_cfg.get("boom_uk", 2)
+              and lc_cfg.get("boom_pc24_low", 10) < pc24_lc <= lc_cfg.get("boom_pc24_high", 200)):
+            if mcap_lc > lc_cfg.get("boom_large_cap_mcap", 50000000):
+                lifecycle_mult = lc_cfg.get("boom_large_cap_penalty", 0.85)
+            else:
+                lifecycle_mult = lc_cfg.get("boom_bonus", 1.1)
+        else:
+            lifecycle_mult = 1.0
+    else:
+        lifecycle_mult = 1.0
+
+    # --- v45: Recompute entry_drift_mult from snapshot values ---
+    ed_cfg = params.get("entry_drift_config", {})
+    if ed_cfg and pd.notna(ep_raw):
+        ep_drift = float(ep_raw)
+        premium_gate = ed_cfg.get("premium_gate", 1.2)
+        if ep_drift <= premium_gate:
+            entry_drift_mult = 1.0
+        else:
+            uk_ed = int(row.get("unique_kols") or 1) if pd.notna(row.get("unique_kols")) else 1
+            kol_score = min(1.0, (uk_ed - 1) / ed_cfg.get("kol_divisor", 7))
+            act_ed = float(row.get("activity_mult") or 1.0) if pd.notna(row.get("activity_mult")) else activity_mult
+            act_base = ed_cfg.get("activity_base", 0.80)
+            act_range = ed_cfg.get("activity_range", 0.45)
+            activity_score = max(0, min(1.0, (act_ed - act_base) / act_range))
+            freshest_ed = float(row.get("freshest_mention_hours") or 999) if pd.notna(row.get("freshest_mention_hours")) else 999
+            fresh_tiers = ed_cfg.get("fresh_tiers", [1, 4, 8])
+            fresh_scores = ed_cfg.get("fresh_scores", [1.0, 0.7, 0.4, 0.1])
+            fresh_score = fresh_scores[-1]
+            for i, tier in enumerate(fresh_tiers):
+                if freshest_ed <= tier:
+                    fresh_score = fresh_scores[i]
+                    break
+            s_ct = int(row.get("s_tier_count") or 0) if pd.notna(row.get("s_tier_count")) else 0
+            s_tier_score = min(1.0, s_ct / ed_cfg.get("stier_divisor", 2))
+            sw = ed_cfg.get("social_weights", [0.30, 0.25, 0.30, 0.15])
+            social_str = kol_score * sw[0] + activity_score * sw[1] + fresh_score * sw[2] + s_tier_score * sw[3]
+            drift = ep_drift - 1.0
+            net_drift = max(0, drift - social_str * 1.0)
+            entry_drift_mult = max(ed_cfg.get("drift_floor", 0.50),
+                                   1.0 - net_drift * ed_cfg.get("drift_factor", 0.25))
+    else:
+        entry_drift_mult = _safe_mult(row, "entry_drift_mult")
+
+    # v45: crash_pen = min(lifecycle, death, entry_premium) when recomputed
+    if death_cfg or ep_cfg or lc_cfg:
+        crash_pen = min(lifecycle_mult, death_penalty, entry_premium_mult)
+    else:
+        crash_pen = _safe_mult(row, "crash_pen")
+
+    # Combined chain (matching pipeline.py v45)
     combined_floor = params.get("combined_floor", 0.25)
     combined_cap = params.get("combined_cap", 2.0)
     combined_raw = (onchain * safety * pump_bonus
@@ -2906,7 +3076,7 @@ def _optuna_optimize_params(
     timeout: int = 900,
 ) -> dict | None:
     """
-    Optuna study with ~32 search space parameters.
+    v45: Optuna study with ~59 search space parameters.
     Walk-forward inside objective: 70% oldest → train, 30% newest → evaluate.
     Returns best_params dict or None if no improvement.
     """
@@ -3000,6 +3170,89 @@ def _optuna_optimize_params(
         if hpt[0] >= hpt[1] or hpt[1] >= hpt[2]:
             return -999.0
 
+        # --- v45: New scalar params ---
+        params["safety_floor"] = trial.suggest_float("safety_floor", 0.60, 1.00, step=0.05)
+        params["onchain_mult_floor"] = trial.suggest_float("onchain_mult_floor", 0.20, 0.60, step=0.05)
+        params["onchain_mult_cap"] = trial.suggest_float("onchain_mult_cap", 1.2, 2.0, step=0.1)
+
+        # --- v45: death_config params ---
+        death_stale_t0 = trial.suggest_int("death_stale_t0", 12, 36)
+        death_stale_t1 = trial.suggest_int("death_stale_t1", 24, 72)
+        death_stale_t2 = trial.suggest_int("death_stale_t2", 48, 96)
+        if death_stale_t0 >= death_stale_t1 or death_stale_t1 >= death_stale_t2:
+            return -999.0
+        death_stale_b0 = trial.suggest_float("death_stale_b0", 0.40, 0.80, step=0.05)
+        death_stale_b1 = trial.suggest_float("death_stale_b1", 0.20, 0.60, step=0.05)
+        death_stale_b2 = trial.suggest_float("death_stale_b2", 0.10, 0.40, step=0.05)
+        death_stale_b3 = trial.suggest_float("death_stale_b3", 0.05, 0.25, step=0.05)
+        death_vol_24h = trial.suggest_float("death_vol_24h", 1000, 10000, step=1000)
+        params["death_config"] = {
+            "stale_start_hours": 12,
+            "stale_tiers": [death_stale_t0, death_stale_t1, death_stale_t2],
+            "stale_bases": [death_stale_b0, death_stale_b1, death_stale_b2, death_stale_b3],
+            "vol_modulation_tiers": [50000, 100000, 500000, 1000000],
+            "vol_modulation_bonuses": [0.15, 0.25, 0.35, 0.45],
+            "vol_modulation_caps": [0.8, 0.85, 0.9, 0.95],
+            "vol_death_24h": death_vol_24h, "vol_death_1h": 500, "vol_death_penalty": 0.15,
+            "vol_floor_24h": 1000, "vol_floor_penalty": 0.1,
+            "price_moderate_social_alive_h": 6, "price_moderate_vol_alive": 0.5,
+            "price_mild_threshold": -30, "price_mild_stale_h": 24,
+        }
+
+        # --- v45: entry_premium_config params ---
+        ep_neutral_cap = trial.suggest_float("ep_neutral_cap", 1.0, 2.5, step=0.25)
+        ep_mild_cap = trial.suggest_float("ep_mild_cap", 2.0, 6.0, step=0.5)
+        ep_harsh_cap = trial.suggest_float("ep_harsh_cap", 4.0, 12.0, step=1.0)
+        if ep_neutral_cap >= ep_mild_cap or ep_mild_cap >= ep_harsh_cap:
+            return -999.0
+        ep_floor_mult = trial.suggest_float("ep_floor_mult", 0.15, 0.40, step=0.05)
+        ep_mcap_threshold = trial.suggest_float("ep_mcap_threshold", 20000000, 100000000, step=10000000)
+        ep_duration_48h = trial.suggest_float("ep_duration_48h", 1.2, 2.0, step=0.1)
+        params["entry_premium_config"] = {
+            "tier_breakpoints": [1.0, ep_neutral_cap, ep_mild_cap, ep_harsh_cap, ep_harsh_cap * 2, ep_harsh_cap * 3],
+            "tier_multipliers": [1.1, 1.0, 0.9, 0.7, 0.5, 0.35, ep_floor_mult],
+            "tier_slopes": [0, 0, 0, 0.1, 0.05, 0.0125, 0],
+            "duration_thresholds": [12, 24, 48],
+            "duration_factors": [1.0, 1.15, 1.3, ep_duration_48h],
+            "mcap_fallback_threshold": ep_mcap_threshold,
+            "mcap_launch_assumed": 1000000,
+            "mcap_tiers": [50, 200, 500],
+            "mcap_multipliers": [0.85, 0.70, 0.50, 0.35],
+        }
+
+        # --- v45: lifecycle_config params ---
+        lc_panic_threshold = trial.suggest_float("lc_panic_threshold", -50, -20, step=5)
+        lc_panic_penalty = trial.suggest_float("lc_panic_penalty", 0.10, 0.50, step=0.05)
+        lc_euphoria_penalty = trial.suggest_float("lc_euphoria_penalty", 0.20, 0.70, step=0.05)
+        lc_boom_bonus = trial.suggest_float("lc_boom_bonus", 1.0, 1.30, step=0.05)
+        lc_boom_mcap = trial.suggest_float("lc_boom_mcap", 20000000, 100000000, step=10000000)
+        params["lifecycle_config"] = {
+            "panic_pc24": lc_panic_threshold, "panic_va": 0.5, "panic_penalty": lc_panic_penalty,
+            "profit_taking_pc24": 100, "profit_taking_vol_proxy": 40, "profit_taking_penalty": 0.35,
+            "euphoria_uk": 3, "euphoria_pc24": 100, "euphoria_sent": 0.2, "euphoria_penalty": lc_euphoria_penalty,
+            "boom_uk": 2, "boom_pc24_low": 10, "boom_pc24_high": 200, "boom_va": 1.0,
+            "boom_bonus": lc_boom_bonus, "boom_large_cap_penalty": 0.85, "boom_large_cap_mcap": lc_boom_mcap,
+            "displacement_age": 6, "displacement_uk": 1, "displacement_pc24": 50, "displacement_penalty": 0.9,
+        }
+
+        # --- v45: entry_drift_config params ---
+        ed_premium_gate = trial.suggest_float("ed_premium_gate", 1.0, 2.5, step=0.25)
+        ed_kol_weight = trial.suggest_float("ed_kol_weight", 0.15, 0.45, step=0.05)
+        ed_fresh_weight = trial.suggest_float("ed_fresh_weight", 0.15, 0.45, step=0.05)
+        ed_drift_factor = trial.suggest_float("ed_drift_factor", 0.10, 0.50, step=0.05)
+        ed_drift_floor = trial.suggest_float("ed_drift_floor", 0.30, 0.70, step=0.05)
+        # Normalize social weights to sum to 1.0 (4 weights: kol, activity, fresh, stier)
+        remaining = max(0.1, 1.0 - ed_kol_weight - ed_fresh_weight)
+        params["entry_drift_config"] = {
+            "premium_gate": ed_premium_gate,
+            "kol_divisor": 7,
+            "activity_base": 0.80, "activity_range": 0.45,
+            "fresh_tiers": [1, 4, 8], "fresh_scores": [1.0, 0.7, 0.4, 0.1],
+            "stier_divisor": 2,
+            "social_weights": [ed_kol_weight, remaining * 0.6, ed_fresh_weight, remaining * 0.4],
+            "drift_factor": ed_drift_factor, "drift_floor": ed_drift_floor,
+        }
+
         # Evaluate on TRAIN set
         train_score = _evaluate_params(df_train, weights, params, horizon, threshold)
         return train_score
@@ -3045,6 +3298,55 @@ def _optuna_optimize_params(
             "thresholds": [bp["hp_t0"], bp["hp_t1"], bp["hp_t2"]],
             "penalties": [1.0, bp["hp_p1"], bp["hp_p2"], bp["hp_p3"]],
         },
+        # v45: new scalar params
+        "safety_floor": bp["safety_floor"],
+        "onchain_mult_floor": bp["onchain_mult_floor"],
+        "onchain_mult_cap": bp["onchain_mult_cap"],
+        # v45: new JSONB configs
+        "death_config": {
+            "stale_start_hours": 12,
+            "stale_tiers": [bp["death_stale_t0"], bp["death_stale_t1"], bp["death_stale_t2"]],
+            "stale_bases": [bp["death_stale_b0"], bp["death_stale_b1"], bp["death_stale_b2"], bp["death_stale_b3"]],
+            "vol_modulation_tiers": [50000, 100000, 500000, 1000000],
+            "vol_modulation_bonuses": [0.15, 0.25, 0.35, 0.45],
+            "vol_modulation_caps": [0.8, 0.85, 0.9, 0.95],
+            "vol_death_24h": bp["death_vol_24h"], "vol_death_1h": 500, "vol_death_penalty": 0.15,
+            "vol_floor_24h": 1000, "vol_floor_penalty": 0.1,
+            "price_moderate_social_alive_h": 6, "price_moderate_vol_alive": 0.5,
+            "price_mild_threshold": -30, "price_mild_stale_h": 24,
+        },
+        "entry_premium_config": {
+            "tier_breakpoints": [1.0, bp["ep_neutral_cap"], bp["ep_mild_cap"], bp["ep_harsh_cap"],
+                                 bp["ep_harsh_cap"] * 2, bp["ep_harsh_cap"] * 3],
+            "tier_multipliers": [1.1, 1.0, 0.9, 0.7, 0.5, 0.35, bp["ep_floor_mult"]],
+            "tier_slopes": [0, 0, 0, 0.1, 0.05, 0.0125, 0],
+            "duration_thresholds": [12, 24, 48],
+            "duration_factors": [1.0, 1.15, 1.3, bp["ep_duration_48h"]],
+            "mcap_fallback_threshold": bp["ep_mcap_threshold"],
+            "mcap_launch_assumed": 1000000,
+            "mcap_tiers": [50, 200, 500],
+            "mcap_multipliers": [0.85, 0.70, 0.50, 0.35],
+        },
+        "lifecycle_config": {
+            "panic_pc24": bp["lc_panic_threshold"], "panic_va": 0.5, "panic_penalty": bp["lc_panic_penalty"],
+            "profit_taking_pc24": 100, "profit_taking_vol_proxy": 40, "profit_taking_penalty": 0.35,
+            "euphoria_uk": 3, "euphoria_pc24": 100, "euphoria_sent": 0.2, "euphoria_penalty": bp["lc_euphoria_penalty"],
+            "boom_uk": 2, "boom_pc24_low": 10, "boom_pc24_high": 200, "boom_va": 1.0,
+            "boom_bonus": bp["lc_boom_bonus"], "boom_large_cap_penalty": 0.85, "boom_large_cap_mcap": bp["lc_boom_mcap"],
+            "displacement_age": 6, "displacement_uk": 1, "displacement_pc24": 50, "displacement_penalty": 0.9,
+        },
+        "entry_drift_config": {
+            "premium_gate": bp["ed_premium_gate"],
+            "kol_divisor": 7,
+            "activity_base": 0.80, "activity_range": 0.45,
+            "fresh_tiers": [1, 4, 8], "fresh_scores": [1.0, 0.7, 0.4, 0.1],
+            "stier_divisor": 2,
+            "social_weights": [bp["ed_kol_weight"],
+                               max(0.1, 1.0 - bp["ed_kol_weight"] - bp["ed_fresh_weight"]) * 0.6,
+                               bp["ed_fresh_weight"],
+                               max(0.1, 1.0 - bp["ed_kol_weight"] - bp["ed_fresh_weight"]) * 0.4],
+            "drift_factor": bp["ed_drift_factor"], "drift_floor": bp["ed_drift_floor"],
+        },
     }
 
     # Evaluate on TEST set (walk-forward validation)
@@ -3064,6 +3366,45 @@ def _optuna_optimize_params(
         "s_tier_bonus": 1.2,
         "breadth_pen_config": {"thresholds": [0.033, 0.05, 0.08], "penalties": [0.75, 0.85, 0.95]},
         "hype_pen_config": {"thresholds": [2, 4, 7], "penalties": [1.0, 0.85, 0.65, 0.50]},
+        # v45: new baseline defaults
+        "safety_floor": 0.75,
+        "onchain_mult_floor": 0.3,
+        "onchain_mult_cap": 1.5,
+        "death_config": {
+            "stale_start_hours": 12, "stale_tiers": [24, 48, 72],
+            "stale_bases": [0.7, 0.45, 0.25, 0.15],
+            "vol_modulation_tiers": [50000, 100000, 500000, 1000000],
+            "vol_modulation_bonuses": [0.15, 0.25, 0.35, 0.45],
+            "vol_modulation_caps": [0.8, 0.85, 0.9, 0.95],
+            "vol_death_24h": 5000, "vol_death_1h": 500, "vol_death_penalty": 0.15,
+            "vol_floor_24h": 1000, "vol_floor_penalty": 0.1,
+            "price_moderate_social_alive_h": 6, "price_moderate_vol_alive": 0.5,
+            "price_mild_threshold": -30, "price_mild_stale_h": 24,
+        },
+        "entry_premium_config": {
+            "tier_breakpoints": [1.0, 1.2, 2.0, 4.0, 8.0, 20.0],
+            "tier_multipliers": [1.1, 1.0, 0.9, 0.7, 0.5, 0.35, 0.25],
+            "tier_slopes": [0, 0, 0, 0.1, 0.05, 0.0125, 0],
+            "duration_thresholds": [12, 24, 48],
+            "duration_factors": [1.0, 1.15, 1.3, 1.5],
+            "mcap_fallback_threshold": 50000000, "mcap_launch_assumed": 1000000,
+            "mcap_tiers": [50, 200, 500], "mcap_multipliers": [0.85, 0.70, 0.50, 0.35],
+        },
+        "lifecycle_config": {
+            "panic_pc24": -30, "panic_va": 0.5, "panic_penalty": 0.25,
+            "profit_taking_pc24": 100, "profit_taking_vol_proxy": 40, "profit_taking_penalty": 0.35,
+            "euphoria_uk": 3, "euphoria_pc24": 100, "euphoria_sent": 0.2, "euphoria_penalty": 0.5,
+            "boom_uk": 2, "boom_pc24_low": 10, "boom_pc24_high": 200, "boom_va": 1.0,
+            "boom_bonus": 1.1, "boom_large_cap_penalty": 0.85, "boom_large_cap_mcap": 50000000,
+            "displacement_age": 6, "displacement_uk": 1, "displacement_pc24": 50, "displacement_penalty": 0.9,
+        },
+        "entry_drift_config": {
+            "premium_gate": 1.2, "kol_divisor": 7,
+            "activity_base": 0.80, "activity_range": 0.45,
+            "fresh_tiers": [1, 4, 8], "fresh_scores": [1.0, 0.7, 0.4, 0.1],
+            "stier_divisor": 2, "social_weights": [0.30, 0.25, 0.30, 0.15],
+            "drift_factor": 0.25, "drift_floor": 0.50,
+        },
     }
     baseline_score = _evaluate_params(df_test, BALANCED_WEIGHTS, baseline_params, horizon, threshold)
 
@@ -3102,7 +3443,8 @@ def _optuna_optimize_params(
 
     # Guard-rail: no param > 30% change from current
     for key in ["activity_mult_floor", "activity_mult_cap", "s_tier_bonus",
-                 "combined_floor", "combined_cap"]:
+                 "combined_floor", "combined_cap",
+                 "safety_floor", "onchain_mult_floor", "onchain_mult_cap"]:
         current = baseline_params.get(key, best_params[key])
         new_val = best_params[key]
         if current > 0:
@@ -3147,10 +3489,21 @@ def _apply_optuna_params(client, best_weights: dict, best_params: dict, reason: 
             "s_tier_bonus": best_params["s_tier_bonus"],
             "breadth_pen_config": best_params["breadth_pen_config"],
             "hype_pen_config": best_params["hype_pen_config"],
+            # v45: new scalar params
+            "safety_floor": best_params.get("safety_floor", 0.75),
+            "onchain_mult_floor": best_params.get("onchain_mult_floor", 0.3),
+            "onchain_mult_cap": best_params.get("onchain_mult_cap", 1.5),
+            # v45: new JSONB configs
+            "death_config": best_params.get("death_config"),
+            "entry_premium_config": best_params.get("entry_premium_config"),
+            "lifecycle_config": best_params.get("lifecycle_config"),
+            "entry_drift_config": best_params.get("entry_drift_config"),
             "updated_at": datetime.now(timezone.utc).isoformat(),
-            "updated_by": "optuna_v44",
+            "updated_by": "optuna_v45",
             "change_reason": reason,
         }
+        # Remove None values (don't write nulls for missing configs)
+        update = {k: v for k, v in update.items() if v is not None}
         client.table("scoring_config").update(update).eq("id", 1).execute()
         logger.info("optuna: scoring_config updated — %s", reason)
         return True
