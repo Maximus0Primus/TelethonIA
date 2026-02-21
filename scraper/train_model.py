@@ -115,6 +115,11 @@ CORE_FEATURES = [
     "conviction_val",           # raw component value [0,1]
     "breadth_val",              # raw component value [0,1]
     "price_action_val",         # raw component value [0,1]
+    # v52: KOL timing alpha signals
+    "time_spread_minutes",
+    "first_call_age_minutes",
+    "kol_cascade_rate",
+    "price_vs_first_call",
 ]
 
 # Tier 2 (extended): Add these when 500-2000 samples. ~30 features total.
@@ -248,6 +253,11 @@ ALL_FEATURE_COLS = [
     "conviction_val",
     "breadth_val",
     "price_action_val",
+    # v52: KOL timing alpha signals
+    "time_spread_minutes",
+    "first_call_age_minutes",
+    "kol_cascade_rate",
+    "price_vs_first_call",
 ]
 
 HORIZONS = {

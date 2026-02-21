@@ -1903,6 +1903,15 @@ _DEFAULT_SCORING_PARAMS = {
         "sth_factors": [1.10, 1.05],
         "sth_penalty_threshold": 0.3,
         "sth_penalty_factor": 0.95,
+        # v52: KOL timing alpha factors
+        "cascade_factor_3plus": 1.15,
+        "cascade_factor_2plus": 1.08,
+        "early_factor_30min": 1.20,
+        "early_factor_60min": 1.10,
+        "late_penalty_360min": 0.85,
+        "pvfc_penalty_3x": 0.60,
+        "pvfc_penalty_2x": 0.75,
+        "pvfc_penalty_1_5x": 0.90,
         "floor": 0.70,
         "cap": 1.40,
     },
@@ -2835,6 +2844,44 @@ def aggregate_ranking(
         _mh_div = SCORING_PARAMS["mention_heat_divisor"]  # v47: was hardcoded 4
         mention_heat_ratio = min(_mh_cap, mentions_1h / (mentions_2h_6h / _mh_div + _mh_eps)) if data["hours_ago"] else None
 
+        # --- v52: KOL timing alpha signals ---
+        # Collect freshest mention per KOL group (= per KOL)
+        all_freshest = []
+        for g, hrs in hours_by_group.items():
+            if hrs:
+                all_freshest.append(min(hrs))  # freshest mention per KOL
+
+        # 1. time_spread_minutes: gap between first and last KOL call
+        if len(all_freshest) >= 2:
+            time_spread_minutes = round((max(all_freshest) - min(all_freshest)) * 60, 1)
+        else:
+            time_spread_minutes = None
+
+        # 2. first_call_age_minutes: age of the very first KOL call
+        if all_freshest:
+            first_call_age_minutes = round(max(all_freshest) * 60, 1)
+        else:
+            first_call_age_minutes = None
+
+        # 3. kol_cascade_rate: max KOLs in any 30-min window
+        if all_freshest and len(all_freshest) >= 2:
+            min_h = min(all_freshest)
+            buckets = defaultdict(int)
+            for h in all_freshest:
+                bucket_idx = int((h - min_h) * 60 / 30)
+                buckets[bucket_idx] += 1
+            kol_cascade_rate = max(buckets.values()) if buckets else 1
+        else:
+            kol_cascade_rate = 1 if all_freshest else None
+
+        # 4. price_vs_first_call: current_price / price_at_first_call
+        price_first = data.get("price_at_first_call")
+        price_now = data.get("price_usd")
+        if price_first and price_now and float(price_first) > 0:
+            price_vs_first_call = round(float(price_now) / float(price_first), 3)
+        else:
+            price_vs_first_call = None
+
         # --- ML v2 Phase B: Social momentum phase classification ---
         if mention_acceleration > 0.2 and social_velocity > 0.3:
             social_momentum_phase = "building"
@@ -2978,6 +3025,11 @@ def aggregate_ranking(
             # v35: Proxy signals for top predictors
             "kol_freshness": round(kol_freshness, 3) if kol_freshness is not None else None,
             "mention_heat_ratio": round(mention_heat_ratio, 3) if mention_heat_ratio is not None else None,
+            # v52: KOL timing alpha signals
+            "time_spread_minutes": time_spread_minutes,
+            "first_call_age_minutes": first_call_age_minutes,
+            "kol_cascade_rate": kol_cascade_rate,
+            "price_vs_first_call": price_vs_first_call,
             # v14: KOL-stated entry mcaps for entry premium calculation
             "kol_stated_entry_mcaps": data.get("kol_stated_entry_mcaps", []),
             # v16: Extraction source counts
@@ -3280,7 +3332,37 @@ def aggregate_ranking(
             elif sth < sth_pen_thresh:
                 vol_heat_factor = sth_pen_factor
 
-        momentum_mult = max(mom_floor, min(mom_cap, kol_fresh_factor * mention_heat_factor * vol_heat_factor))
+        # v52: KOL cascade timing boost
+        cascade = token.get("kol_cascade_rate")
+        cascade_factor = 1.0
+        if cascade is not None and cascade >= 3:
+            cascade_factor = mcfg.get("cascade_factor_3plus", 1.15)
+        elif cascade is not None and cascade >= 2:
+            cascade_factor = mcfg.get("cascade_factor_2plus", 1.08)
+
+        # v52: Early entry boost (first call age)
+        first_age = token.get("first_call_age_minutes")
+        early_factor = 1.0
+        if first_age is not None:
+            if first_age <= 30:
+                early_factor = mcfg.get("early_factor_30min", 1.20)
+            elif first_age <= 60:
+                early_factor = mcfg.get("early_factor_60min", 1.10)
+            elif first_age >= 360:
+                early_factor = mcfg.get("late_penalty_360min", 0.85)
+
+        # v52: Price already moved penalty
+        pvfc = token.get("price_vs_first_call")
+        pvfc_factor = 1.0
+        if pvfc is not None:
+            if pvfc >= 3.0:
+                pvfc_factor = mcfg.get("pvfc_penalty_3x", 0.60)
+            elif pvfc >= 2.0:
+                pvfc_factor = mcfg.get("pvfc_penalty_2x", 0.75)
+            elif pvfc >= 1.5:
+                pvfc_factor = mcfg.get("pvfc_penalty_1_5x", 0.90)
+
+        momentum_mult = max(mom_floor, min(mom_cap, kol_fresh_factor * mention_heat_factor * vol_heat_factor * cascade_factor * early_factor * pvfc_factor))
         token["momentum_mult"] = momentum_mult
 
         # v15: Breadth floor — low KOL count is a mild flag, not a death sentence

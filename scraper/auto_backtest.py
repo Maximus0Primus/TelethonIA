@@ -170,6 +170,7 @@ SNAPSHOT_COLUMNS = (
     "jup_price_impact_1k, min_price_12h, min_price_24h, "
     "median_peak_return, entry_vs_median_peak, win_rate_7d, market_heat_24h, relative_volume, kol_saturation, "
     "kol_freshness, mention_heat_ratio, momentum_mult, activity_ratio_raw, hype_pen, unique_kols, "
+    "time_spread_minutes, first_call_age_minutes, kol_cascade_rate, price_vs_first_call, "
     "whale_change, whale_direction, volume_mcap_ratio, liq_mcap_ratio, token_age_hours, "
     "risk_score, helius_gini, bundle_pct, bundle_detected, helius_recent_tx_count, "
     "helius_holder_count, helius_onchain_bsr, jup_tradeable, jito_max_slot_txns, "
@@ -3288,9 +3289,41 @@ def _compute_score_with_params(
                 vol_heat_factor = sth_factors_v[1]
             elif sth_v < sth_pen_thresh:
                 vol_heat_factor = sth_pen_factor
+        # v52: KOL cascade timing factors
+        cascade_v = row.get("kol_cascade_rate")
+        cascade_factor = 1.0
+        if pd.notna(cascade_v):
+            cv = float(cascade_v)
+            if cv >= 3:
+                cascade_factor = mom_cfg.get("cascade_factor_3plus", 1.15)
+            elif cv >= 2:
+                cascade_factor = mom_cfg.get("cascade_factor_2plus", 1.08)
+
+        first_age_v = row.get("first_call_age_minutes")
+        early_factor = 1.0
+        if pd.notna(first_age_v):
+            fa = float(first_age_v)
+            if fa <= 30:
+                early_factor = mom_cfg.get("early_factor_30min", 1.20)
+            elif fa <= 60:
+                early_factor = mom_cfg.get("early_factor_60min", 1.10)
+            elif fa >= 360:
+                early_factor = mom_cfg.get("late_penalty_360min", 0.85)
+
+        pvfc_v = row.get("price_vs_first_call")
+        pvfc_factor = 1.0
+        if pd.notna(pvfc_v):
+            pv = float(pvfc_v)
+            if pv >= 3.0:
+                pvfc_factor = mom_cfg.get("pvfc_penalty_3x", 0.60)
+            elif pv >= 2.0:
+                pvfc_factor = mom_cfg.get("pvfc_penalty_2x", 0.75)
+            elif pv >= 1.5:
+                pvfc_factor = mom_cfg.get("pvfc_penalty_1_5x", 0.90)
+
         mom_floor = mom_cfg.get("floor", 0.70)
         mom_cap = mom_cfg.get("cap", 1.40)
-        momentum_mult = max(mom_floor, min(mom_cap, kol_fresh_factor * mention_heat_factor * vol_heat_factor))
+        momentum_mult = max(mom_floor, min(mom_cap, kol_fresh_factor * mention_heat_factor * vol_heat_factor * cascade_factor * early_factor * pvfc_factor))
     else:
         momentum_mult = _safe_mult(row, "momentum_mult")
 
@@ -3938,6 +3971,15 @@ def _optuna_optimize_params(
             "sth_factors": [1.10, 1.05],
             "sth_penalty_threshold": mom_sth_pen_t,
             "sth_penalty_factor": 0.95,
+            # v52: KOL timing alpha factors
+            "cascade_factor_3plus": trial.suggest_float("cascade_factor_3plus", 1.0, 1.30, step=0.05),
+            "cascade_factor_2plus": trial.suggest_float("cascade_factor_2plus", 1.0, 1.20, step=0.05),
+            "early_factor_30min": trial.suggest_float("early_factor_30min", 1.0, 1.40, step=0.05),
+            "early_factor_60min": trial.suggest_float("early_factor_60min", 1.0, 1.25, step=0.05),
+            "late_penalty_360min": trial.suggest_float("late_penalty_360min", 0.60, 1.0, step=0.05),
+            "pvfc_penalty_3x": trial.suggest_float("pvfc_penalty_3x", 0.30, 0.80, step=0.05),
+            "pvfc_penalty_2x": trial.suggest_float("pvfc_penalty_2x", 0.50, 0.90, step=0.05),
+            "pvfc_penalty_1_5x": trial.suggest_float("pvfc_penalty_1_5x", 0.70, 1.0, step=0.05),
             "floor": mom_floor_v,
             "cap": mom_cap_v,
         }
@@ -4148,6 +4190,14 @@ def _optuna_optimize_params(
             "sth_factors": [1.10, 1.05],
             "sth_penalty_threshold": bp["mom_sth_pen_threshold"],
             "sth_penalty_factor": 0.95,
+            "cascade_factor_3plus": bp.get("cascade_factor_3plus", 1.15),
+            "cascade_factor_2plus": bp.get("cascade_factor_2plus", 1.08),
+            "early_factor_30min": bp.get("early_factor_30min", 1.20),
+            "early_factor_60min": bp.get("early_factor_60min", 1.10),
+            "late_penalty_360min": bp.get("late_penalty_360min", 0.85),
+            "pvfc_penalty_3x": bp.get("pvfc_penalty_3x", 0.60),
+            "pvfc_penalty_2x": bp.get("pvfc_penalty_2x", 0.75),
+            "pvfc_penalty_1_5x": bp.get("pvfc_penalty_1_5x", 0.90),
             "floor": bp["mom_floor"],
             "cap": bp["mom_cap"],
         },
@@ -4300,6 +4350,14 @@ def _optuna_optimize_params(
             "sth_factors": [1.10, 1.05],
             "sth_penalty_threshold": 0.3,
             "sth_penalty_factor": 0.95,
+            "cascade_factor_3plus": 1.15,
+            "cascade_factor_2plus": 1.08,
+            "early_factor_30min": 1.20,
+            "early_factor_60min": 1.10,
+            "late_penalty_360min": 0.85,
+            "pvfc_penalty_3x": 0.60,
+            "pvfc_penalty_2x": 0.75,
+            "pvfc_penalty_1_5x": 0.90,
             "floor": 0.70,
             "cap": 1.40,
         },
@@ -4465,7 +4523,7 @@ def _apply_optuna_params(client, best_weights: dict, best_params: dict, reason: 
             "momentum_config": best_params.get("momentum_config"),
             "size_mult_config": best_params.get("size_mult_config"),
             "updated_at": datetime.now(timezone.utc).isoformat(),
-            "updated_by": "optuna_v49",
+            "updated_by": "optuna_v52",
             "change_reason": reason,
         }
         # Remove None values (don't write nulls for missing configs)

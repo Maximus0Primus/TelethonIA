@@ -715,6 +715,11 @@ def insert_snapshots(ranking: list[dict]) -> None:
             # v35: Proxy signals for top predictors
             "kol_freshness": t.get("kol_freshness"),
             "mention_heat_ratio": t.get("mention_heat_ratio"),
+            # v52: KOL timing alpha signals
+            "time_spread_minutes": t.get("time_spread_minutes"),
+            "first_call_age_minutes": t.get("first_call_age_minutes"),
+            "kol_cascade_rate": t.get("kol_cascade_rate"),
+            "price_vs_first_call": t.get("price_vs_first_call"),
             "momentum_mult": t.get("momentum_mult"),
             # v44: Raw activity ratio for Optuna re-scoring
             "activity_ratio_raw": t.get("activity_ratio_raw"),
