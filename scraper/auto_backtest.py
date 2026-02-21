@@ -168,7 +168,8 @@ SNAPSHOT_COLUMNS = (
     "risk_score, helius_gini, bundle_pct, bundle_detected, helius_recent_tx_count, "
     "helius_holder_count, helius_onchain_bsr, jup_tradeable, jito_max_slot_txns, "
     "bubblemaps_score, bubblemaps_cluster_max_pct, bubblemaps_cex_pct, "
-    "is_pump_fun, price_change_1h, price_change_5m, pvp_recent_count"
+    "is_pump_fun, price_change_1h, price_change_5m, pvp_recent_count, "
+    "score_at_snapshot"
 )
 
 
@@ -223,6 +224,17 @@ def _bt_tier_lookup(value: float, thresholds: list, factors: list) -> float:
         if value < t:
             return factors[i]
     return factors[-1]
+
+
+def _get_score(row: pd.Series, weights: dict) -> int:
+    """
+    v49: Prefer score_at_snapshot (the actual score produced by the pipeline, including ML).
+    Falls back to _compute_score() recomputation for older snapshots without stored score.
+    """
+    sas = row.get("score_at_snapshot")
+    if pd.notna(sas) and int(sas) > 0:
+        return int(sas)
+    return _compute_score(row, weights)
 
 
 def _compute_score(row: pd.Series, weights: dict) -> int:
@@ -341,7 +353,7 @@ def _top1_hit_rate(df: pd.DataFrame) -> dict:
 
     # v34: First-appearance dedup — keep only the first snapshot per token
     df = df.sort_values("snapshot_at").drop_duplicates(subset=["token_address"], keep="first").copy()
-    df["score"] = df.apply(lambda r: _compute_score(r, BALANCED_WEIGHTS), axis=1)
+    df["score"] = df.apply(lambda r: _get_score(r, BALANCED_WEIGHTS), axis=1)
 
     # Group snapshots into cycles (same minute = same cycle)
     df["cycle"] = df["snapshot_at"].dt.floor("15min")
@@ -420,7 +432,7 @@ def _top1_hit_rate(df: pd.DataFrame) -> dict:
 def _score_calibration(df: pd.DataFrame, horizon_col: str = "did_2x_12h") -> dict:
     """Hit rate and return stats by score band (first-appearance per token)."""
     df = df.copy()
-    df["score"] = df.apply(lambda r: _compute_score(r, BALANCED_WEIGHTS), axis=1)
+    df["score"] = df.apply(lambda r: _get_score(r, BALANCED_WEIGHTS), axis=1)
 
     horizon_suffix = horizon_col.replace("did_2x_", "")
 
@@ -489,7 +501,7 @@ def _gate_autopsy(df: pd.DataFrame, horizon_col: str = "did_2x_12h") -> dict:
     if winners.empty:
         return {"missed_winners": [], "total_winners": 0}
 
-    winners["score"] = winners.apply(lambda r: _compute_score(r, BALANCED_WEIGHTS), axis=1)
+    winners["score"] = winners.apply(lambda r: _get_score(r, BALANCED_WEIGHTS), axis=1)
 
     missed = []
     for _, row in winners.iterrows():
@@ -538,7 +550,7 @@ def _gate_autopsy(df: pd.DataFrame, horizon_col: str = "did_2x_12h") -> dict:
 def _false_positive_autopsy(df: pd.DataFrame, horizon_col: str = "did_2x_12h") -> dict:
     """For high-scoring tokens that did NOT 2x: what components were misleading? (first-appearance)"""
     first = df.sort_values("snapshot_at").drop_duplicates(subset=["token_address"], keep="first").copy()
-    first["score"] = first.apply(lambda r: _compute_score(r, BALANCED_WEIGHTS), axis=1)
+    first["score"] = first.apply(lambda r: _get_score(r, BALANCED_WEIGHTS), axis=1)
 
     labeled = first[first[horizon_col].notna()]
     high_score_losers = labeled[(labeled["score"] >= 60) & (labeled[horizon_col] == False)]
@@ -826,13 +838,16 @@ def _extraction_analysis(df: pd.DataFrame, horizon_col: str = "did_2x_12h") -> d
 
 
 BOT_STRATEGIES = [
-    # Conservative: small gain, tight stop
-    {"name": "TP30_SL20", "tp_col": "time_to_1_3x_min", "sl_col": "time_to_sl20_min",
-     "tp_pct": 0.30, "sl_pct": -0.20, "description": "+30% TP / -20% SL"},
-    # Moderate: medium gain, medium risk
+    # Conservative: small gain, wide stop (memecoins drop 30-50% routinely before pumping)
+    {"name": "TP30_SL50", "tp_col": "time_to_1_3x_min", "sl_col": "time_to_sl50_min",
+     "tp_pct": 0.30, "sl_pct": -0.50, "description": "+30% TP / -50% SL"},
+    # Moderate: medium gain, medium stop
     {"name": "TP50_SL30", "tp_col": "time_to_1_5x_min", "sl_col": "time_to_sl30_min",
      "tp_pct": 0.50, "sl_pct": -0.30, "description": "+50% TP / -30% SL"},
-    # Aggressive: big gain, big risk — the classic 2x
+    # Moderate+: medium gain, wide stop (best risk/reward for memecoins)
+    {"name": "TP50_SL50", "tp_col": "time_to_1_5x_min", "sl_col": "time_to_sl50_min",
+     "tp_pct": 0.50, "sl_pct": -0.50, "description": "+50% TP / -50% SL"},
+    # Aggressive: big gain, wide stop — the classic 2x
     {"name": "TP100_SL50", "tp_col": "time_to_2x_min", "sl_col": "time_to_sl50_min",
      "tp_pct": 1.00, "sl_pct": -0.50, "description": "+100% TP / -50% SL"},
 ]
@@ -848,9 +863,13 @@ def _realistic_bot_simulation(df: pd.DataFrame) -> dict:
     - Compute win rate, profit factor, expectancy, breakeven WR
 
     Also tests rank filters (top 1, top 3, top 5) to find optimal selectivity.
+
+    v49: First-appearance dedup — each token only counted once (earliest snapshot).
+    Without dedup, the same losing token appears in multiple cycles → inflated loss count.
     """
-    df = df.copy()
-    df["score"] = df.apply(lambda r: _compute_score(r, BALANCED_WEIGHTS), axis=1)
+    # First-appearance dedup: keep only the first snapshot per token (like _top1_hit_rate)
+    df = df.sort_values("snapshot_at").drop_duplicates(subset=["token_address"], keep="first").copy()
+    df["score"] = df.apply(lambda r: _get_score(r, BALANCED_WEIGHTS), axis=1)
     df["cycle"] = df["snapshot_at"].dt.floor("15min")
 
     results = {}
@@ -1040,12 +1059,16 @@ def _adaptive_bot_simulation(df: pd.DataFrame) -> dict:
 
     Also loads dd_by_rr_band from model meta (if available) to show ML-recommended SLs.
 
-    Compares fixed SL (20%, 30%, 50%) vs adaptive SL for each horizon.
+    Compares fixed SL (30%, 50%) vs adaptive SL for each horizon.
+
+    v49: First-appearance dedup — each token only counted once.
+    v49: Removed SL20 (too tight for memecoins — normal volatility triggers it).
     """
     from pathlib import Path
 
-    df = df.copy()
-    df["score"] = df.apply(lambda r: _compute_score(r, BALANCED_WEIGHTS), axis=1)
+    # First-appearance dedup: keep only the first snapshot per token
+    df = df.sort_values("snapshot_at").drop_duplicates(subset=["token_address"], keep="first").copy()
+    df["score"] = df.apply(lambda r: _get_score(r, BALANCED_WEIGHTS), axis=1)
     df["cycle"] = df["snapshot_at"].dt.floor("15min")
 
     results = {}
@@ -1064,7 +1087,7 @@ def _adaptive_bot_simulation(df: pd.DataFrame) -> dict:
             except Exception:
                 pass
 
-    FIXED_SL_PCTS = [20, 30, 50]
+    FIXED_SL_PCTS = [30, 50]  # v49: removed SL20 — too tight for memecoins
 
     for hz in ["12h", "24h"]:
         dd_col = f"max_dd_before_tp_pct_{hz}"
@@ -1253,7 +1276,7 @@ def _optimal_threshold(df: pd.DataFrame, horizon_col: str = "did_2x_12h") -> dic
     if labeled.empty:
         return {}
 
-    labeled["score"] = labeled.apply(lambda r: _compute_score(r, BALANCED_WEIGHTS), axis=1)
+    labeled["score"] = labeled.apply(lambda r: _get_score(r, BALANCED_WEIGHTS), axis=1)
 
     best_f1 = 0
     best_threshold = 50
@@ -1300,7 +1323,7 @@ def _walk_forward(df: pd.DataFrame, horizon_col: str = "did_2x_12h") -> list[dic
         return []
 
     labeled = labeled.sort_values("snapshot_at")
-    labeled["score"] = labeled.apply(lambda r: _compute_score(r, BALANCED_WEIGHTS), axis=1)
+    labeled["score"] = labeled.apply(lambda r: _get_score(r, BALANCED_WEIGHTS), axis=1)
 
     min_date = labeled["snapshot_at"].min()
     max_date = labeled["snapshot_at"].max()
@@ -1510,17 +1533,20 @@ def _equity_curve_analysis(df: pd.DataFrame) -> dict:
     """
     Simulate equity curve from bot trades on #1 token per cycle.
     Tracks cumulative PnL, max drawdown, recovery time, losing streaks.
-    Uses TP50/SL30 on 12h as default strategy (most data).
+    Uses TP50/SL50 on 12h as default strategy (memecoins need wide SL).
+
+    v49: First-appearance dedup + SL30→SL50 (memecoins drop 30%+ routinely).
     """
-    df = df.copy()
-    df["score"] = df.apply(lambda r: _compute_score(r, BALANCED_WEIGHTS), axis=1)
+    # First-appearance dedup
+    df = df.sort_values("snapshot_at").drop_duplicates(subset=["token_address"], keep="first").copy()
+    df["score"] = df.apply(lambda r: _get_score(r, BALANCED_WEIGHTS), axis=1)
     df["cycle"] = df["snapshot_at"].dt.floor("15min")
 
     results = {}
 
     for hz in ["12h", "24h"]:
         tp_col = f"time_to_1_5x_min_{hz}"
-        sl_col = f"time_to_sl30_min_{hz}"
+        sl_col = f"time_to_sl50_min_{hz}"  # v49: SL50 (was SL30, too tight for memecoins)
         price_col = f"price_after_{hz}"
         hz_min = HORIZON_MINUTES.get(hz, 720)
 
@@ -1565,7 +1591,7 @@ def _equity_curve_analysis(df: pd.DataFrame) -> dict:
                 exit_type = "TP"
                 exit_min = tp_min
             elif sl_min is not None and (tp_min is None or sl_min <= tp_min):
-                pnl_pct = -0.30
+                pnl_pct = -0.50  # v49: was -0.30
                 exit_type = "SL"
                 exit_min = sl_min
             else:
@@ -1696,7 +1722,7 @@ def _slippage_analysis(df: pd.DataFrame) -> dict:
     TP_PCT = 0.50  # TP50 benchmark
 
     df = df.copy()
-    df["score"] = df.apply(lambda r: _compute_score(r, BALANCED_WEIGHTS), axis=1)
+    df["score"] = df.apply(lambda r: _get_score(r, BALANCED_WEIGHTS), axis=1)
     df["cycle"] = df["snapshot_at"].dt.floor("15min")
 
     results = {}
@@ -1833,7 +1859,7 @@ def _confidence_intervals(df: pd.DataFrame, horizon_col: str = "did_2x_12h") -> 
 
     # CI on top1 hit rate (from report if available)
     # Re-compute here for independence
-    labeled["score"] = labeled.apply(lambda r: _compute_score(r, BALANCED_WEIGHTS), axis=1)
+    labeled["score"] = labeled.apply(lambda r: _get_score(r, BALANCED_WEIGHTS), axis=1)
     labeled["cycle"] = labeled["snapshot_at"].dt.floor("15min")
     horizon_suffix = horizon_col.replace("did_2x_", "")
 
@@ -1921,16 +1947,19 @@ def _portfolio_simulation(df: pd.DataFrame) -> dict:
     - Equal-weight allocation across positions
     - Track portfolio equity curve, not individual trades
     - Shows if diversification helps or hurts
+
+    v49: First-appearance dedup + SL30→SL50 (memecoins need wide SL).
     """
-    df = df.copy()
-    df["score"] = df.apply(lambda r: _compute_score(r, BALANCED_WEIGHTS), axis=1)
+    # First-appearance dedup
+    df = df.sort_values("snapshot_at").drop_duplicates(subset=["token_address"], keep="first").copy()
+    df["score"] = df.apply(lambda r: _get_score(r, BALANCED_WEIGHTS), axis=1)
     df["cycle"] = df["snapshot_at"].dt.floor("15min")
 
     results = {}
 
     for hz in ["12h", "24h"]:
         tp_col = f"time_to_1_5x_min_{hz}"
-        sl_col = f"time_to_sl30_min_{hz}"
+        sl_col = f"time_to_sl50_min_{hz}"  # v49: was SL30
         price_col = f"price_after_{hz}"
         hz_min = HORIZON_MINUTES.get(hz, 720)
 
@@ -1976,7 +2005,7 @@ def _portfolio_simulation(df: pd.DataFrame) -> dict:
                         exit_type = "TP"
                         exit_min = tp_min
                     elif sl_min is not None and (tp_min is None or sl_min <= tp_min):
-                        pnl = -0.30
+                        pnl = -0.50  # v49: was -0.30
                         exit_type = "SL"
                         exit_min = sl_min
                     else:
@@ -2058,18 +2087,18 @@ def _kelly_analysis(df: pd.DataFrame, horizon_col: str = "did_2x_12h") -> dict:
     Shows how much of bankroll to risk per trade for each score band.
     """
     first = df.sort_values("snapshot_at").drop_duplicates(subset=["token_address"], keep="first").copy()
-    first["score"] = first.apply(lambda r: _compute_score(r, BALANCED_WEIGHTS), axis=1)
+    first["score"] = first.apply(lambda r: _get_score(r, BALANCED_WEIGHTS), axis=1)
 
     results = {}
 
     for hz in ["12h", "24h"]:
         tp_col = f"time_to_1_5x_min_{hz}"
-        sl_col = f"time_to_sl30_min_{hz}"
+        sl_col = f"time_to_sl50_min_{hz}"  # v49: was SL30
 
         if tp_col not in first.columns or sl_col not in first.columns:
             continue
 
-        # Label trades: TP first = win (+50%), SL first = loss (-30%)
+        # Label trades: TP first = win (+50%), SL first = loss (-50%)
         first[f"_tp_{hz}"] = pd.to_numeric(first.get(tp_col), errors="coerce")
         first[f"_sl_{hz}"] = pd.to_numeric(first.get(sl_col), errors="coerce")
         has_data = first[f"_tp_{hz}"].notna() | first[f"_sl_{hz}"].notna()
