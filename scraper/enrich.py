@@ -646,9 +646,10 @@ def enrich_token(symbol: str, cache: dict, birdeye_key: str | None = None, known
             result[k] = v
 
     # --- DexScreener (5 min TTL, free, 300/min) ---
-    # v40: Force re-fetch if known_ca differs from cached token_address (CA changed)
+    # v40+v50: Force re-fetch if known_ca differs from cached token_address (CA changed)
+    # v50: Also re-fetch when known_ca is provided but cache has no CA yet
     cached_ca = entry.get("token_address")
-    ca_changed = known_ca and cached_ca and known_ca != cached_ca
+    ca_changed = known_ca and (not cached_ca or known_ca != cached_ca)
     if now - entry.get("_dex_at", 0) > TTL_DEXSCREENER or ca_changed:
         # v40: Use exact CA lookup when available to prevent symbol collision
         if known_ca:
