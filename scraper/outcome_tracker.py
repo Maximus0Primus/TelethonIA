@@ -22,9 +22,11 @@ import os
 import json
 import time
 import logging
+import threading
 from datetime import datetime, timezone, timedelta
 from collections import defaultdict
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 from supabase import create_client, Client
@@ -33,25 +35,29 @@ logger = logging.getLogger(__name__)
 
 
 class _RateLimiter:
-    """Simple rate limiter: sleeps only the remaining time to maintain req/min target."""
+    """Thread-safe rate limiter: sleeps only the remaining time to maintain req/min target."""
 
     def __init__(self, requests_per_minute: int = 28):
         self._interval = 60.0 / requests_per_minute  # seconds between requests
         self._last_request = 0.0
+        self._lock = threading.Lock()
 
     def wait(self):
         """Sleep just enough to maintain rate limit (accounts for processing time)."""
-        now = time.monotonic()
-        elapsed = now - self._last_request
-        if elapsed < self._interval:
-            time.sleep(self._interval - elapsed)
-        self._last_request = time.monotonic()
+        with self._lock:
+            now = time.monotonic()
+            elapsed = now - self._last_request
+            if elapsed < self._interval:
+                time.sleep(self._interval - elapsed)
+            self._last_request = time.monotonic()
 
 
 # GeckoTerminal: 30 req/min, use 28 to leave headroom
 _gecko_limiter = _RateLimiter(28)
 # Birdeye: free tier is very limited (~30K CUs/month), use 10 req/min
 _birdeye_limiter = _RateLimiter(10)
+# v54: DexPaprika rate limiter (replaces hardcoded time.sleep(0.3))
+_dexpaprika_limiter = _RateLimiter(requests_per_minute=180)  # ~3 req/s
 
 # v34: Adaptive GeckoTerminal circuit breaker.
 # After N consecutive 429s, skip Gecko for the rest of the run.
@@ -59,6 +65,7 @@ _birdeye_limiter = _RateLimiter(10)
 _GECKO_429_THRESHOLD = 3
 _gecko_consecutive_429s = 0
 _gecko_disabled = False
+_gecko_lock = threading.Lock()  # v54: Thread safety for gecko circuit breaker
 
 
 GECKOTERMINAL_POOLS_URL = "https://api.geckoterminal.com/api/v2/networks/solana/tokens/{token_address}/pools"
@@ -160,17 +167,20 @@ def _get_pool_address(token_address: str, pool_cache: dict) -> str | None:
     pool_address = None
 
     # 1. Try GeckoTerminal (unless circuit-breaker disabled)
-    if not _gecko_disabled:
+    with _gecko_lock:
+        gecko_ok = not _gecko_disabled
+    if gecko_ok:
         try:
             resp = requests.get(
                 GECKOTERMINAL_POOLS_URL.format(token_address=token_address),
                 timeout=10,
             )
             if resp.status_code == 429:
-                _gecko_consecutive_429s += 1
-                if _gecko_consecutive_429s >= _GECKO_429_THRESHOLD:
-                    _gecko_disabled = True
-                    logger.warning("GeckoTerminal disabled (pool lookup 429s)")
+                with _gecko_lock:
+                    _gecko_consecutive_429s += 1
+                    if _gecko_consecutive_429s >= _GECKO_429_THRESHOLD:
+                        _gecko_disabled = True
+                        logger.warning("GeckoTerminal disabled (pool lookup 429s)")
             elif resp.status_code == 200:
                 pools = resp.json().get("data") or []
                 if pools:
@@ -640,6 +650,7 @@ def _fetch_ohlcv_candles(
     end_dt = datetime.fromtimestamp(end_ts, tz=timezone.utc)
     num_candles_15m = int(window_seconds / 900) + 10
     try:
+        _dexpaprika_limiter.wait()
         resp = requests.get(
             f"{DEXPAPRIKA_BASE}/networks/solana/pools/{pool_addr}/ohlcv",
             params={
@@ -650,7 +661,6 @@ def _fetch_ohlcv_candles(
             },
             timeout=15,
         )
-        time.sleep(0.3)
         stats["api_calls"] += 1
 
         if resp.status_code == 200:
@@ -691,7 +701,9 @@ def _fetch_ohlcv_candles(
 
     # 2. GeckoTerminal fallback (30 req/min — rate-limits fast, skip if circuit breaker tripped)
     global _gecko_consecutive_429s, _gecko_disabled
-    if sorted_candles is None and not _gecko_disabled:
+    with _gecko_lock:
+        gecko_ok = not _gecko_disabled
+    if sorted_candles is None and gecko_ok:
         num_candles_5m = int(window_seconds / 300) + 10
         try:
             _gecko_limiter.wait()
@@ -713,17 +725,19 @@ def _fetch_ohlcv_candles(
                 if ohlcv_list:
                     sorted_candles = sorted(ohlcv_list, key=lambda c: c[0])
                     source = "gecko_ohlcv"
-                _gecko_consecutive_429s = 0  # Reset on success
+                with _gecko_lock:
+                    _gecko_consecutive_429s = 0  # Reset on success
             elif resp.status_code == 429:
-                _gecko_consecutive_429s += 1
-                if _gecko_consecutive_429s >= _GECKO_429_THRESHOLD:
-                    _gecko_disabled = True
-                    logger.warning(
-                        "GeckoTerminal disabled for this run (%d consecutive 429s) — using Birdeye",
-                        _gecko_consecutive_429s,
-                    )
-                else:
-                    logger.warning("GeckoTerminal rate limited — falling back to Birdeye")
+                with _gecko_lock:
+                    _gecko_consecutive_429s += 1
+                    if _gecko_consecutive_429s >= _GECKO_429_THRESHOLD:
+                        _gecko_disabled = True
+                        logger.warning(
+                            "GeckoTerminal disabled for this run (%d consecutive 429s) — using Birdeye",
+                            _gecko_consecutive_429s,
+                        )
+                    else:
+                        logger.warning("GeckoTerminal rate limited — falling back to Birdeye")
         except requests.RequestException as e:
             logger.debug("GeckoTerminal OHLCV failed for %s: %s", symbol, e)
 
@@ -1012,21 +1026,17 @@ def fill_outcomes() -> None:
         len(snapshots), len(token_groups),
     )
 
-    for token_key, group in token_groups.items():
-        # Check time budget
-        if time.time() - start_time > TIME_BUDGET_SECONDS:
-            logger.warning("Time budget exceeded (%.0fs), stopping gracefully", time.time() - start_time)
-            break
-
+    def _process_token_group(token_key, group, _client, _now_ts, _pool_cache, _stats, _stats_lock):
+        """Process one token group — thread-safe. v54."""
         # 1. Pre-filter: handle no-price snapshots immediately (no API needed)
         valid_snaps = []
         for snap in group:
             if not snap.get("price_at_snapshot") or float(snap["price_at_snapshot"]) <= 0:
-                _mark_no_price(client, snap, stats)
+                _mark_no_price(_client, snap, _stats)
             else:
                 valid_snaps.append(snap)
         if not valid_snaps:
-            continue
+            return
 
         # 2. Resolve pool address ONCE per token
         pool_addr = None
@@ -1038,29 +1048,31 @@ def fill_outcomes() -> None:
         actual_token_addr = valid_snaps[0].get("token_address")
         if not pool_addr and actual_token_addr:
             _gecko_limiter.wait()
-            pool_addr = _get_pool_address(actual_token_addr, pool_cache)
-            stats["api_calls"] += 1
+            pool_addr = _get_pool_address(actual_token_addr, _pool_cache)
+            with _stats_lock:
+                _stats["api_calls"] += 1
 
         if not pool_addr:
             for snap in valid_snaps:
-                _mark_dead_pool(client, snap, now_ts, stats)
-            continue
+                _mark_dead_pool(_client, snap, _now_ts, _stats)
+            return
 
         # 3. Parse timestamps and determine horizons for each snapshot
         snap_data = []  # [(snap, snapshot_ts, price_at, horizons_to_fill)]
         for snap in valid_snaps:
             snapshot_ts = _parse_snapshot_ts(snap.get("snapshot_at", ""))
             if not snapshot_ts:
-                stats["skipped"] += 1
+                with _stats_lock:
+                    _stats["skipped"] += 1
                 continue
             price_at = float(snap["price_at_snapshot"])
-            age_hours = (now_ts - snapshot_ts) / 3600
+            age_hours = (_now_ts - snapshot_ts) / 3600
             horizons_to_fill = [hz for hz in HORIZONS if snap.get(hz["flag_col"]) is None and age_hours >= hz["hours"]]
             if horizons_to_fill:
                 snap_data.append((snap, snapshot_ts, price_at, horizons_to_fill))
 
         if not snap_data:
-            continue
+            return
 
         # 4. Compute the FULL time range covering ALL snapshots + their longest horizon
         earliest_ts = min(sd[1] for sd in snap_data)
@@ -1074,25 +1086,49 @@ def fill_outcomes() -> None:
         sorted_candles, source = _fetch_ohlcv_candles(
             pool_addr, actual_token_addr,
             earliest_ts, latest_end_ts,
-            ref_price, ref_symbol, stats,
+            ref_price, ref_symbol, _stats,
         )
 
         if sorted_candles is None:
             # Mark as failed if old enough, otherwise skip for retry
             for snap, snapshot_ts, price_at, horizons_to_fill in snap_data:
-                age = (now_ts - snapshot_ts) / 3600
+                age = (_now_ts - snapshot_ts) / 3600
                 if age > 36:  # v36-fix: was 48h; 36h is enough — OHLCV APIs rarely have data beyond 24-48h
-                    _mark_ohlcv_failed(client, snap, horizons_to_fill, stats)
+                    _mark_ohlcv_failed(_client, snap, horizons_to_fill, _stats)
                 else:
-                    stats["skipped"] += 1
-            continue
+                    with _stats_lock:
+                        _stats["skipped"] += 1
+            return
 
         # 6. Process each snapshot using SHARED candle data
         for snap, snapshot_ts, price_at, horizons_to_fill in snap_data:
-            _label_snapshot(client, snap, snapshot_ts, price_at, horizons_to_fill,
-                            sorted_candles, source, stats)
+            _label_snapshot(_client, snap, snapshot_ts, price_at, horizons_to_fill,
+                            sorted_candles, source, _stats)
 
-        stats["tokens_processed"] += 1
+        with _stats_lock:
+            _stats["tokens_processed"] += 1
+
+    # v54: Parallel processing with ThreadPoolExecutor (4 workers, rate-limiter bounded)
+    stats_lock = threading.Lock()
+    _MAX_WORKERS = 4
+
+    with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as executor:
+        futures = {}
+        for token_key, group in token_groups.items():
+            if time.time() - start_time > TIME_BUDGET_SECONDS:
+                logger.warning("Time budget exceeded (%.0fs), stopping submission", time.time() - start_time)
+                break
+            fut = executor.submit(
+                _process_token_group, token_key, group, client, now_ts,
+                pool_cache, stats, stats_lock,
+            )
+            futures[fut] = token_key
+
+        for fut in as_completed(futures):
+            try:
+                fut.result()
+            except Exception as e:
+                logger.error("Token group %s failed: %s", futures[fut], e)
 
     _save_pool_cache(pool_cache)
 
@@ -1764,7 +1800,9 @@ def _fetch_ohlcv_candles_kco(
 
     # 3. GeckoTerminal last (usually exhausted by main fill_outcomes)
     global _gecko_consecutive_429s, _gecko_disabled
-    if sorted_candles is None and pool_addr and not _gecko_disabled:
+    with _gecko_lock:
+        gecko_ok = not _gecko_disabled
+    if sorted_candles is None and pool_addr and gecko_ok:
         num_candles_5m = int(window_seconds / 300) + 10
         try:
             _gecko_limiter.wait()
@@ -1786,12 +1824,14 @@ def _fetch_ohlcv_candles_kco(
                 if ohlcv_list:
                     sorted_candles = sorted(ohlcv_list, key=lambda c: c[0])
                     source = "gecko_ohlcv"
-                _gecko_consecutive_429s = 0
+                with _gecko_lock:
+                    _gecko_consecutive_429s = 0
             elif resp.status_code == 429:
-                _gecko_consecutive_429s += 1
-                if _gecko_consecutive_429s >= _GECKO_429_THRESHOLD:
-                    _gecko_disabled = True
-                    logger.warning("GeckoTerminal disabled (KCO Phase B)")
+                with _gecko_lock:
+                    _gecko_consecutive_429s += 1
+                    if _gecko_consecutive_429s >= _GECKO_429_THRESHOLD:
+                        _gecko_disabled = True
+                        logger.warning("GeckoTerminal disabled (KCO Phase B)")
         except requests.RequestException as e:
             logger.debug("KCO GeckoTerminal OHLCV failed for %s: %s", symbol, e)
 

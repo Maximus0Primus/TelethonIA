@@ -179,7 +179,8 @@ SNAPSHOT_COLUMNS = (
     "score_at_snapshot, "
     "holder_turnover_pct, smart_money_retention, small_holder_pct, avg_tx_size_usd, "
     "kol_cooccurrence_avg, kol_combo_novelty, "
-    "jup_price_impact_500, jup_price_impact_5k, liquidity_depth_score"
+    "jup_price_impact_500, jup_price_impact_5k, liquidity_depth_score, "
+    "lifecycle_velocity, phase_duration_cycles"
 )
 
 

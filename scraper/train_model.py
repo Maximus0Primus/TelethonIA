@@ -127,6 +127,9 @@ CORE_FEATURES = [
     "kol_cooccurrence_avg",
     "kol_combo_novelty",
     "liquidity_depth_score",
+    # v54: Lifecycle velocity
+    "lifecycle_velocity",
+    "phase_duration_cycles",
 ]
 
 # Tier 2 (extended): Add these when 500-2000 samples. ~30 features total.
@@ -275,6 +278,9 @@ ALL_FEATURE_COLS = [
     "jup_price_impact_500",
     "jup_price_impact_5k",
     "liquidity_depth_score",
+    # v54: Lifecycle velocity
+    "lifecycle_velocity",
+    "phase_duration_cycles",
 ]
 
 HORIZONS = {
@@ -819,6 +825,31 @@ def _optimize_lightgbm(X_train, y_train, X_test, y_test, scale_pos, n_trials):
     return model, best_params, study.best_value
 
 
+def _shap_feature_selection(
+    xgb_shap: dict, lgb_shap: dict, features: list[str],
+    min_importance: float = 0.001, max_drop_pct: float = 0.30,
+) -> list[str]:
+    """
+    v54: Remove features with near-zero SHAP importance from both models.
+    Keeps at least (1 - max_drop_pct) of features to avoid over-pruning.
+    """
+    if not xgb_shap and not lgb_shap:
+        return features
+
+    combined = {}
+    for feat in features:
+        combined[feat] = (xgb_shap.get(feat, 0) + lgb_shap.get(feat, 0)) / 2
+
+    sorted_feats = sorted(combined.items(), key=lambda x: x[1], reverse=True)
+    min_keep = max(5, int(len(features) * (1 - max_drop_pct)))
+
+    selected = []
+    for feat, imp in sorted_feats:
+        if len(selected) < min_keep or imp >= min_importance:
+            selected.append(feat)
+    return selected
+
+
 def _compute_shap(model, X_test, features, model_name="model"):
     """Compute and log SHAP feature importances."""
     try:
@@ -1002,6 +1033,46 @@ def train_regression(
     xgb_shap = _compute_shap(xgb_model, X_test, available_features, "XGBoost-Reg")
     lgb_shap = _compute_shap(lgb_model, X_test, available_features, "LightGBM-Reg")
 
+    # v54: Auto feature selection — prune low-SHAP features and retrain if beneficial
+    features_dropped = []
+    pruned_features = _shap_feature_selection(xgb_shap, lgb_shap, available_features)
+    if len(pruned_features) < len(available_features):
+        dropped = [f for f in available_features if f not in pruned_features]
+        logger.info("SHAP pruning: %d → %d features (dropped: %s)",
+                     len(available_features), len(pruned_features),
+                     ", ".join(f"{f} ({(xgb_shap.get(f,0)+lgb_shap.get(f,0))/2:.4f})" for f in dropped))
+
+        # Retrain on pruned set
+        X_train_p = train_df[pruned_features]
+        X_test_p = test_df[pruned_features]
+
+        xgb_model_p = xgb.XGBRegressor(**xgb_params)
+        xgb_model_p.fit(X_train_p, y_train)
+        lgb_model_p = lgb.LGBMRegressor(**lgb_params)
+        lgb_model_p.fit(X_train_p, y_train)
+
+        xgb_preds_p = xgb_model_p.predict(X_test_p)
+        lgb_preds_p = lgb_model_p.predict(X_test_p)
+        ensemble_preds_p = xgb_weight * xgb_preds_p + lgb_weight * lgb_preds_p
+        spearman_p = _spearman_rank(y_test, ensemble_preds_p)
+
+        if spearman_p >= 0.95 * spearman:
+            logger.info("Pruned model spearman=%.3f (>= 95%% of %.3f) — KEEPING pruned features",
+                         spearman_p, spearman)
+            xgb_model, lgb_model = xgb_model_p, lgb_model_p
+            available_features = pruned_features
+            ensemble_preds = ensemble_preds_p
+            spearman = spearman_p
+            p_at_5 = _precision_at_k(y_test_binary, ensemble_preds, k=5)
+            p_at_10 = _precision_at_k(y_test_binary, ensemble_preds, k=10)
+            X_test = X_test_p
+            features_dropped = dropped
+            xgb_shap = _compute_shap(xgb_model, X_test, available_features, "XGBoost-Reg-Pruned")
+            lgb_shap = _compute_shap(lgb_model, X_test, available_features, "LightGBM-Reg-Pruned")
+        else:
+            logger.info("Pruned model spearman=%.3f (< 95%% of %.3f) — keeping original features",
+                         spearman_p, spearman)
+
     # Save models
     xgb_path = MODEL_DIR / f"model_{horizon}.json"
     xgb_model.save_model(str(xgb_path))
@@ -1010,6 +1081,40 @@ def train_regression(
     lgb_path = MODEL_DIR / f"model_{horizon}_lgb.txt"
     lgb_model.booster_.save_model(str(lgb_path))
     logger.info("LightGBM regressor saved to %s", lgb_path)
+
+    # v54: Isotonic calibration — map raw ensemble predictions to win probabilities
+    calibration_meta = {}
+    try:
+        from sklearn.isotonic import IsotonicRegression
+        from sklearn.metrics import brier_score_loss
+        from joblib import dump as joblib_dump
+
+        # Train calibrator on training set predictions → binary outcome
+        ensemble_preds_train = (
+            xgb_weight * xgb_model.predict(train_df[available_features])
+            + lgb_weight * lgb_model.predict(train_df[available_features])
+        )
+        y_train_binary = (train_df["_winner"]).astype(int)
+
+        iso = IsotonicRegression(out_of_bounds="clip")
+        iso.fit(ensemble_preds_train, y_train_binary)
+
+        # Evaluate calibration on test set
+        calibrated_test = iso.predict(ensemble_preds)
+        brier = float(brier_score_loss(y_test_binary, calibrated_test))
+        cal_p5 = float(_precision_at_k(y_test_binary, calibrated_test, k=5))
+
+        cal_path = MODEL_DIR / f"model_{horizon}_calibrator.joblib"
+        joblib_dump(iso, cal_path)
+        logger.info("Isotonic calibrator saved to %s (brier=%.4f, cal_p@5=%.3f)", cal_path, brier, cal_p5)
+
+        calibration_meta = {
+            "method": "isotonic",
+            "brier_score": brier,
+            "calibrated_p_at_5": cal_p5,
+        }
+    except Exception as e:
+        logger.warning("Calibration failed: %s — skipping", e)
 
     # Feature importances
     xgb_importances = dict(zip(available_features, xgb_model.feature_importances_))
@@ -1036,10 +1141,13 @@ def train_regression(
             "lgb_spearman": float(lgb_spearman),
         },
         "quality_gate": "PASSED",
+        "calibration": calibration_meta,
         "feature_importances_xgb": {k: float(v) for k, v in sorted_imp},
         "shap_importances_xgb": xgb_shap,
         "shap_importances_lgb": lgb_shap,
         "features": available_features,
+        "features_dropped": features_dropped,
+        "features_pruned": len(features_dropped) > 0,
     }
 
     meta_path = MODEL_DIR / f"model_{horizon}_meta.json"

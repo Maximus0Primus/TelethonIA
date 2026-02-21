@@ -652,6 +652,7 @@ _ml_model = None          # XGBoost model (regressor or classifier)
 _ml_lgb_model = None      # LightGBM model (regressor or classifier)
 _ml_features = None       # Feature list
 _ml_meta = None           # Full metadata dict (mode, weights, quality gate)
+_ml_calibrator = None     # v54: Isotonic calibrator (optional)
 _ml_loaded = False         # Prevent repeated load attempts
 
 # Quality gate: refuse to load models below this threshold
@@ -663,11 +664,12 @@ def _load_ml_model(horizon: str = "12h"):
     """
     Lazy-load ML ensemble (XGBoost + LightGBM) if available and quality gate passes.
     Supports both regression and classification models based on metadata 'mode' field.
-    Returns (xgb_model, lgb_model, features, meta) or (None, None, None, None).
+    v54: Also loads isotonic calibrator if available.
+    Returns (xgb_model, lgb_model, features, meta, calibrator) or (None, None, None, None, None).
     """
-    global _ml_model, _ml_lgb_model, _ml_features, _ml_meta, _ml_loaded
+    global _ml_model, _ml_lgb_model, _ml_features, _ml_meta, _ml_calibrator, _ml_loaded
     if _ml_loaded:
-        return _ml_model, _ml_lgb_model, _ml_features, _ml_meta
+        return _ml_model, _ml_lgb_model, _ml_features, _ml_meta, _ml_calibrator
 
     _ml_loaded = True  # Don't retry on failure
 
@@ -676,19 +678,19 @@ def _load_ml_model(horizon: str = "12h"):
     meta_path = _ML_MODEL_DIR / f"model_{horizon}_meta.json"
 
     if not xgb_path.exists():
-        return None, None, None, None
+        return None, None, None, None, None
 
     # Load metadata first — check quality gate BEFORE loading models
     if not meta_path.exists():
         logger.warning("ML metadata not found at %s — refusing to load model without quality gate", meta_path)
-        return None, None, None, None
+        return None, None, None, None, None
 
     try:
         with open(meta_path, "r") as f:
             meta = json.load(f)
     except Exception as e:
         logger.warning("Failed to read ML metadata: %s", e)
-        return None, None, None, None
+        return None, None, None, None, None
 
     # Quality gate check
     p_at_5 = meta.get("metrics", {}).get("precision_at_5", 0)
@@ -698,7 +700,7 @@ def _load_ml_model(horizon: str = "12h"):
             "ML quality gate REJECTED: precision@5=%.3f (need >=%.2f), gate=%s. Using manual scores only.",
             p_at_5, _MIN_PRECISION_AT_5, meta.get("quality_gate", "UNKNOWN"),
         )
-        return None, None, None, None
+        return None, None, None, None, None
 
     # Refuse models trained on tiny test sets — statistically meaningless
     if n_test < 200:
@@ -707,13 +709,13 @@ def _load_ml_model(horizon: str = "12h"):
             "Collect more data before trusting ML scores.",
             n_test,
         )
-        return None, None, None, None
+        return None, None, None, None, None
 
     mode = meta.get("mode", "classification")
     features = meta.get("features", [])
     if not features:
         logger.warning("ML metadata has empty feature list — refusing to load")
-        return None, None, None, None
+        return None, None, None, None, None
 
     try:
         import xgboost as xgb
@@ -743,7 +745,18 @@ def _load_ml_model(horizon: str = "12h"):
             _ml_lgb_model = None
 
     if _ml_model is None and _ml_lgb_model is None:
-        return None, None, None, None
+        return None, None, None, None, None
+
+    # v54: Load isotonic calibrator if available
+    cal_path = _ML_MODEL_DIR / f"model_{horizon}_calibrator.joblib"
+    if cal_path.exists():
+        try:
+            from joblib import load as joblib_load
+            _ml_calibrator = joblib_load(cal_path)
+            logger.info("Isotonic calibrator loaded from %s", cal_path)
+        except Exception as e:
+            logger.warning("Failed to load calibrator: %s — proceeding without", e)
+            _ml_calibrator = None
 
     _ml_features = features
     _ml_meta = meta
@@ -751,7 +764,7 @@ def _load_ml_model(horizon: str = "12h"):
         "ML ensemble loaded: mode=%s, %d features, precision@5=%.3f, ensemble_weights=%s",
         mode, len(features), p_at_5, meta.get("ensemble_weights", {}),
     )
-    return _ml_model, _ml_lgb_model, _ml_features, _ml_meta
+    return _ml_model, _ml_lgb_model, _ml_features, _ml_meta, _ml_calibrator
 
 
 def _build_feature_row(token: dict, features: list[str]) -> dict:
@@ -841,7 +854,7 @@ def _apply_ml_scores(ranking: list[dict]) -> None:
     """
     # v22: Read ML horizon from scoring_config (dynamic)
     ml_horizon = SCORING_PARAMS.get("ml_horizon", "12h")
-    xgb_model, lgb_model, features, meta = _load_ml_model(horizon=ml_horizon)
+    xgb_model, lgb_model, features, meta, calibrator = _load_ml_model(horizon=ml_horizon)
     if (xgb_model is None and lgb_model is None) or not features or not meta:
         return
 
@@ -907,6 +920,17 @@ def _apply_ml_scores(ranking: list[dict]) -> None:
             ml_floor = SCORING_PARAMS["ml_mult_floor"]  # default 0.3
             ml_cap = SCORING_PARAMS["ml_mult_cap"]      # default 2.0
             ml_multipliers = ml_floor + np.clip(proba, 0, 1) * (ml_cap - ml_floor)
+
+        # v54: Apply calibrated win probabilities if calibrator available
+        if calibrator is not None and preds is not None:
+            try:
+                calibrated = calibrator.predict(preds)
+                for token, cal_prob in zip(ranking, calibrated):
+                    token["ml_win_probability"] = round(float(cal_prob), 4)
+                logger.info("Calibrated win probabilities applied [%.3f - %.3f]",
+                            float(calibrated.min()), float(calibrated.max()))
+            except Exception as cal_err:
+                logger.warning("Calibration failed at inference: %s", cal_err)
 
         # Apply multiplier to all score variants
         # v44: dynamic bounds from scoring_config

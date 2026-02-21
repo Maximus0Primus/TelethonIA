@@ -166,6 +166,7 @@ _INT_COLS = {
     "sells_24h", "ticker_mention_count", "trade_24h", "txn_count_24h",
     "unique_wallet_24h", "url_mention_count",
     "lifecycle_phase_num", "social_momentum_num",
+    "lifecycle_velocity", "phase_duration_cycles",
     "whale_count", "whale_new_entries",
     "kol_saturation",
 }
@@ -321,7 +322,7 @@ def _fetch_previous_snapshots(client: Client, symbols: list[str]) -> dict[str, d
     try:
         result = (
             client.table("token_snapshots")
-            .select("symbol, mentions, sentiment, volume_24h, holder_count, score_at_snapshot, top_kols, snapshot_at, score_velocity, unique_kols, first_seen_price, price_at_snapshot")
+            .select("symbol, mentions, sentiment, volume_24h, holder_count, score_at_snapshot, top_kols, snapshot_at, score_velocity, unique_kols, first_seen_price, price_at_snapshot, lifecycle_phase, lifecycle_phase_num, phase_duration_cycles")
             .in_("symbol", symbols)
             .order("snapshot_at", desc=True)
             .limit(len(symbols) * 3)  # enough to get at least 1 per symbol
@@ -731,6 +732,8 @@ def insert_snapshots(ranking: list[dict]) -> None:
             "jup_price_impact_5k": t.get("jup_price_impact_5k"),
             "liquidity_depth_score": t.get("liquidity_depth_score"),
             "momentum_mult": t.get("momentum_mult"),
+            # v54: ML calibrated win probability
+            "ml_win_probability": t.get("ml_win_probability"),
             # v44: Raw activity ratio for Optuna re-scoring
             "activity_ratio_raw": t.get("activity_ratio_raw"),
             # v25: Message-level text features
@@ -766,6 +769,28 @@ def insert_snapshots(ranking: list[dict]) -> None:
                     row["price_drift_from_first_seen"] = round(cur_f / fsp_f, 3)
             except (ValueError, TypeError):
                 pass
+
+        # v54: Lifecycle velocity — direction of phase change + duration in same phase
+        prev_lpn = prev.get("lifecycle_phase_num") if prev else None
+        curr_lpn = row.get("lifecycle_phase_num")
+        if prev_lpn is not None and curr_lpn is not None:
+            try:
+                row["lifecycle_velocity"] = int(curr_lpn) - int(prev_lpn)
+            except (ValueError, TypeError):
+                row["lifecycle_velocity"] = None
+        else:
+            row["lifecycle_velocity"] = None
+
+        prev_phase = prev.get("lifecycle_phase") if prev else None
+        prev_dur = prev.get("phase_duration_cycles", 0) if prev else 0
+        if prev_phase is not None and prev_phase == t.get("lifecycle_phase"):
+            try:
+                row["phase_duration_cycles"] = int(prev_dur) + 1
+            except (ValueError, TypeError):
+                row["phase_duration_cycles"] = 1
+        else:
+            row["phase_duration_cycles"] = 1
+
         rows.append(_sanitize_row(row))
 
     if skipped_stale:
@@ -776,22 +801,30 @@ def insert_snapshots(ranking: list[dict]) -> None:
         return
 
     # Batch insert with row-by-row fallback on failure
+    # v54: Handles unique constraint violations from idx_snapshots_token_cycle
     try:
         client.table("token_snapshots").insert(rows).execute()
         logger.info("Inserted %d token snapshots", len(rows))
     except Exception as e:
-        logger.error("Batch snapshot insert failed (%s: %s) — trying row-by-row", type(e).__name__, e)
+        err_str = str(e).lower()
+        if "duplicate" in err_str or "unique" in err_str or "idx_snapshots_token_cycle" in err_str:
+            logger.info("Dedup constraint hit — inserting row-by-row, skipping duplicates")
+        else:
+            logger.error("Batch snapshot insert failed (%s: %s) — trying row-by-row", type(e).__name__, e)
         inserted = 0
         for row in rows:
             try:
                 client.table("token_snapshots").insert(row).execute()
                 inserted += 1
             except Exception as row_err:
+                row_err_str = str(row_err).lower()
+                if "duplicate" in row_err_str or "unique" in row_err_str:
+                    continue  # v54: Expected — skip dupe silently
                 logger.error(
                     "Snapshot insert failed for %s (%s: %s)",
                     row.get("symbol", "?"), type(row_err).__name__, row_err,
                 )
-        logger.info("Row-by-row fallback: inserted %d/%d snapshots", inserted, len(rows))
+        logger.info("Row-by-row fallback: inserted %d/%d snapshots (dupes skipped)", inserted, len(rows))
 
 
 def insert_kol_mentions(mentions: list[dict]) -> None:
