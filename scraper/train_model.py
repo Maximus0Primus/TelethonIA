@@ -107,6 +107,14 @@ CORE_FEATURES = [
     "market_heat_24h",
     "relative_volume",
     "kol_saturation",
+    # v44: Raw pre-transformation features (ML can learn its own thresholds)
+    "activity_ratio_raw",       # before bucketing into activity_mult
+    "kol_freshness",            # stored in snapshots since v35
+    "mention_heat_ratio",       # stored in snapshots since v35
+    "consensus_val",            # raw component value [0,1]
+    "conviction_val",           # raw component value [0,1]
+    "breadth_val",              # raw component value [0,1]
+    "price_action_val",         # raw component value [0,1]
 ]
 
 # Tier 2 (extended): Add these when 500-2000 samples. ~30 features total.
@@ -232,6 +240,14 @@ ALL_FEATURE_COLS = [
     "market_heat_24h",
     "relative_volume",
     "kol_saturation",
+    # v44: Raw pre-transformation features
+    "activity_ratio_raw",
+    "kol_freshness",
+    "mention_heat_ratio",
+    "consensus_val",
+    "conviction_val",
+    "breadth_val",
+    "price_action_val",
 ]
 
 HORIZONS = {

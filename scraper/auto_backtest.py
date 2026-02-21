@@ -162,7 +162,8 @@ SNAPSHOT_COLUMNS = (
     "max_dd_before_tp_pct_12h, max_dd_before_tp_pct_24h, "
     "time_to_2x_12h, time_to_2x_24h, "
     "jup_price_impact_1k, min_price_12h, min_price_24h, "
-    "median_peak_return, entry_vs_median_peak, win_rate_7d, market_heat_24h, relative_volume, kol_saturation"
+    "median_peak_return, entry_vs_median_peak, win_rate_7d, market_heat_24h, relative_volume, kol_saturation, "
+    "kol_freshness, mention_heat_ratio, momentum_mult, activity_ratio_raw, hype_pen, unique_kols"
 )
 
 
@@ -284,15 +285,15 @@ def _compute_score(row: pd.Series, weights: dict) -> int:
     gate_mult = _safe_mult(row, "gate_mult")
     entry_drift_mult = _safe_mult(row, "entry_drift_mult")
 
-    # v24 chain (12 multipliers, matching pipeline.py exactly)
-    # Removed from old chain: squeeze_mult (dead), trend_mult (dead),
-    # pump_pen (=manipulation_pen duplicate), stale_pen (death_penalty covers it),
-    # pump_momentum_pen (folded into crash_pen)
+    # v35/v44: Chain (14 multipliers, matching pipeline.py exactly)
+    # Includes momentum_mult + hype_pen (added in v35/v32).
+    momentum_mult = _safe_mult(row, "momentum_mult")
+    hype_pen = _safe_mult(row, "hype_pen")
     combined_raw = (onchain * safety * pump_bonus
                     * manipulation_pen * pvp_pen * crash_pen
                     * activity_mult * breadth_pen
                     * size_mult * s_tier_mult * gate_mult
-                    * entry_drift_mult)
+                    * entry_drift_mult * momentum_mult * hype_pen)
     # v17: Floor at 0.25, Cap at 2.0 to prevent multiplier stacking
     combined = max(0.25, min(2.0, combined_raw))
     score = base_score * combined
@@ -2665,6 +2666,565 @@ def _insert_backtest_report(
 
 
 # --- CLI ---
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# v44: OPTUNA PARAMETER OPTIMIZATION SYSTEM
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _compute_score_with_params(
+    row: pd.Series,
+    weights: dict,
+    params: dict,
+) -> int:
+    """
+    Fast re-scorer using stored snapshot values + trial params.
+    For multipliers whose raw values are stored (activity, hype, breadth_pen),
+    recomputes from raw values with trial thresholds/factors.
+    For others (momentum, size), uses stored multiplier values as-is.
+    """
+    # --- Base score from component values (same logic as _compute_score) ---
+    consensus = _safe_mult(row, "consensus_val", default=0)
+    if not pd.notna(row.get("consensus_val")):
+        b_raw = row.get("breadth")
+        consensus = min(1.0, float(b_raw) / 0.15) if pd.notna(b_raw) else None
+
+    pc24_raw = row.get("price_change_24h") if "price_change_24h" in row.index else None
+    if consensus is not None and pd.notna(pc24_raw) and float(pc24_raw) > 50:
+        consensus_discount = max(0.5, 1.0 - (float(pc24_raw) / 400))
+        consensus *= consensus_discount
+
+    conviction_val = _safe_mult(row, "conviction_val", default=0)
+    if not pd.notna(row.get("conviction_val")):
+        ac = row.get("avg_conviction")
+        conviction_val = max(0, min(1, (float(ac) - 6) / 4)) if pd.notna(ac) else None
+
+    breadth_val = _safe_mult(row, "breadth_val", default=0)
+    if not pd.notna(row.get("breadth_val")):
+        b = row.get("breadth")
+        breadth_val = float(b) if pd.notna(b) else None
+
+    pa_val = _safe_mult(row, "price_action_val", default=0.5)
+    if not pd.notna(row.get("price_action_val")):
+        pa = row.get("price_action_score")
+        pa_val = float(pa) if pd.notna(pa) else None
+
+    components = {
+        "consensus": consensus,
+        "conviction": conviction_val,
+        "breadth": breadth_val,
+        "price_action": pa_val,
+    }
+    available = {k: (v, weights[k]) for k, v in components.items() if v is not None and k in weights}
+    if not available:
+        return 0
+
+    total_w = sum(w for _, w in available.values())
+    raw = sum(v * (w / total_w) for v, w in available.values())
+    base_score = raw * 100
+
+    # --- Multiplier chain (recompute what we can, use stored for the rest) ---
+    onchain = _safe_mult(row, "onchain_multiplier")
+    safety = _safe_mult(row, "safety_penalty")
+    pump_bonus = _safe_mult(row, "pump_bonus")
+    manipulation_pen = _safe_mult(row, "wash_pen")
+    pvp_pen = _safe_mult(row, "pvp_pen")
+    crash_pen = _safe_mult(row, "crash_pen")
+    gate_mult = _safe_mult(row, "gate_mult")
+    entry_drift_mult = _safe_mult(row, "entry_drift_mult")
+
+    # Activity_mult: recompute from raw ratio if available
+    act_ratio_raw = row.get("activity_ratio_raw")
+    if pd.notna(act_ratio_raw):
+        act_ratio = float(act_ratio_raw)
+        act_floor = params.get("activity_mult_floor", 0.80)
+        act_cap = params.get("activity_mult_cap", 1.25)
+        act_high = params.get("activity_ratio_high", 0.6)
+        act_mid = params.get("activity_ratio_mid", 0.3)
+        act_low = params.get("activity_ratio_low", 0.1)
+        if act_ratio > act_high:
+            activity_mult = act_cap
+        elif act_ratio > act_mid:
+            activity_mult = 1.10
+        elif act_ratio > act_low:
+            activity_mult = 1.0
+        else:
+            activity_mult = act_floor
+        # Pump cap
+        pc24_act = row.get("price_change_24h")
+        pump_hard = params.get("activity_pump_cap_hard", 80)
+        pump_soft = params.get("activity_pump_cap_soft", 50)
+        if pd.notna(pc24_act) and float(pc24_act) > pump_hard:
+            activity_mult = min(activity_mult, 1.0)
+        elif pd.notna(pc24_act) and float(pc24_act) > pump_soft:
+            activity_mult = min(activity_mult, 1.10)
+    else:
+        activity_mult = _safe_mult(row, "activity_mult")
+
+    # Breadth_pen: recompute from breadth score
+    breadth_score_raw = row.get("breadth") if "breadth" in row.index else None
+    bp_cfg = params.get("breadth_pen_config", {"thresholds": [0.033, 0.05, 0.08], "penalties": [0.75, 0.85, 0.95]})
+    if pd.notna(breadth_score_raw):
+        bs = float(breadth_score_raw)
+        bp_t = bp_cfg["thresholds"]
+        bp_p = bp_cfg["penalties"]
+        if bs < bp_t[0]:
+            breadth_pen = bp_p[0]
+        elif bs < bp_t[1]:
+            breadth_pen = bp_p[1]
+        elif bs < bp_t[2]:
+            breadth_pen = bp_p[2]
+        else:
+            breadth_pen = 1.0
+    else:
+        breadth_pen = _safe_mult(row, "breadth_pen")
+
+    # Hype_pen: recompute from unique_kols
+    uk = row.get("unique_kols")
+    hp_cfg = params.get("hype_pen_config", {"thresholds": [2, 4, 7], "penalties": [1.0, 0.85, 0.65, 0.50]})
+    if pd.notna(uk):
+        uk_count = int(uk)
+        hp_t = hp_cfg["thresholds"]
+        hp_p = hp_cfg["penalties"]
+        if uk_count <= hp_t[0]:
+            hype_pen = hp_p[0]
+        elif uk_count <= hp_t[1]:
+            hype_pen = hp_p[1]
+        elif uk_count <= hp_t[2]:
+            hype_pen = hp_p[2]
+        else:
+            hype_pen = hp_p[3]
+    else:
+        hype_pen = _safe_mult(row, "hype_pen")
+
+    # S-tier_mult: recompute from s_tier_count
+    s_tier_count = row.get("s_tier_count")
+    s_tier_bonus = params.get("s_tier_bonus", 1.2)
+    if pd.notna(s_tier_count) and int(s_tier_count) > 0:
+        s_tier_mult = s_tier_bonus
+    else:
+        s_tier_mult = 1.0
+
+    # Size_mult and momentum_mult: use stored values (raw inputs not fully stored)
+    size_mult = _safe_mult(row, "size_mult")
+    momentum_mult = _safe_mult(row, "momentum_mult")
+
+    # Combined chain (matching pipeline.py v35)
+    combined_floor = params.get("combined_floor", 0.25)
+    combined_cap = params.get("combined_cap", 2.0)
+    combined_raw = (onchain * safety * pump_bonus
+                    * manipulation_pen * pvp_pen * crash_pen
+                    * activity_mult * breadth_pen
+                    * size_mult * s_tier_mult * gate_mult
+                    * entry_drift_mult * momentum_mult * hype_pen)
+    combined = max(combined_floor, min(combined_cap, combined_raw))
+    score = base_score * combined
+
+    return min(100, max(0, int(score)))
+
+
+def _evaluate_params(
+    df: pd.DataFrame,
+    weights: dict,
+    params: dict,
+    horizon: str = "12h",
+    threshold: float = 2.0,
+) -> float:
+    """
+    Composite objective for Optuna (higher = better):
+    - 50% portfolio return (top-5 tokens per cycle, TP/SL simulation)
+    - 30% Sharpe ratio
+    - 20% top-1 hit rate
+    """
+    max_price_col = f"max_price_{horizon}"
+    if max_price_col not in df.columns:
+        return -999.0
+
+    # Compute scores with trial params
+    df = df.copy()
+    df["trial_score"] = df.apply(lambda r: _compute_score_with_params(r, weights, params), axis=1)
+    df["cycle"] = df["snapshot_at"].dt.floor("15min")
+
+    cycle_returns = []
+    top1_hits = 0
+    top1_tested = 0
+
+    for _, group in df.sort_values("snapshot_at").groupby("cycle"):
+        labeled = group[
+            group[max_price_col].notna()
+            & group["price_at_snapshot"].notna()
+        ]
+        if labeled.empty:
+            continue
+
+        # Top 5 tokens by trial score
+        top5 = labeled.nlargest(min(5, len(labeled)), "trial_score")
+
+        # Portfolio return: equal-weight top 5
+        returns = []
+        for _, tok in top5.iterrows():
+            p0 = float(tok["price_at_snapshot"])
+            if p0 <= 0:
+                continue
+            p_max = float(tok[max_price_col])
+            # Simple return: max achievable (optimistic but consistent for comparison)
+            ret = (p_max / p0) - 1.0
+            returns.append(ret)
+
+        if returns:
+            cycle_ret = sum(returns) / len(returns)
+            cycle_returns.append(cycle_ret)
+
+        # Top-1 hit rate
+        top1 = labeled.loc[labeled["trial_score"].idxmax()]
+        p0 = float(top1["price_at_snapshot"]) if pd.notna(top1.get("price_at_snapshot")) else 0
+        p_max = float(top1[max_price_col]) if pd.notna(top1.get(max_price_col)) else 0
+        if p0 > 0:
+            top1_tested += 1
+            if p_max / p0 >= threshold:
+                top1_hits += 1
+
+    if not cycle_returns or top1_tested == 0:
+        return -999.0
+
+    # Components
+    avg_return = np.mean(cycle_returns)
+    std_return = np.std(cycle_returns) if len(cycle_returns) > 1 else 1.0
+    sharpe = avg_return / max(0.01, std_return)
+    top1_hr = top1_hits / top1_tested
+
+    # Composite: 50% portfolio return + 30% sharpe + 20% top1 hit rate
+    # Normalize sharpe to similar scale as returns (typically 0-2)
+    composite = 0.50 * avg_return + 0.30 * min(sharpe, 3.0) / 3.0 + 0.20 * top1_hr
+
+    return composite
+
+
+def _optuna_optimize_params(
+    df: pd.DataFrame,
+    horizon: str = "12h",
+    n_trials: int = 200,
+    timeout: int = 900,
+) -> dict | None:
+    """
+    Optuna study with ~32 search space parameters.
+    Walk-forward inside objective: 70% oldest → train, 30% newest → evaluate.
+    Returns best_params dict or None if no improvement.
+    """
+    import optuna
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+    threshold = ML_THRESHOLD
+    max_price_col = f"max_price_{horizon}"
+
+    # Walk-forward split: 70% oldest for training, 30% newest for evaluation
+    df_sorted = df.sort_values("snapshot_at")
+    split_idx = int(len(df_sorted) * 0.70)
+    df_train = df_sorted.iloc[:split_idx].copy()
+    df_test = df_sorted.iloc[split_idx:].copy()
+
+    if len(df_train) < 50 or len(df_test) < 20:
+        logger.info("optuna: not enough data for walk-forward split (train=%d, test=%d)", len(df_train), len(df_test))
+        return None
+
+    def objective(trial):
+        # --- Weights (sum-to-1 via normalization) ---
+        w_consensus = trial.suggest_float("w_consensus", 0.0, 0.80, step=0.05)
+        w_conviction = trial.suggest_float("w_conviction", 0.0, 0.30, step=0.05)
+        w_breadth = trial.suggest_float("w_breadth", 0.10, 0.80, step=0.05)
+        w_pa = trial.suggest_float("w_price_action", 0.0, 0.30, step=0.05)
+        total_w = w_consensus + w_conviction + w_breadth + w_pa
+        if total_w < 0.1:
+            return -999.0
+        weights = {
+            "consensus": w_consensus / total_w,
+            "conviction": w_conviction / total_w,
+            "breadth": w_breadth / total_w,
+            "price_action": w_pa / total_w,
+        }
+
+        # --- Scalar params ---
+        params = {
+            "combined_floor": trial.suggest_float("combined_floor", 0.10, 0.50, step=0.05),
+            "combined_cap": trial.suggest_float("combined_cap", 1.5, 3.0, step=0.25),
+            "activity_mult_floor": trial.suggest_float("activity_mult_floor", 0.60, 0.95, step=0.05),
+            "activity_mult_cap": trial.suggest_float("activity_mult_cap", 1.10, 1.50, step=0.05),
+            "activity_ratio_high": trial.suggest_float("activity_ratio_high", 0.40, 0.80, step=0.05),
+            "activity_ratio_mid": trial.suggest_float("activity_ratio_mid", 0.15, 0.50, step=0.05),
+            "activity_ratio_low": trial.suggest_float("activity_ratio_low", 0.05, 0.25, step=0.05),
+            "activity_pump_cap_hard": trial.suggest_float("activity_pump_cap_hard", 50, 150, step=10),
+            "activity_pump_cap_soft": trial.suggest_float("activity_pump_cap_soft", 30, 80, step=10),
+            "s_tier_bonus": trial.suggest_float("s_tier_bonus", 1.0, 1.5, step=0.05),
+        }
+
+        # Ordered constraints: high > mid > low
+        if params["activity_ratio_high"] <= params["activity_ratio_mid"]:
+            return -999.0
+        if params["activity_ratio_mid"] <= params["activity_ratio_low"]:
+            return -999.0
+        if params["activity_pump_cap_hard"] <= params["activity_pump_cap_soft"]:
+            return -999.0
+
+        # --- JSONB configs ---
+        params["breadth_pen_config"] = {
+            "thresholds": [
+                trial.suggest_float("bp_t0", 0.01, 0.06, step=0.005),
+                trial.suggest_float("bp_t1", 0.03, 0.10, step=0.005),
+                trial.suggest_float("bp_t2", 0.05, 0.15, step=0.005),
+            ],
+            "penalties": [
+                trial.suggest_float("bp_p0", 0.50, 0.90, step=0.05),
+                trial.suggest_float("bp_p1", 0.65, 0.95, step=0.05),
+                trial.suggest_float("bp_p2", 0.80, 1.00, step=0.05),
+            ],
+        }
+        # Ordered constraints for breadth_pen thresholds
+        bpt = params["breadth_pen_config"]["thresholds"]
+        if bpt[0] >= bpt[1] or bpt[1] >= bpt[2]:
+            return -999.0
+
+        params["hype_pen_config"] = {
+            "thresholds": [
+                trial.suggest_int("hp_t0", 1, 4),
+                trial.suggest_int("hp_t1", 3, 7),
+                trial.suggest_int("hp_t2", 5, 12),
+            ],
+            "penalties": [
+                1.0,  # sweet spot always 1.0
+                trial.suggest_float("hp_p1", 0.60, 1.00, step=0.05),
+                trial.suggest_float("hp_p2", 0.40, 0.85, step=0.05),
+                trial.suggest_float("hp_p3", 0.20, 0.70, step=0.05),
+            ],
+        }
+        # Ordered constraints for hype_pen thresholds
+        hpt = params["hype_pen_config"]["thresholds"]
+        if hpt[0] >= hpt[1] or hpt[1] >= hpt[2]:
+            return -999.0
+
+        # Evaluate on TRAIN set
+        train_score = _evaluate_params(df_train, weights, params, horizon, threshold)
+        return train_score
+
+    study = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler(seed=42))
+    study.optimize(objective, n_trials=n_trials, timeout=timeout)
+
+    best_trial = study.best_trial
+    logger.info(
+        "optuna: best trial #%d, train_score=%.4f (n_trials=%d)",
+        best_trial.number, best_trial.value, len(study.trials),
+    )
+
+    if best_trial.value <= -900:
+        logger.warning("optuna: best trial has invalid score, skipping")
+        return None
+
+    # Reconstruct best params
+    bp = best_trial.params
+    total_w = bp["w_consensus"] + bp["w_conviction"] + bp["w_breadth"] + bp["w_price_action"]
+    best_weights = {
+        "consensus": round(bp["w_consensus"] / total_w, 3),
+        "conviction": round(bp["w_conviction"] / total_w, 3),
+        "breadth": round(bp["w_breadth"] / total_w, 3),
+        "price_action": round(bp["w_price_action"] / total_w, 3),
+    }
+    best_params = {
+        "combined_floor": bp["combined_floor"],
+        "combined_cap": bp["combined_cap"],
+        "activity_mult_floor": bp["activity_mult_floor"],
+        "activity_mult_cap": bp["activity_mult_cap"],
+        "activity_ratio_high": bp["activity_ratio_high"],
+        "activity_ratio_mid": bp["activity_ratio_mid"],
+        "activity_ratio_low": bp["activity_ratio_low"],
+        "activity_pump_cap_hard": bp["activity_pump_cap_hard"],
+        "activity_pump_cap_soft": bp["activity_pump_cap_soft"],
+        "s_tier_bonus": bp["s_tier_bonus"],
+        "breadth_pen_config": {
+            "thresholds": [bp["bp_t0"], bp["bp_t1"], bp["bp_t2"]],
+            "penalties": [bp["bp_p0"], bp["bp_p1"], bp["bp_p2"]],
+        },
+        "hype_pen_config": {
+            "thresholds": [bp["hp_t0"], bp["hp_t1"], bp["hp_t2"]],
+            "penalties": [1.0, bp["hp_p1"], bp["hp_p2"], bp["hp_p3"]],
+        },
+    }
+
+    # Evaluate on TEST set (walk-forward validation)
+    test_score = _evaluate_params(df_test, best_weights, best_params, horizon, threshold)
+
+    # Baseline: evaluate current production params on test set
+    baseline_params = {
+        "combined_floor": 0.25,
+        "combined_cap": 2.0,
+        "activity_mult_floor": 0.80,
+        "activity_mult_cap": 1.25,
+        "activity_ratio_high": 0.6,
+        "activity_ratio_mid": 0.3,
+        "activity_ratio_low": 0.1,
+        "activity_pump_cap_hard": 80,
+        "activity_pump_cap_soft": 50,
+        "s_tier_bonus": 1.2,
+        "breadth_pen_config": {"thresholds": [0.033, 0.05, 0.08], "penalties": [0.75, 0.85, 0.95]},
+        "hype_pen_config": {"thresholds": [2, 4, 7], "penalties": [1.0, 0.85, 0.65, 0.50]},
+    }
+    baseline_score = _evaluate_params(df_test, BALANCED_WEIGHTS, baseline_params, horizon, threshold)
+
+    logger.info(
+        "optuna: walk-forward validation — train=%.4f, test=%.4f, baseline=%.4f",
+        best_trial.value, test_score, baseline_score,
+    )
+
+    # Guard-rail: train/test gap < 20% (prevents overfit)
+    # If either score is negative/zero, the params are likely poor — skip.
+    if best_trial.value <= 0 or test_score <= 0:
+        logger.warning(
+            "optuna: non-positive scores (train=%.4f, test=%.4f) — skipping",
+            best_trial.value, test_score,
+        )
+        return None
+    gap = abs(best_trial.value - test_score) / max(0.001, best_trial.value)
+    if gap > 0.20:
+        logger.warning(
+            "optuna: train/test gap %.1f%% > 20%%, likely overfit — skipping",
+            gap * 100,
+        )
+        return None
+
+    # Guard-rail: must improve over baseline by >= 5%
+    if baseline_score > -900:
+        improvement = (test_score - baseline_score) / max(0.001, abs(baseline_score))
+        if improvement < 0.05:
+            logger.info(
+                "optuna: improvement %.1f%% < 5%% threshold — keeping current params",
+                improvement * 100,
+            )
+            return None
+    else:
+        improvement = float("inf")
+
+    # Guard-rail: no param > 30% change from current
+    for key in ["activity_mult_floor", "activity_mult_cap", "s_tier_bonus",
+                 "combined_floor", "combined_cap"]:
+        current = baseline_params.get(key, best_params[key])
+        new_val = best_params[key]
+        if current > 0:
+            change = abs(new_val - current) / current
+            if change > 0.30:
+                logger.warning(
+                    "optuna: %s changed %.1f%% > 30%% max — clamping",
+                    key, change * 100,
+                )
+                direction = 1 if new_val > current else -1
+                best_params[key] = current * (1 + direction * 0.30)
+
+    return {
+        "weights": best_weights,
+        "params": best_params,
+        "train_score": best_trial.value,
+        "test_score": test_score,
+        "baseline_score": baseline_score,
+        "improvement_pct": round(improvement * 100, 1) if improvement != float("inf") else None,
+        "n_trials": len(study.trials),
+        "best_trial_number": best_trial.number,
+    }
+
+
+def _apply_optuna_params(client, best_weights: dict, best_params: dict, reason: str) -> bool:
+    """Write optimized params to scoring_config table."""
+    try:
+        update = {
+            "w_consensus": best_weights["consensus"],
+            "w_conviction": best_weights["conviction"],
+            "w_breadth": best_weights["breadth"],
+            "w_price_action": best_weights["price_action"],
+            "combined_floor": best_params["combined_floor"],
+            "combined_cap": best_params["combined_cap"],
+            "activity_mult_floor": best_params["activity_mult_floor"],
+            "activity_mult_cap": best_params["activity_mult_cap"],
+            "activity_ratio_high": best_params["activity_ratio_high"],
+            "activity_ratio_mid": best_params["activity_ratio_mid"],
+            "activity_ratio_low": best_params["activity_ratio_low"],
+            "activity_pump_cap_hard": best_params["activity_pump_cap_hard"],
+            "activity_pump_cap_soft": best_params["activity_pump_cap_soft"],
+            "s_tier_bonus": best_params["s_tier_bonus"],
+            "breadth_pen_config": best_params["breadth_pen_config"],
+            "hype_pen_config": best_params["hype_pen_config"],
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_by": "optuna_v44",
+            "change_reason": reason,
+        }
+        client.table("scoring_config").update(update).eq("id", 1).execute()
+        logger.info("optuna: scoring_config updated — %s", reason)
+        return True
+    except Exception as e:
+        logger.error("optuna: failed to write scoring_config: %s", e)
+        return False
+
+
+def run_optuna_optimization(n_trials: int = 200, dry_run: bool = False) -> dict | None:
+    """
+    Top-level entry point for Optuna parameter optimization.
+    Called from GitHub Actions (outcomes.yml) before auto_backtest.
+
+    Self-gates: skips if < 150 unique tokens with labels.
+    """
+    client = _get_client()
+    if not client:
+        return None
+
+    _load_current_weights(client)
+
+    df = _fetch_snapshots(client)
+    if df.empty:
+        logger.info("optuna: no snapshots found")
+        return None
+
+    # First-appearance dedup
+    first = df.sort_values("snapshot_at").drop_duplicates(subset=["token_address"], keep="first")
+
+    # Use 12h as primary horizon (matching auto_backtest)
+    horizon = "12h"
+    max_price_col = f"max_price_{horizon}"
+    if max_price_col not in first.columns:
+        logger.info("optuna: max_price_%s column not available", horizon)
+        return None
+
+    labeled = first[first[max_price_col].notna() & first["price_at_snapshot"].notna()]
+    n_labeled = len(labeled)
+
+    # Guard-rail: minimum 150 unique tokens
+    if n_labeled < 150:
+        logger.info(
+            "optuna: not enough labeled tokens (%d/150) — skipping optimization",
+            n_labeled,
+        )
+        return None
+
+    logger.info("optuna: starting optimization with %d labeled tokens, %d trials", n_labeled, n_trials)
+
+    # Pass deduplicated dataframe to prevent data leakage in walk-forward split
+    result = _optuna_optimize_params(first, horizon=horizon, n_trials=n_trials)
+    if result is None:
+        logger.info("optuna: no improvement found, keeping current params")
+        return None
+
+    logger.info(
+        "optuna: found improvement! train=%.4f test=%.4f baseline=%.4f (+%.1f%%)",
+        result["train_score"], result["test_score"], result["baseline_score"],
+        result.get("improvement_pct", 0),
+    )
+
+    if dry_run:
+        logger.info("optuna: DRY RUN — would apply: weights=%s, params=%s", result["weights"], result["params"])
+        return result
+
+    reason = (
+        f"optuna_v44: {n_labeled} tokens, {result['n_trials']} trials, "
+        f"test_score {result['baseline_score']:.4f} -> {result['test_score']:.4f} "
+        f"(+{result.get('improvement_pct', 0):.1f}%)"
+    )
+    applied = _apply_optuna_params(client, result["weights"], result["params"], reason)
+    result["applied"] = applied
+    return result
+
 
 def main():
     """Run auto-backtest standalone and print report."""

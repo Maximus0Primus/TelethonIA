@@ -716,6 +716,8 @@ def insert_snapshots(ranking: list[dict]) -> None:
             "kol_freshness": t.get("kol_freshness"),
             "mention_heat_ratio": t.get("mention_heat_ratio"),
             "momentum_mult": t.get("momentum_mult"),
+            # v44: Raw activity ratio for Optuna re-scoring
+            "activity_ratio_raw": t.get("activity_ratio_raw"),
             # v25: Message-level text features
             "call_type_score": t.get("call_type_score"),
             "avg_msg_length": t.get("avg_msg_length"),

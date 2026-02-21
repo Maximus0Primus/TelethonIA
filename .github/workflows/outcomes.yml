@@ -14,7 +14,7 @@ concurrency:
 jobs:
   fill-outcomes:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
 
     steps:
       - name: Checkout repository
@@ -66,6 +66,14 @@ jobs:
           BIRDEYE_API_KEY: ${{ secrets.BIRDEYE_API_KEY }}
         working-directory: scraper
         run: python -c "from outcome_tracker import fill_kol_outcomes; fill_kol_outcomes()"
+
+      - name: Run Optuna parameter optimization
+        timeout-minutes: 20
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        working-directory: scraper
+        run: python -c "from auto_backtest import run_optuna_optimization; run_optuna_optimization(n_trials=200)"
 
       - name: Run auto-backtest
         env:

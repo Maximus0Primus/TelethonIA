@@ -769,6 +769,15 @@ def _build_feature_row(token: dict, features: list[str]) -> dict:
         "v_sell_24h_usd_log": "v_sell_24h_usd",
         "helius_holder_count_log": "helius_holder_count",
     }
+    # v44: Component values stored with underscore prefix in token dict
+    # but ML features use unprefixed names. Map ML name → token dict key.
+    component_val_map = {
+        "consensus_val": "_consensus_val",
+        "conviction_val": "_conviction_val",
+        "breadth_val": "_breadth_val",
+        "price_action_val": "_price_action_val",
+        "sentiment_val": "_sentiment_val",
+    }
 
     row = {}
     for feat in features:
@@ -806,6 +815,14 @@ def _build_feature_row(token: dict, features: list[str]) -> dict:
                 row[feat] = 1.0 if now_paris.weekday() >= 5 else 0.0
             elif feat == "is_prime_time":
                 row[feat] = 1.0 if now_paris.hour >= 19 or now_paris.hour < 5 else 0.0
+        elif feat in component_val_map:
+            # v44: Map ML feature name to underscore-prefixed token dict key
+            # At inference: pipeline dict uses "_consensus_val" (underscore prefix)
+            # At training: DB row uses "consensus_val" (no prefix)
+            val = token.get(component_val_map[feat])
+            if val is None:
+                val = token.get(feat)  # fallback to unprefixed (DB row)
+            row[feat] = float(val) if val is not None else np.nan
         else:
             val = token.get(feat)
             row[feat] = float(val) if val is not None else np.nan
@@ -862,10 +879,13 @@ def _apply_ml_scores(ranking: list[dict]) -> None:
             else:
                 preds = lgb_preds
 
-            # Convert to percentile ranks (0-1), then scale to [0.5, 1.5]
+            # Convert to percentile ranks (0-1), then scale to [floor, cap]
+            # v44: dynamic bounds from scoring_config (widened from [0.5, 1.5])
+            ml_floor = SCORING_PARAMS["ml_mult_floor"]  # default 0.3
+            ml_cap = SCORING_PARAMS["ml_mult_cap"]      # default 2.0
             from scipy.stats import rankdata
             ranks = rankdata(preds) / len(preds)  # 0..1 percentile
-            ml_multipliers = 0.5 + ranks  # [0.5, 1.5]
+            ml_multipliers = ml_floor + ranks * (ml_cap - ml_floor)
 
         else:
             # Classification: predict_proba → [0.5, 1.5]
@@ -882,12 +902,18 @@ def _apply_ml_scores(ranking: list[dict]) -> None:
             else:
                 proba = lgb_proba
 
-            # Scale probability to multiplier: p=0 → 0.5x, p=0.5 → 1.0x, p=1 → 1.5x
-            ml_multipliers = 0.5 + np.clip(proba, 0, 1)
+            # Scale probability to multiplier: p=0 → floor, p=1 → cap
+            # v44: dynamic bounds from scoring_config
+            ml_floor = SCORING_PARAMS["ml_mult_floor"]  # default 0.3
+            ml_cap = SCORING_PARAMS["ml_mult_cap"]      # default 2.0
+            ml_multipliers = ml_floor + np.clip(proba, 0, 1) * (ml_cap - ml_floor)
 
         # Apply multiplier to all score variants
+        # v44: dynamic bounds from scoring_config
+        ml_floor = SCORING_PARAMS["ml_mult_floor"]
+        ml_cap = SCORING_PARAMS["ml_mult_cap"]
         for token, ml_mult in zip(ranking, ml_multipliers):
-            ml_mult = float(np.clip(ml_mult, 0.5, 1.5))
+            ml_mult = float(np.clip(ml_mult, ml_floor, ml_cap))
             token["ml_multiplier"] = round(ml_mult, 3)
             token["score"] = int(token["score"] * ml_mult)
             token["score_conviction"] = int(token["score_conviction"] * ml_mult)
@@ -1928,6 +1954,49 @@ _DEFAULT_SCORING_PARAMS = {
     "bot_strategy": "TP50_SL30",
     # v26: Market benchmarks (populated by auto_backtest)
     "market_benchmarks": {},
+    # v44: Dynamic parameter optimization — activity bucketing
+    "activity_ratio_high": 0.6,
+    "activity_ratio_mid": 0.3,
+    "activity_ratio_low": 0.1,
+    "activity_pump_cap_hard": 80,
+    "activity_pump_cap_soft": 50,
+    # v44: S-tier bonus
+    "s_tier_bonus": 1.2,
+    # v44: JSONB configs for grouped breakpoints
+    "momentum_config": {
+        "kol_fresh_thresholds": [0.5, 0.2],
+        "kol_fresh_factors": [1.20, 1.10, 1.05],
+        "mhr_thresholds": [2.0, 1.0, 0.3],
+        "mhr_factors": [1.15, 1.10, 1.05],
+        "sth_thresholds": [3.0, 1.5],
+        "sth_factors": [1.10, 1.05],
+        "sth_penalty_threshold": 0.3,
+        "sth_penalty_factor": 0.95,
+        "floor": 0.70,
+        "cap": 1.40,
+    },
+    "breadth_pen_config": {
+        "thresholds": [0.033, 0.05, 0.08],
+        "penalties": [0.75, 0.85, 0.95],
+    },
+    "hype_pen_config": {
+        "thresholds": [2, 4, 7],
+        "penalties": [1.0, 0.85, 0.65, 0.50],
+    },
+    "size_mult_config": {
+        "mcap_thresholds": [300_000, 1_000_000, 5_000_000, 20_000_000, 50_000_000, 200_000_000, 500_000_000],
+        "mcap_factors": [1.3, 1.15, 1.0, 0.85, 0.70, 0.50, 0.35, 0.25],
+        "fresh_thresholds": [4, 12],
+        "fresh_factors": [1.2, 1.1, 1.0],
+        "large_cap_threshold": 50_000_000,
+        "floor": 0.25,
+        "cap": 1.5,
+    },
+    # v44: ML multiplier bounds (widened from [0.5,1.5])
+    "ml_mult_floor": 0.3,
+    "ml_mult_cap": 2.0,
+    # v44: Scoring mode — formula (default), hybrid, ml_primary
+    "scoring_mode": "formula",
 }
 
 # Module-level cache: refreshed once per scrape cycle via load_scoring_config()
@@ -2009,6 +2078,33 @@ def load_scoring_config() -> None:
 
         # v26: Market benchmarks (computed by auto_backtest, stored as JSONB)
         SCORING_PARAMS["market_benchmarks"] = row.get("market_benchmarks") or {}
+
+        # v44: Dynamic parameter optimization — new scalar params
+        _V44_SCALAR_KEYS = {
+            "activity_ratio_high": 0.6,
+            "activity_ratio_mid": 0.3,
+            "activity_ratio_low": 0.1,
+            "activity_pump_cap_hard": 80,
+            "activity_pump_cap_soft": 50,
+            "s_tier_bonus": 1.2,
+            "ml_mult_floor": 0.3,
+            "ml_mult_cap": 2.0,
+        }
+        for key, default in _V44_SCALAR_KEYS.items():
+            SCORING_PARAMS[key] = float(row.get(key, default))
+
+        # v44: JSONB configs (grouped breakpoints for Optuna optimization)
+        _V44_JSONB_KEYS = [
+            "momentum_config", "breadth_pen_config",
+            "hype_pen_config", "size_mult_config",
+        ]
+        for key in _V44_JSONB_KEYS:
+            val = row.get(key)
+            if val and isinstance(val, dict):
+                SCORING_PARAMS[key] = val
+
+        # v44: Scoring mode
+        SCORING_PARAMS["scoring_mode"] = row.get("scoring_mode", "formula") or "formula"
 
         logger.info(
             "scoring_config loaded: consensus=%.2f conviction=%.2f breadth=%.2f PA=%.2f "
@@ -2957,76 +3053,101 @@ def aggregate_ranking(
 
         # v16: Activity ratio — STRONGEST predictor (+0.212 correlation with 2x).
         # v20: bounds from SCORING_PARAMS (dynamic).
+        # v44: thresholds from scoring_config (Optuna-tunable).
         act_floor = SCORING_PARAMS["activity_mult_floor"]  # default 0.80
         act_cap = SCORING_PARAMS["activity_mult_cap"]      # default 1.25
+        act_high = SCORING_PARAMS["activity_ratio_high"]   # default 0.6
+        act_mid = SCORING_PARAMS["activity_ratio_mid"]     # default 0.3
+        act_low = SCORING_PARAMS["activity_ratio_low"]     # default 0.1
         recent_6h_count = sum(1 for h in token.get("_hours_ago", []) if h <= 6)
         total_mention_count = len(token.get("_hours_ago", []))
         if total_mention_count > 0:
             activity_ratio = recent_6h_count / total_mention_count
-            if activity_ratio > 0.6:
+            # v44: Store raw ratio for Optuna re-scoring
+            token["activity_ratio_raw"] = round(activity_ratio, 4)
+            if activity_ratio > act_high:
                 activity_mult = act_cap   # most mentions are fresh
-            elif activity_ratio > 0.3:
+            elif activity_ratio > act_mid:
                 activity_mult = 1.10
-            elif activity_ratio > 0.1:
+            elif activity_ratio > act_low:
                 activity_mult = 1.0       # neutral
             else:
                 activity_mult = act_floor  # dead social activity
         else:
             activity_mult = 1.0
+            token["activity_ratio_raw"] = None
 
         # v17: Activity_mult cap when token already pumped — buzz peaks during
         # pumps but that's exactly when 2x potential is LOWEST.
+        # v44: thresholds from scoring_config.
+        pump_cap_hard = SCORING_PARAMS["activity_pump_cap_hard"]  # default 80
+        pump_cap_soft = SCORING_PARAMS["activity_pump_cap_soft"]  # default 50
         pc24_act = token.get("price_change_24h")
-        if pc24_act is not None and pc24_act > 80:
+        if pc24_act is not None and pc24_act > pump_cap_hard:
             activity_mult = min(activity_mult, 1.0)   # No bonus if already pumped hard
-        elif pc24_act is not None and pc24_act > 50:
+        elif pc24_act is not None and pc24_act > pump_cap_soft:
             activity_mult = min(activity_mult, 1.10)  # Reduced bonus
 
-        # v35/v42: Momentum multiplier — combines top 3 proxy signals into [0.70, 1.40]
-        # v42 fix: kol_freshness=0 and mention_heat_ratio=0 are NORMAL (90%+ of tokens).
-        # Treat zero as neutral (1.0), only boost tokens with genuine momentum signals.
-        # Old code penalized 0→0.85, causing 79% of tokens to hit the 0.70 floor.
+        # v35/v42: Momentum multiplier — combines top 3 proxy signals.
+        # v42 fix: zero = neutral (1.0), only boost tokens with genuine momentum.
+        # v44: All breakpoints/factors from scoring_config (Optuna-tunable).
+        mcfg = SCORING_PARAMS["momentum_config"]
+        kf_thresh = mcfg.get("kol_fresh_thresholds", [0.5, 0.2])
+        kf_factors = mcfg.get("kol_fresh_factors", [1.20, 1.10, 1.05])
+        mhr_thresh = mcfg.get("mhr_thresholds", [2.0, 1.0, 0.3])
+        mhr_factors = mcfg.get("mhr_factors", [1.15, 1.10, 1.05])
+        sth_thresh = mcfg.get("sth_thresholds", [3.0, 1.5])
+        sth_factors = mcfg.get("sth_factors", [1.10, 1.05])
+        sth_pen_thresh = mcfg.get("sth_penalty_threshold", 0.3)
+        sth_pen_factor = mcfg.get("sth_penalty_factor", 0.95)
+        mom_floor = mcfg.get("floor", 0.70)
+        mom_cap = mcfg.get("cap", 1.40)
+
         kol_fresh = token.get("kol_freshness")
         kol_fresh_factor = 1.0
         if kol_fresh is not None and kol_fresh > 0:
-            if kol_fresh >= 0.5:
-                kol_fresh_factor = 1.20   # majority of KOLs called within 2h
-            elif kol_fresh >= 0.2:
-                kol_fresh_factor = 1.10   # solid fresh presence
+            if kol_fresh >= kf_thresh[0]:
+                kol_fresh_factor = kf_factors[0]
+            elif kol_fresh >= kf_thresh[1]:
+                kol_fresh_factor = kf_factors[1]
             else:
-                kol_fresh_factor = 1.05   # some fresh KOL calls
+                kol_fresh_factor = kf_factors[2]
 
         mhr = token.get("mention_heat_ratio")
         mention_heat_factor = 1.0
         if mhr is not None and mhr > 0:
-            if mhr >= 2.0:
-                mention_heat_factor = 1.15   # mentions accelerating fast
-            elif mhr >= 1.0:
-                mention_heat_factor = 1.10
-            elif mhr >= 0.3:
-                mention_heat_factor = 1.05
+            if mhr >= mhr_thresh[0]:
+                mention_heat_factor = mhr_factors[0]
+            elif mhr >= mhr_thresh[1]:
+                mention_heat_factor = mhr_factors[1]
+            elif mhr >= mhr_thresh[2]:
+                mention_heat_factor = mhr_factors[2]
 
         sth = token.get("short_term_heat")
         vol_heat_factor = 1.0
         if sth is not None:
-            if sth >= 3.0:
-                vol_heat_factor = 1.10   # volume surge
-            elif sth >= 1.5:
-                vol_heat_factor = 1.05
-            elif sth < 0.3:
-                vol_heat_factor = 0.95   # volume nearly dead
+            if sth >= sth_thresh[0]:
+                vol_heat_factor = sth_factors[0]
+            elif sth >= sth_thresh[1]:
+                vol_heat_factor = sth_factors[1]
+            elif sth < sth_pen_thresh:
+                vol_heat_factor = sth_pen_factor
 
-        momentum_mult = max(0.70, min(1.40, kol_fresh_factor * mention_heat_factor * vol_heat_factor))
+        momentum_mult = max(mom_floor, min(mom_cap, kol_fresh_factor * mention_heat_factor * vol_heat_factor))
         token["momentum_mult"] = momentum_mult
 
         # v15: Breadth floor — low KOL count is a mild flag, not a death sentence
+        # v44: thresholds/penalties from scoring_config (Optuna-tunable).
+        bpcfg = SCORING_PARAMS["breadth_pen_config"]
+        bp_thresh = bpcfg.get("thresholds", [0.033, 0.05, 0.08])
+        bp_pens = bpcfg.get("penalties", [0.75, 0.85, 0.95])
         breadth_raw = float(token.get("breadth_score", 0) or 0)
-        if breadth_raw < 0.033:    # ~2 KOLs or fewer
-            breadth_pen = 0.75
-        elif breadth_raw < 0.05:   # ~3 KOLs
-            breadth_pen = 0.85
-        elif breadth_raw < 0.08:   # ~5 KOLs
-            breadth_pen = 0.95
+        if breadth_raw < bp_thresh[0]:
+            breadth_pen = bp_pens[0]
+        elif breadth_raw < bp_thresh[1]:
+            breadth_pen = bp_pens[1]
+        elif breadth_raw < bp_thresh[2]:
+            breadth_pen = bp_pens[2]
         else:
             breadth_pen = 1.0
 
@@ -3062,48 +3183,44 @@ def aggregate_ranking(
         # Freshest mention hours (used by size_mult freshness tier)
         freshest_h = token.get("freshest_mention_hours", 0)
 
-        # v15.2: Size opportunity multiplier — backtest-proven signal.
-        # Winners avg 4.1M mcap vs losers 21.4M. Fresh (<12h) + small (<500K) = 30% precision.
-        # v19: mcap tier — smaller tokens need less $ to 2x.
-        # A $700M token needs $700M NEW capital to 2x — nearly impossible for memecoins.
-        # Progressive penalty: micro→bonus, mid→neutral, large→heavy penalty.
+        # v15.2/v19: Size opportunity multiplier — smaller tokens need less $ to 2x.
+        # v44: All thresholds/factors from scoring_config (Optuna-tunable).
+        smcfg = SCORING_PARAMS["size_mult_config"]
+        sm_mcap_thresh = smcfg.get("mcap_thresholds", [300_000, 1_000_000, 5_000_000, 20_000_000, 50_000_000, 200_000_000, 500_000_000])
+        sm_mcap_factors = smcfg.get("mcap_factors", [1.3, 1.15, 1.0, 0.85, 0.70, 0.50, 0.35, 0.25])
+        sm_fresh_thresh = smcfg.get("fresh_thresholds", [4, 12])
+        sm_fresh_factors = smcfg.get("fresh_factors", [1.2, 1.1, 1.0])
+        sm_large_cap = smcfg.get("large_cap_threshold", 50_000_000)
+        sm_floor = smcfg.get("floor", 0.25)
+        sm_cap = smcfg.get("cap", 1.5)
         t_mcap = token.get("market_cap") or 0
         if t_mcap <= 0:
             mcap_factor = 1.0  # no data = neutral
-        elif t_mcap < 300_000:
-            mcap_factor = 1.3   # micro cap — room to 100x
-        elif t_mcap < 1_000_000:
-            mcap_factor = 1.15  # small cap — easy to 2x
-        elif t_mcap < 5_000_000:
-            mcap_factor = 1.0   # mid cap — neutral
-        elif t_mcap < 20_000_000:
-            mcap_factor = 0.85  # established — harder to 2x
-        elif t_mcap < 50_000_000:
-            mcap_factor = 0.70  # large — needs $50M+ new capital
-        elif t_mcap < 200_000_000:
-            mcap_factor = 0.50  # very large — 2x extremely rare
-        elif t_mcap < 500_000_000:
-            mcap_factor = 0.35  # mega cap — basically impossible to 2x
         else:
-            mcap_factor = 0.25  # >$500M — needs $500M+ to 2x, not happening
+            mcap_factor = sm_mcap_factors[-1]  # fallback: largest tier
+            for i, thresh in enumerate(sm_mcap_thresh):
+                if t_mcap < thresh:
+                    mcap_factor = sm_mcap_factors[i]
+                    break
         # freshness tier: KOL just called = buy pressure incoming
-        # v19: No freshness bonus for large caps — fresh call on $700M token
-        # doesn't make it easier to 2x.
-        if t_mcap >= 50_000_000:
-            fresh_factor = 1.0  # large caps: no freshness boost
-        elif freshest_h < 4:
-            fresh_factor = 1.2
-        elif freshest_h < 12:
-            fresh_factor = 1.1
-        else:
+        # No freshness bonus for large caps.
+        if t_mcap >= sm_large_cap:
             fresh_factor = 1.0
-        size_mult = max(0.25, min(1.5, mcap_factor * fresh_factor))
+        elif freshest_h < sm_fresh_thresh[0]:
+            fresh_factor = sm_fresh_factors[0]
+        elif freshest_h < sm_fresh_thresh[1]:
+            fresh_factor = sm_fresh_factors[1]
+        else:
+            fresh_factor = sm_fresh_factors[2]
+        size_mult = max(sm_floor, min(sm_cap, mcap_factor * fresh_factor))
         token["size_mult"] = round(size_mult, 3)
 
         # v15.3: S-tier KOL bonus — S-tier callers have proven track records
+        # v44: bonus value from scoring_config (Optuna-tunable).
         kol_tiers = token.get("kol_tiers", {})
         s_tier_count = sum(1 for tier in kol_tiers.values() if tier == "S")
-        s_tier_mult = 1.2 if s_tier_count > 0 else 1.0
+        s_tier_bonus = SCORING_PARAMS["s_tier_bonus"]  # default 1.2
+        s_tier_mult = s_tier_bonus if s_tier_count > 0 else 1.0
         token["s_tier_mult"] = s_tier_mult
 
         # v9+v12+v23: Use min(lifecycle, death, entry_premium, pump_momentum)
@@ -3125,17 +3242,19 @@ def aggregate_ranking(
         token["_price_action_val"] = _get_component_value(token, "price_action")
 
         # v32: Hype penalty — more KOLs = WORSE outcomes (corr -0.132, N=1630)
-        # 1-2 KOLs: 11.2% 2x rate, 3-5: 3.6%, 6+: 3.5%
-        # Early/quiet tokens outperform hyped ones 3:1
+        # v44: thresholds/penalties from scoring_config (Optuna-tunable).
+        hpcfg = SCORING_PARAMS["hype_pen_config"]
+        hp_thresh = hpcfg.get("thresholds", [2, 4, 7])
+        hp_pens = hpcfg.get("penalties", [1.0, 0.85, 0.65, 0.50])
         uk_count = token.get("unique_kols") or 1
-        if uk_count <= 2:
-            hype_pen = 1.0        # sweet spot — early discovery
-        elif uk_count <= 4:
-            hype_pen = 0.85       # moderate hype
-        elif uk_count <= 7:
-            hype_pen = 0.65       # crowded trade
+        if uk_count <= hp_thresh[0]:
+            hype_pen = hp_pens[0]     # sweet spot — early discovery
+        elif uk_count <= hp_thresh[1]:
+            hype_pen = hp_pens[1]     # moderate hype
+        elif uk_count <= hp_thresh[2]:
+            hype_pen = hp_pens[2]     # crowded trade
         else:
-            hype_pen = 0.50       # everyone knows — probably too late
+            hype_pen = hp_pens[3]     # everyone knows — probably too late
         token["hype_pen"] = hype_pen
 
         # v21: gate_mult — soft safety penalties (top10, risk, liquidity, holders, single_a_tier)
@@ -3191,8 +3310,13 @@ def aggregate_ranking(
         len(ranking), unconfirmed,
     )
 
-    # Apply ML scoring if model is available (overrides manual score)
-    _apply_ml_scores(ranking)
+    # v44: Apply ML scoring based on scoring_mode from scoring_config
+    scoring_mode = SCORING_PARAMS.get("scoring_mode", "formula")
+    if scoring_mode in ("formula", "hybrid", "ml_primary"):
+        _apply_ml_scores(ranking)
+    # In "hybrid" mode, formula score is blended with ML score (handled in _apply_ml_scores)
+    # In "ml_primary" mode, ML provides ranking, formula provides safety guardrails only
+    # Note: "formula" mode = current behavior (ML as multiplier on formula score)
 
     # === v26: Market context features (regime + relative positioning) ===
     # Computed AFTER all individual scoring, BEFORE final sort.
