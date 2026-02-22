@@ -682,6 +682,7 @@ def insert_snapshots(ranking: list[dict]) -> None:
             # stale_pen removed in v23 (dead code, redundant with death_penalty)
             "size_mult": t.get("size_mult"),
             "s_tier_mult": t.get("s_tier_mult"),
+            "ca_mult": t.get("ca_mult", 1.0),
             # v15: KOL counts for conviction dampening
             "unique_kols": t.get("unique_kols"),
             "s_tier_count": sum(1 for tier in t.get("kol_tiers", {}).values() if tier == "S"),

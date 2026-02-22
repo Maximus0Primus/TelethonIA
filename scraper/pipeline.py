@@ -3626,6 +3626,11 @@ def aggregate_ranking(
         s_tier_mult = s_tier_bonus if s_tier_count > 0 else 1.0
         token["s_tier_mult"] = s_tier_mult
 
+        # v55: CA mention boost — tokens with explicit CA have 25% HR vs 8.9% ticker-only
+        ca_bonus = SCORING_PARAMS.get("ca_mention_bonus", 1.15)
+        ca_mult = ca_bonus if (token.get("ca_mention_count", 0) or 0) > 0 or (token.get("url_mention_count", 0) or 0) > 0 else 1.0
+        token["ca_mult"] = ca_mult
+
         # v9+v12+v23: Use min(lifecycle, death, entry_premium, pump_momentum)
         # — no double-penalizing pump signals. pump_momentum_pen folded in here
         # instead of being a separate chain multiplier.
@@ -3670,14 +3675,14 @@ def aggregate_ranking(
         # v27: Explicit default — tokens that bypass _apply_hard_gates get 1.0
         gate_mult = float(token.get("gate_mult", 1.0) or 1.0)
 
-        # v35: Chain (14 multipliers). Added momentum_mult.
+        # v35/v55: Chain (15 multipliers). Added momentum_mult, ca_mult.
         # v23 removals: squeeze_mult (dead), trend_mult (dead),
         # wash_pen+pump_pen (merged → manipulation_pen),
         # pump_momentum_pen (folded into crash_pen min()).
         combined_raw = (onchain_mult * safety_pen * pump_bonus
                         * manipulation_pen * pvp_pen * crash_pen
                         * activity_mult * breadth_pen
-                        * size_mult * s_tier_mult * gate_mult
+                        * size_mult * s_tier_mult * ca_mult * gate_mult
                         * entry_drift_mult * hype_pen * momentum_mult)
         # v16: Floor at 0.25 decompresses the 0-14 band where 97% of tokens stuck.
         # v17: Cap at 2.0 prevents multiplier stacking (activity*s_tier*size)

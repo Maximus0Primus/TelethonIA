@@ -152,7 +152,7 @@ SNAPSHOT_COLUMNS = (
     "unique_wallet_24h_change, whale_new_entries, "
     "consensus_val, conviction_val, breadth_val, price_action_val, "
     "pump_bonus, wash_pen, pvp_pen, pump_pen, activity_mult, breadth_pen, crash_pen, stale_pen, size_mult, "
-    "s_tier_mult, s_tier_count, unique_kols, pump_momentum_pen, entry_drift_mult, "
+    "s_tier_mult, ca_mult, s_tier_count, unique_kols, pump_momentum_pen, entry_drift_mult, "
     "ca_mention_count, ticker_mention_count, url_mention_count, has_ca_mention, "
     "score_velocity, score_acceleration, mention_velocity, volume_velocity, "
     "social_momentum_phase, kol_arrival_rate, entry_timing_quality, gate_mult, "
@@ -319,17 +319,18 @@ def _compute_score(row: pd.Series, weights: dict) -> int:
     breadth_pen = _safe_mult(row, "breadth_pen")
     size_mult = _safe_mult(row, "size_mult")
     s_tier_mult = _safe_mult(row, "s_tier_mult")
+    ca_mult = _safe_mult(row, "ca_mult")
     gate_mult = _safe_mult(row, "gate_mult")
     entry_drift_mult = _safe_mult(row, "entry_drift_mult")
 
-    # v35/v44: Chain (14 multipliers, matching pipeline.py exactly)
-    # Includes momentum_mult + hype_pen (added in v35/v32).
+    # v35/v44: Chain (15 multipliers, matching pipeline.py exactly)
+    # Includes momentum_mult + hype_pen (added in v35/v32) + ca_mult (v55).
     momentum_mult = _safe_mult(row, "momentum_mult")
     hype_pen = _safe_mult(row, "hype_pen")
     combined_raw = (onchain * safety * pump_bonus
                     * manipulation_pen * pvp_pen * crash_pen
                     * activity_mult * breadth_pen
-                    * size_mult * s_tier_mult * gate_mult
+                    * size_mult * s_tier_mult * ca_mult * gate_mult
                     * entry_drift_mult * momentum_mult * hype_pen)
     # v17: Floor at 0.25, Cap at 2.0 to prevent multiplier stacking
     combined = max(0.25, min(2.0, combined_raw))
@@ -3238,6 +3239,14 @@ def _compute_score_with_params(
     else:
         s_tier_mult = 1.0
 
+    # v55: CA mention boost — Optuna tunable
+    ca_bonus = params.get("ca_mention_bonus", 1.15)
+    ca_val = row.get("has_ca_mention")
+    if pd.notna(ca_val) and bool(ca_val):
+        ca_mult = ca_bonus
+    else:
+        ca_mult = 1.0
+
     # v48: Recompute size_mult from raw fields + trial size_mult_config
     sm_cfg = params.get("size_mult_config", {})
     if sm_cfg:
@@ -3544,13 +3553,13 @@ def _compute_score_with_params(
     else:
         crash_pen = _safe_mult(row, "crash_pen")
 
-    # Combined chain (matching pipeline.py v45)
+    # Combined chain (matching pipeline.py v55)
     combined_floor = params.get("combined_floor", 0.25)
     combined_cap = params.get("combined_cap", 2.0)
     combined_raw = (onchain * safety * pump_bonus
                     * manipulation_pen * pvp_pen * crash_pen
                     * activity_mult * breadth_pen
-                    * size_mult * s_tier_mult * gate_mult
+                    * size_mult * s_tier_mult * ca_mult * gate_mult
                     * entry_drift_mult * momentum_mult * hype_pen)
     combined = max(combined_floor, min(combined_cap, combined_raw))
     score = base_score * combined
@@ -3705,6 +3714,7 @@ def _optuna_optimize_params(
             "activity_pump_cap_hard": trial.suggest_float("activity_pump_cap_hard", 50, 150, step=10),
             "activity_pump_cap_soft": trial.suggest_float("activity_pump_cap_soft", 30, 80, step=10),
             "s_tier_bonus": trial.suggest_float("s_tier_bonus", 1.0, 1.5, step=0.05),
+            "ca_mention_bonus": trial.suggest_float("ca_mention_bonus", 1.0, 1.5, step=0.05),
         }
 
         # Ordered constraints: high > mid > low
@@ -4273,6 +4283,7 @@ def _optuna_optimize_params(
         "activity_pump_cap_hard": 80,
         "activity_pump_cap_soft": 50,
         "s_tier_bonus": 1.2,
+        "ca_mention_bonus": 1.15,
         # v49: conviction normalization defaults
         "conviction_offset": 6,
         "conviction_divisor": 4,
@@ -4458,7 +4469,7 @@ def _optuna_optimize_params(
 
     # Guard-rail: no scalar param > 30% change from current
     # Note: JSONB configs (onchain_config, safety_config, etc.) are bounded by Optuna ranges
-    for key in ["activity_mult_floor", "activity_mult_cap", "s_tier_bonus",
+    for key in ["activity_mult_floor", "activity_mult_cap", "s_tier_bonus", "ca_mention_bonus",
                  "combined_floor", "combined_cap",
                  "safety_floor", "onchain_mult_floor", "onchain_mult_cap",
                  "pa_norm_floor", "pa_norm_cap",
@@ -4543,6 +4554,7 @@ def _apply_optuna_params(client, best_weights: dict, best_params: dict, reason: 
             "activity_pump_cap_hard": best_params["activity_pump_cap_hard"],
             "activity_pump_cap_soft": best_params["activity_pump_cap_soft"],
             "s_tier_bonus": best_params["s_tier_bonus"],
+            "ca_mention_bonus": best_params["ca_mention_bonus"],
             "breadth_pen_config": best_params["breadth_pen_config"],
             "hype_pen_config": best_params["hype_pen_config"],
             # v45: new scalar params
@@ -4573,7 +4585,7 @@ def _apply_optuna_params(client, best_weights: dict, best_params: dict, reason: 
             "momentum_config": best_params.get("momentum_config"),
             "size_mult_config": best_params.get("size_mult_config"),
             "updated_at": datetime.now(timezone.utc).isoformat(),
-            "updated_by": "optuna_v52",
+            "updated_by": "optuna_v55",
             "change_reason": reason,
         }
         # Remove None values (don't write nulls for missing configs)
