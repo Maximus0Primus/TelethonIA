@@ -81,6 +81,7 @@ def analyze_winner_profiles(client=None) -> dict:
             client.table("token_snapshots")
             .select(cols)
             .not_.is_("did_2x_12h", "null")
+            .gte("snapshot_at", "2026-02-14T00:00:00Z")  # skip pre-v34 poisoned data
             .order("snapshot_at", desc=True)
             .range(offset, offset + page_size - 1)
             .execute()

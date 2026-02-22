@@ -65,6 +65,7 @@ def fetch_snapshots(client, min_snapshots: int = 0) -> pd.DataFrame:
             "price_at_snapshot, price_after_24h, max_price_24h, volume_24h, liquidity_usd"
         )
         .not_.is_("did_2x_24h", "null")
+        .gte("snapshot_at", "2026-02-14T00:00:00Z")  # skip pre-v34 poisoned data
         .order("snapshot_at", desc=True)
         .limit(1000)
         .execute()
@@ -94,6 +95,7 @@ def fetch_all_snapshots(client) -> pd.DataFrame:
             "recency_score, price_action_score, price_at_snapshot, "
             "volume_24h, liquidity_usd, did_2x_24h"
         )
+        .gte("snapshot_at", "2026-02-14T00:00:00Z")  # skip pre-v34 poisoned data
         .order("snapshot_at", desc=True)
         .limit(2000)
         .execute()

@@ -202,6 +202,7 @@ def _fetch_snapshots(client) -> pd.DataFrame:
         result = (
             client.table("token_snapshots")
             .select(SNAPSHOT_COLUMNS)
+            .gte("snapshot_at", "2026-02-14T00:00:00Z")  # skip pre-v34 poisoned data
             .order("snapshot_at", desc=True)
             .range(offset, offset + page_size - 1)
             .execute()

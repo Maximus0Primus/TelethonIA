@@ -347,6 +347,7 @@ def load_labeled_data(horizon: str = "12h") -> pd.DataFrame:
             .select("*")
             .not_.is_(max_price_col, "null")
             .not_.is_("price_at_snapshot", "null")
+            .gte("snapshot_at", "2026-02-14T00:00:00Z")  # skip pre-v34 poisoned data
             .order("snapshot_at")
             .range(offset, offset + page_size - 1)
             .execute()
@@ -454,6 +455,7 @@ def load_bot_labeled_data(horizon: str = "12h", strategy: str = "TP50_SL30") -> 
             client.table("token_snapshots")
             .select("*")
             .not_.is_("price_at_snapshot", "null")
+            .gte("snapshot_at", "2026-02-14T00:00:00Z")  # skip pre-v34 poisoned data
             .order("snapshot_at")
             .range(offset, offset + page_size - 1)
             .execute()

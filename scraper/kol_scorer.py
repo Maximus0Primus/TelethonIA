@@ -81,6 +81,7 @@ def compute_kol_scores(min_calls: int = 3) -> dict[str, float]:
             .not_.is_("top_kols", "null")
             # Accept rows where ANY horizon has outcome data
             .or_("did_2x_12h.not.is.null,did_2x_24h.not.is.null,did_2x_48h.not.is.null,did_2x_72h.not.is.null,did_2x_7d.not.is.null")
+            .gte("snapshot_at", "2026-02-14T00:00:00Z")  # skip pre-v34 poisoned data
             .range(offset, offset + page_size - 1)
             .execute()
         )
