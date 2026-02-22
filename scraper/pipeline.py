@@ -411,7 +411,7 @@ def _load_kol_win_rates() -> dict[str, dict]:
                 "select": "kol_group,did_2x",
                 "entry_price": "not.is.null",
                 "max_return": "not.is.null",
-                "called_at": f"gte.{cutoff}",
+                "call_timestamp": f"gte.{cutoff}",
             },
             timeout=10,
         )
