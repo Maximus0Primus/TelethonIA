@@ -80,3 +80,25 @@
 **Root cause 2:** Fallback didn't check if the CA was already "owned" by another token via direct extraction.
 **Fix (2 parts):** (a) `extract_tokens()` backfills CA onto existing ticker-only tuple when CA resolves to an already-seen symbol. (b) Aggregation loop filters `unowned_cas` — CAs claimed by `ca_by_symbol` can't fall back to other tokens.
 **Rule:** When a single CA appears in a multi-token message, it belongs to exactly ONE token. Never assign it to all tokens. Check if the CA resolves to an already-extracted symbol first.
+
+## 2026-02-22: Helius 429 retries caused 25min+ stalls — no global circuit breaker
+**Mistake:** When Helius rate-limited (429), each of the 200 tokens independently retried 3× with exponential backoff (~10s wasted per token). With 3 parallel workers and no shared state, the scraper spent 25-35min on retries alone, exceeding the 35min GH Actions timeout → cancelled every cycle (9 in a row).
+**Root cause:** No global awareness of rate limit status. Each token's retry loop was independent. `_fetch_token_accounts()` had per-token retries but no way to signal "stop trying, we're rate-limited" to the other 195 tokens.
+**Fix:** Thread-safe 429 circuit breaker: global counter increments on each token's retry exhaustion, resets on any success. After 5 consecutive failures → trip → all subsequent API calls return None immediately. ~20s wasted instead of 25min.
+**Rule:** Any API enrichment loop over N items MUST have a global circuit breaker. Per-item retries are necessary but insufficient — when the API is down, N × retry_time = catastrophic delay. Always add: "after K consecutive failures, abort remaining items."
+
+## 2026-02-22: Helius budget estimate was wrong by 262× — exhausted free tier
+**Mistake:** Comment said "~22K CU/month (2.2%)" but actual usage was 5.76M CU/month (576%). The estimate was written when HELIUS_TOP_N=50 and cache TTL=2h, but v36 raised TOP_N to 200 and v41 lowered TTL to 30min. Nobody recalculated: 200 tokens × 20 CU × 48 refreshes/day × 30 days = 5.76M vs 1M free tier.
+**Fix:** Cache TTL 30min → 4h. New budget: ~720K CU/month (72% of free tier).
+**Rule:** When changing API call frequency (cache TTL, batch size, polling interval), ALWAYS recalculate the monthly budget. Write the formula in the comment, not just the result: `TOP_N × CU_per_token × (24h / TTL_hours) × 30 = X CU/month`. Budget estimates without formulas become stale lies.
+
+## 2026-02-22: PostgREST silently fails on wrong column names → HTTP 400
+**Mistake:** `_load_kol_win_rates()` filtered on `called_at` but the column is `call_timestamp`. PostgREST returned HTTP 400 (not silently ignored). Function returned empty dict → `best_kol_win_rate` was NULL for ALL tokens → `kol_wr_mult` always 1.0. The feature appeared "deployed" (column populated with 1.0) but was completely non-functional.
+**Fix:** Changed `"called_at"` to `"call_timestamp"`.
+**Rule:** When writing PostgREST queries, ALWAYS verify column names against the actual schema (`information_schema.columns`). PostgREST returns 400 on unknown columns, but if the error is caught by a generic `except`, it silently degrades. Add the actual column list as a comment above the query. For new features, check logs for HTTP 400 on the first run — a "working" default value (1.0) can mask a completely broken data source.
+
+## 2026-02-22: DexPaprika OHLCV returns SOL price for Pump.fun pools with inverted base token
+**Mistake:** DexPaprika OHLCV returns the **base** token's price. Most pools (PumpSwap, Raydium) have the memecoin as base → correct. But some Pump.fun pools have SOL as base and memecoin as quote → returns ~$85 SOL price instead of $0.00002 token price. 27 tokens per outcome_tracker run rejected by sanity check → never labeled (data loss). `enrich_dexpaprika_ohlcv.py` had NO detection at all → wrong ATH/ATL/PA scoring for live tokens.
+**Root cause:** Verified via API: `$CONNECTED` pool `8i3o...` has `tokens[0].address = So111...` (SOL) as base. `$BLOODNUT` pool `GkG5...` (PumpSwap) has memecoin as base → correct.
+**Fix:** (1) `_is_sol_base_pool()` queries pool metadata (`/networks/solana/pools/{pool}`) and caches `tokens[0].address == SOL_MINT`. (2) `_fetch_ohlcv_candles()` and `_fetch_ohlcv_candles_kco()` skip DexPaprika for inverted pools → fall through to Birdeye (uses mint address, always correct). (3) `enrich_dexpaprika_ohlcv.py` adds `median_close > 50` heuristic as safety net.
+**Rule:** When using pool-based OHLCV APIs, ALWAYS check which token is the base. Pool token ordering varies by DEX protocol (PumpSwap: memecoin=base, some Pump.fun: SOL=base). The safest approach is to query pool metadata once and cache the result. Mint-address-based APIs (Birdeye) are immune to this issue.

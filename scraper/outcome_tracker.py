@@ -73,6 +73,9 @@ GECKOTERMINAL_OHLCV_URL = "https://api.geckoterminal.com/api/v2/networks/solana/
 DEXPAPRIKA_BASE = "https://api.dexpaprika.com"
 BIRDEYE_OHLCV_URL = "https://public-api.birdeye.so/defi/ohlcv"
 
+# v57: SOL mint address — used to detect inverted Pump.fun pools where SOL is the base token
+_SOL_MINT = "So11111111111111111111111111111111111111112"
+
 # Pool address cache (token_address -> pool_address, stable mapping)
 _POOL_CACHE_FILE = Path(__file__).parent / "pool_address_cache.json"
 _POOL_CACHE_TTL = 7 * 24 * 3600  # 7 days -- pool addresses are very stable
@@ -150,6 +153,43 @@ def _save_pool_cache(cache: dict) -> None:
             json.dump(cache, f, indent=2)
     except OSError as e:
         logger.warning("Failed to save pool cache: %s", e)
+
+
+def _is_sol_base_pool(pool_addr: str, pool_cache: dict) -> bool:
+    """Check if pool has SOL as base token (tokens[0]).
+
+    v57: DexPaprika OHLCV returns the base token's price. Some Pump.fun pools
+    have SOL as base instead of the memecoin, so OHLCV returns ~$85 SOL price.
+    Result cached in pool_cache to avoid repeated API calls.
+    """
+    if not pool_addr:
+        return False
+    cache_key = f"_sol_base_{pool_addr}"
+    cached = pool_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    try:
+        resp = requests.get(
+            f"{DEXPAPRIKA_BASE}/networks/solana/pools/{pool_addr}",
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            tokens = data.get("tokens", [])
+            if tokens:
+                base_addr = tokens[0].get("address", "")
+                is_sol = base_addr == _SOL_MINT
+                pool_cache[cache_key] = is_sol
+                if is_sol:
+                    logger.info(
+                        "Pool %s has SOL as base token — DexPaprika OHLCV would return SOL price, skipping",
+                        pool_addr[:12],
+                    )
+                return is_sol
+    except requests.RequestException:
+        pass
+    return False  # assume normal on failure — _check_candle_sanity is fallback
 
 
 # === GeckoTerminal API ===
@@ -632,12 +672,12 @@ def _fetch_ohlcv_candles(
     price_at: float,
     symbol: str,
     stats: dict,
+    pool_cache: dict | None = None,
 ) -> tuple[list | None, str]:
     """
     Fetch OHLCV candles for a pool covering [start_ts, end_ts].
     v39: Reordered to DexPaprika -> GeckoTerminal -> Birdeye.
-    DexPaprika has 10K req/day (plenty), GeckoTerminal only 30 req/min (rate-limits fast).
-    Consistent with KCO pipeline order — reduces GeckoTerminal 429s and zombie snapshots.
+    v57: Skip DexPaprika for pools with SOL as base token (returns SOL price ~$85).
     Returns (sorted_candles, source) where candles are [ts, o, h, l, c, v].
     """
     sorted_candles = None
@@ -645,59 +685,63 @@ def _fetch_ohlcv_candles(
 
     window_seconds = end_ts - start_ts
 
-    # 1. DexPaprika first (10K req/day — plenty of budget)
-    start_dt = datetime.fromtimestamp(start_ts, tz=timezone.utc)
-    end_dt = datetime.fromtimestamp(end_ts, tz=timezone.utc)
-    num_candles_15m = int(window_seconds / 900) + 10
-    try:
-        _dexpaprika_limiter.wait()
-        resp = requests.get(
-            f"{DEXPAPRIKA_BASE}/networks/solana/pools/{pool_addr}/ohlcv",
-            params={
-                "start": start_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "end": end_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "limit": min(1000, num_candles_15m),
-                "interval": "15m",
-            },
-            timeout=15,
-        )
-        stats["api_calls"] += 1
+    # v57: Skip DexPaprika if pool has SOL as base token (returns SOL price instead of memecoin)
+    sol_base = pool_cache is not None and _is_sol_base_pool(pool_addr, pool_cache)
 
-        if resp.status_code == 200:
-            candles_raw = resp.json()
-            if isinstance(candles_raw, list) and candles_raw:
-                sorted_candles = []
-                for c in candles_raw:
-                    try:
-                        # v36-fix: DexPaprika uses time_open/time_close, NOT time/timestamp
-                        ts_str = c.get("time_open") or c.get("time_close") or c.get("time") or c.get("timestamp", "")
-                        if not ts_str:
+    # 1. DexPaprika first (10K req/day) — skip for inverted pools (v57: SOL as base)
+    if not sol_base:
+        start_dt = datetime.fromtimestamp(start_ts, tz=timezone.utc)
+        end_dt = datetime.fromtimestamp(end_ts, tz=timezone.utc)
+        num_candles_15m = int(window_seconds / 900) + 10
+        try:
+            _dexpaprika_limiter.wait()
+            resp = requests.get(
+                f"{DEXPAPRIKA_BASE}/networks/solana/pools/{pool_addr}/ohlcv",
+                params={
+                    "start": start_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "end": end_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "limit": min(1000, num_candles_15m),
+                    "interval": "15m",
+                },
+                timeout=15,
+            )
+            stats["api_calls"] += 1
+
+            if resp.status_code == 200:
+                candles_raw = resp.json()
+                if isinstance(candles_raw, list) and candles_raw:
+                    sorted_candles = []
+                    for c in candles_raw:
+                        try:
+                            # v36-fix: DexPaprika uses time_open/time_close, NOT time/timestamp
+                            ts_str = c.get("time_open") or c.get("time_close") or c.get("time") or c.get("timestamp", "")
+                            if not ts_str:
+                                continue
+                            if ts_str.endswith("Z"):
+                                ts_dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                            else:
+                                ts_dt = datetime.fromisoformat(ts_str)
+                            sorted_candles.append([
+                                int(ts_dt.timestamp()),
+                                float(c.get("open", 0)),
+                                float(c.get("high", 0)),
+                                float(c.get("low", 0)),
+                                float(c.get("close", 0)),
+                                float(c.get("volume", 0)),
+                            ])
+                        except (ValueError, TypeError):
                             continue
-                        if ts_str.endswith("Z"):
-                            ts_dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-                        else:
-                            ts_dt = datetime.fromisoformat(ts_str)
-                        sorted_candles.append([
-                            int(ts_dt.timestamp()),
-                            float(c.get("open", 0)),
-                            float(c.get("high", 0)),
-                            float(c.get("low", 0)),
-                            float(c.get("close", 0)),
-                            float(c.get("volume", 0)),
-                        ])
-                    except (ValueError, TypeError):
-                        continue
-                sorted_candles.sort(key=lambda x: x[0])
-                if sorted_candles:
-                    source = "dexpaprika_ohlcv"
-                else:
-                    sorted_candles = None
-    except requests.RequestException as e:
-        logger.debug("DexPaprika OHLCV failed for %s: %s", symbol, e)
+                    sorted_candles.sort(key=lambda x: x[0])
+                    if sorted_candles:
+                        source = "dexpaprika_ohlcv"
+                    else:
+                        sorted_candles = None
+        except requests.RequestException as e:
+            logger.debug("DexPaprika OHLCV failed for %s: %s", symbol, e)
 
-    # v32: reject SOL quote price leak
-    if sorted_candles and not _check_candle_sanity(sorted_candles, price_at, symbol, source):
-        sorted_candles = None
+        # v32: reject SOL quote price leak
+        if sorted_candles and not _check_candle_sanity(sorted_candles, price_at, symbol, source):
+            sorted_candles = None
 
     # 2. GeckoTerminal fallback (30 req/min — rate-limits fast, skip if circuit breaker tripped)
     global _gecko_consecutive_429s, _gecko_disabled
@@ -1086,7 +1130,7 @@ def fill_outcomes() -> None:
         sorted_candles, source = _fetch_ohlcv_candles(
             pool_addr, actual_token_addr,
             earliest_ts, latest_end_ts,
-            ref_price, ref_symbol, _stats,
+            ref_price, ref_symbol, _stats, _pool_cache,
         )
 
         if sorted_candles is None:
@@ -1666,6 +1710,7 @@ def _fetch_ohlcv_candles_kco(
     symbol: str,
     stats: dict,
     ref_price: float = 0.0,
+    pool_cache: dict | None = None,
 ) -> tuple[list | None, str]:
     """
     Fetch OHLCV candles for KCO Phase B/C. Order: DexPaprika → Birdeye → GeckoTerminal.
@@ -1673,14 +1718,17 @@ def _fetch_ohlcv_candles_kco(
     v36: DexPaprika is primary because GeckoTerminal rate limit is usually exhausted
     by fill_outcomes which runs first in the workflow. Birdeye uses token MINT address
     (no pool resolution needed) and recovers deindexed tokens.
-    v39: Added ref_price sanity check (same as _fetch_ohlcv_candles) to catch SOL price leaks.
+    v57: Skip DexPaprika for pools with SOL as base token (returns SOL price ~$85).
     """
     sorted_candles = None
     source = "none"
     window_seconds = end_ts - start_ts
 
-    # 1. DexPaprika first (pool-based, 15min candles, 10K req/day — plenty for ~300 tokens)
-    if pool_addr:
+    # v57: Skip DexPaprika if pool has SOL as base token
+    sol_base = pool_addr and pool_cache is not None and _is_sol_base_pool(pool_addr, pool_cache)
+
+    # 1. DexPaprika first (pool-based, 15min candles) — skip for inverted pools (v57)
+    if pool_addr and not sol_base:
         start_dt = datetime.fromtimestamp(start_ts, tz=timezone.utc)
         end_dt = datetime.fromtimestamp(end_ts, tz=timezone.utc)
         num_candles_15m = int(window_seconds / 900) + 10
@@ -1724,23 +1772,7 @@ def _fetch_ohlcv_candles_kco(
                             continue
                     sorted_candles.sort(key=lambda x: x[0])
                     if sorted_candles:
-                        # v43: Detect SOL-denominated price leak heuristically.
-                        # Memecoins are always < $1. If median close > $50, DexPaprika
-                        # returned SOL quote price instead of token price → reject and
-                        # fall through to Birdeye which uses mint address (correct denom).
-                        closes = [c[4] for c in sorted_candles if c[4] > 0]
-                        if closes:
-                            median_close = sorted(closes)[len(closes) // 2]
-                            if median_close > 50.0:
-                                logger.info(
-                                    "KCO DexPaprika SOL price leak for %s — median_close=%.2f, rejecting → Birdeye fallback",
-                                    symbol, median_close,
-                                )
-                                sorted_candles = None
-                            else:
-                                source = "dexpaprika_ohlcv"
-                        else:
-                            sorted_candles = None
+                        source = "dexpaprika_ohlcv"
                     else:
                         sorted_candles = None
                 else:
@@ -1915,7 +1947,7 @@ def _kco_phase_b_entry_prices(client: Client, pool_cache: dict, stats: dict, sta
         # Single OHLCV fetch for all KOL calls on this token
         candles, source = _fetch_ohlcv_candles_kco(
             pool_addr, token_addr, window_start, window_end,
-            group[0]["symbol"], stats,
+            group[0]["symbol"], stats, pool_cache=pool_cache,
         )
 
         if not candles:
@@ -2055,12 +2087,12 @@ def _kco_phase_c_update_ath(client: Client, pool_cache: dict, stats: dict, start
         ref_symbol = group[0]["symbol"]
 
         # v36: Use DexPaprika-first (GeckoTerminal usually exhausted by fill_outcomes)
-        # v39: Pass ref_price for sanity checking against SOL price leaks
+        # v57: Skip DexPaprika for inverted pools (SOL as base token)
         candles, source = _fetch_ohlcv_candles_kco(
             pool_addr, token_addr,
             earliest_ts, now_ts,
             ref_symbol, stats,
-            ref_price=ref_price,
+            ref_price=ref_price, pool_cache=pool_cache,
         )
 
         if not candles:

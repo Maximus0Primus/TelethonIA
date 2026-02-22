@@ -136,6 +136,18 @@ def fetch_dexpaprika_ohlcv(pool_address: str) -> dict | None:
         if not highs:
             return None
 
+        # v57: Detect SOL base token leak — Pump.fun pools with SOL as base return ~$85
+        # Memecoins are always < $1. If median close > $50, data is SOL price, not token price.
+        closes = [c["close"] for c in candles if c["close"] > 0]
+        if closes:
+            median_close = sorted(closes)[len(closes) // 2]
+            if median_close > 50.0:
+                logger.warning(
+                    "DexPaprika SOL price leak for pool %s — median_close=%.2f, rejecting → Birdeye fallback",
+                    pool_address[:12], median_close,
+                )
+                return None
+
         ath_24h = max(highs)
         atl_24h = min(lows)
         current_price = candles[-1]["close"] if candles else 0
