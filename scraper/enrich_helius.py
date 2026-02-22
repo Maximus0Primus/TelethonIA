@@ -43,6 +43,10 @@ HELIUS_MAX_PAGES = 5  # max pagination pages (5000 holders max)
 _helius_lock = threading.Lock()
 _helius_last_call = 0.0
 
+# v56: Global 429 circuit breaker — after N consecutive 429 exhaustions, skip remaining calls
+_helius_429_consecutive = 0
+_HELIUS_429_CIRCUIT_BREAKER = 5  # trip after 5 consecutive tokens fail with 429
+
 
 def _helius_rate_limit():
     """Thread-safe rate limiter: ensures minimum 0.12s between Helius API calls (~8 RPS)."""
@@ -53,6 +57,27 @@ def _helius_rate_limit():
         if elapsed < 0.12:
             time.sleep(0.12 - elapsed)
         _helius_last_call = time.time()
+
+
+def _helius_429_trip() -> bool:
+    """Check if the 429 circuit breaker has tripped (thread-safe)."""
+    with _helius_lock:
+        return _helius_429_consecutive >= _HELIUS_429_CIRCUIT_BREAKER
+
+
+def _helius_429_record(exhausted: bool):
+    """Record a 429 outcome: exhausted=True increments, False resets counter."""
+    global _helius_429_consecutive
+    with _helius_lock:
+        if exhausted:
+            _helius_429_consecutive += 1
+            if _helius_429_consecutive == _HELIUS_429_CIRCUIT_BREAKER:
+                logger.warning(
+                    "Helius 429 circuit breaker TRIPPED after %d consecutive failures — skipping remaining enrichment",
+                    _HELIUS_429_CIRCUIT_BREAKER,
+                )
+        else:
+            _helius_429_consecutive = 0
 
 
 def _get_api_key() -> str | None:
@@ -92,12 +117,19 @@ def _fetch_token_accounts(mint: str, api_key: str) -> list[dict] | None:
     Fetch all token holder accounts via Helius DAS getTokenAccounts.
     Paginates up to HELIUS_MAX_PAGES pages (1000 accounts each).
     Returns list of { owner, amount } dicts, or None on failure.
+    v56: Respects global 429 circuit breaker.
     """
+    if _helius_429_trip():
+        return None
+
     url = _rpc_url(api_key)
     all_accounts = []
     cursor = None
 
     for page in range(HELIUS_MAX_PAGES):
+        if _helius_429_trip():
+            break
+
         payload = {
             "jsonrpc": "2.0",
             "id": f"helius-holders-{page}",
@@ -153,8 +185,10 @@ def _fetch_token_accounts(mint: str, api_key: str) -> list[dict] | None:
                 if not cursor:
                     break
 
+                # Success — reset 429 counter and exit retry loop
+                _helius_429_record(exhausted=False)
                 _helius_rate_limit()
-                break  # Success — exit retry loop
+                break
 
             except requests.RequestException as e:
                 if attempt < max_retries - 1:
@@ -164,6 +198,7 @@ def _fetch_token_accounts(mint: str, api_key: str) -> list[dict] | None:
                 break
         else:
             # All retries exhausted (429s)
+            _helius_429_record(exhausted=True)
             logger.warning("Helius 429 exhausted retries for %s page %d", mint[:8], page)
             break
 
@@ -177,7 +212,11 @@ def _fetch_recent_signatures(mint: str, api_key: str, limit: int = 50) -> list[d
     Fetch recent transaction signatures for a token mint address.
     Uses getSignaturesForAddress JSON-RPC method.
     Returns list of signature info dicts, or None on failure.
+    v56: Respects global 429 circuit breaker.
     """
+    if _helius_429_trip():
+        return None
+
     url = _rpc_url(api_key)
     payload = {
         "jsonrpc": "2.0",
@@ -191,6 +230,10 @@ def _fetch_recent_signatures(mint: str, api_key: str, limit: int = 50) -> list[d
 
     try:
         resp = requests.post(url, json=payload, timeout=15)
+        if resp.status_code == 429:
+            _helius_429_record(exhausted=True)
+            logger.debug("Helius 429 for sigs %s", mint[:8])
+            return None
         if resp.status_code != 200:
             logger.warning("Helius getSignaturesForAddress %d for %s", resp.status_code, mint[:8])
             return None
@@ -200,6 +243,7 @@ def _fetch_recent_signatures(mint: str, api_key: str, limit: int = 50) -> list[d
             logger.warning("Helius sigs error for %s: %s", mint[:8], data["error"])
             return None
 
+        _helius_429_record(exhausted=False)
         result = data.get("result", [])
         return result if result else None
 
@@ -689,6 +733,8 @@ def enrich_tokens_helius(ranking: list[dict]) -> list[dict]:
     Rate limited via _helius_rate_limit() to stay under 10 RPS.
     Modifies tokens in-place and returns the list.
     """
+    global _helius_429_consecutive
+
     api_key = _get_api_key()
     if not api_key:
         logger.info("HELIUS_API_KEY not set — skipping Helius enrichment")
@@ -696,6 +742,10 @@ def enrich_tokens_helius(ranking: list[dict]) -> list[dict]:
 
     if not ranking:
         return ranking
+
+    # v56: Reset circuit breaker at start of each cycle
+    with _helius_lock:
+        _helius_429_consecutive = 0
 
     cache = _load_cache()
     enriched_count = 0
@@ -729,8 +779,11 @@ def enrich_tokens_helius(ranking: list[dict]) -> list[dict]:
                 logger.error("Helius enrichment failed for %s: %s", item[1][:8], e)
 
     _save_cache(cache)
-    logger.info(
-        "Helius enriched %d/%d tokens (top %d analyzed, top %d with signatures)",
-        enriched_count, len(ranking), HELIUS_TOP_N, HELIUS_SMART_MONEY_N,
-    )
+    skipped = len(work_items) - enriched_count
+    msg = "Helius enriched %d/%d tokens (top %d analyzed, top %d with signatures)"
+    args = [enriched_count, len(ranking), HELIUS_TOP_N, HELIUS_SMART_MONEY_N]
+    if _helius_429_trip():
+        msg += " — circuit breaker tripped, %d tokens skipped"
+        args.append(skipped)
+    logger.info(msg, *args)
     return ranking
