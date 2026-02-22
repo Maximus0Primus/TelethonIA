@@ -5,7 +5,7 @@ Endpoints used (all JSON-RPC on mainnet.helius-rpc.com):
 - getTokenAccounts (DAS): 10 credits/page, paginated up to 5 pages (5000 holders)
 - getSignaturesForAddress: 10 credits/call, 50 recent signatures
 
-Free tier budget: 1M credits/month. Estimated usage: ~22K/month (2.2%).
+Free tier budget: 1M credits/month. With 4h cache TTL: ~720K CU/month (72%).
 
 Bundle detection algorithm:
   1. Fetch all token holders via getTokenAccounts
@@ -28,7 +28,7 @@ import requests
 logger = logging.getLogger(__name__)
 
 CACHE_FILE = Path(__file__).parent / "helius_cache.json"
-CACHE_TTL_SECONDS = 30 * 60  # v41: 30 min (was 2h). whale_new_entries is top predictor (+0.578), detect whales faster
+CACHE_TTL_SECONDS = 4 * 3600  # v56: 4h (was 30min). Budget: 200×20CU×6/day×30 = 720K CU/month (fits 1M free tier)
 
 # How many tokens to enrich per cycle
 # v36: 50 → 200. Free tier = 1M CU/month, we use ~2%. 200 covers full ranking.
