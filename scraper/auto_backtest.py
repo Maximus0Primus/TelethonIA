@@ -180,7 +180,8 @@ SNAPSHOT_COLUMNS = (
     "holder_turnover_pct, smart_money_retention, small_holder_pct, avg_tx_size_usd, "
     "kol_cooccurrence_avg, kol_combo_novelty, "
     "jup_price_impact_500, jup_price_impact_5k, liquidity_depth_score, "
-    "lifecycle_velocity, phase_duration_cycles"
+    "lifecycle_velocity, phase_duration_cycles, "
+    "best_kol_win_rate, best_kol_total_calls, kol_wr_mult"
 )
 
 
@@ -320,17 +321,17 @@ def _compute_score(row: pd.Series, weights: dict) -> int:
     size_mult = _safe_mult(row, "size_mult")
     s_tier_mult = _safe_mult(row, "s_tier_mult")
     ca_mult = _safe_mult(row, "ca_mult")
+    kol_wr_mult = _safe_mult(row, "kol_wr_mult")
     gate_mult = _safe_mult(row, "gate_mult")
     entry_drift_mult = _safe_mult(row, "entry_drift_mult")
 
-    # v35/v44: Chain (15 multipliers, matching pipeline.py exactly)
-    # Includes momentum_mult + hype_pen (added in v35/v32) + ca_mult (v55).
+    # v56: Chain (16 multipliers, matching pipeline.py exactly)
     momentum_mult = _safe_mult(row, "momentum_mult")
     hype_pen = _safe_mult(row, "hype_pen")
     combined_raw = (onchain * safety * pump_bonus
                     * manipulation_pen * pvp_pen * crash_pen
                     * activity_mult * breadth_pen
-                    * size_mult * s_tier_mult * ca_mult * gate_mult
+                    * size_mult * s_tier_mult * ca_mult * kol_wr_mult * gate_mult
                     * entry_drift_mult * momentum_mult * hype_pen)
     # v17: Floor at 0.25, Cap at 2.0 to prevent multiplier stacking
     combined = max(0.25, min(2.0, combined_raw))
@@ -3247,6 +3248,15 @@ def _compute_score_with_params(
     else:
         ca_mult = 1.0
 
+    # v56: KOL win rate multiplier — recompute from raw fields + trial kol_wr_config
+    wr_cfg = params.get("kol_wr_config", {"thresholds": [0.30, 0.40, 0.50], "factors": [1.0, 1.10, 1.25, 1.40], "min_calls": 3})
+    best_wr = row.get("best_kol_win_rate")
+    best_calls = row.get("best_kol_total_calls")
+    if pd.notna(best_wr) and pd.notna(best_calls) and int(best_calls) >= wr_cfg.get("min_calls", 3):
+        kol_wr_mult = _bt_tier_lookup(float(best_wr), wr_cfg["thresholds"], wr_cfg["factors"])
+    else:
+        kol_wr_mult = 1.0
+
     # v48: Recompute size_mult from raw fields + trial size_mult_config
     sm_cfg = params.get("size_mult_config", {})
     if sm_cfg:
@@ -3553,13 +3563,13 @@ def _compute_score_with_params(
     else:
         crash_pen = _safe_mult(row, "crash_pen")
 
-    # Combined chain (matching pipeline.py v55)
+    # Combined chain (matching pipeline.py v56)
     combined_floor = params.get("combined_floor", 0.25)
     combined_cap = params.get("combined_cap", 2.0)
     combined_raw = (onchain * safety * pump_bonus
                     * manipulation_pen * pvp_pen * crash_pen
                     * activity_mult * breadth_pen
-                    * size_mult * s_tier_mult * ca_mult * gate_mult
+                    * size_mult * s_tier_mult * ca_mult * kol_wr_mult * gate_mult
                     * entry_drift_mult * momentum_mult * hype_pen)
     combined = max(combined_floor, min(combined_cap, combined_raw))
     score = base_score * combined
@@ -3715,6 +3725,26 @@ def _optuna_optimize_params(
             "activity_pump_cap_soft": trial.suggest_float("activity_pump_cap_soft", 30, 80, step=10),
             "s_tier_bonus": trial.suggest_float("s_tier_bonus", 1.0, 1.5, step=0.05),
             "ca_mention_bonus": trial.suggest_float("ca_mention_bonus", 1.0, 1.5, step=0.05),
+        }
+
+        # v56: KOL win rate config (7 params)
+        wr_t0 = trial.suggest_float("wr_t0", 0.15, 0.40, step=0.05)
+        wr_t1 = trial.suggest_float("wr_t1", 0.30, 0.55, step=0.05)
+        wr_t2 = trial.suggest_float("wr_t2", 0.40, 0.65, step=0.05)
+        # Ordered: t0 < t1 < t2
+        if wr_t0 >= wr_t1 or wr_t1 >= wr_t2:
+            return -999.0
+        wr_f1 = trial.suggest_float("wr_f1", 1.0, 1.25, step=0.05)
+        wr_f2 = trial.suggest_float("wr_f2", 1.10, 1.45, step=0.05)
+        wr_f3 = trial.suggest_float("wr_f3", 1.20, 1.60, step=0.05)
+        # Ordered: f1 <= f2 <= f3
+        if wr_f1 > wr_f2 or wr_f2 > wr_f3:
+            return -999.0
+        wr_min_calls = trial.suggest_int("wr_min_calls", 2, 6)
+        params["kol_wr_config"] = {
+            "thresholds": [wr_t0, wr_t1, wr_t2],
+            "factors": [1.0, wr_f1, wr_f2, wr_f3],
+            "min_calls": wr_min_calls,
         }
 
         # Ordered constraints: high > mid > low
@@ -4091,6 +4121,12 @@ def _optuna_optimize_params(
         "activity_pump_cap_hard": bp["activity_pump_cap_hard"],
         "activity_pump_cap_soft": bp["activity_pump_cap_soft"],
         "s_tier_bonus": bp["s_tier_bonus"],
+        # v56: KOL win rate config
+        "kol_wr_config": {
+            "thresholds": [bp["wr_t0"], bp["wr_t1"], bp["wr_t2"]],
+            "factors": [1.0, bp["wr_f1"], bp["wr_f2"], bp["wr_f3"]],
+            "min_calls": bp["wr_min_calls"],
+        },
         # v49: conviction normalization params
         "conviction_offset": bp["conviction_offset"],
         "conviction_divisor": bp["conviction_divisor"],
@@ -4284,6 +4320,8 @@ def _optuna_optimize_params(
         "activity_pump_cap_soft": 50,
         "s_tier_bonus": 1.2,
         "ca_mention_bonus": 1.15,
+        # v56: KOL win rate config defaults
+        "kol_wr_config": {"thresholds": [0.30, 0.40, 0.50], "factors": [1.0, 1.10, 1.25, 1.40], "min_calls": 3},
         # v49: conviction normalization defaults
         "conviction_offset": 6,
         "conviction_divisor": 4,
@@ -4555,6 +4593,8 @@ def _apply_optuna_params(client, best_weights: dict, best_params: dict, reason: 
             "activity_pump_cap_soft": best_params["activity_pump_cap_soft"],
             "s_tier_bonus": best_params["s_tier_bonus"],
             "ca_mention_bonus": best_params["ca_mention_bonus"],
+            # v56: KOL win rate config
+            "kol_wr_config": best_params.get("kol_wr_config"),
             "breadth_pen_config": best_params["breadth_pen_config"],
             "hype_pen_config": best_params["hype_pen_config"],
             # v45: new scalar params
@@ -4585,7 +4625,7 @@ def _apply_optuna_params(client, best_weights: dict, best_params: dict, reason: 
             "momentum_config": best_params.get("momentum_config"),
             "size_mult_config": best_params.get("size_mult_config"),
             "updated_at": datetime.now(timezone.utc).isoformat(),
-            "updated_by": "optuna_v55",
+            "updated_by": "optuna_v56",
             "change_reason": reason,
         }
         # Remove None values (don't write nulls for missing configs)

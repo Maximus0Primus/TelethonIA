@@ -392,6 +392,55 @@ _CA_CACHE_FILE = Path(__file__).parent / "ca_cache.json"
 _CA_CACHE_TTL = 24 * 3600  # 24h — symbols don't change
 
 
+def _load_kol_win_rates() -> dict[str, dict]:
+    """
+    v56: Load per-KOL win rates from kol_call_outcomes (last 14 days).
+    Returns {kol_group: {"wr": float, "total": int}}.
+    """
+    try:
+        url = os.environ.get("SUPABASE_URL")
+        key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+        if not url or not key:
+            return {}
+        from datetime import timedelta
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=14)).isoformat()
+        resp = requests.get(
+            f"{url}/rest/v1/kol_call_outcomes",
+            headers={"apikey": key, "Authorization": f"Bearer {key}"},
+            params={
+                "select": "kol_group,did_2x",
+                "entry_price": "not.is.null",
+                "max_return": "not.is.null",
+                "called_at": f"gte.{cutoff}",
+            },
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            logger.warning("kol_win_rates: HTTP %d", resp.status_code)
+            return {}
+        rows = resp.json()
+        if not rows:
+            return {}
+        from collections import defaultdict
+        stats: dict[str, dict] = defaultdict(lambda: {"wins": 0, "total": 0})
+        for r in rows:
+            g = r.get("kol_group")
+            if not g:
+                continue
+            stats[g]["total"] += 1
+            if r.get("did_2x"):
+                stats[g]["wins"] += 1
+        result = {}
+        for g, s in stats.items():
+            if s["total"] > 0:
+                result[g] = {"wr": round(s["wins"] / s["total"], 3), "total": s["total"]}
+        logger.info("kol_win_rates: loaded %d KOLs from %d outcomes", len(result), len(rows))
+        return result
+    except Exception as e:
+        logger.warning("kol_win_rates: failed (%s)", e)
+        return {}
+
+
 def _load_ca_cache() -> dict[str, dict]:
     """Load persistent CA→symbol cache from disk."""
     if _CA_CACHE_FILE.exists():
@@ -1019,8 +1068,23 @@ def extract_tokens(
                 if resolved not in EXCLUDED_TOKENS and symbol not in seen:
                     tokens.append((symbol, "ca", match))  # v40: CA is the match itself
                     seen.add(symbol)
+                elif symbol in seen:
+                    # v56: Symbol already extracted (e.g. via $ticker) — backfill CA
+                    # so ca_by_symbol gets populated and prevents cross-contamination
+                    for i, (s, src, ca) in enumerate(tokens):
+                        if s == symbol and ca is None:
+                            tokens[i] = (s, src, match)
+                            break
 
     # 4) DexScreener/pump.fun URLs → resolve pair/token address to symbol
+    # v56: Helper to backfill CA on already-seen ticker-only symbols
+    def _backfill_ca(sym: str, ca_val: str | None) -> None:
+        if sym in seen and ca_val:
+            for i, (s, src, ca) in enumerate(tokens):
+                if s == sym and ca is None:
+                    tokens[i] = (s, src, ca_val)
+                    break
+
     if ca_cache is not None:
         # DexScreener: pair address → resolve via pairs API (v40: also get token CA)
         for chain, pair_addr in DEXSCREENER_URL_REGEX.findall(text):
@@ -1030,6 +1094,8 @@ def extract_tokens(
                 if resolved not in EXCLUDED_TOKENS and symbol not in seen:
                     tokens.append((symbol, "url", token_ca))
                     seen.add(symbol)
+                else:
+                    _backfill_ca(symbol, token_ca)
 
         # pump.fun: token CA directly → resolve via tokens API
         for pump_addr in PUMP_FUN_URL_REGEX.findall(text):
@@ -1039,6 +1105,8 @@ def extract_tokens(
                 if resolved not in EXCLUDED_TOKENS and symbol not in seen:
                     tokens.append((symbol, "url", pump_addr))  # v40: URL contains the CA
                     seen.add(symbol)
+                else:
+                    _backfill_ca(symbol, pump_addr)
 
         # GMGN: token CA directly (same as pump.fun — CA in URL)
         for gmgn_addr in GMGN_URL_REGEX.findall(text):
@@ -1048,6 +1116,8 @@ def extract_tokens(
                 if resolved not in EXCLUDED_TOKENS and symbol not in seen:
                     tokens.append((symbol, "url", gmgn_addr))  # v40: URL contains the CA
                     seen.add(symbol)
+                else:
+                    _backfill_ca(symbol, gmgn_addr)
 
         # Photon-sol: LP pair address → resolve via pairs API (v40: also get token CA)
         for photon_addr in PHOTON_URL_REGEX.findall(text):
@@ -1057,6 +1127,8 @@ def extract_tokens(
                 if resolved not in EXCLUDED_TOKENS and symbol not in seen:
                     tokens.append((symbol, "url", token_ca))
                     seen.add(symbol)
+                else:
+                    _backfill_ca(symbol, token_ca)
 
     return tokens
 
@@ -2367,6 +2439,8 @@ def load_scoring_config() -> None:
             "pa_config",
             # v47: Remaining hardcoded params
             "mention_weight_config", "conviction_config", "pump_pen_config",
+            # v56: KOL win rate multiplier config
+            "kol_wr_config",
         ]
         for key in _V44_JSONB_KEYS:
             val = row.get(key)
@@ -2625,6 +2699,9 @@ def aggregate_ranking(
     # Load CA cache once for the entire aggregation cycle
     ca_cache = _load_ca_cache()
 
+    # v56: Load KOL win rates once per cycle
+    kol_win_rates = _load_kol_win_rates()
+
     # === Phase 1: Build confirmed symbols from $-prefix and CA across ALL messages ===
     # A symbol is "confirmed" if at least one KOL explicitly named it with $ or posted its CA.
     # Bare ALLCAPS words (like "SHARK") only count as mentions if confirmed here.
@@ -2785,19 +2862,24 @@ def aggregate_ranking(
             # v50: Deduplicate msg_cas for fallback resolution
             unique_msg_cas = list(dict.fromkeys(msg_cas)) if msg_cas else []
 
+            # v56: CAs already claimed by a token via direct extraction should not
+            # be assigned to other tokens. Build set of "owned" CAs.
+            owned_cas = set(ca_by_symbol.values())
+            # Unowned CAs = CAs in msg not claimed by any token
+            unowned_cas = [c for c in unique_msg_cas if c not in owned_cas]
+
             # v10: Store raw mention for each token in this message
             for token in tokens:
                 # v50: Resolve CA — prefer direct extraction, fallback to msg CAs
-                # If token extracted via ticker-only but message contains CAs,
-                # use the CA if it's unambiguous (1 token + CAs, or 1 unique CA)
+                # v56: Only fallback to UNOWNED CAs to prevent cross-contamination
                 resolved = ca_by_symbol.get(token)
-                if not resolved and unique_msg_cas:
+                if not resolved and unowned_cas:
                     if len(tokens) == 1:
                         # Single token in message — all CAs belong to it
-                        resolved = unique_msg_cas[0]
-                    elif len(unique_msg_cas) == 1:
-                        # Multiple tokens but only 1 CA — likely belongs to this token
-                        resolved = unique_msg_cas[0]
+                        resolved = unowned_cas[0]
+                    elif len(unowned_cas) == 1 and len(tokens) - len(ca_by_symbol) == 1:
+                        # Multiple tokens, 1 unowned CA, and only 1 token without CA — safe to assign
+                        resolved = unowned_cas[0]
 
                 raw_kol_mentions.append({
                     "symbol": token,
@@ -2818,12 +2900,12 @@ def aggregate_ranking(
                 })
 
             for token, source, ca in token_tuples:
-                # v40+v50: Track known CAs — direct extraction OR msg fallback
+                # v40+v50+v56: Track known CAs — direct extraction OR unowned msg fallback
                 if ca:
                     token_data[token]["known_cas"].append(ca)
-                elif unique_msg_cas and (len(tokens) == 1 or len(unique_msg_cas) == 1):
-                    # v50: Same fallback logic as resolved_ca above
-                    token_data[token]["known_cas"].append(unique_msg_cas[0])
+                elif unowned_cas and (len(tokens) == 1 or (len(unowned_cas) == 1 and len(tokens) - len(ca_by_symbol) == 1)):
+                    # v56: Same fallback logic as resolved_ca above — only unowned CAs
+                    token_data[token]["known_cas"].append(unowned_cas[0])
 
                 # v16: Track extraction source counts
                 if source == "ca":
@@ -3172,6 +3254,9 @@ def aggregate_ranking(
             "_decayed_consensus": round(kol_consensus, 4),
             # KOL tier info (for debugging/dashboard)
             "kol_tiers": {g: groups_tier.get(g, "A") for g in data["groups"]} if groups_tier else {},
+            # v56: Best KOL win rate for this token
+            "best_kol_win_rate": None,
+            "best_kol_total_calls": None,
             # Algorithm v7: Weight renormalization
             "_tw_func": tw,
             "data_confidence": data_conf,
@@ -3203,6 +3288,22 @@ def aggregate_ranking(
             # v40: Best known CA from KOL mentions (most frequently referenced)
             "kol_resolved_ca": Counter(data["known_cas"]).most_common(1)[0][0] if data["known_cas"] else None,
         })
+
+    # v56: Compute best KOL win rate per token from kol_win_rates
+    if kol_win_rates:
+        wr_cfg = SCORING_PARAMS.get("kol_wr_config", {"thresholds": [0.30, 0.40, 0.50], "factors": [1.0, 1.10, 1.25, 1.40], "min_calls": 3})
+        wr_min_calls = wr_cfg.get("min_calls", 3)
+        for t in ranking:
+            kol_groups = t.get("kol_tiers", {})
+            best_wr, best_calls = 0.0, 0
+            for g in kol_groups:
+                kwr = kol_win_rates.get(g)
+                if kwr and kwr["total"] >= wr_min_calls and kwr["wr"] > best_wr:
+                    best_wr = kwr["wr"]
+                    best_calls = kwr["total"]
+            if best_calls > 0:
+                t["best_kol_win_rate"] = best_wr
+                t["best_kol_total_calls"] = best_calls
 
     # Verify tokens exist on-chain via DexScreener (filters false positives)
     if ranking:
@@ -3631,6 +3732,16 @@ def aggregate_ranking(
         ca_mult = ca_bonus if (token.get("ca_mention_count", 0) or 0) > 0 or (token.get("url_mention_count", 0) or 0) > 0 else 1.0
         token["ca_mult"] = ca_mult
 
+        # v56: KOL win rate multiplier — graduated boost for tokens called by high-WR KOLs
+        wr_cfg = SCORING_PARAMS.get("kol_wr_config", {"thresholds": [0.30, 0.40, 0.50], "factors": [1.0, 1.10, 1.25, 1.40], "min_calls": 3})
+        best_wr = token.get("best_kol_win_rate", 0) or 0
+        best_calls = token.get("best_kol_total_calls", 0) or 0
+        if best_calls >= wr_cfg.get("min_calls", 3):
+            kol_wr_mult = _tier_lookup(best_wr, wr_cfg["thresholds"], wr_cfg["factors"])
+        else:
+            kol_wr_mult = 1.0
+        token["kol_wr_mult"] = round(kol_wr_mult, 3)
+
         # v9+v12+v23: Use min(lifecycle, death, entry_premium, pump_momentum)
         # — no double-penalizing pump signals. pump_momentum_pen folded in here
         # instead of being a separate chain multiplier.
@@ -3675,14 +3786,14 @@ def aggregate_ranking(
         # v27: Explicit default — tokens that bypass _apply_hard_gates get 1.0
         gate_mult = float(token.get("gate_mult", 1.0) or 1.0)
 
-        # v35/v55: Chain (15 multipliers). Added momentum_mult, ca_mult.
+        # v56: Chain (16 multipliers). Added kol_wr_mult.
         # v23 removals: squeeze_mult (dead), trend_mult (dead),
         # wash_pen+pump_pen (merged → manipulation_pen),
         # pump_momentum_pen (folded into crash_pen min()).
         combined_raw = (onchain_mult * safety_pen * pump_bonus
                         * manipulation_pen * pvp_pen * crash_pen
                         * activity_mult * breadth_pen
-                        * size_mult * s_tier_mult * ca_mult * gate_mult
+                        * size_mult * s_tier_mult * ca_mult * kol_wr_mult * gate_mult
                         * entry_drift_mult * hype_pen * momentum_mult)
         # v16: Floor at 0.25 decompresses the 0-14 band where 97% of tokens stuck.
         # v17: Cap at 2.0 prevents multiplier stacking (activity*s_tier*size)

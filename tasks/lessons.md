@@ -73,3 +73,10 @@
 **Mistake:** 41% of token_snapshots had `unique_kols = NULL` because the column was added after many snapshots were already created. `top_kols` JSON was always populated but `unique_kols` numeric was not extracted from it.
 **Fix:** Backfilled 4,201 rows from `top_kols` JSON: `json_array_length(top_kols::json)`. Ensured push_to_supabase always writes unique_kols.
 **Rule:** When adding a new computed column to snapshots, always backfill from existing data. NULL features are invisible to ML and break any feature that depends on them.
+
+## 2026-02-22: CA cross-contamination in multi-token messages (v56 fix)
+**Mistake:** v50 fallback (`len(unique_msg_cas) == 1 → assign CA to all tokens`) caused 9 CA collisions. Example: message "$KELLYCLAUDE $BLOX DSy..." — CA belongs to KELLYCLAUDE but v50 assigned it to BLOX too. Then enrich_token fetched KELLYCLAUDE's data for BLOX. Dashboard showed wrong chart/CA for affected tokens.
+**Root cause 1:** `extract_tokens()` skipped CA when resolved symbol was already in `seen` set → `ca_by_symbol` was empty → fallback triggered.
+**Root cause 2:** Fallback didn't check if the CA was already "owned" by another token via direct extraction.
+**Fix (2 parts):** (a) `extract_tokens()` backfills CA onto existing ticker-only tuple when CA resolves to an already-seen symbol. (b) Aggregation loop filters `unowned_cas` — CAs claimed by `ca_by_symbol` can't fall back to other tokens.
+**Rule:** When a single CA appears in a multi-token message, it belongs to exactly ONE token. Never assign it to all tokens. Check if the CA resolves to an already-extracted symbol first.

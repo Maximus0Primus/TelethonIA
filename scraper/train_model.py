@@ -130,6 +130,8 @@ CORE_FEATURES = [
     # v54: Lifecycle velocity
     "lifecycle_velocity",
     "phase_duration_cycles",
+    # v56: KOL win rate signal
+    "best_kol_win_rate",
 ]
 
 # Tier 2 (extended): Add these when 500-2000 samples. ~30 features total.
@@ -281,6 +283,8 @@ ALL_FEATURE_COLS = [
     # v54: Lifecycle velocity
     "lifecycle_velocity",
     "phase_duration_cycles",
+    # v56: KOL win rate signal
+    "best_kol_win_rate",
 ]
 
 HORIZONS = {
