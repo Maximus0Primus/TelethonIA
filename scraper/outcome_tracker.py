@@ -1424,24 +1424,33 @@ def backfill_bot_data(batch_limit: int = 50) -> None:
             token_addr = snap.get("token_address")
 
             if not pool_addr and token_addr:
-                _gecko_limiter.wait()
                 pool_addr = _get_pool_address(token_addr, pool_cache)
 
             if not pool_addr:
                 stats["skipped"] += 1
                 continue
 
-            # Fetch OHLCV — try Gecko then DexPaprika
-            _gecko_limiter.wait()
-            _, _, _, _, _, bot_data = _get_max_price_gecko(
-                pool_addr, snapshot_ts, hours, price_at=price_at,
+            # v57: Use _fetch_ohlcv_candles (DexPaprika→Gecko→Birdeye + SOL base check)
+            # instead of legacy Gecko-first which is always rate-limited
+            end_ts = snapshot_ts + hours * 3600
+            api_stats = {"api_calls": 0}
+            sorted_candles, source = _fetch_ohlcv_candles(
+                pool_addr, token_addr, snapshot_ts, end_ts,
+                price_at, symbol, api_stats, pool_cache,
             )
 
-            if bot_data is None:
-                _, _, _, _, _, bot_data = _get_max_price_dexpaprika(
-                    pool_addr, snapshot_ts, hours, price_at=price_at,
-                )
-                time.sleep(0.3)
+            if not sorted_candles:
+                stats["skipped"] += 1
+                continue
+
+            # Extract bot_data from candles using existing helper
+            hz_obj = {"hours": hours, "flag_col": f"did_2x_{hours}h",
+                       "max_col": f"max_price_{hours}h"}
+            hz_results = _extract_horizons_from_candles(
+                sorted_candles, snapshot_ts, price_at, [hz_obj],
+            )
+            hz_data = hz_results.get(hours)
+            bot_data = hz_data.get("bot_data") if hz_data else None
 
             if bot_data is None:
                 stats["skipped"] += 1
