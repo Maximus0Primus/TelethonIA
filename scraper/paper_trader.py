@@ -101,7 +101,7 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime) -> int:
         if t.get("score", 0) > 0
         and t.get("token_address")
         and t.get("price_usd") and float(t["price_usd"]) > 0
-        and t.get("has_ca_mention", False)  # v55: only trade CA-confirmed tokens (25% HR vs 8.9%)
+        and ((t.get("ca_mention_count", 0) or 0) > 0 or (t.get("url_mention_count", 0) or 0) > 0)  # v55: only trade CA-confirmed tokens (25% HR vs 8.9%)
     ][:TOP_N]
 
     if not candidates:
