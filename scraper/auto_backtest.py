@@ -1243,6 +1243,370 @@ def _multi_tranche_bot_simulation(df: pd.DataFrame) -> dict:
     return results
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# PAPER-TRADE-EQUIVALENT SIMULATION
+# Reproduces the EXACT logic of paper_trader.py using OHLCV historical data.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Mapping from paper_trader strategy definitions to OHLCV snapshot columns.
+# Each tranche maps tp_mult to the column that stores "time to reach X".
+# MOONBAG horizon is 7d in paper_trader but we only have 48h OHLCV columns,
+# so we approximate with 48h (documented limitation).
+_PT_STRATEGIES = {
+    "TP50_SL30": {
+        "horizon": "12h",
+        "hz_min": 720,
+        "sl_col_suffix": "time_to_sl30_min",
+        "sl_pct": -0.30,
+        "tranches": [
+            {"pct": 1.0, "tp_col_suffix": "time_to_1_5x_min", "tp_pct": 0.50, "label": "main"},
+        ],
+    },
+    "TP100_SL30": {
+        "horizon": "24h",
+        "hz_min": 1440,
+        "sl_col_suffix": "time_to_sl30_min",
+        "sl_pct": -0.30,
+        "tranches": [
+            {"pct": 1.0, "tp_col_suffix": "time_to_2x_min", "tp_pct": 1.00, "label": "main"},
+        ],
+    },
+    "SCALE_OUT": {
+        "horizon": "48h",
+        "hz_min": 2880,
+        "sl_col_suffix": "time_to_sl30_min",
+        "sl_pct": -0.30,
+        "tranches": [
+            {"pct": 0.25, "tp_col_suffix": "time_to_2x_min", "tp_pct": 1.00, "label": "tp_2x"},
+            {"pct": 0.25, "tp_col_suffix": "time_to_3x_min", "tp_pct": 2.00, "label": "tp_3x"},
+            {"pct": 0.25, "tp_col_suffix": "time_to_5x_min", "tp_pct": 4.00, "label": "tp_5x"},
+            {"pct": 0.25, "tp_col_suffix": None, "tp_pct": None, "label": "moonbag"},
+        ],
+    },
+    "MOONBAG": {
+        # Real paper_trader uses 7d horizon, but OHLCV columns only go to 48h.
+        # Using 48h as approximation — documented limitation.
+        "horizon": "48h",
+        "hz_min": 2880,
+        "sl_col_suffix": "time_to_sl50_min",
+        "sl_pct": -0.50,
+        "tranches": [
+            {"pct": 0.80, "tp_col_suffix": "time_to_2x_min", "tp_pct": 1.00, "label": "main"},
+            {"pct": 0.20, "tp_col_suffix": None, "tp_pct": None, "label": "moonbag"},
+        ],
+    },
+}
+
+# Default paper trade config (matches DB default)
+_PT_DEFAULT_CONFIG = {
+    "top_n": 5,
+    "budget_usd": 50.0,
+    "active_strategies": ["TP50_SL30", "TP100_SL30", "SCALE_OUT", "MOONBAG"],
+    "dedup_cooldown_hours": 0,
+    "ca_filter": True,
+}
+
+
+def _paper_trade_simulation(df: pd.DataFrame) -> dict:
+    """
+    Simulate paper-trade-equivalent trading using OHLCV historical data.
+
+    Reproduces the EXACT logic of paper_trader.py:
+    - Top 5 by score per cycle, $50 budget score-weighted
+    - All 4 strategies in parallel per token (4x surface)
+    - NO first-appearance dedup (same token can be re-traded across cycles)
+    - SL cascade on multi-tranche strategies
+    - CA-confirmed filter (ca_mention_count > 0 OR url_mention_count > 0)
+
+    Returns per-strategy PnL, win_rate, profit_factor, expectancy, plus
+    combined totals — identical format to backtest output.
+    """
+    config = _PT_DEFAULT_CONFIG.copy()
+    top_n = config["top_n"]
+    budget_usd = config["budget_usd"]
+    active_strategies = config["active_strategies"]
+    ca_filter = config["ca_filter"]
+
+    # DO NOT dedup — paper_trader trades same token across cycles
+    work = df.copy()
+    work["score"] = work.apply(lambda r: _get_score(r, BALANCED_WEIGHTS), axis=1)
+    work["cycle"] = work["snapshot_at"].dt.floor("15min")
+
+    # CA filter: only tokens with confirmed contract address
+    if ca_filter:
+        ca_col = work["ca_mention_count"].fillna(0) if "ca_mention_count" in work.columns else pd.Series(0, index=work.index)
+        url_col = work["url_mention_count"].fillna(0) if "url_mention_count" in work.columns else pd.Series(0, index=work.index)
+        ca_mask = (ca_col > 0) | (url_col > 0)
+        work = work[ca_mask].copy()
+
+    if work.empty:
+        return {"error": "no data after CA filter"}
+
+    # Per-strategy results
+    strat_results = {}
+    all_trades = []  # for combined totals
+
+    for strat_name in active_strategies:
+        strat_def = _PT_STRATEGIES.get(strat_name)
+        if strat_def is None:
+            continue
+
+        hz = strat_def["horizon"]
+        hz_suffix = f"_{hz}"
+        hz_min = strat_def["hz_min"]
+        sl_col = strat_def["sl_col_suffix"] + hz_suffix
+        price_col = f"price_after_{hz}"
+
+        if sl_col not in work.columns:
+            continue
+
+        trades = []
+
+        for cycle_ts, group in work.sort_values("snapshot_at").groupby("cycle"):
+            # Filter to tokens with price data for this horizon
+            labeled = group[
+                group["price_at_snapshot"].notna()
+                & (group[sl_col].notna() | group[price_col].notna()
+                   if price_col in group.columns else group[sl_col].notna())
+            ]
+            if labeled.empty:
+                continue
+
+            # Top N by score (paper_trader picks top 5)
+            top_tokens = labeled.nlargest(top_n, "score")
+
+            # Score-weighted budget allocation
+            scores = top_tokens["score"].clip(lower=1).tolist()
+            total_score = sum(scores)
+
+            for idx, (_, row) in enumerate(top_tokens.iterrows()):
+                price_at = float(row["price_at_snapshot"])
+                if price_at <= 0:
+                    continue
+
+                alloc_usd = budget_usd * scores[idx] / total_score
+
+                # Get SL time
+                sl_raw = row.get(sl_col)
+                sl_min = int(sl_raw) if pd.notna(sl_raw) else None
+
+                # Collect TP events: (time_min, tranche_pct, tranche_tp_pct)
+                events = []
+                for tranche in strat_def["tranches"]:
+                    if tranche["tp_col_suffix"] is None:
+                        continue  # moonbag — no TP event
+                    tp_col = tranche["tp_col_suffix"] + hz_suffix
+                    tp_raw = row.get(tp_col)
+                    if pd.notna(tp_raw):
+                        events.append((int(tp_raw), "TP", tranche["pct"], tranche["tp_pct"]))
+
+                # Add SL event
+                if sl_min is not None:
+                    events.append((sl_min, "SL", None, None))
+
+                events.sort(key=lambda e: e[0])
+
+                remaining = 1.0
+                pnl_pct = 0.0
+
+                for ev_time, ev_type, ev_pct, ev_tp_pct in events:
+                    if remaining <= 0:
+                        break
+                    if ev_type == "TP":
+                        take = min(ev_pct, remaining)
+                        pnl_pct += take * ev_tp_pct
+                        remaining -= take
+                    elif ev_type == "SL":
+                        # SL cascade: closes ALL remaining tranches
+                        pnl_pct += remaining * strat_def["sl_pct"]
+                        remaining = 0
+
+                # Moonbag remainder or timeout: use actual price at horizon
+                if remaining > 0:
+                    p_after = row.get(price_col) if price_col in row.index else None
+                    if pd.notna(p_after) and float(p_after) > 0:
+                        pnl_pct += remaining * ((float(p_after) / price_at) - 1.0)
+                    elif pnl_pct == 0.0:
+                        continue  # No partial results and no final price — skip entirely
+                    # else: keep pnl_pct from closed tranches (partial TP profit)
+
+                pnl_usd = alloc_usd * pnl_pct
+                trade = {
+                    "strategy": strat_name,
+                    "symbol": row["symbol"],
+                    "pnl_pct": pnl_pct,
+                    "pnl_usd": pnl_usd,
+                    "position_usd": alloc_usd,
+                    "score": int(row["score"]),
+                }
+                trades.append(trade)
+                all_trades.append(trade)
+
+        if len(trades) < 1:
+            continue
+
+        strat_results[strat_name] = _compute_pnl_stats(trades, strat_name)
+
+    # Combined totals across all strategies
+    combined = _compute_pnl_stats(all_trades, "COMBINED") if all_trades else {}
+
+    return {
+        "config": config,
+        "strategies": strat_results,
+        "combined": combined,
+        "limitations": [
+            "MOONBAG uses 48h horizon (real paper_trader uses 7d — no 7d TP/SL columns)",
+            "No dedup applied (matches paper_trader behavior)",
+            "SL cascade: SL triggers close all remaining tranches for the position",
+        ],
+    }
+
+
+def _compute_pnl_stats(trades: list[dict], label: str) -> dict:
+    """Compute PnL stats from a list of trade dicts (shared by paper sim + recommendations)."""
+    pnl_values = [t["pnl_pct"] for t in trades]
+    pnl_usd_values = [t["pnl_usd"] for t in trades]
+    pos_values = [t["position_usd"] for t in trades]
+    n = len(trades)
+    n_wins = sum(1 for p in pnl_values if p > 0)
+    n_losses = sum(1 for p in pnl_values if p < 0)
+    total_gains = sum(p for p in pnl_values if p > 0)
+    total_losses = abs(sum(p for p in pnl_values if p < 0))
+    profit_factor = total_gains / total_losses if total_losses > 0 else (999.0 if total_gains > 0 else 0)
+    expectancy = sum(pnl_values) / n if n > 0 else 0
+    total_invested = sum(pos_values)
+    total_pnl_usd = sum(pnl_usd_values)
+    roi_pct = round(total_pnl_usd / total_invested * 100, 2) if total_invested > 0 else 0
+
+    # Max consecutive losses
+    max_consec_losses = 0
+    consec = 0
+    for p in pnl_values:
+        if p < 0:
+            consec += 1
+            max_consec_losses = max(max_consec_losses, consec)
+        else:
+            consec = 0
+
+    # Breakeven win rate
+    avg_win = total_gains / n_wins if n_wins > 0 else 0
+    avg_loss = total_losses / n_losses if n_losses > 0 else 0
+    breakeven_wr = avg_loss / (avg_win + avg_loss) if (avg_win + avg_loss) > 0 else 0.5
+
+    return {
+        "label": label,
+        "trades": n,
+        "wins": n_wins,
+        "losses": n_losses,
+        "win_rate": round(n_wins / n, 4) if n > 0 else 0,
+        "profit_factor": round(profit_factor, 4),
+        "expectancy": round(expectancy, 4),
+        "breakeven_wr": round(breakeven_wr, 4),
+        "total_pnl_pct": round(sum(pnl_values) * 100, 2),
+        "total_invested_usd": round(total_invested, 2),
+        "total_pnl_usd": round(total_pnl_usd, 2),
+        "roi_pct": roi_pct,
+        "max_consecutive_losses": max_consec_losses,
+    }
+
+
+def _recommend_strategies(report: dict, client=None) -> dict:
+    """
+    Analyze paper_trade_sim + realistic_bot results and recommend:
+    - Which strategies to activate/deactivate (expectancy > 0, profit_factor > 1.0, 20+ trades)
+    - Optimal top_n (1, 3, or 5) based on best expectancy
+    - Optionally writes to scoring_config.paper_trade_config if criteria are met
+
+    Returns recommendation dict for inclusion in report.
+    """
+    result = {
+        "recommended_strategies": [],
+        "disabled_strategies": [],
+        "recommended_top_n": 5,
+        "applied_to_db": False,
+        "reasoning": [],
+    }
+
+    pt_sim = report.get("paper_trade_sim", {})
+    strategies = pt_sim.get("strategies", {})
+
+    if not strategies:
+        result["reasoning"].append("No paper_trade_sim data available")
+        return result
+
+    # Evaluate each strategy (30+ trades for statistical significance)
+    MIN_TRADES = 30
+    for strat_name, stats in strategies.items():
+        trades = stats.get("trades", 0)
+        expectancy = stats.get("expectancy", 0)
+        pf = stats.get("profit_factor", 0)
+
+        if trades < MIN_TRADES:
+            result["reasoning"].append(f"{strat_name}: insufficient trades ({trades}/{MIN_TRADES})")
+            continue
+
+        if expectancy > 0 and pf > 1.0:
+            result["recommended_strategies"].append(strat_name)
+            result["reasoning"].append(
+                f"{strat_name}: ENABLED (E[R]={expectancy:.4f}, PF={pf:.2f}, N={trades})"
+            )
+        else:
+            result["disabled_strategies"].append(strat_name)
+            result["reasoning"].append(
+                f"{strat_name}: DISABLED (E[R]={expectancy:.4f}, PF={pf:.2f}, N={trades})"
+            )
+
+    # Determine optimal top_n from realistic_bot (which tests top 1/3/5)
+    # Only consider strategies matching our recommended set
+    realistic = report.get("realistic_bot", {})
+    best_topn = 5
+    best_topn_exp = -999
+    recommended_set = set(result["recommended_strategies"])
+
+    for key, stats in realistic.items():
+        if not isinstance(stats, dict) or "top_n" not in stats:
+            continue
+        if stats.get("trades", 0) < 10:
+            continue
+        # Filter: only consider strategies that match our recommended set
+        strat_prefix = key.rsplit("_", 2)[0] if "_" in key else key  # e.g. "TP50_SL30" from "TP50_SL30_12h_top1"
+        if recommended_set and strat_prefix not in recommended_set:
+            continue
+        exp = stats.get("expectancy", -999)
+        top_n = stats["top_n"]
+        if exp > best_topn_exp:
+            best_topn_exp = exp
+            best_topn = top_n
+
+    result["recommended_top_n"] = best_topn
+    result["reasoning"].append(f"Optimal top_n={best_topn} (best expectancy={best_topn_exp:.4f})")
+
+    # Apply to DB if we have client and clear recommendations
+    if client and result["recommended_strategies"]:
+        try:
+            new_config = {
+                "top_n": best_topn,
+                "budget_usd": 50.0,
+                "active_strategies": result["recommended_strategies"],
+                "dedup_cooldown_hours": 0,
+                "ca_filter": True,
+            }
+            client.table("scoring_config").update({
+                "paper_trade_config": new_config,
+                "updated_by": "auto_backtest_recommend",
+            }).eq("id", 1).execute()
+            result["applied_to_db"] = True
+            result["applied_config"] = new_config
+            logger.info("auto_backtest: applied paper_trade_config: %s", new_config)
+        except Exception as e:
+            logger.error("auto_backtest: failed to apply paper_trade_config: %s", e)
+            result["apply_error"] = str(e)
+    elif not result["recommended_strategies"]:
+        result["reasoning"].append("No strategies passed criteria — keeping current config")
+
+    return result
+
+
 def _adaptive_bot_simulation(df: pd.DataFrame) -> dict:
     """
     ML v3.1: Simulate adaptive SL based on actual DD data (oracle upper bound).
@@ -2802,6 +3166,10 @@ def run_auto_backtest() -> dict | None:
     logger.info("Auto-backtest: running multi-tranche bot simulation (SCALE_OUT + MOONBAG)")
     report["multi_tranche_bot"] = _multi_tranche_bot_simulation(df)
 
+    # === PAPER-TRADE-EQUIVALENT SIMULATION ===
+    logger.info("Auto-backtest: running paper-trade-equivalent simulation (4 strategies × top 5)")
+    report["paper_trade_sim"] = _paper_trade_simulation(df)
+
     # === ADAPTIVE SL SIMULATION (ML v3.1 — oracle upper bound) ===
     logger.info("Auto-backtest: running adaptive SL simulation")
     report["adaptive_bot"] = _adaptive_bot_simulation(df)
@@ -2872,6 +3240,10 @@ def run_auto_backtest() -> dict | None:
 
     # Generate recommendations
     report["recommendations"] = _generate_recommendations(report)
+
+    # Strategy recommendation: auto-configure paper_trade_config based on backtest results
+    logger.info("Auto-backtest: running strategy recommendation")
+    report["strategy_recommendation"] = _recommend_strategies(report, client)
 
     # Push to Supabase
     try:

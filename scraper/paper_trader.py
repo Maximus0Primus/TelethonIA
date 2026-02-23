@@ -25,8 +25,11 @@ logger = logging.getLogger(__name__)
 DEXSCREENER_BATCH_URL = "https://api.dexscreener.com/tokens/v1/solana/{addresses}"
 BATCH_SIZE = 30
 
+# --- Defaults (overridden by scoring_config.paper_trade_config) ---
 TOP_N = 5
 PORTFOLIO_BUDGET = 50.0  # USD per cycle, score-weighted across top N
+DEDUP_COOLDOWN_HOURS = 0
+CA_FILTER = True
 
 # --- Strategy Definitions ---
 # Each strategy has a list of tranches. Moonbag tranches have tp_mult=None.
@@ -89,20 +92,83 @@ def _fetch_prices_batch(addresses: list[str]) -> dict[str, float]:
     return prices
 
 
-def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime) -> int:
+def _load_paper_trade_config(client) -> dict:
     """
-    Open paper trades for top N tokens across all 4 strategies.
+    Load paper_trade_config from scoring_config table.
+    Returns config dict with keys: top_n, budget_usd, active_strategies,
+    dedup_cooldown_hours, ca_filter. Falls back to module defaults on error.
+    """
+    defaults = {
+        "top_n": TOP_N,
+        "budget_usd": PORTFOLIO_BUDGET,
+        "active_strategies": list(STRATEGIES.keys()),
+        "dedup_cooldown_hours": DEDUP_COOLDOWN_HOURS,
+        "ca_filter": CA_FILTER,
+    }
+    try:
+        result = client.table("scoring_config").select("paper_trade_config").eq("id", 1).execute()
+        if result.data and result.data[0].get("paper_trade_config"):
+            raw = result.data[0]["paper_trade_config"]
+            if isinstance(raw, str):
+                import json
+                raw = json.loads(raw)
+            # Merge with defaults (unknown keys ignored, missing keys use default)
+            config = {k: raw.get(k, v) for k, v in defaults.items()}
+            # Type safety: JSONB stores numbers as float, but top_n must be int
+            config["top_n"] = int(config["top_n"])
+            config["budget_usd"] = float(config["budget_usd"])
+            config["dedup_cooldown_hours"] = int(config.get("dedup_cooldown_hours", 0))
+            # Validate active_strategies against known strategies
+            config["active_strategies"] = [
+                s for s in config["active_strategies"] if s in STRATEGIES
+            ]
+            if not config["active_strategies"]:
+                config["active_strategies"] = defaults["active_strategies"]
+            logger.info("paper_trader: loaded config from DB: top_n=%d, budget=$%.0f, strategies=%s, dedup=%dh, ca_filter=%s",
+                        config["top_n"], config["budget_usd"], config["active_strategies"],
+                        config["dedup_cooldown_hours"], config["ca_filter"])
+            return config
+    except Exception as e:
+        logger.warning("paper_trader: failed to load config from scoring_config: %s", e)
+    return defaults
+
+
+def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: dict | None = None) -> int:
+    """
+    Open paper trades for top N tokens across configured strategies.
     Each strategy may have multiple tranches (e.g. SCALE_OUT has 4 rows per token).
     Dedup: skip if token_address + strategy already has an open trade.
+    Cooldown dedup: skip if same (token, strategy) closed within dedup_cooldown_hours.
     Returns number of new trade rows opened.
     """
-    candidates = [
+    if config is None:
+        config = {
+            "top_n": TOP_N,
+            "budget_usd": PORTFOLIO_BUDGET,
+            "active_strategies": list(STRATEGIES.keys()),
+            "dedup_cooldown_hours": DEDUP_COOLDOWN_HOURS,
+            "ca_filter": CA_FILTER,
+        }
+
+    top_n = config["top_n"]
+    budget_usd = config["budget_usd"]
+    active_strategies = [s for s in config["active_strategies"] if s in STRATEGIES]
+    dedup_cooldown_h = config.get("dedup_cooldown_hours", 0)
+    ca_filter = config.get("ca_filter", True)
+
+    # Filter candidates
+    base_filter = [
         t for t in ranking
         if t.get("score", 0) > 0
         and t.get("token_address")
         and t.get("price_usd") and float(t["price_usd"]) > 0
-        and ((t.get("ca_mention_count", 0) or 0) > 0 or (t.get("url_mention_count", 0) or 0) > 0)  # v55: only trade CA-confirmed tokens (25% HR vs 8.9%)
-    ][:TOP_N]
+    ]
+    if ca_filter:
+        base_filter = [
+            t for t in base_filter
+            if (t.get("ca_mention_count", 0) or 0) > 0 or (t.get("url_mention_count", 0) or 0) > 0
+        ]
+    candidates = base_filter[:top_n]
 
     if not candidates:
         return 0
@@ -111,7 +177,7 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime) -> int:
     scores = [max(t.get("score", 1), 1) for t in candidates]
     total_score = sum(scores)
     for i, token in enumerate(candidates):
-        token["_alloc_usd"] = round(PORTFOLIO_BUDGET * scores[i] / total_score, 2)
+        token["_alloc_usd"] = round(budget_usd * scores[i] / total_score, 2)
 
     # Check which (token_address, strategy) combos already have open trades
     addrs = [t["token_address"] for t in candidates]
@@ -130,11 +196,30 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime) -> int:
         logger.error("paper_trader: failed to check open trades: %s", e)
         open_combos = set()
 
+    # Cooldown dedup: check recently closed trades
+    cooldown_combos = set()
+    if dedup_cooldown_h > 0:
+        cooldown_since = (cycle_ts - timedelta(hours=dedup_cooldown_h)).isoformat()
+        try:
+            recent = (
+                client.table("paper_trades")
+                .select("token_address, strategy")
+                .neq("status", "open")
+                .gte("exit_at", cooldown_since)
+                .in_("token_address", addrs)
+                .execute()
+            )
+            cooldown_combos = {
+                (r["token_address"], r["strategy"]) for r in (recent.data or [])
+            }
+        except Exception as e:
+            logger.warning("paper_trader: cooldown dedup query failed: %s", e)
+
     opened = 0
     for rank_idx, token in enumerate(candidates, 1):
         addr = token["token_address"]
         entry_price = float(token["price_usd"])
-        alloc_usd = token.get("_alloc_usd", PORTFOLIO_BUDGET / TOP_N)
+        alloc_usd = token.get("_alloc_usd", budget_usd / top_n)
 
         # Common fields for all tranches of this token
         base_row = {
@@ -149,13 +234,17 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime) -> int:
             "unique_kols": token.get("unique_kols"),
             "whale_new_entries": token.get("whale_new_entries"),
             "momentum_mult": float(token["momentum_mult"]) if token.get("momentum_mult") else None,
-            "portfolio_budget": PORTFOLIO_BUDGET,
+            "portfolio_budget": budget_usd,
         }
         if token.get("snapshot_id"):
             base_row["snapshot_id"] = int(token["snapshot_id"])
 
-        for strat_name, tranches in STRATEGIES.items():
+        for strat_name in active_strategies:
+            tranches = STRATEGIES[strat_name]
+
             if (addr, strat_name) in open_combos:
+                continue
+            if (addr, strat_name) in cooldown_combos:
                 continue
 
             for tranche in tranches:
@@ -184,8 +273,8 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime) -> int:
 
     allocs = [f"{t.get('symbol','?')}=${t.get('_alloc_usd',0):.1f}" for t in candidates]
     logger.info(
-        "paper_trader: opened %d rows, $%.0f budget → %s (%d strategies)",
-        opened, PORTFOLIO_BUDGET, ", ".join(allocs), len(STRATEGIES),
+        "paper_trader: opened %d rows, $%.0f budget → %s (%d strategies, dedup=%dh)",
+        opened, budget_usd, ", ".join(allocs), len(active_strategies), dedup_cooldown_h,
     )
     return opened
 
@@ -439,6 +528,20 @@ def paper_trade_summary(client) -> dict | None:
         s_invested = sum(float(t.get("position_usd") or 0) for t in strat_trades)
         s_pnl_usd = sum(float(t.get("pnl_usd") or 0) for t in strat_trades)
 
+        # Enriched stats: expectancy, breakeven WR, max consecutive losses
+        s_expectancy = sum(pos_pnls) / n_positions if n_positions else 0
+        s_avg_win = sum(s_winners) / len(s_winners) if s_winners else 0
+        s_avg_loss = abs(sum(s_losers)) / len(s_losers) if s_losers else 0
+        s_breakeven_wr = s_avg_loss / (s_avg_win + s_avg_loss) if (s_avg_win + s_avg_loss) > 0 else 0.5
+        s_max_consec = 0
+        s_consec = 0
+        for p in pos_pnls:
+            if p < 0:
+                s_consec += 1
+                s_max_consec = max(s_max_consec, s_consec)
+            else:
+                s_consec = 0
+
         strategy_stats[strat_name] = {
             "positions": n_positions,
             "trade_rows": len(strat_trades),
@@ -447,11 +550,29 @@ def paper_trade_summary(client) -> dict | None:
             "timeout": s_to,
             "win_rate": round(pos_wins / n_positions, 3) if n_positions else 0,
             "avg_pnl": round(s_avg_pnl, 4),
+            "expectancy": round(s_expectancy, 4),
             "profit_factor": round(s_pf, 2) if s_pf != float("inf") else "inf",
+            "breakeven_wr": round(s_breakeven_wr, 4),
+            "max_consecutive_losses": s_max_consec,
             "total_pnl_pct": round(sum(pos_pnls) * 100, 2),
             "invested_usd": round(s_invested, 2),
             "pnl_usd": round(s_pnl_usd, 2),
         }
+
+    # Global enriched stats
+    global_expectancy = avg_pnl  # avg_pnl IS expectancy (mean PnL per trade)
+    global_avg_win = sum(winners) / len(winners) if winners else 0
+    global_avg_loss = abs(sum(losers)) / len(losers) if losers else 0
+    global_breakeven_wr = global_avg_loss / (global_avg_win + global_avg_loss) if (global_avg_win + global_avg_loss) > 0 else 0.5
+    global_pf = abs(sum(winners) / sum(losers)) if losers and sum(losers) != 0 else float("inf")
+    g_max_consec = 0
+    g_consec = 0
+    for p in pnls:
+        if p < 0:
+            g_consec += 1
+            g_max_consec = max(g_max_consec, g_consec)
+        else:
+            g_consec = 0
 
     summary = {
         "total_rows": total,
@@ -460,6 +581,10 @@ def paper_trade_summary(client) -> dict | None:
         "timeout": timeout_count,
         "win_rate": round(win_rate, 3),
         "avg_pnl": round(avg_pnl, 4),
+        "expectancy": round(global_expectancy, 4),
+        "profit_factor": round(global_pf, 2) if global_pf != float("inf") else "inf",
+        "breakeven_wr": round(global_breakeven_wr, 4),
+        "max_consecutive_losses": g_max_consec,
         "total_invested_usd": round(total_invested, 2),
         "total_pnl_usd": round(total_pnl_usd, 2),
         "roi_pct": roi_pct,
@@ -467,17 +592,19 @@ def paper_trade_summary(client) -> dict | None:
     }
 
     logger.info(
-        "paper_trader SUMMARY (7d): %d rows, WR=%.1f%%, avgPnL=%.2f%% | "
-        "$%.2f invested, $%+.2f PnL (ROI %.1f%%) | TP=%d SL=%d TO=%d",
-        total, win_rate * 100, avg_pnl * 100,
+        "paper_trader SUMMARY (7d): %d rows, WR=%.1f%%, avgPnL=%.2f%%, E[R]=%.2f%%, PF=%s | "
+        "$%.2f invested, $%+.2f PnL (ROI %.1f%%) | TP=%d SL=%d TO=%d | maxConsecL=%d",
+        total, win_rate * 100, avg_pnl * 100, global_expectancy * 100,
+        round(global_pf, 2) if global_pf != float("inf") else "inf",
         total_invested, total_pnl_usd, roi_pct,
-        tp_count, sl_count, timeout_count,
+        tp_count, sl_count, timeout_count, g_max_consec,
     )
     for name, s in strategy_stats.items():
         logger.info(
-            "  %s: %d pos, WR=%.1f%%, avgPnL=%.2f%%, PF=%s | $%.2f→$%+.2f",
-            name, s["positions"], s["win_rate"] * 100, s["avg_pnl"] * 100,
-            s["profit_factor"], s["invested_usd"], s["pnl_usd"],
+            "  %s: %d pos, WR=%.1f%%, E[R]=%.2f%%, PF=%s, BEwr=%.1f%% | $%.2f→$%+.2f | maxCL=%d",
+            name, s["positions"], s["win_rate"] * 100, s["expectancy"] * 100,
+            s["profit_factor"], s["breakeven_wr"] * 100, s["invested_usd"], s["pnl_usd"],
+            s["max_consecutive_losses"],
         )
     return summary
 

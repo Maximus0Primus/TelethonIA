@@ -423,12 +423,13 @@ def process_and_push(messages_data: dict[str, list[dict]], dump: bool = False) -
             insert_snapshots(extra_7d)
             logger.info("Inserted %d extra snapshots from 7d window", len(extra_7d))
 
-    # Paper trading: open new positions on top 5
+    # Paper trading: open new positions (config-driven)
     try:
-        from paper_trader import open_paper_trades
+        from paper_trader import open_paper_trades, _load_paper_trade_config
         if data_24h:
             sb_pt = _get_supabase()
-            open_paper_trades(sb_pt, data_24h, cycle_ts=datetime.now(timezone.utc))
+            pt_config = _load_paper_trade_config(sb_pt)
+            open_paper_trades(sb_pt, data_24h, cycle_ts=datetime.now(timezone.utc), config=pt_config)
     except Exception as e:
         logger.error("Paper trading (open) failed: %s", e)
 
