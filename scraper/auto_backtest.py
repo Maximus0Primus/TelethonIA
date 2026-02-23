@@ -4108,6 +4108,21 @@ def _optuna_optimize_params(
             "ca_mention_bonus": trial.suggest_float("ca_mention_bonus", 1.0, 1.5, step=0.05),
         }
 
+        # v59: Sentiment blend weights (applied to future scrapes, not retroactive)
+        sent_bert = trial.suggest_float("sent_bert_weight", 0.3, 0.8, step=0.05)
+        sent_vader = trial.suggest_float("sent_vader_weight", 0.1, 0.5, step=0.05)
+        sent_lexicon = trial.suggest_float("sent_lexicon_weight", 0.05, 0.4, step=0.05)
+        sent_total = sent_bert + sent_vader + sent_lexicon
+        if sent_total < 0.3:
+            return -999.0
+        params["sentiment_config"] = {
+            "bert_weight": round(sent_bert / sent_total, 3),
+            "vader_weight": round(sent_vader / sent_total, 3),
+            "lexicon_weight": round(sent_lexicon / sent_total, 3),
+            "no_bert_vader_weight": round(sent_vader / (sent_vader + sent_lexicon) if (sent_vader + sent_lexicon) > 0 else 0.7, 3),
+            "no_bert_lexicon_weight": round(sent_lexicon / (sent_vader + sent_lexicon) if (sent_vader + sent_lexicon) > 0 else 0.3, 3),
+        }
+
         # v56: KOL win rate config (7 params)
         wr_t0 = trial.suggest_float("wr_t0", 0.15, 0.40, step=0.05)
         wr_t1 = trial.suggest_float("wr_t1", 0.30, 0.55, step=0.05)
@@ -4197,15 +4212,25 @@ def _optuna_optimize_params(
         death_stale_b2 = trial.suggest_float("death_stale_b2", 0.10, 0.40, step=0.05)
         death_stale_b3 = trial.suggest_float("death_stale_b3", 0.05, 0.25, step=0.05)
         death_vol_24h = trial.suggest_float("death_vol_24h", 1000, 10000, step=1000)
+        # v59: Previously hardcoded death_config params now in search space
+        death_stale_start = trial.suggest_int("death_stale_start_hours", 6, 24, step=2)
+        death_vol_death_1h = trial.suggest_float("death_vol_death_1h", 100, 1000, step=100)
+        death_vol_floor_24h = trial.suggest_float("death_vol_floor_24h", 500, 5000, step=500)
+        death_vol_mod_t0 = trial.suggest_float("death_vol_mod_t0", 20000, 100000, step=10000)
+        death_vol_mod_t1 = trial.suggest_float("death_vol_mod_t1", 50000, 200000, step=10000)
+        death_vol_mod_t2 = trial.suggest_float("death_vol_mod_t2", 200000, 800000, step=50000)
+        death_vol_mod_t3 = trial.suggest_float("death_vol_mod_t3", 500000, 2000000, step=100000)
+        if death_vol_mod_t0 >= death_vol_mod_t1 or death_vol_mod_t1 >= death_vol_mod_t2 or death_vol_mod_t2 >= death_vol_mod_t3:
+            return -999.0
         params["death_config"] = {
-            "stale_start_hours": 12,
+            "stale_start_hours": death_stale_start,
             "stale_tiers": [death_stale_t0, death_stale_t1, death_stale_t2],
             "stale_bases": [death_stale_b0, death_stale_b1, death_stale_b2, death_stale_b3],
-            "vol_modulation_tiers": [50000, 100000, 500000, 1000000],
+            "vol_modulation_tiers": [death_vol_mod_t0, death_vol_mod_t1, death_vol_mod_t2, death_vol_mod_t3],
             "vol_modulation_bonuses": [0.15, 0.25, 0.35, 0.45],
             "vol_modulation_caps": [0.8, 0.85, 0.9, 0.95],
-            "vol_death_24h": death_vol_24h, "vol_death_1h": 500, "vol_death_penalty": 0.15,
-            "vol_floor_24h": 1000, "vol_floor_penalty": 0.1,
+            "vol_death_24h": death_vol_24h, "vol_death_1h": death_vol_death_1h, "vol_death_penalty": 0.15,
+            "vol_floor_24h": death_vol_floor_24h, "vol_floor_penalty": 0.1,
             "price_moderate_social_alive_h": 6, "price_moderate_vol_alive": 0.5,
             "price_mild_threshold": -30, "price_mild_stale_h": 24,
         }
@@ -4297,6 +4322,10 @@ def _optuna_optimize_params(
         if pp_hard > pp_mod or pp_mod > pp_light:
             return -999.0
         pvp_floor = trial.suggest_float("pvp_normal_floor", 0.3, 0.7, step=0.05)
+        # v59: Previously hardcoded pvp params now in search space
+        pvp_pf_floor = trial.suggest_float("pvp_pump_fun_floor", 0.4, 0.9, step=0.05)
+        pvp_pf_scale = trial.suggest_float("pvp_pump_fun_scale", 0.02, 0.15, step=0.01)
+        pvp_normal_scale = trial.suggest_float("pvp_normal_scale", 0.03, 0.20, step=0.01)
         # v49: pump momentum threshold params
         pp_1h_hard = trial.suggest_float("pp_1h_hard", 15, 50, step=5)
         pp_5m_hard = trial.suggest_float("pp_5m_hard", 8, 30, step=2)
@@ -4307,10 +4336,10 @@ def _optuna_optimize_params(
             "hard_penalty": pp_hard,
             "moderate_penalty": pp_mod,
             "light_penalty": pp_light,
-            "pvp_pump_fun_floor": 0.7,
-            "pvp_pump_fun_scale": 0.05,
+            "pvp_pump_fun_floor": pvp_pf_floor,
+            "pvp_pump_fun_scale": pvp_pf_scale,
             "pvp_normal_floor": pvp_floor,
-            "pvp_normal_scale": 0.1,
+            "pvp_normal_scale": pvp_normal_scale,
             "pump_1h_hard": pp_1h_hard,
             "pump_5m_hard": pp_5m_hard,
             "pump_1h_mod": pp_1h_hard * pp_1h_mod_ratio,
@@ -4530,14 +4559,14 @@ def _optuna_optimize_params(
         "onchain_mult_cap": bp["onchain_mult_cap"],
         # v45: new JSONB configs
         "death_config": {
-            "stale_start_hours": 12,
+            "stale_start_hours": bp["death_stale_start_hours"],
             "stale_tiers": [bp["death_stale_t0"], bp["death_stale_t1"], bp["death_stale_t2"]],
             "stale_bases": [bp["death_stale_b0"], bp["death_stale_b1"], bp["death_stale_b2"], bp["death_stale_b3"]],
-            "vol_modulation_tiers": [50000, 100000, 500000, 1000000],
+            "vol_modulation_tiers": [bp["death_vol_mod_t0"], bp["death_vol_mod_t1"], bp["death_vol_mod_t2"], bp["death_vol_mod_t3"]],
             "vol_modulation_bonuses": [0.15, 0.25, 0.35, 0.45],
             "vol_modulation_caps": [0.8, 0.85, 0.9, 0.95],
-            "vol_death_24h": bp["death_vol_24h"], "vol_death_1h": 500, "vol_death_penalty": 0.15,
-            "vol_floor_24h": 1000, "vol_floor_penalty": 0.1,
+            "vol_death_24h": bp["death_vol_24h"], "vol_death_1h": bp["death_vol_death_1h"], "vol_death_penalty": 0.15,
+            "vol_floor_24h": bp["death_vol_floor_24h"], "vol_floor_penalty": 0.1,
             "price_moderate_social_alive_h": 6, "price_moderate_vol_alive": 0.5,
             "price_mild_threshold": -30, "price_mild_stale_h": 24,
         },
@@ -4593,10 +4622,10 @@ def _optuna_optimize_params(
             "hard_penalty": bp["pump_hard_penalty"],
             "moderate_penalty": bp["pump_moderate_penalty"],
             "light_penalty": bp["pump_light_penalty"],
-            "pvp_pump_fun_floor": 0.7,
-            "pvp_pump_fun_scale": 0.05,
+            "pvp_pump_fun_floor": bp["pvp_pump_fun_floor"],
+            "pvp_pump_fun_scale": bp["pvp_pump_fun_scale"],
             "pvp_normal_floor": bp["pvp_normal_floor"],
-            "pvp_normal_scale": 0.1,
+            "pvp_normal_scale": bp["pvp_normal_scale"],
             "pump_1h_hard": bp["pp_1h_hard"],
             "pump_5m_hard": bp["pp_5m_hard"],
             "pump_1h_mod": bp["pp_1h_hard"] * bp["pp_1h_mod_ratio"],
@@ -4683,6 +4712,14 @@ def _optuna_optimize_params(
             "large_cap_threshold": bp["sm_large_cap_threshold"],
             "floor": bp["sm_floor"],
             "cap": bp["sm_cap"],
+        },
+        # v59: Sentiment blend config (applied to future scrapes via scoring_config)
+        "sentiment_config": {
+            "bert_weight": round(bp["sent_bert_weight"] / (bp["sent_bert_weight"] + bp["sent_vader_weight"] + bp["sent_lexicon_weight"]), 3),
+            "vader_weight": round(bp["sent_vader_weight"] / (bp["sent_bert_weight"] + bp["sent_vader_weight"] + bp["sent_lexicon_weight"]), 3),
+            "lexicon_weight": round(bp["sent_lexicon_weight"] / (bp["sent_bert_weight"] + bp["sent_vader_weight"] + bp["sent_lexicon_weight"]), 3),
+            "no_bert_vader_weight": round(bp["sent_vader_weight"] / (bp["sent_vader_weight"] + bp["sent_lexicon_weight"]) if (bp["sent_vader_weight"] + bp["sent_lexicon_weight"]) > 0 else 0.7, 3),
+            "no_bert_lexicon_weight": round(bp["sent_lexicon_weight"] / (bp["sent_vader_weight"] + bp["sent_lexicon_weight"]) if (bp["sent_vader_weight"] + bp["sent_lexicon_weight"]) > 0 else 0.3, 3),
         },
     }
 
@@ -4851,6 +4888,11 @@ def _optuna_optimize_params(
             "floor": 0.25,
             "cap": 1.5,
         },
+        # v59: Sentiment blend defaults
+        "sentiment_config": {
+            "bert_weight": 0.6, "vader_weight": 0.2, "lexicon_weight": 0.2,
+            "no_bert_vader_weight": 0.7, "no_bert_lexicon_weight": 0.3,
+        },
     }
     baseline_score = _evaluate_params(df_test, BALANCED_WEIGHTS, baseline_params, horizon, threshold)
 
@@ -5006,8 +5048,10 @@ def _apply_optuna_params(client, best_weights: dict, best_params: dict, reason: 
             "safety_config": best_params.get("safety_config"),
             "momentum_config": best_params.get("momentum_config"),
             "size_mult_config": best_params.get("size_mult_config"),
+            # v59: Sentiment blend config (applied at scrape-time by pipeline.py)
+            "sentiment_config": best_params.get("sentiment_config"),
             "updated_at": datetime.now(timezone.utc).isoformat(),
-            "updated_by": "optuna_v56",
+            "updated_by": "optuna_v59",
             "change_reason": reason,
         }
         # Remove None values (don't write nulls for missing configs)

@@ -1153,10 +1153,17 @@ def calculate_sentiment(text: str) -> float:
         lexicon_boost = max(-1, min(1, lexicon_boost / max(1, matches * 0.5)))
 
     bert_score = _cryptobert_sentiment(text)
+    # v59: Sentiment blend weights from SCORING_PARAMS (optimized by Optuna)
+    sent_cfg = SCORING_PARAMS.get("sentiment_config", {})
     if bert_score is not None:
-        final = 0.6 * bert_score + 0.2 * vader_score + 0.2 * lexicon_boost
+        bw = sent_cfg.get("bert_weight", 0.6)
+        vw = sent_cfg.get("vader_weight", 0.2)
+        lw = sent_cfg.get("lexicon_weight", 0.2)
+        final = bw * bert_score + vw * vader_score + lw * lexicon_boost
     else:
-        final = 0.7 * vader_score + 0.3 * lexicon_boost
+        vw_nb = sent_cfg.get("no_bert_vader_weight", 0.7)
+        lw_nb = sent_cfg.get("no_bert_lexicon_weight", 0.3)
+        final = vw_nb * vader_score + lw_nb * lexicon_boost
 
     return max(-1.0, min(1.0, final))
 
@@ -2251,6 +2258,14 @@ _DEFAULT_SCORING_PARAMS = {
         "pvp_normal_floor": 0.5,
         "pvp_normal_scale": 0.1,
     },
+    # v59: Sentiment blend weights (optimized by Optuna)
+    "sentiment_config": {
+        "bert_weight": 0.6,
+        "vader_weight": 0.2,
+        "lexicon_weight": 0.2,
+        "no_bert_vader_weight": 0.7,
+        "no_bert_lexicon_weight": 0.3,
+    },
 }
 
 # Module-level cache: refreshed once per scrape cycle via load_scoring_config()
@@ -2366,6 +2381,8 @@ def load_scoring_config() -> None:
             "mention_weight_config", "conviction_config", "pump_pen_config",
             # v56: KOL win rate multiplier config
             "kol_wr_config",
+            # v59: Sentiment blend weights (optimized by Optuna)
+            "sentiment_config",
         ]
         for key in _V44_JSONB_KEYS:
             val = row.get(key)
