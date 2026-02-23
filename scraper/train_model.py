@@ -120,13 +120,15 @@ CORE_FEATURES = [
     "first_call_age_minutes",
     "kol_cascade_rate",
     "price_vs_first_call",
-    # v53: 4 feature blocks (holder stability, buy distribution, KOL coordination, liquidity depth)
-    "holder_turnover_pct",
-    "small_holder_pct",
-    "avg_tx_size_usd",
-    "kol_cooccurrence_avg",
-    "kol_combo_novelty",
-    "liquidity_depth_score",
+    # v53: 4 feature blocks — DISABLED in core tier (v58 audit: fill rate <6-15%).
+    # Kept in ALL_FEATURE_COLS for when data accumulates. Only avg_tx_size_usd (15%)
+    # and liquidity_depth_score (12%) have enough data to consider later.
+    # "holder_turnover_pct",    # 0.5% fill — dead
+    # "small_holder_pct",       # 1.1% fill — dead
+    # "avg_tx_size_usd",        # 14.9% fill — not enough yet
+    # "kol_cooccurrence_avg",   # 6.0% fill — dead
+    # "kol_combo_novelty",      # 6.0% fill — dead
+    # "liquidity_depth_score",  # 12.0% fill — not enough yet
     # v54: Lifecycle velocity
     "lifecycle_velocity",
     "phase_duration_cycles",
@@ -270,16 +272,17 @@ ALL_FEATURE_COLS = [
     "first_call_age_minutes",
     "kol_cascade_rate",
     "price_vs_first_call",
-    # v53: 4 feature blocks (9 signals)
-    "holder_turnover_pct",
-    "smart_money_retention",
-    "small_holder_pct",
-    "avg_tx_size_usd",
-    "kol_cooccurrence_avg",
-    "kol_combo_novelty",
-    "jup_price_impact_500",
-    "jup_price_impact_5k",
-    "liquidity_depth_score",
+    # v53: 4 feature blocks — v58 audit: most have <15% fill rate, excluded from
+    # training to avoid noise. Re-enable when fill rate > 50%.
+    # "holder_turnover_pct",    # 0.5% fill
+    # "smart_money_retention",  # 0.5% fill
+    # "small_holder_pct",       # 1.1% fill
+    "avg_tx_size_usd",          # 14.9% fill — borderline, derived from existing data
+    # "kol_cooccurrence_avg",   # 6.0% fill
+    # "kol_combo_novelty",      # 6.0% fill
+    "jup_price_impact_500",     # 12.8% fill — growing
+    "jup_price_impact_5k",      # 12.8% fill — growing
+    "liquidity_depth_score",    # 12.0% fill — growing
     # v54: Lifecycle velocity
     "lifecycle_velocity",
     "phase_duration_cycles",

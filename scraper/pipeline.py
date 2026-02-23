@@ -1589,59 +1589,42 @@ def _apply_hard_gates(ranking: list[dict]) -> list[dict]:
       - low_liquidity (17.4% hit rate vs 9.9% scored) — REMOVED
       - wash_trading (38.1% hit rate vs 9.9% scored) — REMOVED (separate function)
 
-    Remaining soft penalties (gate_mult applied):
-      - mint_authority: 0.05x (can inflate supply — genuine rug risk)
-      - freeze_authority: 0.05x (can freeze tokens — genuine rug risk)
-      - top10_concentration > 70%: 0.7x
-      - low_holders < 30: 0.7x
+    v58 AUDIT: ALL gate penalties DISABLED. Data at N=29,345 shows gates are
+    anti-predictive:
+      - Killed tokens (gate=0): 18.4% hit rate (BEST)
+      - No penalty: 15.0%
+      - Penalized: 13.5% (WORST)
+    Gate reasons are still RECORDED for ML features, but gate_mult is always 1.0.
     """
     gate_top10 = SCORING_PARAMS["gate_top10_pct"]
     gate_holders = int(SCORING_PARAMS["gate_min_holders"])
 
-    soft_penalized = 0
+    tagged = 0
     for token in ranking:
-        # v33: Preserve gate_mult from earlier soft penalties (no_address, no_data, single_a_tier)
-        gate_mult = float(token.get("gate_mult", 1.0) or 1.0)
+        # v58: gate_mult ALWAYS 1.0 — gates are anti-predictive, destroy alpha.
+        # We still tag gate_reason so ML can use it as a feature.
         gate_reasons = []
 
-        # === EXTREME SOFT PENALTIES (formerly hard gates) ===
-        # v33: Converted from hard removal to 0.05x so tokens stay in pipeline,
-        # get scored/enriched/labeled. Score crushed to near-zero but data collected.
         if token.get("has_mint_authority"):
-            gate_mult = min(gate_mult, 0.05)
             gate_reasons.append("mint_authority")
         if token.get("has_freeze_authority"):
-            gate_mult = min(gate_mult, 0.05)
             gate_reasons.append("freeze_authority")
 
-        # === SOFT PENALTIES ===
-        # top10 holders own > gate_top10_pct% = concentration risk
         top10 = token.get("top10_holder_pct")
         if top10 is not None and top10 > gate_top10:
-            gate_mult = min(gate_mult, 0.7)
             gate_reasons.append("top10_concentration")
 
-        # v34: REMOVED high_risk_score gate — data shows 46.7% hit rate vs 9.9% for scored tokens.
-        # Safety metrics are anti-predictive in memecoins. RugCheck risk > 8000 correlates with WINNERS.
-        # Keeping as data column for ML features but not penalizing.
-
-        # v34: REMOVED low_liquidity gate — data shows 17.4% hit rate vs 9.9% for scored tokens.
-        # Low liquidity = early entry opportunity, not risk. Keeping as data column for ML.
-
-        # Holder floor (need real organic community)
         hcount = token.get("helius_holder_count") or token.get("holder_count")
         if hcount is not None and hcount < gate_holders:
-            gate_mult = min(gate_mult, 0.7)
             gate_reasons.append("low_holders")
 
-        token["gate_mult"] = round(gate_mult, 3)
+        token["gate_mult"] = 1.0  # v58: no penalty, data proves gates anti-predictive
         if gate_reasons:
-            token["gate_reason"] = gate_reasons[0]  # primary reason for diagnostics
-            soft_penalized += 1
+            token["gate_reason"] = gate_reasons[0]
+            tagged += 1
 
-    if soft_penalized:
-        logger.info("Soft gate penalties applied to %d tokens (mint/freeze=0.05x, top10>%.0f%%, holders<%d)",
-                     soft_penalized, gate_top10, gate_holders)
+    if tagged:
+        logger.info("Gate reasons tagged on %d tokens (NO penalty — v58 audit: gates anti-predictive)", tagged)
     return ranking
 
 
@@ -3323,44 +3306,35 @@ def aggregate_ranking(
     all_enriched = ranking
 
     # === Quality gates BEFORE expensive enrichment ===
-    # v28: Converted from hard removal to soft penalties (gate_mult) so
-    # outcome_tracker labels these tokens and backtest can validate empirically.
-    # Gate 1: No token_address → 0.3x (can't enrich but still scored)
-    addr_penalized = 0
+    # v58 AUDIT: ALL pre-enrichment gate penalties DISABLED — data proves gates
+    # are anti-predictive (killed tokens = 18.4% hit rate vs penalized = 13.5%).
+    # Gate reasons still TAGGED for ML features but gate_mult stays 1.0.
+    addr_tagged = 0
     for t in ranking:
         if not t.get("token_address"):
-            existing_gate = t.get("gate_mult", 1.0)
-            t["gate_mult"] = round(min(existing_gate, 0.3), 3)
             t["gate_reason"] = t.get("gate_reason") or "no_address"
-            addr_penalized += 1
-    if addr_penalized:
-        logger.info("No-address soft penalty (0.3x) applied to %d tokens", addr_penalized)
+            addr_tagged += 1
+    if addr_tagged:
+        logger.info("No-address tagged on %d tokens (no penalty — v58)", addr_tagged)
 
-    # Gate 1b: No volume AND no liquidity → 0.3x
-    data_penalized = 0
+    data_tagged = 0
     for t in ranking:
         if (t.get("volume_24h") or 0) <= 0 and (t.get("liquidity_usd") or 0) <= 0:
-            existing_gate = t.get("gate_mult", 1.0)
-            t["gate_mult"] = round(min(existing_gate, 0.3), 3)
             t["gate_reason"] = t.get("gate_reason") or "no_data"
-            data_penalized += 1
-    if data_penalized:
-        logger.info("No-data soft penalty (0.3x) applied to %d tokens", data_penalized)
+            data_tagged += 1
+    if data_tagged:
+        logger.info("No-data tagged on %d tokens (no penalty — v58)", data_tagged)
 
-    # Gate 2: For longer windows (48h+), single A-tier KOL = soft penalty (not removal)
-    # v21: converted from hard gate to 0.6x penalty — collect outcome data to validate
     if hours >= 48:
         single_a_count = 0
         for t in ranking:
             tiers = t.get("kol_tiers", {})
             has_s_tier = any(tier == "S" for tier in tiers.values())
             if not has_s_tier and t.get("unique_kols", 0) < 2:
-                existing_gate = t.get("gate_mult", 1.0)
-                t["gate_mult"] = round(min(existing_gate, 0.6), 3)
                 t["gate_reason"] = t.get("gate_reason") or "single_a_tier"
                 single_a_count += 1
         if single_a_count:
-            logger.info("Single-A-tier penalty applied to %d tokens (window=%dh)", single_a_count, hours)
+            logger.info("Single-A-tier tagged on %d tokens (window=%dh, no penalty — v58)", single_a_count, hours)
 
     # === Hard gates (uses RugCheck + DexScreener data) ===
     # v33: _apply_hard_gates is now all-soft (returns same list, no removals)

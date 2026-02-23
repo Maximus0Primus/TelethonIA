@@ -36,7 +36,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: group_cache.json
-          key: group-cache-${{ github.run_id }}
+          key: group-cache-v1
           restore-keys: group-cache-
 
       # Persist enrichment caches between runs — avoids re-fetching DexScreener/Helius/Jupiter/etc.
@@ -53,8 +53,8 @@ jobs:
             scraper/pool_address_cache.json
             scraper/bubblemaps_cache.json
             scraper/kol_scores.json
-          key: enrichment-${{ github.run_id }}
-          restore-keys: enrichment-
+          key: enrichment-cache-v1
+          restore-keys: enrichment-cache-
 
       - name: Install dependencies
         run: pip install -r scraper/requirements.txt
