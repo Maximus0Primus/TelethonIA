@@ -341,7 +341,16 @@ def _compute_score(row: pd.Series, weights: dict) -> int:
 
 
 def _compute_return(row: pd.Series, horizon: str = "12h") -> float | None:
-    """Compute max return ratio for a given horizon."""
+    """Compute max return ratio for a given horizon.
+
+    Uses price_at_snapshot as entry — this is the price the user sees on the
+    dashboard when the snapshot is created. Combined with first-appearance dedup,
+    this represents the best-case entry (earliest sighting at that price).
+
+    NOTE (v58 audit): This is slightly optimistic because a real user won't buy
+    at the exact snapshot moment. The paper_trade_simulation and live paper_trader
+    use actual cycle prices which are more realistic.
+    """
     p0 = row.get("price_at_snapshot")
     max_col = f"max_price_{horizon}"
     pmax = row.get(max_col)

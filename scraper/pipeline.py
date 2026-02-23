@@ -3735,19 +3735,9 @@ def aggregate_ranking(
         token["score_momentum"] = min(100, max(0, int(token["score_momentum"] * combined)))
 
         # Multi-indicator confirmation pillars (data only, no score penalty)
-        # v15.2: Gate REMOVED — backtest (204 samples) shows 0 pillars = 28.6%
-        # hit rate vs 3 pillars = 0%. Gate was penalizing winners.
-        pillars = 0
-        consensus_val = _get_component_value(token, "consensus")
-        pa_val = _get_component_value(token, "price_action")
-        breadth_val = _get_component_value(token, "breadth")
-        if consensus_val is not None and consensus_val >= 0.2:
-            pillars += 1
-        if pa_val is not None and pa_val >= 0.35:
-            pillars += 1
-        if breadth_val is not None and breadth_val >= 0.08:
-            pillars += 1
-        token["confirmation_pillars"] = pillars
+        # v58 AUDIT: Removed confirmation_pillars computation (dead since v15.2).
+        # Gate was removed after data showed 0 pillars = 28.6% hit vs 3 pillars = 0%.
+        # Value was only used for logging, never in scoring or ML.
 
         # Update interpretation band after final score
         token["score_interpretation"] = _interpret_score(token["score"])
@@ -3757,12 +3747,7 @@ def aggregate_ranking(
         # ML-only initially; may become a soft multiplier if correlation > 0.05.
         token["entry_timing_quality"] = _compute_entry_timing_quality(token)
 
-    unconfirmed = sum(1 for t in ranking if t.get("confirmation_pillars", 0) < 2)
-    logger.info(
-        "Applied on-chain multipliers & safety penalties to %d tokens "
-        "(unconfirmed: %d)",
-        len(ranking), unconfirmed,
-    )
+    logger.info("Applied on-chain multipliers & safety penalties to %d tokens", len(ranking))
 
     # v44: Apply ML scoring based on scoring_mode from scoring_config
     scoring_mode = SCORING_PARAMS.get("scoring_mode", "formula")
