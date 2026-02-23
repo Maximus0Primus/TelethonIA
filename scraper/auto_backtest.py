@@ -4121,6 +4121,7 @@ def _optuna_optimize_params(
         "activity_pump_cap_hard": bp["activity_pump_cap_hard"],
         "activity_pump_cap_soft": bp["activity_pump_cap_soft"],
         "s_tier_bonus": bp["s_tier_bonus"],
+        "ca_mention_bonus": bp["ca_mention_bonus"],
         # v56: KOL win rate config
         "kol_wr_config": {
             "thresholds": [bp["wr_t0"], bp["wr_t1"], bp["wr_t2"]],

@@ -9,7 +9,7 @@ interface UseAutoRefreshOptions {
 }
 
 export function useAutoRefresh({
-  interval = 60_000,
+  interval = 900_000,
   enabled = true,
   onDataChange,
 }: UseAutoRefreshOptions) {

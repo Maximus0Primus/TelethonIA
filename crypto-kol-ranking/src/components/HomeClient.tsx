@@ -121,7 +121,6 @@ export function HomeClient({ initialTokens }: HomeClientProps) {
 
   // Auto-refresh polling
   useAutoRefresh({
-    interval: 60_000,
     enabled: introDone,
     onDataChange: () => runAnimation(),
   });
