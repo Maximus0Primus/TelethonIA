@@ -1628,67 +1628,9 @@ def _apply_hard_gates(ranking: list[dict]) -> list[dict]:
     return ranking
 
 
-def _detect_volume_squeeze(token: dict) -> tuple[str, float]:
-    """
-    Detect volume squeeze/fire pattern (adapted from Harvard BB Squeeze).
-    When volume compresses (6h avg << 24h avg) then explodes (1h >> 6h avg) = breakout.
-    Returns (state, squeeze_score) where state is 'squeezing', 'firing', 'none'.
-    squeeze_score: 0.0 (no signal) to 1.0 (strong squeeze fire).
-    """
-    vol_1h = token.get("volume_1h", 0) or 0
-    vol_6h = token.get("volume_6h", 0) or 0
-    vol_24h = token.get("volume_24h", 0) or 0
-
-    if not vol_6h or not vol_24h:
-        return "none", 0.0
-
-    avg_hourly_6h = vol_6h / 6
-    avg_hourly_24h = vol_24h / 24
-
-    if avg_hourly_24h <= 0:
-        return "none", 0.0
-
-    # Compression: 6h hourly average much lower than 24h hourly average
-    compression_ratio = avg_hourly_6h / avg_hourly_24h
-
-    if compression_ratio < 0.5:  # Volume was compressed
-        if vol_1h > 0 and avg_hourly_6h > 0:
-            expansion = vol_1h / avg_hourly_6h
-            if expansion > 2.0:  # Breakout: 1h volume explodes past compressed average
-                return "firing", min(1.0, expansion / 5.0)
-        return "squeezing", 0.3
-
-    return "none", 0.0
-
-
-def _compute_trend_strength(token: dict) -> float:
-    """
-    ADX-like trend strength from available price data (adapted from Harvard ADX).
-    Measures directional conviction across timeframes.
-    Returns 0.0 (no trend / conflicting signals) to 1.0 (very strong directional move).
-    """
-    pc1h = token.get("price_change_1h")
-    pc6h = token.get("price_change_6h")
-    pc24h = token.get("price_change_24h")
-
-    # Only use non-None values for direction analysis
-    valid = [(pc, tf) for pc, tf in [(pc1h, "1h"), (pc6h, "6h"), (pc24h, "24h")] if pc is not None]
-    if not valid:
-        return 0.0
-
-    directions = [1 if pc > 0 else -1 for pc, _ in valid]
-
-    # All available timeframes agree in direction = strong trend
-    agreement = len(set(directions)) == 1
-
-    # Magnitude: use longest available timeframe, clamped to 100%
-    longest_pc = valid[-1][0]  # last entry = longest timeframe
-    magnitude = min(abs(longest_pc) / 100, 1.0)
-
-    if agreement:
-        return min(1.0, 0.5 + magnitude * 0.5)
-    else:
-        return magnitude * 0.3  # Conflicting signals = weak trend
+# v58 AUDIT: Removed _detect_volume_squeeze() and _compute_trend_strength()
+# Both were dead code: computed but never used in scoring formula or multiplier chain.
+# squeeze_score correlation ~0, trend_strength explicitly marked dead in v23.
 
 
 # v53: KOL co-occurrence matrix — cached per cycle (15min TTL)
@@ -2943,6 +2885,24 @@ def aggregate_ranking(
     # Persist CA cache after processing all messages
     _save_ca_cache(ca_cache)
 
+    # v58 AUDIT: Backfill resolved_ca on ticker-only mentions.
+    # Problem: 90% of mentions had resolved_ca=NULL because ticker extractions
+    # ($POPCAT) don't carry CAs. But the SAME token may have been mentioned in
+    # other messages WITH a CA (via direct CA extraction or URL).
+    # Fix: Use the token-level known_cas (majority vote) to backfill NULL resolved_ca.
+    _backfill_count = 0
+    for m in raw_kol_mentions:
+        if m["resolved_ca"] is None:
+            sym = m["symbol"]
+            known = token_data.get(sym, {}).get("known_cas", [])
+            if known:
+                # Use most common CA for this symbol (same logic as kol_resolved_ca)
+                m["resolved_ca"] = Counter(known).most_common(1)[0][0]
+                _backfill_count += 1
+    if _backfill_count:
+        logger.info("v58: Backfilled resolved_ca on %d/%d ticker-only mentions using token-level known_cas",
+                     _backfill_count, len(raw_kol_mentions))
+
     # Score & rank
     ranking: list[TokenRanking] = []
 
@@ -3382,13 +3342,8 @@ def aggregate_ranking(
         )
         token.update(pa)
 
-        # === Harvard adaptations: Volume Squeeze + Trend Strength ===
-        squeeze_state, squeeze_score = _detect_volume_squeeze(token)
-        token["squeeze_state"] = squeeze_state
-        token["squeeze_score"] = round(squeeze_score, 3)
-
-        trend_strength = _compute_trend_strength(token)
-        token["trend_strength"] = round(trend_strength, 3)
+        # v58 AUDIT: Removed _detect_volume_squeeze() and _compute_trend_strength()
+        # Both computed but never used in scoring or ML. Correlation ~0 at N=29k.
 
         # Algorithm v7: Recalculate balanced score with renormalization
         # Now price_action_score is available (or still None if no OHLCV)
