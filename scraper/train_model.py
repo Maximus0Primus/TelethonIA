@@ -55,12 +55,32 @@ MODEL_DIR = Path(__file__).parent
 
 # Quality gate: model must exceed this precision@5 to be saved
 # v49: dynamic threshold based on sample size (see quality gate below)
+# v58: Overridden by scoring_config.pipeline_config.ml.min_precision_at_5
 MIN_PRECISION_AT_5 = 0.30  # fallback default
 
 # Minimum test set size for quality gate to be meaningful
-# Need 200+ unique tokens for p@5 to be statistically reliable.
-# With N=14 the ML adds noise, not signal. Collect more data first.
+# v58: Overridden by scoring_config.pipeline_config.ml.min_n_test
 MIN_N_TEST = 200
+
+
+def _load_ml_config() -> None:
+    """v58: Load ML quality gate config from scoring_config.pipeline_config.ml."""
+    global MIN_PRECISION_AT_5, MIN_N_TEST
+    try:
+        client = _get_client()
+        if not client:
+            return
+        result = client.table("scoring_config").select("pipeline_config").eq("id", 1).execute()
+        if not result.data or not result.data[0].get("pipeline_config"):
+            return
+        cfg = result.data[0]["pipeline_config"].get("ml", {})
+        if cfg:
+            MIN_PRECISION_AT_5 = float(cfg.get("min_precision_at_5", MIN_PRECISION_AT_5))
+            MIN_N_TEST = int(cfg.get("min_n_test", MIN_N_TEST))
+            logger.info("v58: Loaded ML config: p@5_min=%.2f, n_test_min=%d",
+                        MIN_PRECISION_AT_5, MIN_N_TEST)
+    except Exception as e:
+        logger.warning("v58: Failed to load ML config: %s (using defaults)", e)
 
 # v22: Dynamic return thresholds — no longer tied to did_2x_* columns
 RETURN_THRESHOLDS = {
@@ -2093,6 +2113,7 @@ def auto_train(
     Returns metadata dict if model was successfully trained and deployed,
     None if skipped or failed.
     """
+    _load_ml_config()  # v58: dynamic quality gates from DB
     HORIZON_POOL = ["6h", "12h", "24h"]
     THRESHOLD_POOL = [1.3, 1.5, 2.0]
 

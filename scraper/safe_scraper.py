@@ -41,6 +41,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # === CONFIGURATION ===
+# v58: These defaults are overridden by scoring_config.pipeline_config.scraper
+# from Supabase when available. Loaded at startup via _load_pipeline_config().
 
 TELEGRAM_API_ID = int(os.environ["TELEGRAM_API_ID"])
 TELEGRAM_API_HASH = os.environ["TELEGRAM_API_HASH"]
@@ -70,6 +72,32 @@ TIME_WINDOWS = {"3h": 3, "6h": 6, "12h": 12, "24h": 24, "48h": 48, "7d": 168}
 # All groups default to tier "A". Update tiers as you identify elite KOLs.
 
 TIER_WEIGHTS = {"S": 2.0, "A": 1.0}
+
+
+def _load_pipeline_config():
+    """v58: Load scraper config from scoring_config.pipeline_config.scraper.
+    Overrides module-level constants. No-op if DB is unreachable."""
+    global MESSAGES_PER_GROUP, MAX_MESSAGE_AGE_HOURS, CYCLE_INTERVAL_SECONDS
+    global PRICE_REFRESH_INTERVAL, TIER_WEIGHTS
+    try:
+        sb = _get_supabase()
+        if not sb:
+            return
+        result = sb.table("scoring_config").select("pipeline_config").eq("id", 1).execute()
+        if not result.data or not result.data[0].get("pipeline_config"):
+            return
+        cfg = result.data[0]["pipeline_config"]
+        scraper_cfg = cfg.get("scraper", {})
+        if scraper_cfg:
+            MESSAGES_PER_GROUP = int(scraper_cfg.get("messages_per_group", MESSAGES_PER_GROUP))
+            MAX_MESSAGE_AGE_HOURS = int(scraper_cfg.get("max_message_age_hours", MAX_MESSAGE_AGE_HOURS))
+            CYCLE_INTERVAL_SECONDS = int(scraper_cfg.get("cycle_interval_seconds", CYCLE_INTERVAL_SECONDS))
+            PRICE_REFRESH_INTERVAL = int(scraper_cfg.get("price_refresh_interval", PRICE_REFRESH_INTERVAL))
+            TIER_WEIGHTS = scraper_cfg.get("tier_weights", TIER_WEIGHTS)
+            logger.info("v58: Loaded scraper config from DB: msgs=%d, cycle=%ds, refresh=%ds",
+                        MESSAGES_PER_GROUP, CYCLE_INTERVAL_SECONDS, PRICE_REFRESH_INTERVAL)
+    except Exception as e:
+        logger.warning("v58: Failed to load pipeline_config: %s (using defaults)", e)
 
 GROUPS_DATA = {
     # === S-TIER (weight 2.0, conviction 10) — elite callers ===
@@ -590,6 +618,9 @@ async def main():
         help="Save debug dump of all messages and pipeline output to scraper/debug_dumps/",
     )
     args = parser.parse_args()
+
+    # v58: Load dynamic config from DB before starting
+    _load_pipeline_config()
 
     session = _get_session()
     client = TelegramClient(session, TELEGRAM_API_ID, TELEGRAM_API_HASH)

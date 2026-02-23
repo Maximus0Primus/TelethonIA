@@ -31,8 +31,9 @@ CACHE_FILE = Path(__file__).parent / "helius_cache.json"
 CACHE_TTL_SECONDS = 4 * 3600  # v56: 4h (was 30min). Budget: 200×20CU×6/day×30 = 720K CU/month (fits 1M free tier)
 
 # How many tokens to enrich per cycle
-# v36: 50 → 200. Free tier = 1M CU/month, we use ~2%. 200 covers full ranking.
-HELIUS_TOP_N = 200         # getTokenAccounts (holder analysis + bundles)
+# v58: 200 → 100. Free tier = 1M CU/month. At 200 + 4h TTL + 15min cron,
+# budget was exhausted by Feb 22. 100 tokens × 20CU × 6/day = 360K CU/month (safe).
+HELIUS_TOP_N = 100         # getTokenAccounts (holder analysis + bundles)
 HELIUS_SMART_MONEY_N = 5   # getSignaturesForAddress (transaction analysis)
 
 # Rate limiting

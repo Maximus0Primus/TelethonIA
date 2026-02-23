@@ -1,0 +1,70 @@
+name: Train ML Models (Manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Training mode'
+        required: true
+        default: 'auto'
+        type: choice
+        options:
+          - auto        # Grid search all 9 combos (6h/12h/24h × 1.3x/1.5x/2.0x)
+          - regression  # Single regression model with current config
+      horizon:
+        description: 'Horizon (only for regression mode)'
+        required: false
+        default: '24h'
+        type: choice
+        options:
+          - 6h
+          - 12h
+          - 24h
+      threshold:
+        description: 'Threshold (only for regression mode)'
+        required: false
+        default: '1.3'
+        type: choice
+        options:
+          - '1.3'
+          - '1.5'
+          - '2.0'
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('scraper/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: pip install -r scraper/requirements.txt
+
+      - name: Train models
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        working-directory: scraper
+        run: |
+          if [ "${{ inputs.mode }}" = "auto" ]; then
+            echo "Running auto_train (grid search all combos)..."
+            python -c "from train_model import auto_train; auto_train()"
+          else
+            echo "Running regression: ${{ inputs.horizon }} / ${{ inputs.threshold }}x..."
+            python -c "from train_model import train_regression; train_regression(horizon='${{ inputs.horizon }}', threshold=${{ inputs.threshold }})"
+          fi

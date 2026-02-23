@@ -94,14 +94,30 @@ HORIZONS = [
 
 # Max snapshots to process per cycle
 # v34: increased to 2000 — token-grouping means ~1 API call per unique token, not per snapshot
+# v58: Overridden by scoring_config.pipeline_config.labeling.batch_limit
 BATCH_LIMIT = 2000
 
 # Time budget in seconds — exit gracefully before GH Action timeout
-# v23: 18 min (was 25). Must leave room for _fix_inconsistencies, _fill_first_call,
-# backfill_bot_data, and auto_backtest which run after the main loop.
-# v34: 30 min (was 18). outcomes.yml timeout increased to 45min to clear labeling backlog.
-# Feb 17 had only 39% of Feb 15 snapshots labeled (should be 100% after 48h).
+# v58: Overridden by scoring_config.pipeline_config.labeling.time_budget_seconds
 TIME_BUDGET_SECONDS = 30 * 60  # 30 minutes
+
+
+def _load_labeling_config(client) -> None:
+    """v58: Load labeling config from scoring_config.pipeline_config.labeling.
+    Overrides module-level BATCH_LIMIT and TIME_BUDGET_SECONDS. No-op if DB unreachable."""
+    global BATCH_LIMIT, TIME_BUDGET_SECONDS
+    try:
+        result = client.table("scoring_config").select("pipeline_config").eq("id", 1).execute()
+        if not result.data or not result.data[0].get("pipeline_config"):
+            return
+        cfg = result.data[0]["pipeline_config"].get("labeling", {})
+        if cfg:
+            BATCH_LIMIT = int(cfg.get("batch_limit", BATCH_LIMIT))
+            TIME_BUDGET_SECONDS = int(cfg.get("time_budget_seconds", TIME_BUDGET_SECONDS))
+            logger.info("v58: Loaded labeling config: batch=%d, budget=%ds",
+                        BATCH_LIMIT, TIME_BUDGET_SECONDS)
+    except Exception as e:
+        logger.warning("v58: Failed to load labeling config: %s (using defaults)", e)
 
 # Sanity check: max plausible price ratio per horizon.
 # If OHLCV returns max_price/price_at > this, the data is likely wrong
@@ -1016,6 +1032,7 @@ def fill_outcomes() -> None:
     New approach: 1 API call per unique token -> ~2000+ snapshots/run (5-10x faster).
     """
     client = _get_client()
+    _load_labeling_config(client)  # v58: dynamic config from DB
     now = datetime.now(timezone.utc)
     now_ts = now.timestamp()
     pool_cache = _load_pool_cache()

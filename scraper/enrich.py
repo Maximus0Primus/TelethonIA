@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 CACHE_FILE = Path(__file__).parent / "enrich_cache.json"
 # Per-source TTLs: only re-fetch when data is actually stale
+# v58: These are defaults — overridden by scoring_config.pipeline_config.enrichment
 TTL_DEXSCREENER = 5 * 60     # 5 min — prices change fast
 TTL_RUGCHECK = 2 * 60 * 60   # 2 hours — risk flags rarely change
 TTL_BIRDEYE = 60 * 60        # 1 hour — holder counts change slowly
@@ -34,6 +35,26 @@ BIRDEYE_TOKEN_SECURITY_URL = "https://public-api.birdeye.so/defi/token_security"
 # Max tokens to enrich via Birdeye per cycle (free tier = 30K CUs/month)
 # Raised from 5 → 20: ~600 CU/cycle × 96 cycles/day = ~18K CU/month (within 30K limit)
 BIRDEYE_TOP_N = 20
+
+
+def load_enrichment_config(client) -> None:
+    """v58: Load enrichment config from scoring_config.pipeline_config.enrichment.
+    Overrides module-level TTL and TOP_N constants. No-op if DB unreachable."""
+    global TTL_DEXSCREENER, TTL_RUGCHECK, TTL_BIRDEYE, BIRDEYE_TOP_N
+    try:
+        result = client.table("scoring_config").select("pipeline_config").eq("id", 1).execute()
+        if not result.data or not result.data[0].get("pipeline_config"):
+            return
+        cfg = result.data[0]["pipeline_config"].get("enrichment", {})
+        if cfg:
+            TTL_DEXSCREENER = int(cfg.get("ttl_dexscreener", TTL_DEXSCREENER))
+            TTL_RUGCHECK = int(cfg.get("ttl_rugcheck", TTL_RUGCHECK))
+            TTL_BIRDEYE = int(cfg.get("ttl_birdeye", TTL_BIRDEYE))
+            BIRDEYE_TOP_N = int(cfg.get("birdeye_top_n", BIRDEYE_TOP_N))
+            logger.info("v58: Loaded enrichment config: dex_ttl=%ds, rug_ttl=%ds, bird_ttl=%ds, bird_n=%d",
+                        TTL_DEXSCREENER, TTL_RUGCHECK, TTL_BIRDEYE, BIRDEYE_TOP_N)
+    except Exception as e:
+        logger.warning("v58: Failed to load enrichment config: %s (using defaults)", e)
 
 
 def _load_cache() -> dict:
