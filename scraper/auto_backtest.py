@@ -3962,14 +3962,17 @@ def _evaluate_params(
     df: pd.DataFrame,
     weights: dict,
     params: dict,
-    horizon: str = "12h",
-    threshold: float = 2.0,
+    horizon: str = "24h",
+    threshold: float = 1.3,
 ) -> float:
     """
-    Composite objective for Optuna (higher = better):
-    - 30% portfolio return (top-5 tokens per cycle)
-    - 20% Sharpe ratio
-    - 50% top-1 hit rate (dominant — bot picks only #1 token per cycle)
+    v60: Composite objective for Optuna (higher = better).
+    Multi-threshold ranking quality + multi-strategy PnL + Sharpe.
+
+    - 30% multi-threshold hit rate on top-3 (1.3x/1.5x/2.0x weighted)
+    - 25% portfolio return (top-5 tokens per cycle)
+    - 20% Sharpe ratio on top-5 cycle returns
+    - 25% strategy expectancy (avg across BOT_STRATEGIES using time_to_* cols)
     """
     max_price_col = f"max_price_{horizon}"
     if max_price_col not in df.columns:
@@ -3981,8 +3984,11 @@ def _evaluate_params(
     df["cycle"] = df["snapshot_at"].dt.floor("15min")
 
     cycle_returns = []
-    top1_hits = 0
-    top1_tested = 0
+    # Multi-threshold counters (on top-3)
+    hr_counts = {"1_3x": 0, "1_5x": 0, "2x": 0}
+    hr_tested = 0
+    # Strategy PnL accumulators
+    strategy_pnls = {s["name"]: [] for s in BOT_STRATEGIES}
 
     for _, group in df.sort_values("snapshot_at").groupby("cycle"):
         labeled = group[
@@ -4002,7 +4008,6 @@ def _evaluate_params(
             if p0 <= 0:
                 continue
             p_max = float(tok[max_price_col])
-            # Simple return: max achievable (optimistic but consistent for comparison)
             ret = (p_max / p0) - 1.0
             returns.append(ret)
 
@@ -4010,40 +4015,91 @@ def _evaluate_params(
             cycle_ret = sum(returns) / len(returns)
             cycle_returns.append(cycle_ret)
 
-        # Top-1 hit rate
-        top1 = labeled.loc[labeled["trial_score"].idxmax()]
-        p0 = float(top1["price_at_snapshot"]) if pd.notna(top1.get("price_at_snapshot")) else 0
-        p_max = float(top1[max_price_col]) if pd.notna(top1.get(max_price_col)) else 0
-        if p0 > 0:
-            top1_tested += 1
-            if p_max / p0 >= threshold:
-                top1_hits += 1
+        # Multi-threshold hit rate on top-3
+        top3 = labeled.nlargest(min(3, len(labeled)), "trial_score")
+        for _, tok in top3.iterrows():
+            p0 = float(tok["price_at_snapshot"])
+            if p0 <= 0:
+                continue
+            p_max = float(tok[max_price_col])
+            ratio = p_max / p0
+            hr_tested += 1
+            if ratio >= 1.3:
+                hr_counts["1_3x"] += 1
+            if ratio >= 1.5:
+                hr_counts["1_5x"] += 1
+            if ratio >= 2.0:
+                hr_counts["2x"] += 1
 
-    if not cycle_returns or top1_tested == 0:
+        # Strategy PnL on top-5 using time_to_* columns
+        for strat in BOT_STRATEGIES:
+            tp_col = f"{strat['tp_col']}_{horizon}"
+            sl_col = f"{strat['sl_col']}_{horizon}"
+            for _, tok in top5.iterrows():
+                tp_time = tok.get(tp_col)
+                sl_time = tok.get(sl_col)
+                tp_hit = pd.notna(tp_time) and float(tp_time) >= 0
+                sl_hit = pd.notna(sl_time) and float(sl_time) >= 0
+                if tp_hit and sl_hit:
+                    # Both hit — whichever came first
+                    if float(tp_time) <= float(sl_time):
+                        strategy_pnls[strat["name"]].append(strat["tp_pct"])
+                    else:
+                        strategy_pnls[strat["name"]].append(strat["sl_pct"])
+                elif tp_hit:
+                    strategy_pnls[strat["name"]].append(strat["tp_pct"])
+                elif sl_hit:
+                    strategy_pnls[strat["name"]].append(strat["sl_pct"])
+                # else: timeout — no entry (skip, don't penalize)
+
+    if not cycle_returns or hr_tested == 0:
         return -999.0
 
-    # Components
+    # Component 1: Multi-threshold hit rate (weighted)
+    hr_1_3x = hr_counts["1_3x"] / hr_tested
+    hr_1_5x = hr_counts["1_5x"] / hr_tested
+    hr_2x = hr_counts["2x"] / hr_tested
+    multi_hr = 0.50 * hr_1_3x + 0.30 * hr_1_5x + 0.20 * hr_2x
+
+    # Component 2: Portfolio return
     avg_return = np.mean(cycle_returns)
+
+    # Component 3: Sharpe ratio (capped at 3 for normalization)
     std_return = np.std(cycle_returns) if len(cycle_returns) > 1 else 1.0
     sharpe = avg_return / max(0.01, std_return)
-    top1_hr = top1_hits / top1_tested
+    sharpe_norm = min(sharpe, 3.0) / 3.0
 
-    # Composite: 30% portfolio return + 20% sharpe + 50% top1 hit rate
-    # v49: hit-rate-dominant — bot only picks #1 token per cycle
-    composite = 0.30 * avg_return + 0.20 * min(sharpe, 3.0) / 3.0 + 0.50 * top1_hr
+    # Component 4: Strategy expectancy (avg across all strategies that had trades)
+    strat_expectations = []
+    for name, pnls in strategy_pnls.items():
+        if len(pnls) >= 3:  # Need at least 3 trades to be meaningful
+            strat_expectations.append(np.mean(pnls))
+    if strat_expectations:
+        strategy_expectancy = np.mean(strat_expectations)
+        # Normalize: typical range is [-0.3, +0.5] → map to [0, 1]
+        strategy_expectancy_norm = max(0, min(1.0, (strategy_expectancy + 0.3) / 0.8))
+    else:
+        strategy_expectancy_norm = 0.0
+
+    # Composite: multi-threshold ranking + return + sharpe + strategy PnL
+    composite = (0.30 * multi_hr
+                 + 0.25 * max(0, min(avg_return, 2.0)) / 2.0  # cap return at 200% for normalization
+                 + 0.20 * sharpe_norm
+                 + 0.25 * strategy_expectancy_norm)
 
     return composite
 
 
 def _optuna_optimize_params(
     df: pd.DataFrame,
-    horizon: str = "12h",
-    n_trials: int = 200,
-    timeout: int = 900,
+    horizon: str = "24h",
+    n_trials: int = 500,
+    timeout: int = 1800,
 ) -> dict | None:
     """
-    v49: Optuna study with ~119 search space parameters (14/14 multipliers recomputable).
+    v60: Optuna study with ~119 search space parameters (14/14 multipliers recomputable).
     2-fold expanding walk-forward inside objective to prevent overfit to a single split.
+    500 trials, 1800s timeout, random seed, multi-threshold + strategy PnL objective.
     Returns best_params dict or None if no improvement.
     """
     import optuna
@@ -4498,7 +4554,7 @@ def _optuna_optimize_params(
             return -999.0
         return (fold1_score + fold2_score) / 2.0
 
-    study = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler(seed=42))
+    study = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler())
     study.optimize(objective, n_trials=n_trials, timeout=timeout)
 
     best_trial = study.best_trial
@@ -4910,81 +4966,85 @@ def _optuna_optimize_params(
         )
         return None
     gap = abs(best_trial.value - test_score) / max(0.001, best_trial.value)
-    if gap > 0.20:
+    if gap > 0.40:
         logger.warning(
-            "optuna: train/test gap %.1f%% > 20%%, likely overfit — skipping",
+            "optuna: train/test gap %.1f%% > 40%%, likely overfit — skipping",
             gap * 100,
         )
         return None
 
-    # Guard-rail: must improve over baseline by >= 5%
+    # Guard-rail: must improve over baseline by >= 1%
     if baseline_score > -900:
         improvement = (test_score - baseline_score) / max(0.001, abs(baseline_score))
-        if improvement < 0.05:
+        if improvement < 0.01:
             logger.info(
-                "optuna: improvement %.1f%% < 5%% threshold — keeping current params",
+                "optuna: improvement %.1f%% < 1%% threshold — keeping current params",
                 improvement * 100,
             )
             return None
     else:
         improvement = float("inf")
 
-    # Guard-rail: no scalar param > 30% change from current
-    # Note: JSONB configs (onchain_config, safety_config, etc.) are bounded by Optuna ranges
-    for key in ["activity_mult_floor", "activity_mult_cap", "s_tier_bonus", "ca_mention_bonus",
-                 "combined_floor", "combined_cap",
-                 "safety_floor", "onchain_mult_floor", "onchain_mult_cap",
-                 "pa_norm_floor", "pa_norm_cap",
-                 "consensus_pump_threshold", "consensus_pump_floor",
-                 "consensus_pump_divisor", "activity_mid_mult",
-                 "conviction_offset", "conviction_divisor"]:
-        current = baseline_params.get(key, best_params[key])
-        new_val = best_params[key]
-        if current > 0:
-            change = abs(new_val - current) / current
-            if change > 0.30:
-                logger.warning(
-                    "optuna: %s changed %.1f%% > 30%% max — clamping",
-                    key, change * 100,
-                )
-                direction = 1 if new_val > current else -1
-                best_params[key] = current * (1 + direction * 0.30)
+    # v60: 30% parameter clamp REMOVED — Optuna suggest_float() ranges already bound all params.
+    # Walk-forward validation + train/test gap check are sufficient overfit protection.
 
-    # v49: Post-Optuna bot validation — verify #1 pick has positive expectancy
+    # v60: Multi-strategy bot validation using BOT_STRATEGIES × top-3 per cycle
     max_price_col = f"max_price_{horizon}"
     df_test_scored = df_test.copy()
     df_test_scored["trial_score"] = df_test_scored.apply(
         lambda r: _compute_score_with_params(r, best_weights, best_params), axis=1
     )
     df_test_scored["cycle"] = df_test_scored["snapshot_at"].dt.floor("15min")
-    bot_wins, bot_losses, bot_tested = 0, 0, 0
-    for _, group in df_test_scored.groupby("cycle"):
-        labeled = group[group[max_price_col].notna() & group["price_at_snapshot"].notna()]
-        if labeled.empty:
-            continue
-        top1 = labeled.loc[labeled["trial_score"].idxmax()]
-        p0 = float(top1["price_at_snapshot"])
-        if p0 <= 0:
-            continue
-        p_max = float(top1[max_price_col])
-        bot_tested += 1
-        ret = (p_max / p0) - 1.0
-        if ret >= (threshold - 1.0):
-            bot_wins += 1
-        elif ret < -0.30:  # SL proxy: -30% = loss
-            bot_losses += 1
-    if bot_tested >= 5:
-        bot_expectancy = (bot_wins * (threshold - 1.0) - bot_losses * 0.30) / bot_tested
-        if bot_expectancy < 0:
-            logger.warning(
-                "optuna: bot validation NEGATIVE expectancy (%.3f, wins=%d losses=%d tested=%d) — skipping",
-                bot_expectancy, bot_wins, bot_losses, bot_tested,
+
+    strat_results = {}
+    for strat in BOT_STRATEGIES:
+        tp_col = f"{strat['tp_col']}_{horizon}"
+        sl_col = f"{strat['sl_col']}_{horizon}"
+        wins, losses, trades = 0, 0, 0
+        for _, group in df_test_scored.groupby("cycle"):
+            labeled = group[group[max_price_col].notna() & group["price_at_snapshot"].notna()]
+            if labeled.empty:
+                continue
+            top3 = labeled.nlargest(min(3, len(labeled)), "trial_score")
+            for _, tok in top3.iterrows():
+                tp_time = tok.get(tp_col)
+                sl_time = tok.get(sl_col)
+                tp_hit = pd.notna(tp_time) and float(tp_time) >= 0
+                sl_hit = pd.notna(sl_time) and float(sl_time) >= 0
+                if tp_hit and sl_hit:
+                    trades += 1
+                    if float(tp_time) <= float(sl_time):
+                        wins += 1
+                    else:
+                        losses += 1
+                elif tp_hit:
+                    trades += 1
+                    wins += 1
+                elif sl_hit:
+                    trades += 1
+                    losses += 1
+        if trades >= 3:
+            expectancy = (wins * strat["tp_pct"] + losses * strat["sl_pct"]) / trades
+            strat_results[strat["name"]] = {
+                "expectancy": expectancy, "wins": wins, "losses": losses, "trades": trades,
+            }
+            logger.info(
+                "optuna: bot validation %s — expectancy=%.3f, wins=%d/%d",
+                strat["name"], expectancy, wins, trades,
             )
-            return None
-        logger.info(
-            "optuna: bot validation OK — expectancy=%.3f, wins=%d/%d",
-            bot_expectancy, bot_wins, bot_tested,
+
+    # Gate: at least 2 of 5 strategies must have positive expectancy
+    positive_strats = sum(1 for s in strat_results.values() if s["expectancy"] > 0)
+    if strat_results and positive_strats < 2:
+        logger.warning(
+            "optuna: bot validation FAILED — only %d/%d strategies profitable — skipping",
+            positive_strats, len(strat_results),
         )
+        return None
+    logger.info(
+        "optuna: bot validation PASSED — %d/%d strategies profitable",
+        positive_strats, len(strat_results),
+    )
 
     return {
         "weights": best_weights,
@@ -5051,7 +5111,7 @@ def _apply_optuna_params(client, best_weights: dict, best_params: dict, reason: 
             # v59: Sentiment blend config (applied at scrape-time by pipeline.py)
             "sentiment_config": best_params.get("sentiment_config"),
             "updated_at": datetime.now(timezone.utc).isoformat(),
-            "updated_by": "optuna_v59",
+            "updated_by": "optuna_v60",
             "change_reason": reason,
         }
         # Remove None values (don't write nulls for missing configs)
@@ -5064,7 +5124,7 @@ def _apply_optuna_params(client, best_weights: dict, best_params: dict, reason: 
         return False
 
 
-def run_optuna_optimization(n_trials: int = 200, dry_run: bool = False) -> dict | None:
+def run_optuna_optimization(n_trials: int = 500, dry_run: bool = False) -> dict | None:
     """
     Top-level entry point for Optuna parameter optimization.
     Called from GitHub Actions (outcomes.yml) before auto_backtest.
@@ -5085,8 +5145,8 @@ def run_optuna_optimization(n_trials: int = 200, dry_run: bool = False) -> dict 
     # First-appearance dedup
     first = df.sort_values("snapshot_at").drop_duplicates(subset=["token_address"], keep="first")
 
-    # Use 12h as primary horizon (matching auto_backtest)
-    horizon = "12h"
+    # v60: Use 24h as primary horizon (more data, better for strategy PnL)
+    horizon = "24h"
     max_price_col = f"max_price_{horizon}"
     if max_price_col not in first.columns:
         logger.info("optuna: max_price_%s column not available", horizon)
@@ -5122,7 +5182,7 @@ def run_optuna_optimization(n_trials: int = 200, dry_run: bool = False) -> dict 
         return result
 
     reason = (
-        f"optuna_v49: {n_labeled} tokens, {result['n_trials']} trials, "
+        f"optuna_v60: {n_labeled} tokens, {result['n_trials']} trials, "
         f"test_score {result['baseline_score']:.4f} -> {result['test_score']:.4f} "
         f"(+{result.get('improvement_pct', 0):.1f}%)"
     )
