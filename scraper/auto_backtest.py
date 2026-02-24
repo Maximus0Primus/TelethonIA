@@ -214,7 +214,7 @@ def _fetch_snapshots(client) -> pd.DataFrame:
         if len(result.data) < page_size:
             break  # last page
         offset += page_size
-        if offset >= 10000:  # safety cap
+        if offset >= 50000:  # safety cap (30k+ rows as of Feb 2026, ~2500/day)
             break
 
     if not all_rows:

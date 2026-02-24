@@ -92,7 +92,7 @@ def analyze_winner_profiles(client=None) -> dict:
         if len(result.data) < page_size:
             break
         offset += page_size
-        if offset >= 10000:
+        if offset >= 50000:
             break
 
     if not all_rows:
