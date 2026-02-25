@@ -472,21 +472,9 @@ def process_and_push(messages_data: dict[str, list[dict]], dump: bool = False) -
     # Running fill_outcomes() here was causing GeckoTerminal rate-limit stalls
     # that pushed the scraper past its 25-min GitHub Actions timeout.
 
-    # Run automated backtest diagnosis (only if enough labeled data)
-    try:
-        from auto_backtest import run_auto_backtest
-        report = run_auto_backtest()
-        if report:
-            ds = report.get("data_summary", {})
-            recs = report.get("recommendations", [])
-            logger.info(
-                "Auto-backtest: %d snapshots, hit_rate_12h=%.1f%%, %d recommendations",
-                ds.get("labeled_12h", 0),
-                ds.get("hit_rate_12h", 0) * 100,
-                len(recs),
-            )
-    except Exception as e:
-        logger.error("Auto-backtest failed: %s", e)
+    # v63: Auto-backtest REMOVED from 15-min scrape cycle to fix egress.
+    # Was doing full table scan (34k rows × 170 cols = ~400MB) every 15min = 10+ GB/day.
+    # Now runs ONLY in outcomes.yml (1x/hour) — 75% fewer API calls.
 
     # Auto-retrain ML model when enough labeled data accumulated
     # v22: auto_train does multi-horizon × multi-threshold grid search

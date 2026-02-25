@@ -181,7 +181,8 @@ SNAPSHOT_COLUMNS = (
     "kol_cooccurrence_avg, kol_combo_novelty, "
     "jup_price_impact_500, jup_price_impact_5k, liquidity_depth_score, "
     "lifecycle_velocity, phase_duration_cycles, "
-    "best_kol_win_rate, best_kol_total_calls, kol_wr_mult"
+    "best_kol_win_rate, best_kol_total_calls, kol_wr_mult, "
+    "price_at_first_call, oldest_mention_hours"
 )
 
 
@@ -195,7 +196,45 @@ def _get_client():
 
 
 def _fetch_snapshots(client) -> pd.DataFrame:
-    """Fetch all snapshots with pagination (PostgREST caps at 1000/page)."""
+    """
+    v63: Fetch DEDUPLICATED snapshots via RPC (first appearance per token).
+    Uses Postgres DISTINCT ON server-side → ~2k rows instead of ~34k.
+    Slashes egress from ~400MB to ~25MB per call.
+    """
+    try:
+        # PostgREST default limit is 1000 — raise to 5000 for deduped data (~1200 tokens)
+        all_rows = []
+        page_size = 1000
+        offset = 0
+        while True:
+            result = (
+                client.rpc("get_deduped_snapshots", {})
+                .range(offset, offset + page_size - 1)
+                .execute()
+            )
+            if not result.data:
+                break
+            all_rows.extend(result.data)
+            if len(result.data) < page_size:
+                break
+            offset += page_size
+            if offset >= 10000:  # safety cap
+                break
+
+        if not all_rows:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(all_rows)
+        df["snapshot_at"] = pd.to_datetime(df["snapshot_at"])
+        logger.info("Fetched %d deduped snapshots via RPC", len(df))
+        return df
+    except Exception as e:
+        logger.error("RPC get_deduped_snapshots failed, falling back to legacy fetch: %s", e)
+        return _fetch_snapshots_legacy(client)
+
+
+def _fetch_snapshots_legacy(client) -> pd.DataFrame:
+    """Legacy paginated fetch (fallback if RPC fails). Returns ALL rows."""
     all_rows = []
     page_size = 1000
     offset = 0
@@ -203,7 +242,7 @@ def _fetch_snapshots(client) -> pd.DataFrame:
         result = (
             client.table("token_snapshots")
             .select(SNAPSHOT_COLUMNS)
-            .gte("snapshot_at", "2026-02-14T00:00:00Z")  # skip pre-v34 poisoned data
+            .gte("snapshot_at", "2026-02-14T00:00:00Z")
             .order("snapshot_at", desc=True)
             .range(offset, offset + page_size - 1)
             .execute()
@@ -212,9 +251,9 @@ def _fetch_snapshots(client) -> pd.DataFrame:
             break
         all_rows.extend(result.data)
         if len(result.data) < page_size:
-            break  # last page
+            break
         offset += page_size
-        if offset >= 50000:  # safety cap (30k+ rows as of Feb 2026, ~2500/day)
+        if offset >= 50000:
             break
 
     if not all_rows:
@@ -223,6 +262,98 @@ def _fetch_snapshots(client) -> pd.DataFrame:
     df = pd.DataFrame(all_rows)
     df["snapshot_at"] = pd.to_datetime(df["snapshot_at"])
     return df
+
+
+def _fetch_paper_trade_snapshots(client) -> pd.DataFrame:
+    """
+    v63: Fetch ALL snapshots but with minimal columns for paper_trade simulation.
+    Uses RPC get_paper_trade_snapshots → ~55 cols instead of ~170+ (70% less data).
+    Paper trade needs all rows (no dedup) because same token re-trades across cycles.
+    """
+    try:
+        all_rows = []
+        page_size = 1000
+        offset = 0
+        while True:
+            result = (
+                client.rpc("get_paper_trade_snapshots", {})
+                .range(offset, offset + page_size - 1)
+                .execute()
+            )
+            if not result.data:
+                break
+            all_rows.extend(result.data)
+            if len(result.data) < page_size:
+                break
+            offset += page_size
+            if offset >= 50000:  # safety cap
+                break
+
+        if not all_rows:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(all_rows)
+        df["snapshot_at"] = pd.to_datetime(df["snapshot_at"])
+        logger.info("Fetched %d paper-trade snapshots via RPC (%d cols)", len(df), len(df.columns))
+        return df
+    except Exception as e:
+        logger.error("RPC get_paper_trade_snapshots failed: %s", e)
+        return pd.DataFrame()
+
+
+def _fetch_kco_data(client) -> pd.DataFrame:
+    """
+    v62: Fetch kol_call_outcomes aggregated per token_address.
+    Returns one row per token with best KCO entry price and max_return.
+
+    KCO measures ATH from the actual KOL call timestamp (unlimited window),
+    so returns are much more accurate than snapshot-based max_price_24h.
+    """
+    all_rows = []
+    page_size = 1000
+    offset = 0
+    while True:
+        result = (
+            client.table("kol_call_outcomes")
+            .select("token_address, entry_price, ath_after_call, max_return, did_2x, call_timestamp")
+            .not_.is_("entry_price", "null")
+            .not_.is_("ath_after_call", "null")
+            .order("call_timestamp", desc=True)
+            .range(offset, offset + page_size - 1)
+            .execute()
+        )
+        if not result.data:
+            break
+        all_rows.extend(result.data)
+        if len(result.data) < page_size:
+            break
+        offset += page_size
+        if offset >= 10000:
+            break
+
+    if not all_rows:
+        return pd.DataFrame()
+
+    kco = pd.DataFrame(all_rows)
+    kco["entry_price"] = pd.to_numeric(kco["entry_price"], errors="coerce")
+    kco["ath_after_call"] = pd.to_numeric(kco["ath_after_call"], errors="coerce")
+    kco["max_return"] = pd.to_numeric(kco["max_return"], errors="coerce")
+
+    # Aggregate per token: best entry (lowest price = earliest/cheapest) and best ATH
+    agg = (
+        kco.groupby("token_address")
+        .agg(
+            kco_entry_price=("entry_price", "min"),       # best (lowest) entry
+            kco_ath=("ath_after_call", "max"),             # best ATH across all calls
+            kco_max_return=("max_return", "max"),          # best return
+            kco_did_2x=("did_2x", lambda x: x.any()),     # any call hit 2x
+            kco_n_calls=("token_address", "count"),
+        )
+        .reset_index()
+    )
+    logger.info("kco: fetched %d KCO rows → %d unique tokens (%.1f%% did 2x)",
+                len(kco), len(agg), 100.0 * agg["kco_did_2x"].sum() / max(1, len(agg)))
+    return agg
 
 
 def _safe_mult(row: pd.Series, col: str, default: float = 1.0) -> float:
@@ -3107,10 +3238,13 @@ def _compute_market_benchmarks(client, df: pd.DataFrame) -> None:
         logger.error("Failed to compute market benchmarks: %s", e, exc_info=True)
 
 
-def run_auto_backtest() -> dict | None:
+def run_auto_backtest(df: pd.DataFrame | None = None) -> dict | None:
     """
     Main entry point. Fetches snapshots, runs progressive analyses,
     returns structured report dict. Returns None if not enough data.
+
+    v63: Accepts optional pre-fetched df to avoid double-fetch when called
+    after Optuna in outcomes.yml pipeline.
     """
     client = _get_client()
     if not client:
@@ -3119,16 +3253,18 @@ def run_auto_backtest() -> dict | None:
     # Load current production weights from scoring_config
     _load_current_weights(client)
 
-    df = _fetch_snapshots(client)
+    if df is None:
+        df = _fetch_snapshots(client)
     if df.empty:
         logger.info("Auto-backtest: no snapshots found")
         return None
 
+    # v63: df from RPC is already deduped (DISTINCT ON token_address).
+    # Internal functions still call drop_duplicates (harmless no-op on deduped data).
     total = len(df)
 
     ALL_HORIZONS = ["12h", "24h", "48h", "72h", "7d"]
 
-    # First-appearance dedup: each token counted once (earliest snapshot)
     first = df.sort_values("snapshot_at").drop_duplicates(subset=["token_address"], keep="first")
     unique_tokens = len(first)
 
@@ -3176,8 +3312,13 @@ def run_auto_backtest() -> dict | None:
     report["multi_tranche_bot"] = _multi_tranche_bot_simulation(df)
 
     # === PAPER-TRADE-EQUIVALENT SIMULATION ===
+    # v63: Paper trade needs ALL rows (no dedup) but uses lightweight column set
     logger.info("Auto-backtest: running paper-trade-equivalent simulation (4 strategies × top 5)")
-    report["paper_trade_sim"] = _paper_trade_simulation(df)
+    pt_df = _fetch_paper_trade_snapshots(client)
+    if not pt_df.empty:
+        report["paper_trade_sim"] = _paper_trade_simulation(pt_df)
+    else:
+        report["paper_trade_sim"] = {"error": "paper trade fetch failed"}
 
     # === ADAPTIVE SL SIMULATION (ML v3.1 — oracle upper bound) ===
     logger.info("Auto-backtest: running adaptive SL simulation")
@@ -3964,36 +4105,71 @@ def _evaluate_params(
     params: dict,
     horizon: str = "24h",
     threshold: float = 1.3,
+    entry_mode: str = "snapshot",
 ) -> float:
     """
-    v60: Composite objective for Optuna (higher = better).
+    v62: Composite objective for Optuna (higher = better).
     Multi-threshold ranking quality + multi-strategy PnL + Sharpe.
 
+    entry_mode:
+      - "snapshot" (default): entry price = price_at_snapshot, return from max_price_{horizon}
+      - "first_call": entry price = price_at_first_call (fallback to price_at_snapshot)
+        Skips strategy PnL. Composite: 3 components.
+      - "kco": uses KCO data directly — kco_entry_price + kco_ath as return.
+        KCO measures ATH from actual call time (unlimited window) = more accurate.
+        Skips strategy PnL. Composite: 3 components.
+
+    Snapshot mode:
     - 30% multi-threshold hit rate on top-3 (1.3x/1.5x/2.0x weighted)
     - 25% portfolio return (top-5 tokens per cycle)
     - 20% Sharpe ratio on top-5 cycle returns
     - 25% strategy expectancy (avg across BOT_STRATEGIES using time_to_* cols)
     """
-    max_price_col = f"max_price_{horizon}"
-    if max_price_col not in df.columns:
-        return -999.0
+    use_kco = entry_mode == "kco"
+    use_first_call = entry_mode == "first_call"
+    skip_strategy = use_kco or use_first_call
+
+    # v62: KCO mode uses kco_ath/kco_entry_price instead of max_price_{horizon}
+    if use_kco:
+        if "kco_entry_price" not in df.columns or "kco_ath" not in df.columns:
+            return -999.0
+    else:
+        max_price_col = f"max_price_{horizon}"
+        if max_price_col not in df.columns:
+            return -999.0
 
     # Compute scores with trial params
     df = df.copy()
     df["trial_score"] = df.apply(lambda r: _compute_score_with_params(r, weights, params), axis=1)
     df["cycle"] = df["snapshot_at"].dt.floor("15min")
 
+    # v62: Compute entry price and max price columns based on mode
+    if use_kco:
+        df["_entry_price"] = df["kco_entry_price"]
+        df["_max_price"] = df["kco_ath"]
+    elif use_first_call:
+        df["_entry_price"] = df["price_at_first_call"].where(
+            df["price_at_first_call"].notna() & (df["price_at_first_call"] > 0),
+            df["price_at_snapshot"],
+        )
+        df["_max_price"] = df[max_price_col]
+    else:
+        df["_entry_price"] = df["price_at_snapshot"]
+        df["_max_price"] = df[max_price_col]
+
     cycle_returns = []
     # Multi-threshold counters (on top-3)
     hr_counts = {"1_3x": 0, "1_5x": 0, "2x": 0}
     hr_tested = 0
-    # Strategy PnL accumulators
-    strategy_pnls = {s["name"]: [] for s in BOT_STRATEGIES}
+    # Strategy PnL accumulators (only for snapshot mode)
+    strategy_pnls = {s["name"]: [] for s in BOT_STRATEGIES} if not skip_strategy else {}
 
     for _, group in df.sort_values("snapshot_at").groupby("cycle"):
         labeled = group[
-            group[max_price_col].notna()
-            & group["price_at_snapshot"].notna()
+            group["_max_price"].notna()
+            & group["_entry_price"].notna()
+            & (group["_entry_price"] > 0)
+            & (group["_max_price"] > 0)
         ]
         if labeled.empty:
             continue
@@ -4004,10 +4180,10 @@ def _evaluate_params(
         # Portfolio return: equal-weight top 5
         returns = []
         for _, tok in top5.iterrows():
-            p0 = float(tok["price_at_snapshot"])
+            p0 = float(tok["_entry_price"])
             if p0 <= 0:
                 continue
-            p_max = float(tok[max_price_col])
+            p_max = float(tok["_max_price"])
             ret = (p_max / p0) - 1.0
             returns.append(ret)
 
@@ -4018,10 +4194,10 @@ def _evaluate_params(
         # Multi-threshold hit rate on top-3
         top3 = labeled.nlargest(min(3, len(labeled)), "trial_score")
         for _, tok in top3.iterrows():
-            p0 = float(tok["price_at_snapshot"])
+            p0 = float(tok["_entry_price"])
             if p0 <= 0:
                 continue
-            p_max = float(tok[max_price_col])
+            p_max = float(tok["_max_price"])
             ratio = p_max / p0
             hr_tested += 1
             if ratio >= 1.3:
@@ -4031,26 +4207,27 @@ def _evaluate_params(
             if ratio >= 2.0:
                 hr_counts["2x"] += 1
 
-        # Strategy PnL on top-5 using time_to_* columns
-        for strat in BOT_STRATEGIES:
-            tp_col = f"{strat['tp_col']}_{horizon}"
-            sl_col = f"{strat['sl_col']}_{horizon}"
-            for _, tok in top5.iterrows():
-                tp_time = tok.get(tp_col)
-                sl_time = tok.get(sl_col)
-                tp_hit = pd.notna(tp_time) and float(tp_time) >= 0
-                sl_hit = pd.notna(sl_time) and float(sl_time) >= 0
-                if tp_hit and sl_hit:
-                    # Both hit — whichever came first
-                    if float(tp_time) <= float(sl_time):
+        # Strategy PnL on top-5 using time_to_* columns (snapshot mode only)
+        if not skip_strategy:
+            for strat in BOT_STRATEGIES:
+                tp_col = f"{strat['tp_col']}_{horizon}"
+                sl_col = f"{strat['sl_col']}_{horizon}"
+                for _, tok in top5.iterrows():
+                    tp_time = tok.get(tp_col)
+                    sl_time = tok.get(sl_col)
+                    tp_hit = pd.notna(tp_time) and float(tp_time) >= 0
+                    sl_hit = pd.notna(sl_time) and float(sl_time) >= 0
+                    if tp_hit and sl_hit:
+                        # Both hit — whichever came first
+                        if float(tp_time) <= float(sl_time):
+                            strategy_pnls[strat["name"]].append(strat["tp_pct"])
+                        else:
+                            strategy_pnls[strat["name"]].append(strat["sl_pct"])
+                    elif tp_hit:
                         strategy_pnls[strat["name"]].append(strat["tp_pct"])
-                    else:
+                    elif sl_hit:
                         strategy_pnls[strat["name"]].append(strat["sl_pct"])
-                elif tp_hit:
-                    strategy_pnls[strat["name"]].append(strat["tp_pct"])
-                elif sl_hit:
-                    strategy_pnls[strat["name"]].append(strat["sl_pct"])
-                # else: timeout — no entry (skip, don't penalize)
+                    # else: timeout — no entry (skip, don't penalize)
 
     if not cycle_returns or hr_tested == 0:
         return -999.0
@@ -4069,23 +4246,29 @@ def _evaluate_params(
     sharpe = avg_return / max(0.01, std_return)
     sharpe_norm = min(sharpe, 3.0) / 3.0
 
-    # Component 4: Strategy expectancy (avg across all strategies that had trades)
-    strat_expectations = []
-    for name, pnls in strategy_pnls.items():
-        if len(pnls) >= 3:  # Need at least 3 trades to be meaningful
-            strat_expectations.append(np.mean(pnls))
-    if strat_expectations:
-        strategy_expectancy = np.mean(strat_expectations)
-        # Normalize: typical range is [-0.3, +0.5] → map to [0, 1]
-        strategy_expectancy_norm = max(0, min(1.0, (strategy_expectancy + 0.3) / 0.8))
+    if skip_strategy:
+        # v62: KCO / first-call mode — 3 components (no strategy PnL)
+        composite = (0.40 * multi_hr
+                     + 0.30 * max(0, min(avg_return, 2.0)) / 2.0
+                     + 0.30 * sharpe_norm)
     else:
-        strategy_expectancy_norm = 0.0
+        # Snapshot mode — 4 components (with strategy PnL)
+        strat_expectations = []
+        for name, pnls in strategy_pnls.items():
+            if len(pnls) >= 3:  # Need at least 3 trades to be meaningful
+                strat_expectations.append(np.mean(pnls))
+        if strat_expectations:
+            strategy_expectancy = np.mean(strat_expectations)
+            # Normalize: typical range is [-0.3, +0.5] → map to [0, 1]
+            strategy_expectancy_norm = max(0, min(1.0, (strategy_expectancy + 0.3) / 0.8))
+        else:
+            strategy_expectancy_norm = 0.0
 
-    # Composite: multi-threshold ranking + return + sharpe + strategy PnL
-    composite = (0.30 * multi_hr
-                 + 0.25 * max(0, min(avg_return, 2.0)) / 2.0  # cap return at 200% for normalization
-                 + 0.20 * sharpe_norm
-                 + 0.25 * strategy_expectancy_norm)
+        # Composite: multi-threshold ranking + return + sharpe + strategy PnL
+        composite = (0.30 * multi_hr
+                     + 0.25 * max(0, min(avg_return, 2.0)) / 2.0
+                     + 0.20 * sharpe_norm
+                     + 0.25 * strategy_expectancy_norm)
 
     return composite
 
@@ -4095,11 +4278,14 @@ def _optuna_optimize_params(
     horizon: str = "24h",
     n_trials: int = 500,
     timeout: int = 1800,
+    entry_mode: str = "snapshot",
 ) -> dict | None:
     """
-    v60: Optuna study with ~119 search space parameters (14/14 multipliers recomputable).
+    v62: Optuna study with ~119 search space parameters (14/14 multipliers recomputable).
     2-fold expanding walk-forward inside objective to prevent overfit to a single split.
     500 trials, 1800s timeout, random seed, multi-threshold + strategy PnL objective.
+
+    entry_mode: "snapshot" (default), "first_call", or "kco" — passed through to _evaluate_params.
     Returns best_params dict or None if no improvement.
     """
     import optuna
@@ -4547,9 +4733,9 @@ def _optuna_optimize_params(
 
         # v49: 2-fold expanding walk-forward evaluation
         # Fold 1: train on B1, evaluate on B2
-        fold1_score = _evaluate_params(df_b2, weights, params, horizon, threshold)
+        fold1_score = _evaluate_params(df_b2, weights, params, horizon, threshold, entry_mode=entry_mode)
         # Fold 2: train on B1+B2, evaluate on B3 (but we only eval here, Optuna trains implicitly)
-        fold2_score = _evaluate_params(df_b3, weights, params, horizon, threshold)
+        fold2_score = _evaluate_params(df_b3, weights, params, horizon, threshold, entry_mode=entry_mode)
         if fold1_score <= -900 or fold2_score <= -900:
             return -999.0
         return (fold1_score + fold2_score) / 2.0
@@ -4780,7 +4966,7 @@ def _optuna_optimize_params(
     }
 
     # Evaluate on TEST set (walk-forward validation)
-    test_score = _evaluate_params(df_test, best_weights, best_params, horizon, threshold)
+    test_score = _evaluate_params(df_test, best_weights, best_params, horizon, threshold, entry_mode=entry_mode)
 
     # Baseline: evaluate current production params on test set
     baseline_params = {
@@ -4950,7 +5136,7 @@ def _optuna_optimize_params(
             "no_bert_vader_weight": 0.7, "no_bert_lexicon_weight": 0.3,
         },
     }
-    baseline_score = _evaluate_params(df_test, BALANCED_WEIGHTS, baseline_params, horizon, threshold)
+    baseline_score = _evaluate_params(df_test, BALANCED_WEIGHTS, baseline_params, horizon, threshold, entry_mode=entry_mode)
 
     logger.info(
         "optuna: walk-forward validation — train=%.4f, test=%.4f, baseline=%.4f",
@@ -5055,6 +5241,7 @@ def _optuna_optimize_params(
         "improvement_pct": round(improvement * 100, 1) if improvement != float("inf") else None,
         "n_trials": len(study.trials),
         "best_trial_number": best_trial.number,
+        "entry_mode": entry_mode,
     }
 
 
@@ -5111,7 +5298,7 @@ def _apply_optuna_params(client, best_weights: dict, best_params: dict, reason: 
             # v59: Sentiment blend config (applied at scrape-time by pipeline.py)
             "sentiment_config": best_params.get("sentiment_config"),
             "updated_at": datetime.now(timezone.utc).isoformat(),
-            "updated_by": "optuna_v60",
+            "updated_by": "optuna_v62",
             "change_reason": reason,
         }
         # Remove None values (don't write nulls for missing configs)
@@ -5124,12 +5311,19 @@ def _apply_optuna_params(client, best_weights: dict, best_params: dict, reason: 
         return False
 
 
-def run_optuna_optimization(n_trials: int = 500, dry_run: bool = False) -> dict | None:
+def run_optuna_optimization(n_trials: int = 500, dry_run: bool = False, df: pd.DataFrame | None = None) -> dict | None:
     """
-    Top-level entry point for Optuna parameter optimization.
+    v62: Top-level entry point for Optuna parameter optimization.
     Called from GitHub Actions (outcomes.yml) before auto_backtest.
 
-    Self-gates: skips if < 150 unique tokens with labels.
+    Runs THREE modes:
+      1. Snapshot entry (price_at_snapshot + max_price_24h)
+      2. First-call entry (price_at_first_call + max_price_24h)
+      3. KCO entry (kol_call_outcomes entry_price + ath_after_call)
+    Deploys whichever produces the highest test_score.
+
+    v63: Accepts optional pre-fetched df to share data with auto_backtest.
+    Returns (result, df) tuple when called from run_outcomes_pipeline().
     """
     client = _get_client()
     if not client:
@@ -5137,13 +5331,24 @@ def run_optuna_optimization(n_trials: int = 500, dry_run: bool = False) -> dict 
 
     _load_current_weights(client)
 
-    df = _fetch_snapshots(client)
+    if df is None:
+        df = _fetch_snapshots(client)
     if df.empty:
         logger.info("optuna: no snapshots found")
         return None
 
-    # First-appearance dedup
+    # v63: RPC already returns deduped data (DISTINCT ON token_address).
+    # drop_duplicates is a harmless no-op for backward compatibility.
     first = df.sort_values("snapshot_at").drop_duplicates(subset=["token_address"], keep="first")
+
+    # v61: Zombie filter — align with train_model.py deduplicate_snapshots()
+    if "freshest_mention_hours" in first.columns:
+        stale_cutoff = 48  # default stale_hours_severe
+        stale_mask = pd.to_numeric(first["freshest_mention_hours"], errors="coerce") > stale_cutoff
+        stale_count = int(stale_mask.sum())
+        if stale_count > 0:
+            first = first[~stale_mask]
+            logger.info("optuna: filtered %d zombie snapshots (freshest_mention > %dh)", stale_count, stale_cutoff)
 
     # v60: Use 24h as primary horizon (more data, better for strategy PnL)
     horizon = "24h"
@@ -5163,32 +5368,138 @@ def run_optuna_optimization(n_trials: int = 500, dry_run: bool = False) -> dict 
         )
         return None
 
-    logger.info("optuna: starting optimization with %d labeled tokens, %d trials", n_labeled, n_trials)
+    # === Mode A: Snapshot entry (current behavior) ===
+    # v62-fix: Pass pre-filtered `labeled` (valid max_price + price_at_snapshot),
+    # not raw `first` which has NULL max_price rows that cause all trials → -999.
+    logger.info("optuna: === Mode A: snapshot entry (%d labeled tokens, %d trials) ===", n_labeled, n_trials)
+    result_snap = _optuna_optimize_params(labeled, horizon=horizon, n_trials=n_trials, entry_mode="snapshot")
 
-    # Pass deduplicated dataframe to prevent data leakage in walk-forward split
-    result = _optuna_optimize_params(first, horizon=horizon, n_trials=n_trials)
-    if result is None:
-        logger.info("optuna: no improvement found, keeping current params")
+    # === Mode B: First-call entry ===
+    # v61: Backfill price_at_first_call from ANY snapshot of same token (not just first-appearance)
+    # v62-fix: Use `labeled` base (valid max_price) — first_call mode still needs max_price for _max_price col
+    result_fc = None
+    if "price_at_first_call" in labeled.columns and "price_at_first_call" in df.columns:
+        labeled["price_at_first_call"] = pd.to_numeric(labeled["price_at_first_call"], errors="coerce")
+        df["_fcp_any"] = pd.to_numeric(df["price_at_first_call"], errors="coerce")
+        fcp_lookup = df.dropna(subset=["_fcp_any"]).drop_duplicates(subset=["token_address"], keep="first").set_index("token_address")["_fcp_any"]
+        missing_fcp = labeled["price_at_first_call"].isna() & labeled["token_address"].isin(fcp_lookup.index)
+        if missing_fcp.any():
+            labeled.loc[missing_fcp, "price_at_first_call"] = labeled.loc[missing_fcp, "token_address"].map(fcp_lookup)
+            logger.info("optuna: propagated price_at_first_call to %d first-appearance rows from other snapshots", int(missing_fcp.sum()))
+        n_fcp = int(labeled["price_at_first_call"].notna().sum())
+        if n_fcp >= 100:
+            logger.info("optuna: === Mode B: first-call entry (%d tokens with FCP, %d trials) ===", n_fcp, n_trials)
+            result_fc = _optuna_optimize_params(labeled, horizon=horizon, n_trials=n_trials, entry_mode="first_call")
+        else:
+            logger.info("optuna: skipping first-call mode — only %d/%d tokens have price_at_first_call (need 100)", n_fcp, n_labeled)
+    else:
+        logger.info("optuna: skipping first-call mode — price_at_first_call column not in data")
+
+    # === Mode C: KCO entry (kol_call_outcomes data) ===
+    # v62: Uses real ATH from call timestamp instead of max_price_24h from snapshot_at
+    # v62-fix: Use `labeled` base for more reliable Optuna convergence
+    result_kco = None
+    kco_data = _fetch_kco_data(client)
+    if not kco_data.empty:
+        # Join KCO aggregated data to labeled snapshots by token_address
+        first_kco = labeled.merge(kco_data, on="token_address", how="inner")
+        # Filter: must have valid KCO entry + ATH
+        kco_valid = (
+            first_kco["kco_entry_price"].notna()
+            & (first_kco["kco_entry_price"] > 0)
+            & first_kco["kco_ath"].notna()
+            & (first_kco["kco_ath"] > 0)
+        )
+        first_kco = first_kco[kco_valid].copy()
+        n_kco = len(first_kco)
+        if n_kco >= 100:
+            logger.info("optuna: === Mode C: KCO entry (%d matched tokens, %.1f%% 2x rate, %d trials) ===",
+                        n_kco, 100.0 * first_kco["kco_did_2x"].sum() / max(1, n_kco), n_trials)
+            result_kco = _optuna_optimize_params(first_kco, horizon=horizon, n_trials=n_trials, entry_mode="kco")
+        else:
+            logger.info("optuna: skipping KCO mode — only %d tokens matched kol_call_outcomes (need 100)", n_kco)
+    else:
+        logger.info("optuna: skipping KCO mode — no kol_call_outcomes data available")
+
+    # === Pick the best result ===
+    candidates = []
+    if result_snap is not None:
+        candidates.append(result_snap)
+    if result_fc is not None:
+        candidates.append(result_fc)
+    if result_kco is not None:
+        candidates.append(result_kco)
+
+    if not candidates:
+        logger.info("optuna: no improvement found in any mode, keeping current params")
         return None
 
+    result = max(candidates, key=lambda r: r["test_score"])
+    chosen_mode = result.get("entry_mode", "snapshot")
+
+    # Log comparison across all modes that ran
+    mode_scores = []
+    if result_snap is not None:
+        mode_scores.append(f"snapshot={result_snap['test_score']:.4f}")
+    if result_fc is not None:
+        mode_scores.append(f"first_call={result_fc['test_score']:.4f}")
+    if result_kco is not None:
+        mode_scores.append(f"kco={result_kco['test_score']:.4f}")
+    if len(mode_scores) > 1:
+        logger.info("optuna: multi-mode comparison — %s → using %s", " vs ".join(mode_scores), chosen_mode)
+
     logger.info(
-        "optuna: found improvement! train=%.4f test=%.4f baseline=%.4f (+%.1f%%)",
+        "optuna: found improvement! mode=%s train=%.4f test=%.4f baseline=%.4f (+%.1f%%)",
+        chosen_mode,
         result["train_score"], result["test_score"], result["baseline_score"],
         result.get("improvement_pct", 0),
     )
 
     if dry_run:
-        logger.info("optuna: DRY RUN — would apply: weights=%s, params=%s", result["weights"], result["params"])
+        logger.info("optuna: DRY RUN — would apply: mode=%s, weights=%s", chosen_mode, result["weights"])
         return result
 
     reason = (
-        f"optuna_v60: {n_labeled} tokens, {result['n_trials']} trials, "
+        f"optuna_v62_{chosen_mode}: {n_labeled} tokens, {result['n_trials']} trials, "
         f"test_score {result['baseline_score']:.4f} -> {result['test_score']:.4f} "
         f"(+{result.get('improvement_pct', 0):.1f}%)"
     )
     applied = _apply_optuna_params(client, result["weights"], result["params"], reason)
     result["applied"] = applied
     return result
+
+
+def run_outcomes_pipeline(n_trials: int = 100) -> None:
+    """
+    v63: Combined entry point for Optuna + auto_backtest.
+    Fetches snapshots ONCE and shares the DataFrame between both steps.
+    Called from outcomes.yml instead of separate python -c commands.
+    Saves ~400MB egress per outcomes cycle (was fetching twice).
+    """
+    client = _get_client()
+    if not client:
+        logger.error("outcomes_pipeline: no client")
+        return
+
+    _load_current_weights(client)
+    df = _fetch_snapshots(client)
+    if df.empty:
+        logger.info("outcomes_pipeline: no snapshots")
+        return
+
+    logger.info("outcomes_pipeline: fetched %d deduped snapshots, running Optuna then backtest", len(df))
+
+    # Step 1: Optuna optimization (shares df)
+    try:
+        run_optuna_optimization(n_trials=n_trials, df=df)
+    except Exception as e:
+        logger.error("outcomes_pipeline: Optuna failed: %s", e)
+
+    # Step 2: Auto-backtest (shares same df)
+    try:
+        run_auto_backtest(df=df)
+    except Exception as e:
+        logger.error("outcomes_pipeline: auto_backtest failed: %s", e)
 
 
 def main():

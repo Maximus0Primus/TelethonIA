@@ -74,25 +74,17 @@ jobs:
         working-directory: scraper
         run: python -c "from outcome_tracker import fill_kol_outcomes; fill_kol_outcomes()"
 
-      # v58: Reduced from 200 to 100 trials — sufficient with current data volume
-      - name: Run Optuna parameter optimization
-        id: optuna
+      # v63: Combined Optuna + auto_backtest in single pipeline to share DataFrame.
+      # Fetches snapshots ONCE instead of twice → saves ~400MB egress per run.
+      - name: Run Optuna + auto-backtest pipeline
+        id: optuna_backtest
         continue-on-error: true
-        timeout-minutes: 20
+        timeout-minutes: 25
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         working-directory: scraper
-        run: python -c "from auto_backtest import run_optuna_optimization; run_optuna_optimization(n_trials=100)"
-
-      - name: Run auto-backtest
-        id: backtest
-        continue-on-error: true
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-        working-directory: scraper
-        run: python -c "from auto_backtest import run_auto_backtest; run_auto_backtest()"
+        run: python -c "from auto_backtest import run_outcomes_pipeline; run_outcomes_pipeline(n_trials=100)"
 
       # v58: Summary step — report which steps failed
       - name: Report step results
@@ -104,5 +96,4 @@ jobs:
           echo "| Fill outcomes | ${{ steps.fill_outcomes.outcome }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Backfill bot data | ${{ steps.backfill.outcome }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Fill KOL outcomes | ${{ steps.fill_kol.outcome }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Optuna | ${{ steps.optuna.outcome }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Auto-backtest | ${{ steps.backtest.outcome }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Optuna + Backtest | ${{ steps.optuna_backtest.outcome }} |" >> $GITHUB_STEP_SUMMARY
