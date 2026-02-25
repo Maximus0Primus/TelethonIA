@@ -478,6 +478,45 @@ def process_and_push(messages_data: dict[str, list[dict]], dump: bool = False,
     except Exception as e:
         logger.error("Paper trading (open) failed: %s", e)
 
+    # v66: Batch confirmation — update open RT trades with batch score
+    try:
+        sb_rt = _get_supabase()
+        if sb_rt and data_24h:
+            rt_open = (
+                sb_rt.table("paper_trades")
+                .select("id, token_address, symbol")
+                .eq("source", "rt")
+                .eq("status", "open")
+                .execute()
+            )
+            rt_trades = rt_open.data or []
+            if rt_trades:
+                # Build lookup: token_address → batch score
+                batch_scores = {}
+                for t in data_24h:
+                    addr = t.get("token_address")
+                    if addr:
+                        batch_scores[addr] = int(t.get("score", 0))
+
+                confirmed = 0
+                for rt in rt_trades:
+                    addr = rt["token_address"]
+                    if addr in batch_scores:
+                        try:
+                            sb_rt.table("paper_trades").update({
+                                "batch_confirmed_at": datetime.now(timezone.utc).isoformat(),
+                                "batch_score": batch_scores[addr],
+                            }).eq("id", rt["id"]).execute()
+                            confirmed += 1
+                            logger.info("RT trade %s confirmed by batch (score=%d)",
+                                        rt["symbol"], batch_scores[addr])
+                        except Exception as e2:
+                            logger.debug("RT confirm update failed for %s: %s", rt["symbol"], e2)
+                if confirmed:
+                    logger.info("v66: %d/%d open RT trades confirmed by batch", confirmed, len(rt_trades))
+    except Exception as e:
+        logger.debug("v66: batch confirmation skipped: %s", e)
+
     # v10: Store raw KOL mention texts for NLP analysis
     if all_raw_mentions:
         try:
@@ -578,56 +617,461 @@ def process_and_push(messages_data: dict[str, list[dict]], dump: bool = False,
 
 
 # ---------------------------------------------------------------------------
-# v64: Real-time KOL listener → instant paper trades at call-moment price
+# v66: Real-time KOL listener — EXPLORATION MODE
+# Philosophy: Never block a trade. Score everything, size by confidence.
+#   - Cooldown per (KOL × token), not per token — 3 KOLs same token = 3 signals
+#   - All 7 strategies active — let Optuna/ML learn which work per-context
+#   - Score drives sizing, not entry — low score = $1 micro position (learn), high = $30
+#   - Only hard block: no price (can't compute PnL)
+#   - When ML model exists: predicts per-strategy PnL → smart strategy selection
 # ---------------------------------------------------------------------------
 _rt_ca_cache: dict = {}
-_rt_trade_cooldown: dict[str, float] = {}  # ca -> last_trade_timestamp
-_rt_group_id_to_username: dict[int, str] = {}  # built at setup, fast reverse lookup
-RT_COOLDOWN_SECONDS = 1800  # 30 min dedup per token
+_rt_ml_model = None  # LightGBM Booster, loaded from Supabase
+_rt_trade_cooldown: dict[str, float] = {}  # (kol, ca) -> last_trade_timestamp
+_rt_in_flight: set = set()  # (kol, ca) tuples currently being processed
+_rt_group_id_to_username: dict[int, str] = {}
+_rt_kol_scores: dict = {}
+_rt_kol_scores_loaded_at: float = 0.0
+_rt_config: dict = {}
+_rt_config_loaded_at: float = 0.0
+RT_COOLDOWN_SECONDS = 1800
+RT_KOL_SCORES_TTL = 3600  # 1 hour
+RT_CONFIG_TTL = 300  # 5 minutes
 
 
-def _rt_should_trade(ca: str) -> bool:
-    """Check cooldown: same CA won't open new trades within RT_COOLDOWN_SECONDS."""
+def _rt_load_kol_scores() -> dict:
+    """Load KOL scores from kol_scores.json. Refreshed every hour."""
+    global _rt_kol_scores, _rt_kol_scores_loaded_at
     now = time.time()
-    last = _rt_trade_cooldown.get(ca, 0)
-    if now - last < RT_COOLDOWN_SECONDS:
-        return False
-    _rt_trade_cooldown[ca] = now
-    return True
+    if _rt_kol_scores and now - _rt_kol_scores_loaded_at < RT_KOL_SCORES_TTL:
+        return _rt_kol_scores
+    try:
+        kol_path = Path(__file__).parent / "kol_scores.json"
+        if kol_path.exists():
+            with open(kol_path, "r") as f:
+                data = json.load(f)
+            details = data.get("_kol_details", {})
+            scores = {}
+            for kol, info in details.items():
+                if kol.startswith("_"):
+                    continue
+                scores[kol] = {
+                    "score": float(info.get("score", 0)),
+                    "win_rate": float(info.get("raw_hit_rate", 0)),
+                    "total_calls": int(info.get("tokens_called", 0)),
+                }
+            for k, v in data.items():
+                if not k.startswith("_") and k not in scores and isinstance(v, (int, float)):
+                    scores[k] = {"score": float(v), "win_rate": 0.0, "total_calls": 0}
+            _rt_kol_scores = scores
+            _rt_kol_scores_loaded_at = now
+            logger.info("RT: KOL scores loaded (%d KOLs)", len(scores))
+    except Exception as e:
+        logger.warning("RT: failed to load kol_scores.json: %s", e)
+    return _rt_kol_scores
 
 
-def _rt_open_trades(ca: str, symbol: str, price: float, mcap: float, kol_username: str, tier: str):
-    """Open paper trades for a real-time KOL detection."""
-    from paper_trader import open_paper_trades, _load_paper_trade_config
+def _rt_load_config() -> dict:
+    """Load RT trade config from scoring_config.rt_trade_config. 5min cache."""
+    global _rt_config, _rt_config_loaded_at, RT_COOLDOWN_SECONDS
+    now = time.time()
+    if _rt_config and now - _rt_config_loaded_at < RT_CONFIG_TTL:
+        return _rt_config
+    defaults = {
+        "enabled": True,
+        "cooldown_seconds": 1800,
+        "base_budget_usd": 20,
+        "min_position_usd": 1.0,
+        "max_position_usd": 30.0,
+        "rt_strategies": "all",  # "all" = all 7 strategies
+        "score_weights": {
+            "kol_quality": 0.35,
+            "token_safety": 0.30,
+            "market_momentum": 0.20,
+            "confirmation": 0.15,
+        },
+        # Sizing multiplier curves (Optuna-tunable)
+        "sizing": {
+            "kol_score_mult_cap": 1.8,     # best KOL → 1.8× budget
+            "kol_score_mult_floor": 0.3,    # unknown KOL → 0.3× budget
+            "tier_s_bonus": 1.3,            # S-tier KOL → extra 1.3×
+            "safety_mult_floor": 0.2,       # very risky token → 0.2× budget
+            "safety_mult_cap": 1.5,         # very safe token → 1.5× budget
+            "momentum_mult_floor": 0.5,     # negative momentum → 0.5×
+            "momentum_mult_cap": 1.5,       # strong momentum → 1.5×
+        },
+    }
+    try:
+        sb = _get_supabase()
+        if sb:
+            result = sb.table("scoring_config").select("rt_trade_config").eq("id", 1).execute()
+            if result.data and result.data[0].get("rt_trade_config"):
+                raw = result.data[0]["rt_trade_config"]
+                if isinstance(raw, str):
+                    raw = json.loads(raw)
+                # Deep merge for nested dicts
+                for k, v in raw.items():
+                    if isinstance(v, dict) and isinstance(defaults.get(k), dict):
+                        defaults[k].update(v)
+                    else:
+                        defaults[k] = v
+                logger.info("RT: config loaded from DB (enabled=%s, budget=$%.0f, strategies=%s)",
+                            defaults["enabled"], defaults["base_budget_usd"], defaults["rt_strategies"])
+    except Exception as e:
+        logger.warning("RT: failed to load rt_trade_config: %s (using defaults)", e)
+    _rt_config = defaults
+    _rt_config_loaded_at = now
+    RT_COOLDOWN_SECONDS = int(defaults.get("cooldown_seconds", 1800))
+    return _rt_config
+
+
+def _rt_should_trade(kol: str, ca: str) -> bool:
+    """Cooldown per (KOL × token). Does NOT consume — call _rt_mark_traded() on success."""
+    now = time.time()
+    key = (kol, ca)
+    last = _rt_trade_cooldown.get(key, 0)
+    return now - last >= RT_COOLDOWN_SECONDS
+
+
+def _rt_mark_traded(kol: str, ca: str) -> None:
+    """Consume cooldown slot for this (KOL × token) pair."""
+    _rt_trade_cooldown[(kol, ca)] = time.time()
+
+
+def _rt_compute_kol_quality(kol_info: dict, tier: str) -> float:
+    """KOL quality sub-score (0-100). No gates — unknown KOL = low score, not blocked."""
+    kol_score_raw = min(kol_info.get("score", 0), 3.0)
+    kol_wr = min(kol_info.get("win_rate", 0), 0.5)
+    kol_calls = kol_info.get("total_calls", 0)
+
+    # Score component (0-40): based on kol_score from kol_scores.json
+    score_part = (kol_score_raw / 3.0) * 40
+
+    # Win rate component (0-40): scaled to 50% cap
+    wr_part = (kol_wr / 0.5) * 40
+
+    # Tier bonus (0-15): S-tier gets flat boost
+    tier_part = 15 if tier == "S" else 0
+
+    # Experience bonus (0-5): more calls = more data = more trust
+    exp_part = min(5, kol_calls / 10 * 5) if kol_calls > 0 else 0
+
+    return min(100, max(0, score_part + wr_part + tier_part + exp_part))
+
+
+def _rt_compute_token_safety(token_info: dict) -> float:
+    """Token safety sub-score (0-100). Everything is a gradient, nothing blocked."""
+    liq = token_info.get("liquidity_usd", 0)
+    mcap = max(token_info.get("mcap", 1), 1)
+    vol = token_info.get("volume_24h", 0)
+    bsr = token_info.get("buy_sell_ratio", 0.5)
+    age_h = token_info.get("token_age_hours", 0)
+    is_pf = token_info.get("is_pump_fun", 0)
+    liq_mcap = liq / mcap
+
+    # Liquidity (0-30): $0→0, $5K→10, $50K→20, $500K+→30
+    if liq < 5000:
+        liq_score = (liq / 5000) * 10
+    elif liq < 50000:
+        liq_score = 10 + (liq - 5000) / 45000 * 10
+    else:
+        liq_score = min(30, 20 + (liq - 50000) / 450000 * 10)
+
+    # Volume (0-20): piecewise
+    if vol < 10_000:
+        vol_score = (vol / 10_000) * 6
+    elif vol < 100_000:
+        vol_score = 6 + (vol - 10_000) / 90_000 * 8
+    else:
+        vol_score = min(20, 14 + (vol - 100_000) / 900_000 * 6)
+
+    # BSR (0-15): below 0.3 = very bearish but still scored
+    bsr_score = min(15, max(0, bsr / 2.0 * 15))
+
+    # Liq/MCap ratio (0-15): healthy ratio = higher safety
+    liq_mcap_score = min(15, max(0, liq_mcap / 0.2 * 15))
+
+    # Age (0-10): new = 0, mature = 10
+    age_score = min(10, max(0, age_h / 168 * 10))
+
+    # Pump.fun penalty (0 or -10): bonding curve = extra risky but NOT blocked
+    pf_penalty = -10 if (is_pf and liq < 10000) else 0
+
+    return max(0, min(100, liq_score + vol_score + bsr_score + liq_mcap_score + age_score + pf_penalty))
+
+
+def _rt_compute_momentum(token_info: dict) -> float:
+    """Market momentum sub-score (0-100). Negative momentum = low score, not blocked."""
+    pc_1h = token_info.get("price_change_1h", 0)
+    pc_5m = token_info.get("price_change_5m", 0)
+    vol = token_info.get("volume_24h", 0)
+
+    # Price momentum 1h (0-35): -50%→0, 0%→17, +25%→35
+    m_1h = min(35, max(0, 17.5 + pc_1h * 0.7))
+
+    # Price momentum 5m (0-35): -20%→0, 0%→17, +10%→35
+    m_5m = min(35, max(0, 17.5 + pc_5m * 1.75))
+
+    # Volume (0-30): piecewise
+    if vol < 10_000:
+        v_score = (vol / 10_000) * 9
+    elif vol < 100_000:
+        v_score = 9 + (vol - 10_000) / 90_000 * 12
+    else:
+        v_score = min(30, 21 + (vol - 100_000) / 900_000 * 9)
+
+    return max(0, min(100, m_1h + m_5m + v_score))
+
+
+def _rt_compute_confirmation(kol: str, ca: str, token_info: dict) -> float:
+    """
+    Confirmation sub-score (0-100): is this token being called by multiple KOLs?
+    Check if other KOLs have recently traded the same CA (from cooldown dict).
+    """
+    now = time.time()
+    recent_kols = set()
+    for (k, c), ts in _rt_trade_cooldown.items():
+        if c == ca and k != kol and (now - ts) < 3600:  # within last hour
+            recent_kols.add(k)
+
+    n_other_kols = len(recent_kols)
+    # 0 others → 0, 1 other → 40, 2 others → 70, 3+ → 100
+    if n_other_kols == 0:
+        return 0
+    elif n_other_kols == 1:
+        return 40
+    elif n_other_kols == 2:
+        return 70
+    else:
+        return 100
+
+
+def _rt_compute_score(kol_username: str, ca: str, kol_info: dict,
+                      token_info: dict, tier: str, config: dict) -> float:
+    """
+    Compute RT score (0-100). Drives position sizing, NOT entry/exit.
+    4 components: KOL quality, token safety, momentum, confirmation.
+    """
+    weights = config.get("score_weights", {
+        "kol_quality": 0.35, "token_safety": 0.30,
+        "market_momentum": 0.20, "confirmation": 0.15,
+    })
+
+    kol_q = _rt_compute_kol_quality(kol_info, tier)
+    safety = _rt_compute_token_safety(token_info)
+    momentum = _rt_compute_momentum(token_info)
+    confirmation = _rt_compute_confirmation(kol_username, ca, token_info)
+
+    w_kol = float(weights.get("kol_quality", 0.35))
+    w_safety = float(weights.get("token_safety", 0.30))
+    w_momentum = float(weights.get("market_momentum", 0.20))
+    w_confirm = float(weights.get("confirmation", 0.15))
+
+    rt_score = kol_q * w_kol + safety * w_safety + momentum * w_momentum + confirmation * w_confirm
+    return round(max(0, min(100, rt_score)), 1)
+
+
+def _rt_position_size(rt_score: float, kol_info: dict, token_info: dict,
+                      tier: str, config: dict) -> float:
+    """
+    Dynamic position sizing. Score drives size, NOT entry.
+    Budget × kol_mult × safety_mult × momentum_mult. Floor $1, cap $30.
+    Low-confidence = micro position ($1-3) to learn.
+    High-confidence = full position ($20-30).
+    """
+    budget = float(config.get("base_budget_usd", 20))
+    sizing = config.get("sizing", {})
+
+    # KOL multiplier: [floor, cap] based on kol_score
+    kol_score = kol_info.get("score", 0)
+    kol_floor = float(sizing.get("kol_score_mult_floor", 0.3))
+    kol_cap = float(sizing.get("kol_score_mult_cap", 1.8))
+    # Map kol_score [0, 3.0] → [floor, cap]
+    kol_frac = min(1.0, kol_score / 3.0) if kol_score > 0 else 0
+    kol_mult = kol_floor + kol_frac * (kol_cap - kol_floor)
+
+    # S-tier bonus
+    if tier == "S":
+        kol_mult *= float(sizing.get("tier_s_bonus", 1.3))
+
+    # Safety multiplier based on token_safety sub-score
+    safety_sub = _rt_compute_token_safety(token_info)
+    safety_floor = float(sizing.get("safety_mult_floor", 0.2))
+    safety_cap = float(sizing.get("safety_mult_cap", 1.5))
+    safety_mult = safety_floor + (safety_sub / 100) * (safety_cap - safety_floor)
+
+    # Momentum multiplier
+    momentum_sub = _rt_compute_momentum(token_info)
+    mom_floor = float(sizing.get("momentum_mult_floor", 0.5))
+    mom_cap = float(sizing.get("momentum_mult_cap", 1.5))
+    mom_mult = mom_floor + (momentum_sub / 100) * (mom_cap - mom_floor)
+
+    # Final: budget × geometric mean of multipliers (so no single factor dominates)
+    combined = (kol_mult * safety_mult * mom_mult) ** (1 / 3)
+    size = budget * combined
+
+    min_pos = float(config.get("min_position_usd", 1.0))
+    max_pos = float(config.get("max_position_usd", 30.0))
+    return round(max(min_pos, min(max_pos, size)), 2)
+
+
+def _rt_count_confirmations(kol: str, ca: str) -> int:
+    """Count distinct other KOLs that traded the same CA within the last hour."""
+    now = time.time()
+    other_kols = set()
+    for (k, c), ts in _rt_trade_cooldown.items():
+        if c == ca and k != kol and (now - ts) < 3600:
+            other_kols.add(k)
+    return len(other_kols)
+
+
+def _rt_open_trades(ca: str, symbol: str, price: float, mcap: float,
+                    kol_username: str, tier: str, rt_score: float, pos_size: float,
+                    kol_info: dict, token_info: dict, config: dict):
+    """
+    Open paper trades with ML-guided strategy selection when model exists.
+    Phase 1 (no model): all strategies, scoring-based sizing.
+    Phase 2 (model): per-strategy PnL prediction → smart selection + sizing.
+    """
+    global _rt_ml_model
+    from paper_trader import open_paper_trades, _load_paper_trade_config, STRATEGIES
     sb = _get_supabase()
     if not sb:
         return 0
-    config = _load_paper_trade_config(sb)
+
+    # Try loading ML model (cached, 5min TTL)
+    if _rt_ml_model is None:
+        try:
+            from rt_model import load_rt_model
+            _rt_ml_model = load_rt_model(sb)
+        except Exception:
+            pass
+
+    ml_mode = False
+    valid_strategies = []
+    strategy_size_mults = {}
+
+    if _rt_ml_model is not None:
+        # --- ML MODE: predict per-strategy PnL ---
+        try:
+            from rt_model import predict_strategy_pnl, select_strategies
+            n_confirm = _rt_count_confirmations(kol_username, ca)
+            hour = datetime.now(timezone.utc).hour
+
+            predictions = predict_strategy_pnl(
+                _rt_ml_model, kol_info, token_info, tier,
+                rt_score, n_confirm, hour,
+            )
+            selected = select_strategies(predictions, config)
+
+            if selected:
+                ml_mode = True
+                valid_strategies = [s for s, _ in selected]
+                strategy_size_mults = {s: m for s, m in selected}
+
+                # Log ML decisions
+                take = [(s, f"{p:+.2%}") for s, p in predictions.items() if p > 0]
+                skip = [(s, f"{p:+.2%}") for s, p in predictions.items() if p <= 0]
+                logger.info(
+                    "RT ML: %s → TAKE %s | SKIP %s",
+                    symbol, take, skip,
+                )
+        except Exception as e:
+            logger.debug("RT ML predict failed: %s (falling back to exploration)", e)
+
+    if not ml_mode:
+        # --- EXPLORATION MODE: all strategies ---
+        rt_strats = config.get("rt_strategies", "all")
+        if rt_strats == "all":
+            valid_strategies = list(STRATEGIES.keys())
+        else:
+            valid_strategies = [s for s in rt_strats if s in STRATEGIES]
+            if not valid_strategies:
+                valid_strategies = list(STRATEGIES.keys())
+
+    # Build base token entry with RT metadata
     token_entry = {
         "symbol": symbol,
         "token_address": ca,
         "price_usd": price,
         "market_cap": mcap,
-        "score": 25,  # Neutral — real-time trades skip pipeline scoring
+        "score": int(rt_score),
         "ca_mention_count": 1,
         "url_mention_count": 0,
         "unique_kols": 1,
         "kol_freshness": 1.0,
         "momentum_mult": 1.0,
         "whale_new_entries": None,
+        "_rt_source": "rt",
+        "_rt_kol_group": kol_username,
+        "_rt_kol_tier": tier,
+        "_rt_kol_score": kol_info.get("score"),
+        "_rt_kol_win_rate": kol_info.get("win_rate"),
+        "_rt_score": rt_score,
+        "_rt_liquidity_usd": token_info.get("liquidity_usd"),
+        "_rt_volume_24h": token_info.get("volume_24h"),
+        "_rt_buy_sell_ratio": token_info.get("buy_sell_ratio"),
+        "_rt_token_age_hours": token_info.get("token_age_hours"),
+        "_rt_is_pump_fun": token_info.get("is_pump_fun"),
     }
+
+    # Open trades per strategy (ML mode: individual sizing per strategy)
     now = datetime.now(timezone.utc)
-    opened = open_paper_trades(sb, [token_entry], cycle_ts=now, config=config)
-    if opened > 0:
+    total_opened = 0
+
+    if ml_mode and strategy_size_mults:
+        # ML mode: open each strategy individually with adjusted sizing
+        for strat_name in valid_strategies:
+            size_mult = strategy_size_mults.get(strat_name, 1.0)
+            strat_pos = round(max(1.0, min(30.0, pos_size * size_mult)), 2)
+
+            pt_config = _load_paper_trade_config(sb)
+            pt_config["budget_usd"] = strat_pos
+            pt_config["active_strategies"] = [strat_name]
+            pt_config["top_n"] = 1
+            pt_config["ca_filter"] = False
+
+            opened = open_paper_trades(sb, [token_entry], cycle_ts=now, config=pt_config)
+            total_opened += opened
+    else:
+        # Exploration mode: all strategies with same sizing
+        pt_config = _load_paper_trade_config(sb)
+        pt_config["budget_usd"] = pos_size
+        pt_config["active_strategies"] = valid_strategies
+        pt_config["top_n"] = 1
+        pt_config["ca_filter"] = False
+
+        total_opened = open_paper_trades(sb, [token_entry], cycle_ts=now, config=pt_config)
+
+    if total_opened > 0:
+        mode_str = "ML" if ml_mode else "EXPLORE"
         logger.info(
-            "RT paper trade: %d rows opened for %s @ $%.6f — KOL: %s (%s-tier)",
-            opened, symbol, price, kol_username, tier,
+            "RT TRADE [%s]: %s @ $%.6f | %d strats | KOL: %s (%s, wr=%.0f%%) "
+            "rt_score=%.0f pos=$%.2f liq=$%.0fK",
+            mode_str, symbol, price, len(valid_strategies), kol_username, tier,
+            kol_info.get("win_rate", 0) * 100,
+            rt_score, pos_size,
+            token_info.get("liquidity_usd", 0) / 1000,
         )
-    return opened
+    return total_opened
+
+
+def _rt_extract_token_info(raw: dict) -> dict:
+    """Parse DexScreener response into normalized token_info dict."""
+    return {
+        "liquidity_usd": float(raw.get("liquidity_usd") or 0),
+        "volume_24h": float(raw.get("volume_24h") or 0),
+        "buy_sell_ratio": float(raw.get("buy_sell_ratio_24h") or raw.get("bsr_24h") or 0.5),
+        "token_age_hours": float(raw.get("token_age_hours") or 0),
+        "is_pump_fun": int(raw.get("is_pump_fun") or 0),
+        "mcap": float(raw.get("mcap") or 0),
+        "price_change_1h": float(raw.get("price_change_1h") or 0),
+        "price_change_5m": float(raw.get("price_change_5m") or 0),
+    }
 
 
 async def _rt_on_new_message(event: events.NewMessage.Event):
-    """Real-time event handler: detect token CAs → open paper trades instantly."""
+    """v66 Exploration Mode: Score everything, size by confidence, learn from all trades."""
     global _rt_ca_cache
 
     chat_id = event.chat_id
@@ -656,33 +1100,72 @@ async def _rt_on_new_message(event: events.NewMessage.Event):
     if not tokens:
         return
 
+    config = _rt_load_config()
+    if not config.get("enabled", True):
+        return
+    kol_scores = _rt_load_kol_scores()
+
     tier = GROUPS_TIER.get(username, "A")
+    kol_info = kol_scores.get(username, {"score": 0.0, "win_rate": 0.0, "total_calls": 0})
 
     for symbol, source, ca in tokens:
         if not ca:
             continue
 
-        if not _rt_should_trade(ca):
+        # Cooldown per (KOL × token) — different KOL on same token = new signal
+        if not _rt_should_trade(username, ca):
             continue
 
-        logger.info("RT detect: %s (CA: %s...) from %s (%s-tier)", symbol, ca[:8], username, tier)
-
-        # Fetch DexScreener price (sync in executor)
-        from enrich import _fetch_dexscreener_by_address
-        loop = asyncio.get_event_loop()
-        raw = await loop.run_in_executor(None, _fetch_dexscreener_by_address, ca)
-        if not raw or not raw.get("price_usd"):
-            logger.warning("RT: no price for %s — skipping", ca[:8])
+        flight_key = (username, ca)
+        if flight_key in _rt_in_flight:
             continue
+        _rt_in_flight.add(flight_key)
+
         try:
-            price = float(raw["price_usd"])
-            mcap = float(raw.get("mcap") or 0)
-        except (ValueError, TypeError):
-            continue
-        if price <= 0:
-            continue
+            logger.info("RT detect: %s (CA: %s...) from %s (%s-tier)", symbol, ca[:8], username, tier)
 
-        await loop.run_in_executor(None, _rt_open_trades, ca, symbol, price, mcap, username, tier)
+            # DexScreener fetch — only hard requirement: price must exist
+            from enrich import _fetch_dexscreener_by_address
+            loop = asyncio.get_event_loop()
+            raw = await loop.run_in_executor(None, _fetch_dexscreener_by_address, ca)
+            if not raw or not raw.get("price_usd"):
+                logger.info("RT SKIP: %s — no price (only hard block)", ca[:8])
+                continue
+
+            try:
+                price = float(raw["price_usd"])
+            except (ValueError, TypeError):
+                continue
+            if price <= 0:
+                continue
+
+            mcap = float(raw.get("mcap") or 0)
+            token_info = _rt_extract_token_info(raw)
+
+            # Compute RT score (drives sizing, never blocks)
+            rt_score = _rt_compute_score(username, ca, kol_info, token_info, tier, config)
+
+            # Position sizing: confidence → dollars
+            pos_size = _rt_position_size(rt_score, kol_info, token_info, tier, config)
+
+            logger.info(
+                "RT score: %s rt_score=%.0f → pos=$%.2f | kol=%s(%.2f/%.0f%%) liq=$%.0fK bsr=%.2f",
+                symbol, rt_score, pos_size, username,
+                kol_info.get("score", 0), kol_info.get("win_rate", 0) * 100,
+                token_info.get("liquidity_usd", 0) / 1000,
+                token_info.get("buy_sell_ratio", 0),
+            )
+
+            # Open trades across all strategies
+            opened = await loop.run_in_executor(
+                None, _rt_open_trades, ca, symbol, price, mcap,
+                username, tier, rt_score, pos_size, kol_info, token_info, config,
+            )
+
+            if opened and opened > 0:
+                _rt_mark_traded(username, ca)
+        finally:
+            _rt_in_flight.discard(flight_key)
 
 
 async def setup_realtime_listener(client: TelegramClient):
@@ -718,9 +1201,29 @@ async def setup_realtime_listener(client: TelegramClient):
         )
         s_count = sum(1 for u, d in GROUPS_DATA.items()
                       if d.get("tier") == "S" and cache.get(u, {}).get("id") in group_ids)
+
+        # v66: Pre-load KOL scores + RT config + ML model at startup
+        global _rt_ml_model
+        kol_scores = _rt_load_kol_scores()
+        rt_config = _rt_load_config()
+
+        # Try loading ML model from Supabase
+        ml_status = "no model"
+        try:
+            from rt_model import load_rt_model
+            _rt_ml_model = load_rt_model()
+            if _rt_ml_model:
+                ml_status = "ML model loaded"
+        except Exception as e:
+            logger.debug("RT: ML model load failed: %s", e)
+
         logger.info(
-            "RT listener active: %d groups (%d S-tier). Paper trading on every KOL call.",
-            len(group_ids), s_count,
+            "RT v66: %d groups (%d S-tier) | %d KOLs | %s | "
+            "budget=$%.0f, strategies=%s, cooldown=%ds",
+            len(group_ids), s_count, len(kol_scores), ml_status,
+            rt_config.get("base_budget_usd", 20),
+            rt_config.get("rt_strategies", "all"),
+            rt_config.get("cooldown_seconds", 1800),
         )
     return group_ids
 

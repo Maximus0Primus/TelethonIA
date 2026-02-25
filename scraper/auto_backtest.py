@@ -5501,6 +5501,358 @@ def run_outcomes_pipeline(n_trials: int = 100) -> None:
     except Exception as e:
         logger.error("outcomes_pipeline: auto_backtest failed: %s", e)
 
+    # Step 3 (v66): RT trade analysis + Optuna sizing optimization (gated on N>=50)
+    try:
+        run_rt_optimization(client=client, n_trials=min(n_trials, 100))
+    except Exception as e:
+        logger.error("outcomes_pipeline: RT optimization failed: %s", e)
+
+    # Step 4 (v66): Train RT ML model for strategy selection (gated on N>=100)
+    try:
+        from rt_model import train_rt_model
+        rt_result = train_rt_model(client=client)
+        if rt_result:
+            logger.info("outcomes_pipeline: RT ML trained — edge=%.2f%%, dir_acc=%.1f%%",
+                        rt_result.get("model_edge", 0) * 100,
+                        rt_result.get("direction_accuracy", 0) * 100)
+    except Exception as e:
+        logger.error("outcomes_pipeline: RT ML training failed: %s", e)
+
+
+# ---------------------------------------------------------------------------
+# v66: RT Trade Analysis + Optuna RT Filter Optimization
+# ---------------------------------------------------------------------------
+
+def _analyze_rt_trades(client) -> dict | None:
+    """
+    v66 Exploration Mode: Analyze ALL closed RT trades.
+    Per-KOL perf, per-strategy perf, score band analysis, batch confirmation impact.
+    """
+    try:
+        result = (
+            client.table("paper_trades")
+            .select("*")
+            .eq("source", "rt")
+            .neq("status", "open")
+            .execute()
+        )
+        trades = result.data or []
+    except Exception as e:
+        logger.error("RT analysis: query failed: %s", e)
+        return None
+
+    if len(trades) < 10:
+        logger.info("RT analysis: only %d closed RT trades (need 10+), skipping", len(trades))
+        return None
+
+    total = len(trades)
+    winners = [t for t in trades if float(t.get("pnl_pct") or 0) > 0]
+    win_rate = len(winners) / total
+    pnls = [float(t.get("pnl_pct") or 0) for t in trades]
+    avg_pnl = sum(pnls) / len(pnls)
+    total_invested = sum(float(t.get("position_usd") or 0) for t in trades)
+    total_pnl_usd = sum(float(t.get("pnl_usd") or 0) for t in trades)
+
+    # Per-KOL breakdown
+    kol_stats = {}
+    for t in trades:
+        kol = t.get("kol_group") or "unknown"
+        kol_stats.setdefault(kol, {"trades": 0, "wins": 0, "pnl_usd": 0.0,
+                                    "tier": t.get("kol_tier", "A"), "pnl_pcts": []})
+        kol_stats[kol]["trades"] += 1
+        pnl = float(t.get("pnl_pct") or 0)
+        kol_stats[kol]["pnl_pcts"].append(pnl)
+        if pnl > 0:
+            kol_stats[kol]["wins"] += 1
+        kol_stats[kol]["pnl_usd"] += float(t.get("pnl_usd") or 0)
+
+    for kol, stats in kol_stats.items():
+        stats["win_rate"] = stats["wins"] / stats["trades"] if stats["trades"] else 0
+        stats["avg_pnl"] = sum(stats["pnl_pcts"]) / len(stats["pnl_pcts"]) if stats["pnl_pcts"] else 0
+        del stats["pnl_pcts"]  # cleanup
+
+    # Per-strategy breakdown
+    strategy_stats = {}
+    for t in trades:
+        strat = t.get("strategy", "unknown")
+        strategy_stats.setdefault(strat, {"trades": 0, "wins": 0, "pnl_usd": 0.0})
+        strategy_stats[strat]["trades"] += 1
+        if float(t.get("pnl_pct") or 0) > 0:
+            strategy_stats[strat]["wins"] += 1
+        strategy_stats[strat]["pnl_usd"] += float(t.get("pnl_usd") or 0)
+    for s in strategy_stats.values():
+        s["win_rate"] = s["wins"] / s["trades"] if s["trades"] else 0
+
+    # RT score band analysis (10-point bands for finer granularity)
+    score_bands = [(0, 10), (10, 20), (20, 30), (30, 40), (40, 50),
+                   (50, 60), (60, 70), (70, 80), (80, 90), (90, 101)]
+    band_stats = {}
+    for lo, hi in score_bands:
+        band_trades = [t for t in trades if lo <= float(t.get("rt_score") or 0) < hi]
+        if band_trades:
+            b_wins = sum(1 for t in band_trades if float(t.get("pnl_pct") or 0) > 0)
+            b_pnl = sum(float(t.get("pnl_usd") or 0) for t in band_trades)
+            b_avg = sum(float(t.get("pnl_pct") or 0) for t in band_trades) / len(band_trades)
+            band_stats[f"{lo}-{hi}"] = {
+                "count": len(band_trades),
+                "win_rate": round(b_wins / len(band_trades), 3),
+                "avg_pnl_pct": round(b_avg, 4),
+                "pnl_usd": round(b_pnl, 2),
+            }
+
+    # Batch confirmation impact
+    confirmed = [t for t in trades if t.get("batch_confirmed_at")]
+    unconfirmed = [t for t in trades if not t.get("batch_confirmed_at")]
+    conf_wr = (sum(1 for t in confirmed if float(t.get("pnl_pct") or 0) > 0) / len(confirmed)
+               if confirmed else 0)
+    unconf_wr = (sum(1 for t in unconfirmed if float(t.get("pnl_pct") or 0) > 0) / len(unconfirmed)
+                 if unconfirmed else 0)
+
+    # Position size vs PnL correlation (does the sizing work?)
+    sizes = [float(t.get("position_usd") or 0) for t in trades]
+    pnl_usds = [float(t.get("pnl_usd") or 0) for t in trades]
+    # Simple: did bigger positions make more money?
+    if len(sizes) > 10:
+        median_size = sorted(sizes)[len(sizes) // 2]
+        big_trades = [t for t, s in zip(trades, sizes) if s >= median_size]
+        small_trades = [t for t, s in zip(trades, sizes) if s < median_size]
+        big_wr = sum(1 for t in big_trades if float(t.get("pnl_pct") or 0) > 0) / max(1, len(big_trades))
+        small_wr = sum(1 for t in small_trades if float(t.get("pnl_pct") or 0) > 0) / max(1, len(small_trades))
+        sizing_edge = big_wr - small_wr  # positive = sizing is working
+    else:
+        sizing_edge = 0
+
+    analysis = {
+        "total_rt_trades": total,
+        "win_rate": round(win_rate, 3),
+        "avg_pnl_pct": round(avg_pnl, 4),
+        "total_invested": round(total_invested, 2),
+        "total_pnl_usd": round(total_pnl_usd, 2),
+        "kol_stats": kol_stats,
+        "strategy_stats": strategy_stats,
+        "score_bands": band_stats,
+        "batch_confirmed_count": len(confirmed),
+        "batch_confirmed_wr": round(conf_wr, 3),
+        "unconfirmed_count": len(unconfirmed),
+        "unconfirmed_wr": round(unconf_wr, 3),
+        "sizing_edge": round(sizing_edge, 3),
+    }
+
+    logger.info(
+        "RT analysis: %d trades, WR=%.1f%%, avgPnL=%.2f%%, $%.2f invested, $%+.2f PnL | "
+        "confirmed=%d(WR=%.0f%%) unconfirmed=%d(WR=%.0f%%) | sizing_edge=%.1f%%",
+        total, win_rate * 100, avg_pnl * 100, total_invested, total_pnl_usd,
+        len(confirmed), conf_wr * 100, len(unconfirmed), unconf_wr * 100,
+        sizing_edge * 100,
+    )
+    # Per-KOL
+    for kol, s in sorted(kol_stats.items(), key=lambda x: x[1]["pnl_usd"], reverse=True):
+        logger.info("  KOL %s (%s): %d trades, WR=%.0f%%, avgPnL=%.2f%%, $%+.2f",
+                     kol, s["tier"], s["trades"], s["win_rate"] * 100, s["avg_pnl"] * 100, s["pnl_usd"])
+    # Per-strategy
+    for strat, s in sorted(strategy_stats.items(), key=lambda x: x[1]["pnl_usd"], reverse=True):
+        logger.info("  Strategy %s: %d trades, WR=%.0f%%, $%+.2f",
+                     strat, s["trades"], s["win_rate"] * 100, s["pnl_usd"])
+
+    return analysis
+
+
+def _optimize_rt_scoring(client, n_trials: int = 100) -> dict | None:
+    """
+    v66 Exploration Optuna: Optimize score weights + sizing params + per-strategy selection.
+    NOT filter optimization — we never block, we optimize HOW MUCH to bet.
+    Objective: total_pnl_usd (because sizing IS the variable now).
+    Gated on N >= 50 closed RT trades.
+    """
+    try:
+        import optuna
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+    except ImportError:
+        logger.warning("RT Optuna: optuna not installed, skipping")
+        return None
+
+    # Fetch all closed RT trades with metadata
+    try:
+        result = (
+            client.table("paper_trades")
+            .select("kol_score, kol_win_rate, kol_tier, kol_group, rt_score, "
+                    "rt_liquidity_usd, rt_volume_24h, rt_buy_sell_ratio, "
+                    "rt_token_age_hours, rt_is_pump_fun, entry_mcap, "
+                    "pnl_pct, pnl_usd, position_usd, strategy")
+            .eq("source", "rt")
+            .neq("status", "open")
+            .execute()
+        )
+        trades = result.data or []
+    except Exception as e:
+        logger.error("RT Optuna: query failed: %s", e)
+        return None
+
+    if len(trades) < 50:
+        logger.info("RT Optuna: only %d closed RT trades (need 50+), skipping", len(trades))
+        return None
+
+    logger.info("RT Optuna: optimizing scoring+sizing on %d closed RT trades", len(trades))
+
+    # Pre-compute sub-scores for each trade (to avoid recomputing in every trial)
+    for t in trades:
+        ks = float(t.get("kol_score") or 0)
+        kw = float(t.get("kol_win_rate") or 0)
+        tier = t.get("kol_tier", "A")
+        liq = float(t.get("rt_liquidity_usd") or 0)
+        vol = float(t.get("rt_volume_24h") or 0)
+        bsr = float(t.get("rt_buy_sell_ratio") or 0.5)
+        age = float(t.get("rt_token_age_hours") or 0)
+        mcap = max(float(t.get("entry_mcap") or 1), 1)
+        is_pf = int(t.get("rt_is_pump_fun") or 0)
+
+        # Raw sub-scores (0-1 normalized)
+        t["_kol_q"] = min(1.0, (min(ks, 3.0) / 3.0 * 0.4 + min(kw, 0.5) / 0.5 * 0.4
+                                 + (0.15 if tier == "S" else 0) + min(0.05, ks / 60)))
+        t["_safety"] = min(1.0, max(0, (
+            min(0.30, liq / 500000 * 0.30) +
+            min(0.20, vol / 1_000_000 * 0.20) +
+            min(0.15, bsr / 2.0 * 0.15) +
+            min(0.15, (liq / mcap) / 0.2 * 0.15) +
+            min(0.10, age / 168 * 0.10) +
+            (-0.10 if is_pf and liq < 10000 else 0)
+        )))
+        # Momentum: use price change proxy from pnl (positive short-term pnl = momentum was right)
+        # Note: we don't have price_change_1h in DB, so use a simpler proxy
+        t["_momentum"] = min(1.0, max(0, 0.5 + vol / 2_000_000))
+        t["_tier_s"] = 1 if tier == "S" else 0
+
+    def objective(trial):
+        # Score weights (how to combine sub-scores → rt_score)
+        w_kol = trial.suggest_float("w_kol_quality", 0.10, 0.60, step=0.05)
+        w_safety = trial.suggest_float("w_token_safety", 0.10, 0.50, step=0.05)
+        w_momentum = trial.suggest_float("w_momentum", 0.05, 0.40, step=0.05)
+
+        # Sizing params (how rt_score → position size)
+        base_budget = trial.suggest_float("base_budget", 5, 40, step=2.5)
+        kol_mult_floor = trial.suggest_float("kol_mult_floor", 0.1, 0.8, step=0.1)
+        kol_mult_cap = trial.suggest_float("kol_mult_cap", 1.0, 2.5, step=0.1)
+        tier_s_bonus = trial.suggest_float("tier_s_bonus", 1.0, 2.0, step=0.1)
+        safety_mult_floor = trial.suggest_float("safety_mult_floor", 0.1, 0.5, step=0.05)
+        safety_mult_cap = trial.suggest_float("safety_mult_cap", 1.0, 2.0, step=0.1)
+
+        # Per-strategy weight (should we scale position for each strategy?)
+        strat_mults = {}
+        known_strats = set(t.get("strategy", "") for t in trades)
+        for s in known_strats:
+            if s:
+                strat_mults[s] = trial.suggest_float(f"strat_{s}", 0.0, 2.0, step=0.1)
+
+        total_pnl = 0.0
+        total_invested = 0.0
+
+        for t in trades:
+            # Recompute score with trial weights
+            w_total = w_kol + w_safety + w_momentum
+            score = (t["_kol_q"] * w_kol + t["_safety"] * w_safety +
+                     t["_momentum"] * w_momentum) / w_total
+
+            # Recompute sizing
+            ks = float(t.get("kol_score") or 0)
+            kol_frac = min(1.0, ks / 3.0) if ks > 0 else 0
+            km = kol_mult_floor + kol_frac * (kol_mult_cap - kol_mult_floor)
+            if t["_tier_s"]:
+                km *= tier_s_bonus
+            sm = safety_mult_floor + t["_safety"] * (safety_mult_cap - safety_mult_floor)
+            combined = (km * sm) ** 0.5  # geometric mean
+            pos_size = max(1.0, min(30.0, base_budget * combined))
+
+            # Strategy multiplier
+            strat = t.get("strategy", "")
+            s_mult = strat_mults.get(strat, 1.0)
+            pos_size *= s_mult
+            pos_size = max(0.0, min(30.0, pos_size))  # 0 = don't take this strategy
+
+            # Simulate PnL
+            pnl_pct = float(t.get("pnl_pct") or 0)
+            sim_pnl = pos_size * pnl_pct
+            total_pnl += sim_pnl
+            total_invested += pos_size
+
+        # Objective: total_pnl_usd (maximize absolute profit with the sizing)
+        # Penalty for over-investing (cap total risk)
+        if total_invested > 0:
+            roi = total_pnl / total_invested
+            return total_pnl * (1 + roi)  # reward both total PnL and ROI
+        return 0.0
+
+    study = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler(seed=42))
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+
+    best = study.best_params
+    best_value = study.best_value
+    logger.info("RT Optuna: best objective=%.4f, params=%s", best_value, best)
+
+    # Extract strategy multipliers
+    best_strat_mults = {}
+    for k, v in best.items():
+        if k.startswith("strat_"):
+            strat_name = k[6:]  # remove "strat_" prefix
+            best_strat_mults[strat_name] = round(v, 2)
+
+    # Strategies with mult < 0.1 → effectively disabled
+    disabled_strats = [s for s, m in best_strat_mults.items() if m < 0.1]
+    boosted_strats = [f"{s}({m}x)" for s, m in best_strat_mults.items() if m >= 0.1]
+
+    logger.info("RT Optuna: strategies: boosted=%s, disabled=%s", boosted_strats, disabled_strats)
+
+    if best_value <= 0:
+        logger.info("RT Optuna: best objective=%.4f <= 0, NOT deploying", best_value)
+        return {"status": "no_improvement", "best_value": best_value, "best_params": best}
+
+    # Build updated config
+    try:
+        current = client.table("scoring_config").select("rt_trade_config").eq("id", 1).execute()
+        current_config = (current.data[0].get("rt_trade_config") or {}) if current.data else {}
+    except Exception:
+        current_config = {}
+
+    updated_config = {**current_config}
+    updated_config["score_weights"] = {
+        "kol_quality": round(best["w_kol_quality"], 3),
+        "token_safety": round(best["w_token_safety"], 3),
+        "market_momentum": round(best["w_momentum"], 3),
+    }
+    updated_config["base_budget_usd"] = round(best["base_budget"], 1)
+    updated_config["sizing"] = {
+        "kol_score_mult_floor": round(best["kol_mult_floor"], 2),
+        "kol_score_mult_cap": round(best["kol_mult_cap"], 2),
+        "tier_s_bonus": round(best["tier_s_bonus"], 2),
+        "safety_mult_floor": round(best["safety_mult_floor"], 2),
+        "safety_mult_cap": round(best["safety_mult_cap"], 2),
+    }
+    updated_config["strategy_multipliers"] = best_strat_mults
+
+    try:
+        import json as _json
+        client.table("scoring_config").update({
+            "rt_trade_config": _json.dumps(updated_config),
+            "updated_by": "optuna_rt_v66_exploration",
+        }).eq("id", 1).execute()
+        logger.info("RT Optuna: deployed new scoring+sizing config to scoring_config")
+    except Exception as e:
+        logger.error("RT Optuna: failed to deploy config: %s", e)
+
+    return {"status": "deployed", "best_value": best_value, "best_params": best,
+            "strategy_mults": best_strat_mults}
+
+
+def run_rt_optimization(client=None, n_trials: int = 100):
+    """Entry point for RT analysis + Optuna scoring/sizing optimization."""
+    if client is None:
+        client = _get_client()
+    if not client:
+        return
+
+    analysis = _analyze_rt_trades(client)
+    if analysis and analysis["total_rt_trades"] >= 50:
+        _optimize_rt_scoring(client, n_trials=n_trials)
+
 
 def main():
     """Run auto-backtest standalone and print report."""

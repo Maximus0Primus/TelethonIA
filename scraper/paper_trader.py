@@ -1,11 +1,14 @@
 """
-Paper Trading System v3 — Multi-strategy with tranche support + portfolio allocation.
+Paper Trading System v4 — Multi-strategy with tranche support + portfolio allocation.
 
-4 strategies run in parallel per token:
-- TP50_SL30:  100% at 1.5x, -30% SL, 12h horizon (conservative baseline)
-- TP100_SL30: 100% at 2x,   -30% SL, 24h horizon (wait for double)
-- SCALE_OUT:  25% tranches at 2x/3x/5x + moonbag, -30% SL, 48h horizon
-- MOONBAG:    80% at 2x + 20% moonbag, -50% SL, 7d horizon
+7 strategies run in parallel per token (new strategies have entry filters):
+- TP50_SL30:   100% at 1.5x, -30% SL, 12h horizon (conservative baseline)
+- TP100_SL30:  100% at 2x,   -30% SL, 24h horizon (wait for double)
+- SCALE_OUT:   25% tranches at 2x/3x/5x + moonbag, -30% SL, 48h horizon
+- MOONBAG:     80% at 2x + 20% moonbag, -50% SL, 7d horizon
+- FRESH_MICRO: 100% at 1.3x, -70% SL, 24h (score 10-49, fresh KOL, micro-cap)
+- QUICK_SCALP: 100% at 1.5x, ~no SL, 6h timeout (score 10-49, momentum)
+- WIDE_RUNNER: 60%@2x + 40%@3x, -70% SL, 48h (score 10-49, fresh KOL, micro-cap)
 
 Each tranche = 1 row in paper_trades. SL triggers close ALL open tranches
 for the same token+strategy. Moonbag tranches (tp_price=NULL) only close
@@ -13,6 +16,7 @@ on SL or timeout.
 
 v3: Score-weighted portfolio allocation. $50 budget per cycle split
 proportionally by token score. Tracks position_usd and pnl_usd.
+v4: Data-driven strategies with entry filters (STRATEGY_FILTERS).
 """
 
 import logging
@@ -50,7 +54,64 @@ STRATEGIES = {
         {"pct": 0.80, "tp_mult": 2.00, "sl_mult": 0.50, "horizon_min": 10080, "label": "main"},
         {"pct": 0.20, "tp_mult": None, "sl_mult": 0.50, "horizon_min": 10080, "label": "moonbag"},
     ],
+    "FRESH_MICRO": [
+        # TP30/SL70/24h — data-driven: score 10-49 + fresh KOL + momentum > 1 + mcap < 5M
+        {"pct": 1.0, "tp_mult": 1.30, "sl_mult": 0.30, "horizon_min": 1440, "label": "main"},
+    ],
+    "QUICK_SCALP": [
+        # TP50/no real SL/6h timeout — ride the fast pump or timeout
+        {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.05, "horizon_min": 360, "label": "main"},
+    ],
+    "WIDE_RUNNER": [
+        # TP100/SL70/48h — patient 2x with wide SL
+        {"pct": 0.60, "tp_mult": 2.00, "sl_mult": 0.30, "horizon_min": 2880, "label": "main"},
+        {"pct": 0.40, "tp_mult": 3.00, "sl_mult": 0.30, "horizon_min": 2880, "label": "runner"},
+    ],
 }
+
+# --- Strategy Entry Filters ---
+# If a token doesn't pass the filter, that strategy is skipped (other strategies still apply).
+STRATEGY_FILTERS = {
+    "FRESH_MICRO": {
+        "min_score": 10,
+        "max_score": 49,
+        "min_kol_freshness": 0.01,
+        "min_momentum_mult": 1.0,
+        "max_mcap": 5_000_000,
+    },
+    "QUICK_SCALP": {
+        "min_score": 10,
+        "max_score": 49,
+        "min_momentum_mult": 1.0,
+    },
+    "WIDE_RUNNER": {
+        "min_score": 10,
+        "max_score": 49,
+        "min_kol_freshness": 0.01,
+        "max_mcap": 5_000_000,
+    },
+}
+
+
+def _passes_strategy_filter(token: dict, strategy_name: str) -> bool:
+    """Check if a token passes the entry filter for a given strategy."""
+    filt = STRATEGY_FILTERS.get(strategy_name)
+    if not filt:
+        return True  # no filter = always pass
+
+    score = token.get("score", 0)
+    if score < filt.get("min_score", 0) or score > filt.get("max_score", 100):
+        return False
+    mcap = float(token.get("market_cap") or 0)
+    if filt.get("max_mcap") and mcap > filt["max_mcap"]:
+        return False
+    kf = float(token.get("kol_freshness") or 0)
+    if kf < filt.get("min_kol_freshness", 0):
+        return False
+    mm = float(token.get("momentum_mult") or 1.0)
+    if mm < filt.get("min_momentum_mult", 0):
+        return False
+    return True
 
 
 def _fetch_prices_batch(addresses: list[str]) -> dict[str, float]:
@@ -239,7 +300,28 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
         if token.get("snapshot_id"):
             base_row["snapshot_id"] = int(token["snapshot_id"])
 
+        # v66: RT metadata propagation (keys prefixed _rt_ in token dict → DB columns)
+        _rt_col_map = {
+            "_rt_source": "source",
+            "_rt_kol_group": "kol_group",
+            "_rt_kol_tier": "kol_tier",
+            "_rt_kol_score": "kol_score",
+            "_rt_kol_win_rate": "kol_win_rate",
+            "_rt_score": "rt_score",
+            "_rt_liquidity_usd": "rt_liquidity_usd",
+            "_rt_volume_24h": "rt_volume_24h",
+            "_rt_buy_sell_ratio": "rt_buy_sell_ratio",
+            "_rt_token_age_hours": "rt_token_age_hours",
+            "_rt_is_pump_fun": "rt_is_pump_fun",
+        }
+        for src_key, db_col in _rt_col_map.items():
+            val = token.get(src_key)
+            if val is not None:
+                base_row[db_col] = val
+
         for strat_name in active_strategies:
+            if not _passes_strategy_filter(token, strat_name):
+                continue  # token doesn't qualify for this strategy
             tranches = STRATEGIES[strat_name]
 
             if (addr, strat_name) in open_combos:
@@ -591,6 +673,28 @@ def paper_trade_summary(client) -> dict | None:
         "strategies": strategy_stats,
     }
 
+    # v66: RT vs batch split
+    rt_trades = [t for t in trades if t.get("source") == "rt"]
+    batch_trades = [t for t in trades if t.get("source") != "rt"]
+
+    def _source_stats(src_trades, label):
+        # Only count closed trades (already filtered by neq("status","open") above)
+        closed = [t for t in src_trades if t.get("status") in ("tp_hit", "sl_hit", "timeout")]
+        if not closed:
+            return None
+        n = len(closed)
+        w = sum(1 for t in closed if float(t.get("pnl_pct") or 0) > 0)
+        inv = sum(float(t.get("position_usd") or 0) for t in closed)
+        pnl = sum(float(t.get("pnl_usd") or 0) for t in closed)
+        wr = w / n if n else 0
+        return {"label": label, "rows": n, "win_rate": round(wr, 3),
+                "invested": round(inv, 2), "pnl_usd": round(pnl, 2)}
+
+    rt_stats = _source_stats(rt_trades, "RT")
+    batch_stats = _source_stats(batch_trades, "batch")
+    summary["rt_stats"] = rt_stats
+    summary["batch_stats"] = batch_stats
+
     logger.info(
         "paper_trader SUMMARY (7d): %d rows, WR=%.1f%%, avgPnL=%.2f%%, E[R]=%.2f%%, PF=%s | "
         "$%.2f invested, $%+.2f PnL (ROI %.1f%%) | TP=%d SL=%d TO=%d | maxConsecL=%d",
@@ -599,6 +703,13 @@ def paper_trade_summary(client) -> dict | None:
         total_invested, total_pnl_usd, roi_pct,
         tp_count, sl_count, timeout_count, g_max_consec,
     )
+    # v66: Log RT vs batch breakdown
+    for ss in [rt_stats, batch_stats]:
+        if ss:
+            logger.info(
+                "  [%s] %d rows, WR=%.1f%%, $%.2f invested, $%+.2f PnL",
+                ss["label"], ss["rows"], ss["win_rate"] * 100, ss["invested"], ss["pnl_usd"],
+            )
     for name, s in strategy_stats.items():
         logger.info(
             "  %s: %d pos, WR=%.1f%%, E[R]=%.2f%%, PF=%s, BEwr=%.1f%% | $%.2f→$%+.2f | maxCL=%d",
