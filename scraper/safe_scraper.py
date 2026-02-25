@@ -19,7 +19,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 from dotenv import load_dotenv
-from telethon import TelegramClient
+from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.tl.functions.messages import GetHistoryRequest
 from telethon.tl.types import PeerChannel, InputPeerChannel
@@ -560,6 +560,154 @@ def process_and_push(messages_data: dict[str, list[dict]], dump: bool = False) -
         logger.debug("Retention cleanup skipped: %s", e)
 
 
+# ---------------------------------------------------------------------------
+# v64: Real-time KOL listener → instant paper trades at call-moment price
+# ---------------------------------------------------------------------------
+_rt_ca_cache: dict = {}
+_rt_trade_cooldown: dict[str, float] = {}  # ca -> last_trade_timestamp
+_rt_group_id_to_username: dict[int, str] = {}  # built at setup, fast reverse lookup
+RT_COOLDOWN_SECONDS = 1800  # 30 min dedup per token
+
+
+def _rt_should_trade(ca: str) -> bool:
+    """Check cooldown: same CA won't open new trades within RT_COOLDOWN_SECONDS."""
+    now = time.time()
+    last = _rt_trade_cooldown.get(ca, 0)
+    if now - last < RT_COOLDOWN_SECONDS:
+        return False
+    _rt_trade_cooldown[ca] = now
+    return True
+
+
+def _rt_open_trades(ca: str, symbol: str, price: float, mcap: float, kol_username: str, tier: str):
+    """Open paper trades for a real-time KOL detection."""
+    from paper_trader import open_paper_trades, _load_paper_trade_config
+    sb = _get_supabase()
+    if not sb:
+        return 0
+    config = _load_paper_trade_config(sb)
+    token_entry = {
+        "symbol": symbol,
+        "token_address": ca,
+        "price_usd": price,
+        "market_cap": mcap,
+        "score": 25,  # Neutral — real-time trades skip pipeline scoring
+        "ca_mention_count": 1,
+        "url_mention_count": 0,
+        "unique_kols": 1,
+        "kol_freshness": 1.0,
+        "momentum_mult": 1.0,
+        "whale_new_entries": None,
+    }
+    now = datetime.now(timezone.utc)
+    opened = open_paper_trades(sb, [token_entry], cycle_ts=now, config=config)
+    if opened > 0:
+        logger.info(
+            "RT paper trade: %d rows opened for %s @ $%.6f — KOL: %s (%s-tier)",
+            opened, symbol, price, kol_username, tier,
+        )
+    return opened
+
+
+async def _rt_on_new_message(event: events.NewMessage.Event):
+    """Real-time event handler: detect token CAs → open paper trades instantly."""
+    global _rt_ca_cache
+
+    chat_id = event.chat_id
+    username = _rt_group_id_to_username.get(chat_id)
+    if not username:
+        return
+
+    msg = event.message
+    if not msg or not msg.message:
+        return
+
+    text = msg.message.strip()
+    if msg.entities:
+        entity_urls = []
+        for entity in msg.entities:
+            if hasattr(entity, "url") and entity.url:
+                entity_urls.append(entity.url)
+        if entity_urls:
+            text += "\n" + "\n".join(entity_urls)
+
+    from pipeline import extract_tokens, _load_ca_cache, _save_ca_cache
+    if not _rt_ca_cache:
+        _rt_ca_cache = _load_ca_cache()
+
+    tokens = extract_tokens(text, ca_cache=_rt_ca_cache)
+    if not tokens:
+        return
+
+    tier = GROUPS_TIER.get(username, "A")
+
+    for symbol, source, ca in tokens:
+        if not ca:
+            continue
+
+        if not _rt_should_trade(ca):
+            continue
+
+        logger.info("RT detect: %s (CA: %s...) from %s (%s-tier)", symbol, ca[:8], username, tier)
+
+        # Fetch DexScreener price (sync in executor)
+        from enrich import _fetch_dexscreener_by_address
+        loop = asyncio.get_event_loop()
+        raw = await loop.run_in_executor(None, _fetch_dexscreener_by_address, ca)
+        if not raw or not raw.get("price_usd"):
+            logger.warning("RT: no price for %s — skipping", ca[:8])
+            continue
+        try:
+            price = float(raw["price_usd"])
+            mcap = float(raw.get("mcap") or 0)
+        except (ValueError, TypeError):
+            continue
+        if price <= 0:
+            continue
+
+        await loop.run_in_executor(None, _rt_open_trades, ca, symbol, price, mcap, username, tier)
+
+
+async def setup_realtime_listener(client: TelegramClient):
+    """Register event handlers for all KOL groups. Returns list of group IDs."""
+    global _rt_group_id_to_username
+    cache = load_group_cache()
+    group_ids = []
+
+    for username in GROUPS_DATA:
+        cached = cache.get(username)
+        if cached and "id" in cached:
+            gid = cached["id"]
+            group_ids.append(gid)
+            _rt_group_id_to_username[gid] = username
+        else:
+            try:
+                entity = await client.get_entity(username)
+                gid = entity.id
+                group_ids.append(gid)
+                _rt_group_id_to_username[gid] = username
+                cache[username] = {
+                    "id": gid,
+                    "access_hash": getattr(entity, "access_hash", None),
+                }
+                save_group_cache(cache)
+            except Exception as e:
+                logger.warning("RT: could not resolve %s: %s", username, e)
+
+    if group_ids:
+        client.add_event_handler(
+            _rt_on_new_message,
+            events.NewMessage(chats=group_ids),
+        )
+        s_count = sum(1 for u, d in GROUPS_DATA.items()
+                      if d.get("tier") == "S" and cache.get(u, {}).get("id") in group_ids)
+        logger.info(
+            "RT listener active: %d groups (%d S-tier). Paper trading on every KOL call.",
+            len(group_ids), s_count,
+        )
+    return group_ids
+
+
 async def run_one_cycle(client: TelegramClient, dump: bool = False) -> None:
     """Execute a single scrape-process-push cycle."""
     logger.info("=== Scrape cycle starting ===")
@@ -623,8 +771,15 @@ async def main():
         logger.info("Single cycle complete. Exiting.")
         return
 
-    # Default: infinite loop with parallel price refresh
-    logger.info("Entering 30-min loop with 3-min price refresh.")
+    # Default: infinite loop with parallel price refresh + real-time listener
+    logger.info("Entering continuous mode: RT listener + 30-min batch + 3-min price refresh.")
+
+    # v64: Register real-time event handlers for instant paper trading
+    try:
+        rt_groups = await setup_realtime_listener(client)
+        logger.info("Real-time listener registered for %d groups", len(rt_groups))
+    except Exception as e:
+        logger.error("Failed to setup RT listener (batch mode continues): %s", e)
 
     async def price_refresh_loop():
         """Mini-cycle: refresh top token prices every 5 minutes."""
