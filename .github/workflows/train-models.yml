@@ -38,6 +38,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
@@ -67,4 +69,27 @@ jobs:
           else
             echo "Running regression: ${{ inputs.horizon }} / ${{ inputs.threshold }}x..."
             python -c "from train_model import train_regression; train_regression(horizon='${{ inputs.horizon }}', threshold=${{ inputs.threshold }})"
+          fi
+
+      # v68: Persist trained model files back to repo so VPS/scraper can use them
+      - name: Commit model files
+        if: always()
+        run: |
+          # Check if any model files were created/updated
+          MODEL_FILES=$(find scraper/ -name 'model_*.json' -o -name 'model_*_lgb.txt' -o -name 'model_*_calibrator.joblib' -o -name 'model_*_meta.json' | grep -v '.disabled' | sort)
+          if [ -z "$MODEL_FILES" ]; then
+            echo "No model files found, skipping commit"
+            exit 0
+          fi
+          echo "Model files found:"
+          echo "$MODEL_FILES"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add scraper/model_*.json scraper/model_*_lgb.txt scraper/model_*_calibrator.joblib 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "No changes to model files, skipping commit"
+          else
+            git commit -m "chore: update ML model files from auto_train [skip ci]"
+            git push
+            echo "Model files committed and pushed"
           fi

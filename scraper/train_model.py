@@ -355,11 +355,65 @@ def _select_feature_tier(n_samples: int) -> list[str]:
     return features
 
 
-def load_labeled_data(horizon: str = "12h") -> pd.DataFrame:
+def _fetch_kco_for_ml(client) -> pd.DataFrame:
+    """
+    v62: Fetch kol_call_outcomes aggregated per token_address for ML training.
+    Returns one row per token with best KCO entry price and max_return.
+    """
+    all_rows = []
+    page_size = 1000
+    offset = 0
+    while True:
+        result = (
+            client.table("kol_call_outcomes")
+            .select("token_address, entry_price, ath_after_call, max_return, did_2x")
+            .not_.is_("entry_price", "null")
+            .not_.is_("ath_after_call", "null")
+            .order("call_timestamp", desc=True)
+            .range(offset, offset + page_size - 1)
+            .execute()
+        )
+        if not result.data:
+            break
+        all_rows.extend(result.data)
+        if len(result.data) < page_size:
+            break
+        offset += page_size
+        if offset >= 10000:
+            break
+
+    if not all_rows:
+        return pd.DataFrame()
+
+    kco = pd.DataFrame(all_rows)
+    kco["entry_price"] = pd.to_numeric(kco["entry_price"], errors="coerce")
+    kco["ath_after_call"] = pd.to_numeric(kco["ath_after_call"], errors="coerce")
+    kco["max_return"] = pd.to_numeric(kco["max_return"], errors="coerce")
+
+    agg = (
+        kco.groupby("token_address")
+        .agg(
+            kco_entry_price=("entry_price", "min"),
+            kco_ath=("ath_after_call", "max"),
+            kco_max_return=("max_return", "max"),
+            kco_did_2x=("did_2x", lambda x: x.any()),
+        )
+        .reset_index()
+    )
+    return agg
+
+
+def load_labeled_data(horizon: str = "12h", entry_mode: str = "snapshot") -> pd.DataFrame:
     """
     Load all labeled snapshots from Supabase with pagination.
     v22: Filter on max_price_{horizon} being non-null (not did_2x_*),
     so the label can be computed dynamically at any threshold.
+
+    v62: entry_mode parameter:
+      - "snapshot" (default): entry price = price_at_snapshot (current behavior)
+      - "first_call": entry price = price_at_first_call (filters to rows where available)
+      - "kco": joins kol_call_outcomes data — uses KCO entry_price and ath_after_call.
+        KCO measures ATH from actual call timestamp (unlimited window) = more accurate returns.
     """
     client = _get_client()
     max_price_col = f"max_price_{horizon}"
@@ -396,10 +450,41 @@ def load_labeled_data(horizon: str = "12h") -> pd.DataFrame:
     # Pre-compute max_return for dynamic threshold labeling
     df[max_price_col] = pd.to_numeric(df[max_price_col], errors="coerce")
     df["price_at_snapshot"] = pd.to_numeric(df["price_at_snapshot"], errors="coerce")
-    valid = (df[max_price_col] > 0) & (df["price_at_snapshot"] > 0)
-    df = df[valid].copy()
-    df["max_return"] = df[max_price_col] / df["price_at_snapshot"]
-    logger.info("Loaded %d labeled snapshots for %s horizon", len(df), horizon)
+
+    if entry_mode == "kco":
+        # v62: Join KCO data — use KCO entry_price and ath as return basis
+        kco = _fetch_kco_for_ml(client)
+        if kco.empty:
+            logger.warning("KCO mode requested but no kol_call_outcomes data available")
+            return pd.DataFrame()
+        n_before = len(df)
+        df = df.merge(kco, on="token_address", how="inner")
+        valid = (df["kco_entry_price"] > 0) & (df["kco_ath"] > 0)
+        df = df[valid].copy()
+        # max_return = ath / entry (KCO multiplier form, same as DB)
+        df["max_return"] = df["kco_ath"] / df["kco_entry_price"]
+        logger.info(
+            "Loaded %d labeled snapshots for %s/kco (matched from %d snapshots, %d KCO tokens)",
+            len(df), horizon, n_before, len(kco),
+        )
+    elif entry_mode == "first_call":
+        # v61: Use price_at_first_call as entry price
+        df["price_at_first_call"] = pd.to_numeric(df.get("price_at_first_call"), errors="coerce")
+        # Filter to rows that have price_at_first_call
+        has_fcp = df["price_at_first_call"].notna() & (df["price_at_first_call"] > 0)
+        n_before = len(df)
+        df = df[has_fcp & (df[max_price_col] > 0)].copy()
+        df["max_return"] = df[max_price_col] / df["price_at_first_call"]
+        logger.info(
+            "Loaded %d labeled snapshots for %s/%s (filtered from %d — %d had price_at_first_call)",
+            len(df), horizon, entry_mode, n_before, int(has_fcp.sum()),
+        )
+    else:
+        valid = (df[max_price_col] > 0) & (df["price_at_snapshot"] > 0)
+        df = df[valid].copy()
+        df["max_return"] = df[max_price_col] / df["price_at_snapshot"]
+        logger.info("Loaded %d labeled snapshots for %s horizon", len(df), horizon)
+
     return df
 
 
@@ -2105,10 +2190,14 @@ def auto_train(
     trials: int = 50,
 ) -> dict | None:
     """
-    v22: Multi-horizon × multi-threshold grid search.
+    v62: Multi-horizon × multi-threshold × tri-entry-mode grid search.
 
-    Tries all (horizon, threshold) combos, trains regression (+ LTR if enough data),
-    picks the best combo by precision@5, and deploys it.
+    Tries all (horizon, threshold, entry_mode) combos, trains regression
+    (+ LTR if enough data), picks the best combo by precision@5, and deploys it.
+
+    Grid: 3 horizons × 3 thresholds × 3 entry_modes = 27 combos.
+    First-call mode skipped if < min_samples tokens have price_at_first_call.
+    KCO mode uses kol_call_outcomes data (ATH from actual call timestamp).
 
     Returns metadata dict if model was successfully trained and deployed,
     None if skipped or failed.
@@ -2116,9 +2205,10 @@ def auto_train(
     _load_ml_config()  # v58: dynamic quality gates from DB
     HORIZON_POOL = ["6h", "12h", "24h"]
     THRESHOLD_POOL = [1.3, 1.5, 2.0]
+    ENTRY_MODES = ["snapshot", "first_call", "kco"]
 
-    logger.info("=== AUTO-TRAIN: grid %s × %s, min_samples=%d, trials=%d ===",
-                HORIZON_POOL, THRESHOLD_POOL, min_samples, trials)
+    logger.info("=== AUTO-TRAIN: grid %s × %s × %s, min_samples=%d, trials=%d ===",
+                HORIZON_POOL, THRESHOLD_POOL, ENTRY_MODES, min_samples, trials)
 
     # Suppress Optuna logs in auto mode
     optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -2147,69 +2237,79 @@ def auto_train(
                     old_meta.get("metrics", {}).get("precision_at_5", 0),
                     old_meta.get("train_samples", 0) + old_meta.get("test_samples", 0))
 
-    # Grid search: best (horizon, threshold) combo
+    # Grid search: best (horizon, threshold, entry_mode) combo
     best_result = None
     best_horizon = None
     best_threshold = None
+    best_entry_mode = None
 
-    for horizon in HORIZON_POOL:
-        df = load_labeled_data(horizon)
-        if df.empty:
-            logger.info("auto_train: %s — no data, skipping", horizon)
-            continue
-
-        df = deduplicate_snapshots(df, threshold=2.0)  # dedup with default threshold for logging
-
-        if len(df) < min_samples:
-            logger.info("auto_train: %s — only %d unique tokens (need %d), skipping",
-                        horizon, len(df), min_samples)
-            continue
-
-        for threshold in THRESHOLD_POOL:
-            n_winners = int((df["max_return"] >= threshold).sum())
-            if n_winners < 3:
-                logger.info("auto_train: %s/%.1fx — only %d winners, skipping",
-                            horizon, threshold, n_winners)
+    for entry_mode in ENTRY_MODES:
+        for horizon in HORIZON_POOL:
+            df = load_labeled_data(horizon, entry_mode=entry_mode)
+            if df.empty:
+                logger.info("auto_train: %s/%s — no data, skipping", horizon, entry_mode)
                 continue
 
-            logger.info("auto_train: trying %s/%.1fx — %d samples, %d winners",
-                        horizon, threshold, len(df), n_winners)
+            df = deduplicate_snapshots(df, threshold=2.0)  # dedup with default threshold for logging
 
-            # Train regression
-            reg_meta = train_regression(
-                df, horizon, n_trials=trials, min_samples=min_samples, threshold=threshold
-            )
-
-            # Also try LTR if enough data
-            ltr_meta = None
-            if len(df) >= 200:
-                try:
-                    ltr_meta = train_ltr(
-                        df, horizon, n_trials=trials, min_samples=min_samples, threshold=threshold
-                    )
-                except Exception as e:
-                    logger.warning("auto_train: LTR %s/%.1fx failed: %s", horizon, threshold, e)
-
-            # Pick best candidate for this combo
-            candidates = []
-            if reg_meta and reg_meta.get("quality_gate") == "PASSED":
-                candidates.append(reg_meta)
-            if ltr_meta and ltr_meta.get("quality_gate") == "PASSED":
-                candidates.append(ltr_meta)
-
-            if not candidates:
+            if len(df) < min_samples:
+                logger.info("auto_train: %s/%s — only %d unique tokens (need %d), skipping",
+                            horizon, entry_mode, len(df), min_samples)
                 continue
 
-            combo_best = max(candidates, key=lambda m: m.get("metrics", {}).get("precision_at_5", 0))
-            combo_p5 = combo_best.get("metrics", {}).get("precision_at_5", 0)
+            for threshold in THRESHOLD_POOL:
+                n_winners = int((df["max_return"] >= threshold).sum())
+                if n_winners < 3:
+                    logger.info("auto_train: %s/%.1fx/%s — only %d winners, skipping",
+                                horizon, threshold, entry_mode, n_winners)
+                    continue
 
-            logger.info("auto_train: %s/%.1fx best = %s p@5=%.3f",
-                        horizon, threshold, combo_best.get("mode"), combo_p5)
+                logger.info("auto_train: trying %s/%.1fx/%s — %d samples, %d winners",
+                            horizon, threshold, entry_mode, len(df), n_winners)
 
-            if best_result is None or combo_p5 > best_result.get("metrics", {}).get("precision_at_5", 0):
-                best_result = combo_best
-                best_horizon = horizon
-                best_threshold = threshold
+                # Train regression
+                reg_meta = train_regression(
+                    df, horizon, n_trials=trials, min_samples=min_samples, threshold=threshold
+                )
+
+                # Also try LTR if enough data
+                ltr_meta = None
+                if len(df) >= 200:
+                    try:
+                        ltr_meta = train_ltr(
+                            df, horizon, n_trials=trials, min_samples=min_samples, threshold=threshold
+                        )
+                    except Exception as e:
+                        logger.warning("auto_train: LTR %s/%.1fx/%s failed: %s", horizon, threshold, entry_mode, e)
+
+                # Pick best candidate for this combo
+                candidates = []
+                if reg_meta and reg_meta.get("quality_gate") == "PASSED":
+                    candidates.append(reg_meta)
+                if ltr_meta and ltr_meta.get("quality_gate") == "PASSED":
+                    candidates.append(ltr_meta)
+
+                if not candidates:
+                    continue
+
+                combo_best = max(candidates, key=lambda m: (
+                    m.get("metrics", {}).get("precision_at_5", 0),
+                    m.get("metrics", {}).get("spearman", 0),
+                ))
+                combo_p5 = combo_best.get("metrics", {}).get("precision_at_5", 0)
+                combo_sp = combo_best.get("metrics", {}).get("spearman", 0)
+
+                logger.info("auto_train: %s/%.1fx/%s best = %s p@5=%.3f spearman=%.3f",
+                            horizon, threshold, entry_mode, combo_best.get("mode"), combo_p5, combo_sp)
+
+                # v68: tiebreak on Spearman when p@5 is equal (was first-wins bias)
+                best_p5 = best_result.get("metrics", {}).get("precision_at_5", 0) if best_result else -1
+                best_sp = best_result.get("metrics", {}).get("spearman", 0) if best_result else -1
+                if best_result is None or (combo_p5, combo_sp) > (best_p5, best_sp):
+                    best_result = combo_best
+                    best_horizon = horizon
+                    best_threshold = threshold
+                    best_entry_mode = entry_mode
 
     if best_result is None:
         logger.warning("auto_train: no model passed quality gate across all combos")
@@ -2218,31 +2318,39 @@ def auto_train(
     new_p5 = best_result.get("metrics", {}).get("precision_at_5", 0)
     best_mode = best_result.get("mode", "regression")
 
-    # A/B comparison: new model must beat old model on precision@5
+    new_sp = best_result.get("metrics", {}).get("spearman", 0)
+    logger.info(
+        "auto_train: grid search complete — best combo: %s/%.1fx/%s/%s (p@5=%.3f, spearman=%.3f)",
+        best_horizon, best_threshold, best_entry_mode, best_mode, new_p5, new_sp,
+    )
+
+    # A/B comparison: new model must beat old model on (precision@5, spearman)
     if old_meta:
         old_p5 = old_meta.get("metrics", {}).get("precision_at_5", 0)
-        if new_p5 < old_p5:
+        old_sp = old_meta.get("metrics", {}).get("spearman", 0)
+        if (new_p5, new_sp) < (old_p5, old_sp):
             logger.warning(
-                "auto_train: new %s/%s/%.1fx (p@5=%.3f) worse than old %s/%s (p@5=%.3f). "
+                "auto_train: new %s/%s/%.1fx/%s (p@5=%.3f, sp=%.3f) worse than old %s/%s (p@5=%.3f, sp=%.3f). "
                 "Keeping old model.",
-                best_horizon, best_mode, best_threshold, new_p5,
-                old_horizon, old_meta.get("mode", "?"), old_p5,
+                best_horizon, best_mode, best_threshold, best_entry_mode, new_p5, new_sp,
+                old_horizon, old_meta.get("mode", "?"), old_p5, old_sp,
             )
             return None
 
         logger.info(
-            "auto_train: new %s/%s/%.1fx (p@5=%.3f) beats old %s/%s (p@5=%.3f). Deployed!",
-            best_horizon, best_mode, best_threshold, new_p5,
-            old_horizon, old_meta.get("mode", "?"), old_p5,
+            "auto_train: new %s/%s/%.1fx/%s (p@5=%.3f, sp=%.3f) beats old %s/%s (p@5=%.3f, sp=%.3f). Deployed!",
+            best_horizon, best_mode, best_threshold, best_entry_mode, new_p5, new_sp,
+            old_horizon, old_meta.get("mode", "?"), old_p5, old_sp,
         )
     else:
-        logger.info("auto_train: no existing model — %s/%s/%.1fx deployed (p@5=%.3f)",
-                    best_horizon, best_mode, best_threshold, new_p5)
+        logger.info("auto_train: no existing model — %s/%s/%.1fx/%s deployed (p@5=%.3f)",
+                    best_horizon, best_mode, best_threshold, best_entry_mode, new_p5)
 
     # Save final metadata with auto-train info
     meta_path = MODEL_DIR / f"model_{best_horizon}_meta.json"
     best_result["auto_trained"] = True
     best_result["auto_trained_at"] = datetime.utcnow().isoformat()
+    best_result["entry_mode"] = best_entry_mode
     with open(meta_path, "w") as f:
         json.dump(best_result, f, indent=2)
 
