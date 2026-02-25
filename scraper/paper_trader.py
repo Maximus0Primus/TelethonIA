@@ -2,10 +2,10 @@
 Paper Trading System v4 — Multi-strategy with tranche support + portfolio allocation.
 
 7 strategies run in parallel per token (new strategies have entry filters):
-- TP50_SL30:   100% at 1.5x, -30% SL, 12h horizon (conservative baseline)
+- TP50_SL30:   100% at 1.5x, -30% SL, 24h horizon (decoupled from TP100, same horizon)
 - TP100_SL30:  100% at 2x,   -30% SL, 24h horizon (wait for double)
-- SCALE_OUT:   25% tranches at 2x/3x/5x + moonbag, -30% SL, 48h horizon
-- MOONBAG:     80% at 2x + 20% moonbag, -50% SL, 7d horizon
+- SCALE_OUT:   25% tranches at 2x/3x/5x + moonbag, -50% SL, 48h horizon (wider SL for long hold)
+- MOONBAG:     80% at 2x + 20% moonbag, -70% SL, 7d horizon (widest SL for max duration)
 - FRESH_MICRO: 100% at 1.3x, -70% SL, 24h (score 10-49, fresh KOL, micro-cap)
 - QUICK_SCALP: 100% at 1.5x, ~no SL, 6h timeout (score 10-49, momentum)
 - WIDE_RUNNER: 60%@2x + 40%@3x, -70% SL, 48h (score 10-49, fresh KOL, micro-cap)
@@ -46,20 +46,23 @@ CA_FILTER = True
 # Each strategy has a list of tranches. Moonbag tranches have tp_mult=None.
 STRATEGIES = {
     "TP50_SL30": [
-        {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.70, "horizon_min": 720, "label": "main"},
+        # v68: horizon 12h→24h (decoupled from TP level — analysis showed TP100 edge was from horizon, not TP)
+        {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.70, "horizon_min": 1440, "label": "main"},
     ],
     "TP100_SL30": [
         {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.70, "horizon_min": 1440, "label": "main"},
     ],
     "SCALE_OUT": [
-        {"pct": 0.25, "tp_mult": 2.00, "sl_mult": 0.70, "horizon_min": 2880, "label": "tp_2x"},
-        {"pct": 0.25, "tp_mult": 3.00, "sl_mult": 0.70, "horizon_min": 2880, "label": "tp_3x"},
-        {"pct": 0.25, "tp_mult": 5.00, "sl_mult": 0.70, "horizon_min": 2880, "label": "tp_5x"},
-        {"pct": 0.25, "tp_mult": None, "sl_mult": 0.70, "horizon_min": 2880, "label": "moonbag"},
+        # v68: SL widened 0.70→0.50 (-50% SL). Was 82% SL hit rate at -30% — too tight for 48h hold.
+        {"pct": 0.25, "tp_mult": 2.00, "sl_mult": 0.50, "horizon_min": 2880, "label": "tp_2x"},
+        {"pct": 0.25, "tp_mult": 3.00, "sl_mult": 0.50, "horizon_min": 2880, "label": "tp_3x"},
+        {"pct": 0.25, "tp_mult": 5.00, "sl_mult": 0.50, "horizon_min": 2880, "label": "tp_5x"},
+        {"pct": 0.25, "tp_mult": None, "sl_mult": 0.50, "horizon_min": 2880, "label": "moonbag"},
     ],
     "MOONBAG": [
-        {"pct": 0.80, "tp_mult": 2.00, "sl_mult": 0.50, "horizon_min": 10080, "label": "main"},
-        {"pct": 0.20, "tp_mult": None, "sl_mult": 0.50, "horizon_min": 10080, "label": "moonbag"},
+        # v68: SL widened 0.50→0.30 (-70% SL). 7d hold needs room to breathe — memecoins drop 50%+ intraday.
+        {"pct": 0.80, "tp_mult": 2.00, "sl_mult": 0.30, "horizon_min": 10080, "label": "main"},
+        {"pct": 0.20, "tp_mult": None, "sl_mult": 0.30, "horizon_min": 10080, "label": "moonbag"},
     ],
     "FRESH_MICRO": [
         # TP30/SL70/24h — data-driven: score 10-49 + fresh KOL + momentum > 1 + mcap < 5M
