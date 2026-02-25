@@ -4319,6 +4319,28 @@ def _optuna_optimize_params(
         )
         return None
 
+    def _suggest_ordered(trial, names, low, high, step, ascending=True):
+        """Sample N values guaranteed to be in ascending order.
+
+        Instead of sampling independently and rejecting bad combos (which
+        wastes >99.9% of trials with 21 constraints), we sample each value
+        conditional on the previous one.
+        """
+        values = []
+        n = len(names)
+        current_low = low
+        for i, name in enumerate(names):
+            remaining = n - i - 1
+            max_for_this = high - remaining * step
+            if current_low > max_for_this:
+                current_low = max_for_this  # degenerate: all equal
+            val = trial.suggest_float(name, current_low, max_for_this, step=step)
+            values.append(val)
+            current_low = val + step
+        if not ascending:
+            values = values[::-1]
+        return values
+
     def objective(trial):
         # --- Weights (sum-to-1 via normalization) ---
         w_consensus = trial.suggest_float("w_consensus", 0.0, 0.80, step=0.05)
@@ -4341,11 +4363,8 @@ def _optuna_optimize_params(
             "combined_cap": trial.suggest_float("combined_cap", 1.5, 3.0, step=0.25),
             "activity_mult_floor": trial.suggest_float("activity_mult_floor", 0.60, 0.95, step=0.05),
             "activity_mult_cap": trial.suggest_float("activity_mult_cap", 1.10, 1.50, step=0.05),
-            "activity_ratio_high": trial.suggest_float("activity_ratio_high", 0.40, 0.80, step=0.05),
-            "activity_ratio_mid": trial.suggest_float("activity_ratio_mid", 0.15, 0.50, step=0.05),
-            "activity_ratio_low": trial.suggest_float("activity_ratio_low", 0.05, 0.25, step=0.05),
-            "activity_pump_cap_hard": trial.suggest_float("activity_pump_cap_hard", 50, 150, step=10),
-            "activity_pump_cap_soft": trial.suggest_float("activity_pump_cap_soft", 30, 80, step=10),
+            "activity_pump_cap_hard": 0,  # placeholder, set below
+            "activity_pump_cap_soft": 0,  # placeholder, set below
             "s_tier_bonus": trial.suggest_float("s_tier_bonus", 1.0, 1.5, step=0.05),
             "ca_mention_bonus": trial.suggest_float("ca_mention_bonus", 1.0, 1.5, step=0.05),
         }
@@ -4366,18 +4385,8 @@ def _optuna_optimize_params(
         }
 
         # v56: KOL win rate config (7 params)
-        wr_t0 = trial.suggest_float("wr_t0", 0.15, 0.40, step=0.05)
-        wr_t1 = trial.suggest_float("wr_t1", 0.30, 0.55, step=0.05)
-        wr_t2 = trial.suggest_float("wr_t2", 0.40, 0.65, step=0.05)
-        # Ordered: t0 < t1 < t2
-        if wr_t0 >= wr_t1 or wr_t1 >= wr_t2:
-            return -999.0
-        wr_f1 = trial.suggest_float("wr_f1", 1.0, 1.25, step=0.05)
-        wr_f2 = trial.suggest_float("wr_f2", 1.10, 1.45, step=0.05)
-        wr_f3 = trial.suggest_float("wr_f3", 1.20, 1.60, step=0.05)
-        # Ordered: f1 <= f2 <= f3
-        if wr_f1 > wr_f2 or wr_f2 > wr_f3:
-            return -999.0
+        wr_t0, wr_t1, wr_t2 = _suggest_ordered(trial, ["wr_t0", "wr_t1", "wr_t2"], 0.15, 0.65, 0.05)
+        wr_f1, wr_f2, wr_f3 = _suggest_ordered(trial, ["wr_f1", "wr_f2", "wr_f3"], 1.0, 1.60, 0.05)
         wr_min_calls = trial.suggest_int("wr_min_calls", 2, 6)
         params["kol_wr_config"] = {
             "thresholds": [wr_t0, wr_t1, wr_t2],
@@ -4385,42 +4394,39 @@ def _optuna_optimize_params(
             "min_calls": wr_min_calls,
         }
 
-        # Ordered constraints: high > mid > low
-        if params["activity_ratio_high"] <= params["activity_ratio_mid"]:
-            return -999.0
-        if params["activity_ratio_mid"] <= params["activity_ratio_low"]:
-            return -999.0
-        if params["activity_pump_cap_hard"] <= params["activity_pump_cap_soft"]:
-            return -999.0
+        # Ordered: low < mid < high (sample ascending, assign reversed)
+        _ar_low, _ar_mid, _ar_high = _suggest_ordered(
+            trial, ["activity_ratio_low", "activity_ratio_mid", "activity_ratio_high"], 0.05, 0.80, 0.05)
+        params["activity_ratio_low"] = _ar_low
+        params["activity_ratio_mid"] = _ar_mid
+        params["activity_ratio_high"] = _ar_high
+        # Ordered: soft < hard
+        _pc_soft, _pc_hard = _suggest_ordered(
+            trial, ["activity_pump_cap_soft", "activity_pump_cap_hard"], 30, 150, 10)
+        params["activity_pump_cap_soft"] = _pc_soft
+        params["activity_pump_cap_hard"] = _pc_hard
 
         # --- v49: conviction normalization params ---
         params["conviction_offset"] = trial.suggest_float("conviction_offset", 3, 10, step=1)
         params["conviction_divisor"] = trial.suggest_float("conviction_divisor", 2, 8, step=1)
 
         # --- JSONB configs ---
+        _bp_t0, _bp_t1, _bp_t2 = _suggest_ordered(trial, ["bp_t0", "bp_t1", "bp_t2"], 0.01, 0.15, 0.005)
         params["breadth_pen_config"] = {
-            "thresholds": [
-                trial.suggest_float("bp_t0", 0.01, 0.06, step=0.005),
-                trial.suggest_float("bp_t1", 0.03, 0.10, step=0.005),
-                trial.suggest_float("bp_t2", 0.05, 0.15, step=0.005),
-            ],
+            "thresholds": [_bp_t0, _bp_t1, _bp_t2],
             "penalties": [
                 trial.suggest_float("bp_p0", 0.50, 0.90, step=0.05),
                 trial.suggest_float("bp_p1", 0.65, 0.95, step=0.05),
                 trial.suggest_float("bp_p2", 0.80, 1.00, step=0.05),
             ],
         }
-        # Ordered constraints for breadth_pen thresholds
-        bpt = params["breadth_pen_config"]["thresholds"]
-        if bpt[0] >= bpt[1] or bpt[1] >= bpt[2]:
-            return -999.0
 
+        # Hype pen: ordered int thresholds
+        _hp_t0 = trial.suggest_int("hp_t0", 1, 4)
+        _hp_t1 = trial.suggest_int("hp_t1", max(_hp_t0 + 1, 3), 7)
+        _hp_t2 = trial.suggest_int("hp_t2", max(_hp_t1 + 1, 5), 12)
         params["hype_pen_config"] = {
-            "thresholds": [
-                trial.suggest_int("hp_t0", 1, 4),
-                trial.suggest_int("hp_t1", 3, 7),
-                trial.suggest_int("hp_t2", 5, 12),
-            ],
+            "thresholds": [_hp_t0, _hp_t1, _hp_t2],
             "penalties": [
                 1.0,  # sweet spot always 1.0
                 trial.suggest_float("hp_p1", 0.60, 1.00, step=0.05),
@@ -4433,11 +4439,6 @@ def _optuna_optimize_params(
                 "penalty": trial.suggest_float("cooc_penalty", 0.70, 0.95, step=0.05),
             },
         }
-        # Ordered constraints for hype_pen thresholds
-        hpt = params["hype_pen_config"]["thresholds"]
-        if hpt[0] >= hpt[1] or hpt[1] >= hpt[2]:
-            return -999.0
-
         # --- v45: New scalar params ---
         params["safety_floor"] = trial.suggest_float("safety_floor", 0.60, 1.00, step=0.05)
         params["onchain_mult_floor"] = trial.suggest_float("onchain_mult_floor", 0.20, 0.60, step=0.05)
@@ -4445,10 +4446,8 @@ def _optuna_optimize_params(
 
         # --- v45: death_config params ---
         death_stale_t0 = trial.suggest_int("death_stale_t0", 12, 36)
-        death_stale_t1 = trial.suggest_int("death_stale_t1", 24, 72)
-        death_stale_t2 = trial.suggest_int("death_stale_t2", 48, 96)
-        if death_stale_t0 >= death_stale_t1 or death_stale_t1 >= death_stale_t2:
-            return -999.0
+        death_stale_t1 = trial.suggest_int("death_stale_t1", max(death_stale_t0 + 1, 24), 72)
+        death_stale_t2 = trial.suggest_int("death_stale_t2", max(death_stale_t1 + 1, 48), 96)
         death_stale_b0 = trial.suggest_float("death_stale_b0", 0.40, 0.80, step=0.05)
         death_stale_b1 = trial.suggest_float("death_stale_b1", 0.20, 0.60, step=0.05)
         death_stale_b2 = trial.suggest_float("death_stale_b2", 0.10, 0.40, step=0.05)
@@ -4459,11 +4458,9 @@ def _optuna_optimize_params(
         death_vol_death_1h = trial.suggest_float("death_vol_death_1h", 100, 1000, step=100)
         death_vol_floor_24h = trial.suggest_float("death_vol_floor_24h", 500, 5000, step=500)
         death_vol_mod_t0 = trial.suggest_float("death_vol_mod_t0", 20000, 100000, step=10000)
-        death_vol_mod_t1 = trial.suggest_float("death_vol_mod_t1", 50000, 200000, step=10000)
-        death_vol_mod_t2 = trial.suggest_float("death_vol_mod_t2", 200000, 800000, step=50000)
-        death_vol_mod_t3 = trial.suggest_float("death_vol_mod_t3", 500000, 2000000, step=100000)
-        if death_vol_mod_t0 >= death_vol_mod_t1 or death_vol_mod_t1 >= death_vol_mod_t2 or death_vol_mod_t2 >= death_vol_mod_t3:
-            return -999.0
+        death_vol_mod_t1 = trial.suggest_float("death_vol_mod_t1", max(death_vol_mod_t0 + 10000, 50000), 200000, step=10000)
+        death_vol_mod_t2 = trial.suggest_float("death_vol_mod_t2", max(death_vol_mod_t1 + 50000, 200000), 800000, step=50000)
+        death_vol_mod_t3 = trial.suggest_float("death_vol_mod_t3", max(death_vol_mod_t2 + 100000, 500000), 2000000, step=100000)
         params["death_config"] = {
             "stale_start_hours": death_stale_start,
             "stale_tiers": [death_stale_t0, death_stale_t1, death_stale_t2],
@@ -4479,10 +4476,8 @@ def _optuna_optimize_params(
 
         # --- v45: entry_premium_config params ---
         ep_neutral_cap = trial.suggest_float("ep_neutral_cap", 1.0, 2.5, step=0.25)
-        ep_mild_cap = trial.suggest_float("ep_mild_cap", 2.0, 6.0, step=0.5)
-        ep_harsh_cap = trial.suggest_float("ep_harsh_cap", 4.0, 12.0, step=1.0)
-        if ep_neutral_cap >= ep_mild_cap or ep_mild_cap >= ep_harsh_cap:
-            return -999.0
+        ep_mild_cap = trial.suggest_float("ep_mild_cap", max(ep_neutral_cap + 0.5, 2.0), 6.0, step=0.5)
+        ep_harsh_cap = trial.suggest_float("ep_harsh_cap", max(ep_mild_cap + 1.0, 4.0), 12.0, step=1.0)
         ep_floor_mult = trial.suggest_float("ep_floor_mult", 0.15, 0.40, step=0.05)
         ep_mcap_threshold = trial.suggest_float("ep_mcap_threshold", 20000000, 100000000, step=10000000)
         ep_duration_48h = trial.suggest_float("ep_duration_48h", 1.2, 2.0, step=0.1)
@@ -4532,15 +4527,10 @@ def _optuna_optimize_params(
         }
 
         # --- v46: pa_config params (direction penalties + norm bounds) ---
-        pa_dir_pump = trial.suggest_float("pa_dir_pump_mult", 0.3, 1.0, step=0.05)
         pa_dir_hard_pump = trial.suggest_float("pa_dir_hard_pump_mult", 0.3, 1.0, step=0.05)
+        pa_dir_pump = trial.suggest_float("pa_dir_pump_mult", max(pa_dir_hard_pump, 0.3), 1.0, step=0.05)
         pa_dir_freefall = trial.suggest_float("pa_dir_freefall_mult", 0.3, 1.0, step=0.05)
-        pa_dir_dying = trial.suggest_float("pa_dir_dying_mult", 0.5, 1.0, step=0.05)
-        # Ordered: hard_pump <= pump, freefall <= dying
-        if pa_dir_hard_pump > pa_dir_pump:
-            return -999.0
-        if pa_dir_freefall > pa_dir_dying:
-            return -999.0
+        pa_dir_dying = trial.suggest_float("pa_dir_dying_mult", max(pa_dir_freefall, 0.5), 1.0, step=0.05)
         params["pa_norm_floor"] = trial.suggest_float("pa_norm_floor", 0.2, 0.6, step=0.05)
         params["pa_norm_cap"] = trial.suggest_float("pa_norm_cap", 1.0, 1.8, step=0.1)
         params["pa_config"] = {
@@ -4557,12 +4547,8 @@ def _optuna_optimize_params(
         params["consensus_pump_floor"] = trial.suggest_float("consensus_pump_floor", 0.3, 0.8, step=0.05)
         params["consensus_pump_divisor"] = trial.suggest_float("consensus_pump_divisor", 200, 600, step=50)
         params["activity_mid_mult"] = trial.suggest_float("activity_mid_mult", 1.0, 1.20, step=0.02)
-        pp_hard = trial.suggest_float("pump_hard_penalty", 0.3, 0.7, step=0.05)
-        pp_mod = trial.suggest_float("pump_moderate_penalty", 0.5, 0.85, step=0.05)
-        pp_light = trial.suggest_float("pump_light_penalty", 0.70, 0.95, step=0.05)
-        # Ordered: hard <= moderate <= light
-        if pp_hard > pp_mod or pp_mod > pp_light:
-            return -999.0
+        pp_hard, pp_mod, pp_light = _suggest_ordered(
+            trial, ["pump_hard_penalty", "pump_moderate_penalty", "pump_light_penalty"], 0.3, 0.95, 0.05)
         pvp_floor = trial.suggest_float("pvp_normal_floor", 0.3, 0.7, step=0.05)
         # v59: Previously hardcoded pvp params now in search space
         pvp_pf_floor = trial.suggest_float("pvp_pump_fun_floor", 0.4, 0.9, step=0.05)
@@ -4591,9 +4577,7 @@ def _optuna_optimize_params(
 
         # --- v48: onchain_config params (~11 new) ---
         oc_lmr_low = trial.suggest_float("oc_lmr_low", 0.01, 0.05, step=0.005)
-        oc_lmr_high = trial.suggest_float("oc_lmr_high", 0.05, 0.20, step=0.01)
-        if oc_lmr_low >= oc_lmr_high:
-            return -999.0
+        oc_lmr_high = trial.suggest_float("oc_lmr_high", max(oc_lmr_low + 0.01, 0.05), 0.20, step=0.01)
         oc_whale_count_f0 = trial.suggest_float("oc_whale_count_f0", 0.4, 0.9, step=0.05)
         oc_whale_count_f3 = trial.suggest_float("oc_whale_count_f3", 1.2, 1.8, step=0.1)
         oc_wne_f2 = trial.suggest_float("oc_wne_f2", 1.1, 1.5, step=0.05)
@@ -4650,8 +4634,8 @@ def _optuna_optimize_params(
         sf_holder_t = trial.suggest_float("sf_holder_count_threshold", 30, 100, step=10)
         sf_holder_p = trial.suggest_float("sf_holder_count_penalty", 0.6, 0.95, step=0.05)
         sf_whale_conc_t = trial.suggest_float("sf_whale_conc_threshold", 40, 80, step=5)
-        sf_whale_dist_p = trial.suggest_float("sf_whale_dist_penalty", 0.5, 0.9, step=0.05)
         sf_whale_dump_p = trial.suggest_float("sf_whale_dump_penalty", 0.4, 0.8, step=0.05)
+        sf_whale_dist_p = trial.suggest_float("sf_whale_dist_penalty", max(sf_whale_dump_p, 0.5), 0.9, step=0.05)
         sf_lp_unlock_p = trial.suggest_float("sf_lp_unlock_penalty", 0.3, 0.8, step=0.05)
         # v49: 6 safety slope params
         sf_insider_slope = trial.suggest_float("sf_insider_slope", 50, 200, step=25)
@@ -4660,9 +4644,6 @@ def _optuna_optimize_params(
         sf_whale_conc_slope = trial.suggest_float("sf_whale_conc_slope", 40, 150, step=10)
         sf_bb_cluster_slope = trial.suggest_float("sf_bb_cluster_slope", 30, 120, step=10)
         sf_cex_slope = trial.suggest_float("sf_cex_slope", 50, 200, step=25)
-        # Ordered: dump <= dist
-        if sf_whale_dump_p > sf_whale_dist_p:
-            return -999.0
         params["safety_config"] = {
             "insider_threshold": sf_insider_t, "insider_floor": sf_insider_f, "insider_slope": sf_insider_slope,
             "top10_threshold": 50, "top10_floor": 0.7, "top10_slope": sf_top10_slope,
