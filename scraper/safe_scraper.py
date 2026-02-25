@@ -66,6 +66,11 @@ PRICE_REFRESH_INTERVAL = 3 * 60   # 3 minutes
 # Time windows to compute
 TIME_WINDOWS = {"3h": 3, "6h": 6, "12h": 12, "24h": 24, "48h": 48, "7d": 168}
 
+# v65: Throttle expensive windows on VPS continuous mode to reduce egress.
+# 48h runs every 2nd cycle, 7d every 6th. Saves ~60% of enrichment API calls + Supabase writes.
+WINDOW_CYCLE_FREQ = {"3h": 1, "6h": 1, "12h": 1, "24h": 1, "48h": 2, "7d": 6}
+_cycle_counter: int = 0  # incremented in main loop
+
 # === KOL GROUPS (conviction scores + tier) ===
 # Tier S (weight 2.0): elite callers — each mention counts double
 # Tier A (weight 1.0): good callers — baseline weight
@@ -375,8 +380,14 @@ def _fetch_sol_price() -> float | None:
     return None
 
 
-def process_and_push(messages_data: dict[str, list[dict]], dump: bool = False) -> None:
-    """Run the pipeline and push results to Supabase."""
+def process_and_push(messages_data: dict[str, list[dict]], dump: bool = False,
+                     cycle_num: int = 0, once_mode: bool = False) -> None:
+    """Run the pipeline and push results to Supabase.
+
+    Args:
+        cycle_num: current cycle counter (0-based). Used to throttle expensive windows.
+        once_mode: if True, run ALL windows regardless of throttle (--once / GH Actions).
+    """
     _cycle_start = time.time()
     # Load dynamic scoring weights from Supabase (auto-learning loop)
     try:
@@ -389,16 +400,22 @@ def process_and_push(messages_data: dict[str, list[dict]], dump: bool = False) -
     all_enriched_by_window: dict[str, list[dict]] = {}
     all_raw_mentions: list[dict] = []
 
+    # v65: Decide which windows to run this cycle
     for window_name, hours in TIME_WINDOWS.items():
+        freq = WINDOW_CYCLE_FREQ.get(window_name, 1)
+        if not once_mode and freq > 1 and cycle_num % freq != 0:
+            logger.info("Window %s: SKIPPED (runs every %d cycles, next in %d)",
+                        window_name, freq, freq - (cycle_num % freq))
+            continue
         ranking, raw_mentions, all_enriched = aggregate_ranking(
             messages_data, GROUPS_CONVICTION, hours,
             groups_tier=GROUPS_TIER, tier_weights=TIER_WEIGHTS,
         )
         ranking_by_window[window_name] = ranking
         all_enriched_by_window[window_name] = all_enriched
-        # v10: Keep mentions from the largest window only (7d) to avoid duplicates
-        if window_name == "7d":
-            all_raw_mentions = raw_mentions
+        # v10: Keep mentions from the widest window processed (avoids duplicates)
+        # v65: When 7d is skipped, the widest processed window provides mentions
+        all_raw_mentions = raw_mentions
         penalized = sum(1 for t in all_enriched if t.get("gate_mult", 1.0) < 1.0)
         logger.info("Window %s: %d tokens (%d penalized)", window_name, len(ranking), penalized)
 
@@ -708,16 +725,19 @@ async def setup_realtime_listener(client: TelegramClient):
     return group_ids
 
 
-async def run_one_cycle(client: TelegramClient, dump: bool = False) -> None:
+async def run_one_cycle(client: TelegramClient, dump: bool = False,
+                        once_mode: bool = False) -> None:
     """Execute a single scrape-process-push cycle."""
-    logger.info("=== Scrape cycle starting ===")
+    global _cycle_counter
+    logger.info("=== Scrape cycle starting (cycle #%d) ===", _cycle_counter)
     messages_data = await scrape_groups(client)
 
     total_msgs = sum(len(v) for v in messages_data.values())
     logger.info("Scraped %d messages from %d groups", total_msgs, len(messages_data))
 
     if total_msgs > 0:
-        process_and_push(messages_data, dump=dump)
+        process_and_push(messages_data, dump=dump,
+                         cycle_num=_cycle_counter, once_mode=once_mode)
 
         # C1 fix: Run price refresh at end of cycle so --once mode
         # (GH Action) also gets fresh DexScreener prices before exiting.
@@ -765,7 +785,7 @@ async def main():
     if args.once:
         logger.info("Running single cycle (--once mode).")
         try:
-            await run_one_cycle(client, dump=args.dump)
+            await run_one_cycle(client, dump=args.dump, once_mode=True)
         finally:
             await client.disconnect()
         logger.info("Single cycle complete. Exiting.")
@@ -812,9 +832,11 @@ async def main():
             except Exception as e:
                 logger.error("Cycle failed: %s", e, exc_info=True)
 
+            _cycle_counter += 1
             elapsed = time.time() - cycle_start
             remaining = max(0, CYCLE_INTERVAL_SECONDS - elapsed)
-            logger.info("Cycle done in %.0fs. Sleeping %.0fs until next cycle.", elapsed, remaining)
+            logger.info("Cycle #%d done in %.0fs. Sleeping %.0fs until next cycle.",
+                        _cycle_counter, elapsed, remaining)
             await asyncio.sleep(remaining)
     finally:
         refresh_task.cancel()
