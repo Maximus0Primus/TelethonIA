@@ -26,6 +26,13 @@ import requests
 
 logger = logging.getLogger(__name__)
 
+# v67: Monitoring — conditional import
+try:
+    from monitor import metrics as _metrics, estimate_egress as _estimate_egress
+    _monitoring = True
+except ImportError:
+    _monitoring = False
+
 DEXSCREENER_BATCH_URL = "https://api.dexscreener.com/tokens/v1/solana/{addresses}"
 BATCH_SIZE = 30
 
@@ -358,6 +365,8 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
         "paper_trader: opened %d rows, $%.0f budget → %s (%d strategies, dedup=%dh)",
         opened, budget_usd, ", ".join(allocs), len(active_strategies), dedup_cooldown_h,
     )
+    if _monitoring and opened > 0:
+        _metrics.record_paper_trade_open(opened)
     return opened
 
 
@@ -378,6 +387,8 @@ def check_paper_trades(client) -> dict:
     try:
         result = client.table("paper_trades").select("*").eq("status", "open").execute()
         open_trades = result.data or []
+        if _monitoring:
+            _estimate_egress("paper_trader", "paper_trades", len(open_trades))
     except Exception as e:
         logger.error("paper_trader: failed to fetch open trades: %s", e)
         return {"checked": 0, "closed": 0, "tp": 0, "sl": 0, "timeout": 0}
@@ -390,6 +401,7 @@ def check_paper_trades(client) -> dict:
     prices = _fetch_prices_batch(addresses)
 
     counts = {"checked": len(open_trades), "closed": 0, "tp": 0, "sl": 0, "timeout": 0}
+    _total_pnl_usd = 0.0  # v67: accumulate for monitoring
 
     # Track SL-triggered groups so we can cascade
     # Key: (token_address, strategy, cycle_ts) -> True if SL was hit
@@ -466,6 +478,7 @@ def check_paper_trades(client) -> dict:
             client.table("paper_trades").update(update).eq("id", trade["id"]).execute()
             closed_ids.add(trade["id"])
             counts["closed"] += 1
+            _total_pnl_usd += pnl_usd or 0
             status_key = new_status.replace("_hit", "")
             counts[status_key] = counts.get(status_key, 0) + 1
             usd_str = f" ${pnl_usd:+.2f}" if pnl_usd is not None else ""
@@ -515,6 +528,7 @@ def check_paper_trades(client) -> dict:
             client.table("paper_trades").update(update).eq("id", trade["id"]).execute()
             closed_ids.add(trade["id"])
             counts["closed"] += 1
+            _total_pnl_usd += pnl_usd or 0
             counts["sl"] = counts.get("sl", 0) + 1
             usd_str = f" ${pnl_usd:+.2f}" if pnl_usd is not None else ""
             logger.info(
@@ -530,6 +544,9 @@ def check_paper_trades(client) -> dict:
             "paper_trader: checked %d open, closed %d (TP=%d SL=%d timeout=%d)",
             counts["checked"], counts["closed"], counts["tp"], counts["sl"], counts["timeout"],
         )
+        # v67: Track paper trade closures
+        if _monitoring:
+            _metrics.record_paper_trade_close(counts["closed"], _total_pnl_usd)
     return counts
 
 

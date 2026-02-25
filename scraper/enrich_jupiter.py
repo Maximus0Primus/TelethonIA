@@ -18,6 +18,13 @@ import requests
 
 logger = logging.getLogger(__name__)
 
+# v67: Monitoring — conditional import
+try:
+    from monitor import track_api_call as _track_api_call
+    _monitoring = True
+except ImportError:
+    _monitoring = False
+
 CACHE_FILE = Path(__file__).parent / "jupiter_cache.json"
 CACHE_TTL_SECONDS = 2 * 3600  # 2 hours — tradeability rarely changes
 
@@ -73,17 +80,32 @@ def _fetch_jupiter_quote(mint: str, amount_lamports: int = QUOTE_AMOUNT_LAMPORTS
         headers["x-api-key"] = api_key
 
     try:
-        resp = requests.get(
-            "https://api.jup.ag/swap/v1/quote",
-            params={
-                "inputMint": WSOL_MINT,
-                "outputMint": mint,
-                "amount": str(amount_lamports),
-                "slippageBps": "50",
-            },
-            headers=headers,
-            timeout=10,
-        )
+        if _monitoring:
+            with _track_api_call("jupiter", "/quote") as _t:
+                resp = requests.get(
+                    "https://api.jup.ag/swap/v1/quote",
+                    params={
+                        "inputMint": WSOL_MINT,
+                        "outputMint": mint,
+                        "amount": str(amount_lamports),
+                        "slippageBps": "50",
+                    },
+                    headers=headers,
+                    timeout=10,
+                )
+                _t.set_response(resp)
+        else:
+            resp = requests.get(
+                "https://api.jup.ag/swap/v1/quote",
+                params={
+                    "inputMint": WSOL_MINT,
+                    "outputMint": mint,
+                    "amount": str(amount_lamports),
+                    "slippageBps": "50",
+                },
+                headers=headers,
+                timeout=10,
+            )
 
         if resp.status_code == 400:
             # Token not routable on Jupiter
@@ -133,12 +155,22 @@ def _fetch_jupiter_prices(mints: list[str]) -> dict[str, float]:
         headers["x-api-key"] = api_key
 
     try:
-        resp = requests.get(
-            "https://api.jup.ag/price/v3/price",
-            params={"ids": ",".join(mints)},
-            headers=headers,
-            timeout=10,
-        )
+        if _monitoring:
+            with _track_api_call("jupiter", "/price") as _t:
+                resp = requests.get(
+                    "https://api.jup.ag/price/v3/price",
+                    params={"ids": ",".join(mints)},
+                    headers=headers,
+                    timeout=10,
+                )
+                _t.set_response(resp)
+        else:
+            resp = requests.get(
+                "https://api.jup.ag/price/v3/price",
+                params={"ids": ",".join(mints)},
+                headers=headers,
+                timeout=10,
+            )
 
         if resp.status_code != 200:
             logger.warning("Jupiter price API %d", resp.status_code)

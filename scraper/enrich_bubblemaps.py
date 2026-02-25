@@ -23,6 +23,13 @@ import requests
 
 logger = logging.getLogger(__name__)
 
+# v67: Monitoring — conditional import
+try:
+    from monitor import track_api_call as _track_api_call
+    _monitoring = True
+except ImportError:
+    _monitoring = False
+
 BUBBLEMAPS_API_URL = "https://api.bubblemaps.io/maps/solana/{address}"
 CACHE_FILE = Path(__file__).parent / "bubblemaps_cache.json"
 CACHE_TTL_SECONDS = 4 * 3600  # 4 hours — wallet clusters are very stable
@@ -67,17 +74,32 @@ def _fetch_bubblemaps(address: str, api_key: str) -> dict | None:
     Returns decentralization score + cluster analysis.
     """
     try:
-        resp = requests.get(
-            BUBBLEMAPS_API_URL.format(address=address),
-            headers={"X-ApiKey": api_key},
-            params={
-                "return_clusters": "true",
-                "return_decentralization_score": "true",
-                "return_nodes": "false",  # save quota — we only need clusters + score
-                "return_relationships": "false",
-            },
-            timeout=20,  # Bubblemaps can be slow (up to 15s for uncached tokens)
-        )
+        if _monitoring:
+            with _track_api_call("bubblemaps", "/token") as _t:
+                resp = requests.get(
+                    BUBBLEMAPS_API_URL.format(address=address),
+                    headers={"X-ApiKey": api_key},
+                    params={
+                        "return_clusters": "true",
+                        "return_decentralization_score": "true",
+                        "return_nodes": "false",
+                        "return_relationships": "false",
+                    },
+                    timeout=20,
+                )
+                _t.set_response(resp)
+        else:
+            resp = requests.get(
+                BUBBLEMAPS_API_URL.format(address=address),
+                headers={"X-ApiKey": api_key},
+                params={
+                    "return_clusters": "true",
+                    "return_decentralization_score": "true",
+                    "return_nodes": "false",  # save quota — we only need clusters + score
+                    "return_relationships": "false",
+                },
+                timeout=20,  # Bubblemaps can be slow (up to 15s for uncached tokens)
+            )
 
         if resp.status_code == 429:
             logger.warning("Bubblemaps rate limited — stopping enrichment for this cycle")

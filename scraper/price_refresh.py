@@ -25,6 +25,13 @@ from pipeline import SCORING_PARAMS
 
 logger = logging.getLogger(__name__)
 
+# v67: Monitoring — conditional import
+try:
+    from monitor import estimate_egress as _estimate_egress
+    _monitoring = True
+except ImportError:
+    _monitoring = False
+
 def _two_phase_decay(hours_ago: float) -> float:
     """
     Single-phase exponential decay (mirrors pipeline._two_phase_decay).
@@ -275,6 +282,8 @@ def refresh_top_tokens(n: int = REFRESH_TOP_N) -> int:
     )
 
     tokens = result.data or []
+    if _monitoring:
+        _estimate_egress("price_refresh", "tokens", len(tokens))
     if not tokens:
         logger.info("Price refresh: no tokens to update")
         return 0
@@ -299,7 +308,10 @@ def refresh_top_tokens(n: int = REFRESH_TOP_N) -> int:
             .limit(n * 3)
             .execute()
         )
-        for row in (snap_result.data or []):
+        snap_rows = snap_result.data or []
+        if _monitoring:
+            _estimate_egress("price_refresh", "token_snapshots", len(snap_rows))
+        for row in snap_rows:
             sym = row.get("symbol")
             if sym and sym not in stored_lifecycle_pen:
                 stored_lifecycle_pen[sym] = _safe_float(row.get("already_pumped_penalty"), 1.0)

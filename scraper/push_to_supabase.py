@@ -15,6 +15,13 @@ from pipeline import SCORING_PARAMS
 
 logger = logging.getLogger(__name__)
 
+# v67: Monitoring — conditional import
+try:
+    from monitor import estimate_egress as _estimate_egress
+    _monitoring = True
+except ImportError:
+    _monitoring = False
+
 
 def _sanitize_value(v):
     """
@@ -329,7 +336,10 @@ def _fetch_previous_snapshots(client: Client, symbols: list[str]) -> dict[str, d
             .execute()
         )
 
-        for row in (result.data or []):
+        rows_fetched = result.data or []
+        if _monitoring:
+            _estimate_egress("push_to_supabase", "token_snapshots", len(rows_fetched))
+        for row in rows_fetched:
             sym = row.get("symbol")
             if sym and sym not in previous:
                 previous[sym] = row

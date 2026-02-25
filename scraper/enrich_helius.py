@@ -27,6 +27,13 @@ import requests
 
 logger = logging.getLogger(__name__)
 
+# v67: Monitoring — conditional import
+try:
+    from monitor import track_api_call as _track_api_call
+    _monitoring = True
+except ImportError:
+    _monitoring = False
+
 CACHE_FILE = Path(__file__).parent / "helius_cache.json"
 CACHE_TTL_SECONDS = 4 * 3600  # v56: 4h (was 30min). Budget: 200×20CU×6/day×30 = 720K CU/month (fits 1M free tier)
 
@@ -149,7 +156,12 @@ def _fetch_token_accounts(mint: str, api_key: str) -> list[dict] | None:
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                resp = requests.post(url, json=payload, timeout=15)
+                if _monitoring:
+                    with _track_api_call("helius", "/getTokenAccounts") as _t:
+                        resp = requests.post(url, json=payload, timeout=15)
+                        _t.set_response(resp)
+                else:
+                    resp = requests.post(url, json=payload, timeout=15)
 
                 if resp.status_code == 429:
                     wait = 2 ** attempt + 1
@@ -230,7 +242,12 @@ def _fetch_recent_signatures(mint: str, api_key: str, limit: int = 50) -> list[d
     }
 
     try:
-        resp = requests.post(url, json=payload, timeout=15)
+        if _monitoring:
+            with _track_api_call("helius", "/getSignatures") as _t:
+                resp = requests.post(url, json=payload, timeout=15)
+                _t.set_response(resp)
+        else:
+            resp = requests.post(url, json=payload, timeout=15)
         if resp.status_code == 429:
             _helius_429_record(exhausted=True)
             logger.debug("Helius 429 for sigs %s", mint[:8])

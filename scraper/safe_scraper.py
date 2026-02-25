@@ -31,6 +31,17 @@ from push_to_supabase import upsert_tokens, insert_snapshots, insert_kol_mention
 from price_refresh import refresh_top_tokens
 from debug_dump import dump_debug_data
 
+# v67: Monitoring — conditional import (fail-safe)
+try:
+    from monitor import metrics as _metrics, track_api_call, estimate_egress
+    from alerter import (
+        send_startup_message, alert_cycle_failure, alert_rt_listener_down,
+        alert_api_errors, alert_egress_warning, send_daily_summary,
+    )
+    _monitoring = True
+except ImportError:
+    _monitoring = False
+
 # Load .env from the scraper directory
 load_dotenv(Path(__file__).parent / ".env")
 
@@ -389,6 +400,8 @@ def process_and_push(messages_data: dict[str, list[dict]], dump: bool = False,
         once_mode: if True, run ALL windows regardless of throttle (--once / GH Actions).
     """
     _cycle_start = time.time()
+    if _monitoring:
+        _metrics.cycle_started(cycle_num)
     # Load dynamic scoring weights from Supabase (auto-learning loop)
     try:
         from pipeline import load_scoring_config
@@ -614,6 +627,14 @@ def process_and_push(messages_data: dict[str, list[dict]], dump: bool = False,
                 logger.debug("Retention %s skipped: %s", rpc_name, e2)
     except Exception as e:
         logger.debug("Retention cleanup skipped: %s", e)
+
+    # v67: Record cycle completion
+    if _monitoring:
+        _metrics.cycle_completed(
+            scored=len(data_24h),
+            pushed=len(ranking_by_window.get("24h", [])),
+            windows=list(ranking_by_window.keys()),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1164,6 +1185,9 @@ async def _rt_on_new_message(event: events.NewMessage.Event):
 
             if opened and opened > 0:
                 _rt_mark_traded(username, ca)
+                # v67: Record RT event for monitoring
+                if _monitoring:
+                    _metrics.record_rt_event(symbol, username, ca, rt_score, pos_size, opened)
         finally:
             _rt_in_flight.discard(flight_key)
 
@@ -1304,6 +1328,61 @@ async def main():
     except Exception as e:
         logger.error("Failed to setup RT listener (batch mode continues): %s", e)
 
+    # v67: Send startup alert + launch monitor loop
+    if _monitoring:
+        try:
+            send_startup_message(len(GROUPS_DATA), len(rt_groups) if 'rt_groups' in dir() else 0)
+        except Exception:
+            pass
+
+    async def monitor_loop():
+        """v67: Health check loop — every 5 minutes, evaluate scraper health."""
+        _last_daily_hour = -1
+        while True:
+            await asyncio.sleep(300)  # 5 minutes
+            try:
+                # Check cycle health
+                cs = _metrics.get_cycle_stats(5)
+                recent_errors = cs.get("recent_errors", [])
+                if recent_errors:
+                    last_err = recent_errors[-1]
+                    if time.time() - last_err["ts"] < 600:
+                        alert_cycle_failure(
+                            last_err.get("num", 0),
+                            last_err.get("msg", "unknown"),
+                            0,
+                        )
+
+                # Check RT listener health
+                rt_stats = _metrics.get_rt_stats(2.0)
+                last_age = rt_stats.get("last_event_age_s")
+                if last_age is not None and last_age > 7200:
+                    alert_rt_listener_down(last_age / 60)
+
+                # Check API error rates
+                api_stats = _metrics.get_api_stats(1.0)
+                for api, stats in api_stats.items():
+                    if stats["calls"] >= 5 and stats["error_rate"] > 0.30:
+                        alert_api_errors(api, stats["error_rate"], stats["errors"], stats["calls"])
+
+                # Check egress
+                egress = _metrics.get_egress_estimate()
+                total_mb = egress.get("total_mb", 0)
+                if total_mb >= 500:
+                    alert_egress_warning(total_mb, egress.get("by_module", {}), 500)
+
+                # Daily summary at 8h UTC
+                now_utc = datetime.now(timezone.utc)
+                if now_utc.hour == 8 and _last_daily_hour != 8:
+                    _last_daily_hour = 8
+                    snapshot = _metrics.get_full_snapshot()
+                    send_daily_summary(snapshot)
+                elif now_utc.hour != 8:
+                    _last_daily_hour = now_utc.hour
+
+            except Exception as e:
+                logger.debug("Monitor loop error: %s", e)
+
     async def price_refresh_loop():
         """Mini-cycle: refresh top token prices every 5 minutes."""
         while True:
@@ -1326,6 +1405,8 @@ async def main():
 
     # Start the price refresh loop as a background task
     refresh_task = asyncio.create_task(price_refresh_loop())
+    # v67: Start monitor loop
+    monitor_task = asyncio.create_task(monitor_loop()) if _monitoring else None
 
     try:
         while True:
@@ -1334,6 +1415,10 @@ async def main():
                 await run_one_cycle(client)
             except Exception as e:
                 logger.error("Cycle failed: %s", e, exc_info=True)
+                if _monitoring:
+                    _metrics.cycle_error(str(e))
+                    _metrics.cycle_completed(0, 0, [])
+                    alert_cycle_failure(_cycle_counter, str(e), time.time() - cycle_start)
 
             _cycle_counter += 1
             elapsed = time.time() - cycle_start
@@ -1343,6 +1428,8 @@ async def main():
             await asyncio.sleep(remaining)
     finally:
         refresh_task.cancel()
+        if monitor_task:
+            monitor_task.cancel()
 
 
 if __name__ == "__main__":
