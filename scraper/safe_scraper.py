@@ -1371,13 +1371,21 @@ async def main():
     try:
         rt_groups = await setup_realtime_listener(client)
         logger.info("Real-time listener registered for %d groups", len(rt_groups))
-        # v69: Force Telethon to sync update state — without this,
-        # StringSession restarts miss channel updates entirely.
+        # v69: Force Telethon to subscribe to channel updates.
+        # StringSession loses update state on restart — get_dialogs() forces
+        # Telegram to push updates for all joined channels/groups.
         try:
+            dialogs = await client.get_dialogs(limit=200)
+            dialog_ids = {d.id for d in dialogs}
+            matched = sum(1 for gid in group_ids if gid in dialog_ids)
+            logger.info(
+                "RT: get_dialogs() fetched %d dialogs (%d/%d KOL groups matched)",
+                len(dialogs), matched, len(group_ids),
+            )
             await client.catch_up()
             logger.info("RT: catch_up() completed — update state synced")
         except Exception as e:
-            logger.warning("RT: catch_up() failed (non-fatal): %s", e)
+            logger.warning("RT: dialog/catch_up failed (non-fatal): %s", e)
     except Exception as e:
         logger.error("Failed to setup RT listener (batch mode continues): %s", e)
 
