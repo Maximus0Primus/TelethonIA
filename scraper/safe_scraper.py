@@ -1213,37 +1213,68 @@ async def setup_realtime_listener(client: TelegramClient):
 
     # v69: First, join all groups to ensure we receive RT updates.
     # Telegram only pushes real-time updates for channels you're a member of.
+    # Strategy: use cached IDs first (no API call), only resolve uncached groups.
+    from telethon.tl.functions.channels import JoinChannelRequest
+    import asyncio as _aio
+
     joined = 0
     already = 0
+    failed = 0
     for username in GROUPS_DATA:
+        # Try cache first to avoid get_entity flood waits
+        cached = cache.get(username)
+        gid = None
+        if isinstance(cached, dict) and "id" in cached:
+            gid = cached["id"]
+        elif isinstance(cached, int):
+            gid = cached
+
         try:
-            from telethon.tl.functions.channels import JoinChannelRequest
-            entity = await client.get_entity(username)
-            await client(JoinChannelRequest(entity))
-            gid = entity.id
-            group_ids.append(gid)
-            _rt_group_id_to_username[gid] = username
-            marked_id = int(f"-100{gid}")
-            _rt_group_id_to_username[marked_id] = username
-            # Update cache
-            if not cache.get(username) or not isinstance(cache.get(username), dict):
+            if gid:
+                # Use cached ID — try to join via InputChannel (no username resolve)
+                from telethon.tl.types import InputChannel
+                access_hash = cached.get("access_hash", 0) if isinstance(cached, dict) else 0
+                input_ch = InputChannel(gid, access_hash or 0)
+                try:
+                    await client(JoinChannelRequest(input_ch))
+                    joined += 1
+                except Exception as je:
+                    je_str = str(je)
+                    if "ALREADY" in je_str.upper() or "already" in je_str.lower():
+                        already += 1
+                    else:
+                        # access_hash may be stale — fall back to username resolve
+                        entity = await client.get_entity(username)
+                        await client(JoinChannelRequest(entity))
+                        gid = entity.id
+                        cache[username] = {
+                            "id": gid,
+                            "access_hash": getattr(entity, "access_hash", None),
+                        }
+                        save_group_cache(cache)
+                        joined += 1
+                        await _aio.sleep(1)  # rate-limit between resolves
+            else:
+                # No cache — must resolve username (costs 1 API call)
+                entity = await client.get_entity(username)
+                await client(JoinChannelRequest(entity))
+                gid = entity.id
                 cache[username] = {
                     "id": gid,
                     "access_hash": getattr(entity, "access_hash", None),
                 }
                 save_group_cache(cache)
-            joined += 1
+                joined += 1
+                await _aio.sleep(1)  # rate-limit between resolves
+
+            # Map both raw and marked IDs
+            group_ids.append(gid)
+            _rt_group_id_to_username[gid] = username
+            marked_id = int(f"-100{gid}")
+            _rt_group_id_to_username[marked_id] = username
         except Exception as e:
-            err_str = str(e)
-            if "already" in err_str.lower() or "USER_ALREADY_PARTICIPANT" in err_str:
-                already += 1
-            # Still try to use cached ID for the mapping
-            cached = cache.get(username)
-            gid = None
-            if isinstance(cached, dict) and "id" in cached:
-                gid = cached["id"]
-            elif isinstance(cached, int):
-                gid = cached
+            failed += 1
+            # Still use cached ID for the mapping if available
             if gid:
                 group_ids.append(gid)
                 _rt_group_id_to_username[gid] = username
@@ -1252,7 +1283,8 @@ async def setup_realtime_listener(client: TelegramClient):
             else:
                 logger.warning("RT: could not join/resolve %s: %s", username, e)
 
-    logger.info("RT: joined/confirmed %d groups (%d already member)", joined, already)
+    logger.info("RT: joined %d, already %d, failed %d (total mapped: %d)",
+                joined, already, failed, len(group_ids))
 
     if group_ids:
         # v69: Register WITHOUT chats filter — filter in handler instead.
