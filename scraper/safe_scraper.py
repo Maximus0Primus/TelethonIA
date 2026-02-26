@@ -1211,35 +1211,48 @@ async def setup_realtime_listener(client: TelegramClient):
     cache = load_group_cache()
     group_ids = []
 
+    # v69: First, join all groups to ensure we receive RT updates.
+    # Telegram only pushes real-time updates for channels you're a member of.
+    joined = 0
+    already = 0
     for username in GROUPS_DATA:
-        cached = cache.get(username)
-        gid = None
-        # v69: Handle both dict {"id": ...} and plain int entries in cache
-        if isinstance(cached, dict) and "id" in cached:
-            gid = cached["id"]
-        elif isinstance(cached, int):
-            gid = cached
-        if gid:
+        try:
+            from telethon.tl.functions.channels import JoinChannelRequest
+            entity = await client.get_entity(username)
+            await client(JoinChannelRequest(entity))
+            gid = entity.id
             group_ids.append(gid)
             _rt_group_id_to_username[gid] = username
-            # v69: Also map the Telethon "marked" channel ID (-100{id})
             marked_id = int(f"-100{gid}")
             _rt_group_id_to_username[marked_id] = username
-        else:
-            try:
-                entity = await client.get_entity(username)
-                gid = entity.id
-                group_ids.append(gid)
-                _rt_group_id_to_username[gid] = username
-                marked_id = int(f"-100{gid}")
-                _rt_group_id_to_username[marked_id] = username
+            # Update cache
+            if not cache.get(username) or not isinstance(cache.get(username), dict):
                 cache[username] = {
                     "id": gid,
                     "access_hash": getattr(entity, "access_hash", None),
                 }
                 save_group_cache(cache)
-            except Exception as e:
-                logger.warning("RT: could not resolve %s: %s", username, e)
+            joined += 1
+        except Exception as e:
+            err_str = str(e)
+            if "already" in err_str.lower() or "USER_ALREADY_PARTICIPANT" in err_str:
+                already += 1
+            # Still try to use cached ID for the mapping
+            cached = cache.get(username)
+            gid = None
+            if isinstance(cached, dict) and "id" in cached:
+                gid = cached["id"]
+            elif isinstance(cached, int):
+                gid = cached
+            if gid:
+                group_ids.append(gid)
+                _rt_group_id_to_username[gid] = username
+                marked_id = int(f"-100{gid}")
+                _rt_group_id_to_username[marked_id] = username
+            else:
+                logger.warning("RT: could not join/resolve %s: %s", username, e)
+
+    logger.info("RT: joined/confirmed %d groups (%d already member)", joined, already)
 
     if group_ids:
         # v69: Register WITHOUT chats filter — filter in handler instead.
