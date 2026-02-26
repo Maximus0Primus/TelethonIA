@@ -1091,13 +1091,26 @@ def _rt_extract_token_info(raw: dict) -> dict:
     }
 
 
+_rt_debug_counter = 0  # Log first N events for debugging
+
+
 async def _rt_on_new_message(event: events.NewMessage.Event):
     """v66 Exploration Mode: Score everything, size by confidence, learn from all trades."""
-    global _rt_ca_cache
+    global _rt_ca_cache, _rt_debug_counter
 
     chat_id = event.chat_id
     username = _rt_group_id_to_username.get(chat_id)
+    # v69: Also try unmarked positive ID (Telethon channels use -100{id})
+    if not username and chat_id < 0:
+        raw_id = int(str(chat_id).replace("-100", "", 1)) if str(chat_id).startswith("-100") else abs(chat_id)
+        username = _rt_group_id_to_username.get(raw_id)
+        if username:
+            # Cache the marked ID for future lookups
+            _rt_group_id_to_username[chat_id] = username
     if not username:
+        if _rt_debug_counter < 5:
+            _rt_debug_counter += 1
+            logger.debug("RT: unmatched chat_id=%s (first %d)", chat_id, _rt_debug_counter)
         return
 
     msg = event.message
@@ -1200,16 +1213,26 @@ async def setup_realtime_listener(client: TelegramClient):
 
     for username in GROUPS_DATA:
         cached = cache.get(username)
-        if cached and "id" in cached:
+        gid = None
+        # v69: Handle both dict {"id": ...} and plain int entries in cache
+        if isinstance(cached, dict) and "id" in cached:
             gid = cached["id"]
+        elif isinstance(cached, int):
+            gid = cached
+        if gid:
             group_ids.append(gid)
             _rt_group_id_to_username[gid] = username
+            # v69: Also map the Telethon "marked" channel ID (-100{id})
+            marked_id = int(f"-100{gid}")
+            _rt_group_id_to_username[marked_id] = username
         else:
             try:
                 entity = await client.get_entity(username)
                 gid = entity.id
                 group_ids.append(gid)
                 _rt_group_id_to_username[gid] = username
+                marked_id = int(f"-100{gid}")
+                _rt_group_id_to_username[marked_id] = username
                 cache[username] = {
                     "id": gid,
                     "access_hash": getattr(entity, "access_hash", None),
@@ -1219,12 +1242,21 @@ async def setup_realtime_listener(client: TelegramClient):
                 logger.warning("RT: could not resolve %s: %s", username, e)
 
     if group_ids:
+        # v69: Register WITHOUT chats filter — filter in handler instead.
+        # Telethon's chats filter can silently drop events when IDs don't
+        # match the internal "marked" format. Handler filters via the mapping.
         client.add_event_handler(
             _rt_on_new_message,
-            events.NewMessage(chats=group_ids),
+            events.NewMessage(),
         )
+        def _cache_gid(entry):
+            if isinstance(entry, dict):
+                return entry.get("id")
+            elif isinstance(entry, int):
+                return entry
+            return None
         s_count = sum(1 for u, d in GROUPS_DATA.items()
-                      if d.get("tier") == "S" and cache.get(u, {}).get("id") in group_ids)
+                      if d.get("tier") == "S" and _cache_gid(cache.get(u)) in group_ids)
 
         # v66: Pre-load KOL scores + RT config + ML model at startup
         global _rt_ml_model
