@@ -1375,6 +1375,220 @@ def _fill_first_call_prices(client: Client, pool_cache: dict) -> None:
         logger.info("Filled price_at_first_call for %d snapshots", filled)
 
 
+def backfill_first_call_prices(client: Client = None, limit: int = 500) -> int:
+    """
+    v61: Aggressive backfill of price_at_first_call for Optuna/ML dual-mode entry.
+
+    Queries all snapshots with oldest_mention_hours but no price_at_first_call,
+    prioritizing labeled snapshots (max_price_24h IS NOT NULL) from Feb 14+.
+    Uses DexPaprika + Birdeye fallback for OHLCV at first-call timestamp.
+
+    Returns number of snapshots filled.
+    """
+    if client is None:
+        client = _get_client()
+
+    pool_cache = _load_pool_cache()
+    birdeye_key = os.environ.get("BIRDEYE_API_KEY")
+
+    # Prioritize: labeled snapshots from Feb 14+ with pair_address
+    # Order: labeled first (max_price_24h IS NOT NULL), then by snapshot_at DESC (recent first)
+    try:
+        # Batch 1: labeled snapshots (highest priority)
+        result_labeled = (
+            client.table("token_snapshots")
+            .select("id, symbol, snapshot_at, oldest_mention_hours, pair_address, token_address, price_at_snapshot")
+            .is_("price_at_first_call", "null")
+            .not_.is_("oldest_mention_hours", "null")
+            .not_.is_("max_price_24h", "null")
+            .gte("snapshot_at", "2026-02-14T00:00:00Z")
+            .order("snapshot_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        labeled_snaps = result_labeled.data or []
+
+        # Batch 2: unlabeled snapshots (fill remaining quota)
+        remaining = limit - len(labeled_snaps)
+        unlabeled_snaps = []
+        if remaining > 0:
+            result_unlabeled = (
+                client.table("token_snapshots")
+                .select("id, symbol, snapshot_at, oldest_mention_hours, pair_address, token_address, price_at_snapshot")
+                .is_("price_at_first_call", "null")
+                .not_.is_("oldest_mention_hours", "null")
+                .is_("max_price_24h", "null")
+                .gte("snapshot_at", "2026-02-14T00:00:00Z")
+                .order("snapshot_at", desc=True)
+                .limit(remaining)
+                .execute()
+            )
+            unlabeled_snaps = result_unlabeled.data or []
+
+        snapshots = labeled_snaps + unlabeled_snaps
+    except Exception as e:
+        logger.error("backfill_fcp: query failed: %s", e)
+        return 0
+
+    if not snapshots:
+        logger.info("backfill_fcp: no snapshots need price_at_first_call")
+        return 0
+
+    logger.info(
+        "backfill_fcp: processing %d snapshots (%d labeled, %d unlabeled)",
+        len(snapshots), len(labeled_snaps), len(unlabeled_snaps),
+    )
+
+    filled = 0
+    skipped = 0
+    errors = 0
+
+    for i, snap in enumerate(snapshots):
+        snap_at_str = snap.get("snapshot_at", "")
+        oldest_h = float(snap.get("oldest_mention_hours") or 0)
+        pool_addr = snap.get("pair_address")
+        token_addr = snap.get("token_address")
+        price_at = float(snap.get("price_at_snapshot") or 0)
+
+        if oldest_h <= 0:
+            skipped += 1
+            continue
+
+        # Parse snapshot timestamp
+        snapshot_ts = _parse_snapshot_ts(snap_at_str)
+        if snapshot_ts is None:
+            skipped += 1
+            continue
+
+        # First call happened at snapshot_ts - oldest_mention_hours * 3600
+        first_call_ts = snapshot_ts - oldest_h * 3600
+        # Fetch a small window of candles around the first call time
+        start_ts = first_call_ts - 900   # 15min before
+        end_ts = first_call_ts + 900     # 15min after
+
+        close_price = None
+
+        # 1. DexPaprika (primary) — needs pool_addr
+        if pool_addr and close_price is None:
+            start_dt = datetime.fromtimestamp(start_ts, tz=timezone.utc)
+            end_dt = datetime.fromtimestamp(end_ts, tz=timezone.utc)
+            try:
+                _dexpaprika_limiter.wait()
+                resp = requests.get(
+                    f"{DEXPAPRIKA_BASE}/networks/solana/pools/{pool_addr}/ohlcv",
+                    params={
+                        "start": start_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        "end": end_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        "limit": 4,
+                        "interval": "15m",
+                    },
+                    timeout=10,
+                )
+                if resp.status_code == 200:
+                    items = resp.json()
+                    if isinstance(items, list) and items:
+                        close_price = _pick_closest_candle_price(items, first_call_ts, price_at)
+            except requests.RequestException:
+                pass
+
+        # 2. Birdeye fallback — uses token mint address
+        if close_price is None and token_addr and birdeye_key:
+            try:
+                _birdeye_limiter.wait()
+                resp = requests.get(
+                    BIRDEYE_OHLCV_URL,
+                    params={
+                        "address": token_addr,
+                        "type": "15m",
+                        "time_from": int(start_ts),
+                        "time_to": int(end_ts),
+                    },
+                    headers={"X-API-KEY": birdeye_key, "x-chain": "solana"},
+                    timeout=10,
+                )
+                if resp.status_code == 200:
+                    items = resp.json().get("data", {}).get("items", [])
+                    if items:
+                        # Convert Birdeye format to DexPaprika-like for _pick_closest_candle_price
+                        candles = []
+                        for c in items:
+                            candles.append({
+                                "time_open": str(c.get("unixTime", 0)),
+                                "close": c.get("c", 0),
+                                "_unix_ts": int(c.get("unixTime", 0)),
+                            })
+                        close_price = _pick_closest_candle_price_birdeye(candles, first_call_ts, price_at)
+            except requests.RequestException:
+                pass
+
+        if close_price and close_price > 0:
+            try:
+                client.table("token_snapshots").update({
+                    "price_at_first_call": close_price,
+                }).eq("id", snap["id"]).execute()
+                filled += 1
+            except Exception as e:
+                logger.debug("backfill_fcp: update failed for %s: %s", snap["symbol"], e)
+                errors += 1
+        else:
+            skipped += 1
+
+        # Progress log every 50
+        if (i + 1) % 50 == 0:
+            logger.info("backfill_fcp: %d/%d processed (%d filled, %d skipped)", i + 1, len(snapshots), filled, skipped)
+
+    _save_pool_cache(pool_cache)
+    logger.info("backfill_fcp: done — %d filled, %d skipped, %d errors (of %d total)", filled, skipped, errors, len(snapshots))
+    return filled
+
+
+def _pick_closest_candle_price(items: list, target_ts: float, price_at: float) -> float | None:
+    """Pick close price of candle closest to target_ts. Reject if >500x price_at (SOL leak)."""
+    best_candle = None
+    best_diff = float('inf')
+    for item in items:
+        ts_str = item.get("time_open") or item.get("time_close") or ""
+        if not ts_str:
+            continue
+        try:
+            candle_ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00")).timestamp()
+        except (ValueError, AttributeError):
+            continue
+        diff = abs(candle_ts - target_ts)
+        if diff < best_diff:
+            best_diff = diff
+            best_candle = item
+
+    if best_candle:
+        close_price = float(best_candle.get("close", 0) or 0)
+        if close_price > 0:
+            # Sanity check: reject SOL price leak
+            if price_at > 0 and close_price / price_at > _CANDLE_SANITY_RATIO:
+                return None
+            return close_price
+    return None
+
+
+def _pick_closest_candle_price_birdeye(candles: list, target_ts: float, price_at: float) -> float | None:
+    """Pick close price of Birdeye candle closest to target_ts."""
+    best_close = None
+    best_diff = float('inf')
+    for c in candles:
+        candle_ts = c.get("_unix_ts", 0)
+        if candle_ts <= 0:
+            continue
+        diff = abs(candle_ts - target_ts)
+        if diff < best_diff:
+            best_diff = diff
+            close_price = float(c.get("close", 0) or 0)
+            if close_price > 0:
+                best_close = close_price
+
+    if best_close and price_at > 0 and best_close / price_at > _CANDLE_SANITY_RATIO:
+        return None
+    return best_close
+
+
 def backfill_bot_data(batch_limit: int = 50) -> None:
     """
     Backfill TP/SL timing columns for snapshots that already have OHLCV labels
@@ -2217,3 +2431,23 @@ def _kco_phase_c_update_ath(client: Client, pool_cache: dict, stats: dict, start
                                  row["symbol"], max_high, max_return if entry > 0 else 0)
             except Exception as e:
                 logger.error("KCO Phase C: update failed for id=%d: %s", row["id"], e)
+
+
+if __name__ == "__main__":
+    import argparse
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).parent / ".env")
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+    parser = argparse.ArgumentParser(description="Outcome tracker utilities")
+    parser.add_argument("--backfill-fcp", action="store_true",
+                        help="Backfill price_at_first_call for snapshots with oldest_mention_hours")
+    parser.add_argument("--limit", type=int, default=500, help="Batch size for backfill (default 500)")
+    args = parser.parse_args()
+
+    if args.backfill_fcp:
+        filled = backfill_first_call_prices(limit=args.limit)
+        print(f"Backfilled price_at_first_call for {filled} snapshots")
+    else:
+        parser.print_help()
