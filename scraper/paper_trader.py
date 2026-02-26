@@ -443,18 +443,18 @@ def check_paper_trades(client) -> dict:
         # Check if this group already had SL triggered by a sibling tranche
         if group_key in sl_triggered:
             new_status = "sl_hit"
-            exit_price = current_price if current_price else entry_price * (sl_price / entry_price)
+            exit_price = sl_price  # Cap at SL price for cascade too
 
         elif current_price is not None:
             # SL check (applies to all tranches including moonbag)
             if current_price <= sl_price:
                 new_status = "sl_hit"
-                exit_price = current_price
+                exit_price = sl_price  # Cap at SL price, not actual (gap-down)
                 sl_triggered.add(group_key)
             # TP check (only for tranches with a TP target)
             elif tp_price is not None and current_price >= tp_price:
                 new_status = "tp_hit"
-                exit_price = current_price
+                exit_price = tp_price  # Cap at TP price, not actual (gap-up)
 
         # Timeout check
         if new_status is None and elapsed_minutes >= horizon:
@@ -513,7 +513,7 @@ def check_paper_trades(client) -> dict:
             continue
         elapsed_minutes = (now - created_at).total_seconds() / 60
 
-        exit_price = current_price if current_price else entry_price * (sl_price / entry_price)
+        exit_price = sl_price  # Cap at SL price, not actual (gap-down)
         pnl_pct = round((exit_price / entry_price) - 1, 4) if exit_price and entry_price else 0
         pos_usd = float(trade.get("position_usd") or 0)
         pnl_usd = round(pos_usd * pnl_pct, 2) if pos_usd else None
