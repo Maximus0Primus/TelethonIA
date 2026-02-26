@@ -1377,10 +1377,10 @@ async def main():
         try:
             dialogs = await client.get_dialogs(limit=200)
             dialog_ids = {d.id for d in dialogs}
-            matched = sum(1 for gid in group_ids if gid in dialog_ids)
+            matched = sum(1 for gid in rt_groups if gid in dialog_ids)
             logger.info(
                 "RT: get_dialogs() fetched %d dialogs (%d/%d KOL groups matched)",
-                len(dialogs), matched, len(group_ids),
+                len(dialogs), matched, len(rt_groups),
             )
             await client.catch_up()
             logger.info("RT: catch_up() completed — update state synced")
