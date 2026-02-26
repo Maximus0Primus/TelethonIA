@@ -1108,9 +1108,9 @@ async def _rt_on_new_message(event: events.NewMessage.Event):
             # Cache the marked ID for future lookups
             _rt_group_id_to_username[chat_id] = username
     if not username:
-        if _rt_debug_counter < 5:
+        if _rt_debug_counter < 20:
             _rt_debug_counter += 1
-            logger.debug("RT: unmatched chat_id=%s (first %d)", chat_id, _rt_debug_counter)
+            logger.info("RT: unmatched chat_id=%s (event %d)", chat_id, _rt_debug_counter)
         return
 
     msg = event.message
@@ -1371,6 +1371,13 @@ async def main():
     try:
         rt_groups = await setup_realtime_listener(client)
         logger.info("Real-time listener registered for %d groups", len(rt_groups))
+        # v69: Force Telethon to sync update state — without this,
+        # StringSession restarts miss channel updates entirely.
+        try:
+            await client.catch_up()
+            logger.info("RT: catch_up() completed — update state synced")
+        except Exception as e:
+            logger.warning("RT: catch_up() failed (non-fatal): %s", e)
     except Exception as e:
         logger.error("Failed to setup RT listener (batch mode continues): %s", e)
 
