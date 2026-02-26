@@ -1249,6 +1249,20 @@ async def setup_realtime_listener(client: TelegramClient):
             _rt_on_new_message,
             events.NewMessage(),
         )
+
+        # v69: Debug — log first 10 raw updates to confirm Telethon receives events
+        _raw_count = {"n": 0}
+
+        async def _rt_debug_raw(event):
+            if _raw_count["n"] < 10:
+                _raw_count["n"] += 1
+                logger.info(
+                    "RT RAW EVENT #%d: type=%s chat_id=%s",
+                    _raw_count["n"], type(event).__name__,
+                    getattr(event, "chat_id", "?"),
+                )
+
+        client.add_event_handler(_rt_debug_raw, events.NewMessage())
         def _cache_gid(entry):
             if isinstance(entry, dict):
                 return entry.get("id")
