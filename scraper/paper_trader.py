@@ -392,7 +392,8 @@ def check_paper_trades(client) -> dict:
 
     Moonbag tranches (tp_price=NULL) only close on SL or timeout.
 
-    Returns {"checked": N, "closed": M, "tp": X, "sl": Y, "timeout": Z}.
+    Returns {"checked": N, "closed": M, "tp": X, "sl": Y, "timeout": Z,
+            "pnl_usd": total, "rt_pnl_usd": RT-only}.
     """
     now = datetime.now(timezone.utc)
 
@@ -403,10 +404,10 @@ def check_paper_trades(client) -> dict:
             _estimate_egress("paper_trader", "paper_trades", len(open_trades))
     except Exception as e:
         logger.error("paper_trader: failed to fetch open trades: %s", e)
-        return {"checked": 0, "closed": 0, "tp": 0, "sl": 0, "timeout": 0}
+        return {"checked": 0, "closed": 0, "tp": 0, "sl": 0, "timeout": 0, "pnl_usd": 0, "rt_pnl_usd": 0, "rt_closed": 0}
 
     if not open_trades:
-        return {"checked": 0, "closed": 0, "tp": 0, "sl": 0, "timeout": 0}
+        return {"checked": 0, "closed": 0, "tp": 0, "sl": 0, "timeout": 0, "pnl_usd": 0, "rt_pnl_usd": 0, "rt_closed": 0}
 
     # Batch fetch current prices
     addresses = list({t["token_address"] for t in open_trades})
@@ -414,6 +415,8 @@ def check_paper_trades(client) -> dict:
 
     counts = {"checked": len(open_trades), "closed": 0, "tp": 0, "sl": 0, "timeout": 0}
     _total_pnl_usd = 0.0  # v67: accumulate for monitoring
+    _rt_pnl_usd = 0.0     # v71: RT-only PnL for bankroll tracking
+    _rt_closed = 0         # v71: RT-only closed count for bankroll tracking
 
     # Track SL-triggered groups so we can cascade
     # Key: (token_address, strategy, cycle_ts) -> True if SL was hit
@@ -491,6 +494,9 @@ def check_paper_trades(client) -> dict:
             closed_ids.add(trade["id"])
             counts["closed"] += 1
             _total_pnl_usd += pnl_usd or 0
+            if trade.get("source") == "rt":
+                _rt_pnl_usd += pnl_usd or 0
+                _rt_closed += 1
             status_key = new_status.replace("_hit", "")
             counts[status_key] = counts.get(status_key, 0) + 1
             usd_str = f" ${pnl_usd:+.2f}" if pnl_usd is not None else ""
@@ -541,6 +547,9 @@ def check_paper_trades(client) -> dict:
             closed_ids.add(trade["id"])
             counts["closed"] += 1
             _total_pnl_usd += pnl_usd or 0
+            if trade.get("source") == "rt":
+                _rt_pnl_usd += pnl_usd or 0
+                _rt_closed += 1
             counts["sl"] = counts.get("sl", 0) + 1
             usd_str = f" ${pnl_usd:+.2f}" if pnl_usd is not None else ""
             logger.info(
@@ -559,6 +568,9 @@ def check_paper_trades(client) -> dict:
         # v67: Track paper trade closures
         if _monitoring:
             _metrics.record_paper_trade_close(counts["closed"], _total_pnl_usd)
+    counts["pnl_usd"] = round(_total_pnl_usd, 2)
+    counts["rt_pnl_usd"] = round(_rt_pnl_usd, 2)
+    counts["rt_closed"] = _rt_closed
     return counts
 
 

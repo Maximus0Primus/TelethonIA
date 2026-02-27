@@ -660,6 +660,139 @@ RT_COOLDOWN_SECONDS = 1800
 RT_KOL_SCORES_TTL = 3600  # 1 hour
 RT_CONFIG_TTL = 300  # 5 minutes
 
+# v71: KOL WR whitelist + bankroll management
+_rt_kol_whitelist: dict = {}           # {kol_group: {wr, total, hits, approved}}
+_rt_kol_whitelist_loaded_at: float = 0.0
+_rt_bankroll: dict = {}                # single row from rt_bankroll table
+_rt_bankroll_loaded_at: float = 0.0
+RT_KOL_WHITELIST_TTL = 3600  # 1h
+RT_BANKROLL_TTL = 60          # 1min
+
+
+def _rt_load_kol_whitelist(config: dict) -> dict:
+    """v71: Load KOL whitelist based on historical WR from kol_call_outcomes. Cached 1h."""
+    global _rt_kol_whitelist, _rt_kol_whitelist_loaded_at
+    now = time.time()
+    if _rt_kol_whitelist and now - _rt_kol_whitelist_loaded_at < RT_KOL_WHITELIST_TTL:
+        return _rt_kol_whitelist
+
+    kf = config.get("kol_filter", {})
+    wr_threshold = float(kf.get("wr_threshold", 0.60))
+    return_threshold = float(kf.get("return_threshold", 1.5))
+    min_calls = int(kf.get("min_calls", 5))
+
+    try:
+        sb = _get_supabase()
+        if not sb:
+            return _rt_kol_whitelist
+        # Fetch all KCO rows with a max_return value
+        result = sb.table("kol_call_outcomes").select(
+            "kol_group, max_return"
+        ).filter("max_return", "not.is", "null").execute()
+        rows = result.data or []
+        if not rows:
+            logger.warning("RT KOL whitelist: no KCO rows with max_return")
+            return _rt_kol_whitelist
+
+        # Aggregate by kol_group
+        from collections import defaultdict
+        agg = defaultdict(lambda: {"total": 0, "hits": 0})
+        for r in rows:
+            kol = r["kol_group"]
+            agg[kol]["total"] += 1
+            if float(r["max_return"] or 0) >= return_threshold:
+                agg[kol]["hits"] += 1
+
+        whitelist = {}
+        approved_count = 0
+        for kol, stats in agg.items():
+            wr = stats["hits"] / stats["total"] if stats["total"] > 0 else 0
+            approved = wr >= wr_threshold and stats["total"] >= min_calls
+            whitelist[kol] = {
+                "wr": round(wr, 4),
+                "total": stats["total"],
+                "hits": stats["hits"],
+                "approved": approved,
+            }
+            if approved:
+                approved_count += 1
+
+        _rt_kol_whitelist = whitelist
+        _rt_kol_whitelist_loaded_at = now
+        logger.info("RT KOL whitelist: %d/%d approved (wr>=%.0f%%, calls>=%d, ret>=%.1fx)",
+                     approved_count, len(whitelist), wr_threshold * 100, min_calls, return_threshold)
+    except Exception as e:
+        logger.warning("RT KOL whitelist load failed: %s", e)
+    return _rt_kol_whitelist
+
+
+def _rt_load_bankroll() -> dict:
+    """v71: Load bankroll state from rt_bankroll table. Cached 60s."""
+    global _rt_bankroll, _rt_bankroll_loaded_at
+    now = time.time()
+    if _rt_bankroll and now - _rt_bankroll_loaded_at < RT_BANKROLL_TTL:
+        return _rt_bankroll
+    try:
+        sb = _get_supabase()
+        if not sb:
+            return _rt_bankroll or {"current_balance": 100.0}
+        result = sb.table("rt_bankroll").select("*").limit(1).execute()
+        if result.data:
+            _rt_bankroll = result.data[0]
+            _rt_bankroll_loaded_at = now
+            logger.debug("RT bankroll loaded: $%.2f (peak $%.2f, dd %.1f%%)",
+                         float(_rt_bankroll["current_balance"]),
+                         float(_rt_bankroll["peak_balance"]),
+                         float(_rt_bankroll["max_drawdown_pct"]))
+        else:
+            _rt_bankroll = {"current_balance": 100.0, "peak_balance": 100.0,
+                            "total_pnl": 0.0, "total_trades": 0, "max_drawdown_pct": 0.0}
+    except Exception as e:
+        logger.warning("RT bankroll load failed: %s", e)
+        if not _rt_bankroll:
+            _rt_bankroll = {"current_balance": 100.0, "peak_balance": 100.0,
+                            "total_pnl": 0.0, "total_trades": 0, "max_drawdown_pct": 0.0}
+    return _rt_bankroll
+
+
+def _rt_update_bankroll(pnl_usd: float, n_trades: int) -> None:
+    """v71: Update bankroll after trades close. Read-modify-write with peak/drawdown tracking."""
+    global _rt_bankroll, _rt_bankroll_loaded_at
+    if pnl_usd == 0 and n_trades == 0:
+        return
+    try:
+        sb = _get_supabase()
+        if not sb:
+            return
+        # Fresh read to avoid stale data
+        result = sb.table("rt_bankroll").select("*").limit(1).execute()
+        if not result.data:
+            return
+        row = result.data[0]
+        old_balance = float(row["current_balance"])
+        new_balance = round(old_balance + pnl_usd, 2)
+        new_total_pnl = round(float(row["total_pnl"]) + pnl_usd, 2)
+        new_total_trades = int(row["total_trades"]) + n_trades
+        new_peak = max(float(row["peak_balance"]), new_balance)
+        new_dd = round((1 - new_balance / new_peak) * 100, 2) if new_peak > 0 else 0
+        new_dd = max(float(row["max_drawdown_pct"]), new_dd)
+
+        sb.table("rt_bankroll").update({
+            "current_balance": new_balance,
+            "total_pnl": new_total_pnl,
+            "total_trades": new_total_trades,
+            "peak_balance": new_peak,
+            "max_drawdown_pct": new_dd,
+            "last_updated_at": datetime.now(timezone.utc).isoformat(),
+        }).eq("id", row["id"]).execute()
+
+        # Invalidate cache so next read gets fresh data
+        _rt_bankroll_loaded_at = 0
+        logger.info("RT bankroll: $%.2f → $%.2f (pnl=$%+.2f, %d trades, peak=$%.2f, dd=%.1f%%)",
+                     old_balance, new_balance, pnl_usd, n_trades, new_peak, new_dd)
+    except Exception as e:
+        logger.error("RT bankroll update failed: %s", e)
+
 
 def _rt_load_kol_scores() -> dict:
     """Load KOL scores from kol_scores.json. Refreshed every hour."""
@@ -896,39 +1029,62 @@ def _rt_compute_score(kol_username: str, ca: str, kol_info: dict,
 def _rt_position_size(rt_score: float, kol_info: dict, token_info: dict,
                       tier: str, config: dict) -> float:
     """
-    Dynamic position sizing. Score drives size, NOT entry.
-    Budget × kol_mult × safety_mult × momentum_mult. Floor $1, cap $30.
-    Low-confidence = micro position ($1-3) to learn.
-    High-confidence = full position ($20-30).
+    v71: Bankroll-based position sizing with Kelly fraction.
+    base_bet = bankroll × kelly_fraction (7%)
+    Modulated by KOL WR and RT score. Floor $1, cap $200.
+    Falls back to old fixed-budget sizing if sizing.mode != "bankroll".
     """
-    budget = float(config.get("base_budget_usd", 20))
     sizing = config.get("sizing", {})
+    mode = sizing.get("mode", "fixed")
+
+    if mode == "bankroll":
+        bankroll = _rt_load_bankroll()
+        balance = float(bankroll.get("current_balance", 100))
+        kelly = float(sizing.get("kelly_fraction", 0.07))
+        base_bet = balance * kelly
+
+        # WR multiplier: higher WR KOLs get bigger size
+        wr = float(kol_info.get("win_rate", 0))
+        if wr >= 0.80:
+            wr_mult = 1.5
+        elif wr >= 0.70:
+            wr_mult = 1.2
+        else:
+            wr_mult = 1.0  # 60% threshold already passed by WR gate
+
+        # Score multiplier: RT score 0→0.7x, 100→1.3x
+        score_frac = max(0, min(1, rt_score / 100))
+        score_mult = 0.7 + score_frac * 0.6
+
+        size = base_bet * wr_mult * score_mult
+
+        min_pos = float(config.get("min_position_usd", sizing.get("min_position_usd", 1.0)))
+        max_pos = float(config.get("max_position_usd", sizing.get("max_position_usd", 200.0)))
+        return round(max(min_pos, min(max_pos, size)), 2)
+
+    # --- Legacy fixed-budget mode (fallback) ---
+    budget = float(config.get("base_budget_usd", 20))
 
     # KOL multiplier: [floor, cap] based on kol_score
     kol_score = kol_info.get("score", 0)
     kol_floor = float(sizing.get("kol_score_mult_floor", 0.3))
     kol_cap = float(sizing.get("kol_score_mult_cap", 1.8))
-    # Map kol_score [0, 3.0] → [floor, cap]
     kol_frac = min(1.0, kol_score / 3.0) if kol_score > 0 else 0
     kol_mult = kol_floor + kol_frac * (kol_cap - kol_floor)
 
-    # S-tier bonus
     if tier == "S":
         kol_mult *= float(sizing.get("tier_s_bonus", 1.3))
 
-    # Safety multiplier based on token_safety sub-score
     safety_sub = _rt_compute_token_safety(token_info)
     safety_floor = float(sizing.get("safety_mult_floor", 0.2))
     safety_cap = float(sizing.get("safety_mult_cap", 1.5))
     safety_mult = safety_floor + (safety_sub / 100) * (safety_cap - safety_floor)
 
-    # Momentum multiplier
     momentum_sub = _rt_compute_momentum(token_info)
     mom_floor = float(sizing.get("momentum_mult_floor", 0.5))
     mom_cap = float(sizing.get("momentum_mult_cap", 1.5))
     mom_mult = mom_floor + (momentum_sub / 100) * (mom_cap - mom_floor)
 
-    # Final: budget × geometric mean of multipliers (so no single factor dominates)
     combined = (kol_mult * safety_mult * mom_mult) ** (1 / 3)
     size = budget * combined
 
@@ -951,69 +1107,16 @@ def _rt_open_trades(ca: str, symbol: str, price: float, mcap: float,
                     kol_username: str, tier: str, rt_score: float, pos_size: float,
                     kol_info: dict, token_info: dict, config: dict):
     """
-    Open paper trades with ML-guided strategy selection when model exists.
-    Phase 1 (no model): all strategies, scoring-based sizing.
-    Phase 2 (model): per-strategy PnL prediction → smart selection + sizing.
+    v71: Open paper trades with hybrid strategy allocation.
+    When hybrid_strategy.enabled: split pos_size across configured strategies (e.g. 60/40).
+    Fallback to exploration mode if disabled.
     """
-    global _rt_ml_model
     from paper_trader import open_paper_trades, _load_paper_trade_config, STRATEGIES
     sb = _get_supabase()
     if not sb:
         return 0
 
-    # Try loading ML model (cached, 5min TTL)
-    if _rt_ml_model is None:
-        try:
-            from rt_model import load_rt_model
-            _rt_ml_model = load_rt_model(sb)
-        except Exception:
-            pass
-
-    ml_mode = False
-    valid_strategies = []
-    strategy_size_mults = {}
-
-    if _rt_ml_model is not None:
-        # --- ML MODE: predict per-strategy PnL ---
-        try:
-            from rt_model import predict_strategy_pnl, select_strategies
-            n_confirm = _rt_count_confirmations(kol_username, ca)
-            hour = datetime.now(timezone.utc).hour
-
-            predictions = predict_strategy_pnl(
-                _rt_ml_model, kol_info, token_info, tier,
-                rt_score, n_confirm, hour,
-            )
-            selected = select_strategies(predictions, config)
-
-            if selected:
-                ml_mode = True
-                valid_strategies = [s for s, _ in selected]
-                strategy_size_mults = {s: m for s, m in selected}
-
-                # Log ML decisions
-                take = [(s, f"{p:+.2%}") for s, p in predictions.items() if p > 0]
-                skip = [(s, f"{p:+.2%}") for s, p in predictions.items() if p <= 0]
-                logger.info(
-                    "RT ML: %s → TAKE %s | SKIP %s",
-                    symbol, take, skip,
-                )
-        except Exception as e:
-            logger.debug("RT ML predict failed: %s (falling back to exploration)", e)
-
-    # v5: load DB config once — used for both strategy selection and trade opening
-    pt_config = _load_paper_trade_config(sb) if sb else {}
-    db_active = [s for s in pt_config.get("active_strategies", list(STRATEGIES.keys())) if s in STRATEGIES]
-
-    if not ml_mode:
-        # --- EXPLORATION MODE: use DB active_strategies (respects deprecated strategy removal) ---
-        rt_strats = config.get("rt_strategies", "all")
-        if rt_strats == "all":
-            valid_strategies = db_active
-        else:
-            valid_strategies = [s for s in rt_strats if s in STRATEGIES]
-            if not valid_strategies:
-                valid_strategies = db_active
+    pt_config = _load_paper_trade_config(sb)
 
     # Build base token entry with RT metadata
     token_entry = {
@@ -1041,40 +1144,64 @@ def _rt_open_trades(ca: str, symbol: str, price: float, mcap: float,
         "_rt_is_pump_fun": token_info.get("is_pump_fun"),
     }
 
-    # Open trades per strategy (ML mode: individual sizing per strategy)
     now = datetime.now(timezone.utc)
     total_opened = 0
 
-    if ml_mode and strategy_size_mults:
-        # ML mode: open each strategy individually with adjusted sizing
-        for strat_name in valid_strategies:
-            size_mult = strategy_size_mults.get(strat_name, 1.0)
-            strat_pos = round(max(1.0, min(30.0, pos_size * size_mult)), 2)
+    # v71: Hybrid strategy — split position across configured allocations
+    hybrid_cfg = config.get("hybrid_strategy", {})
+    if hybrid_cfg.get("enabled", False):
+        allocations = hybrid_cfg.get("allocations", {"TP50_SL30": 0.60, "TP100_SL30": 0.40})
+        for strat_name, alloc_pct in allocations.items():
+            if strat_name not in STRATEGIES:
+                continue
+            strat_pos = round(pos_size * float(alloc_pct), 2)
+            if strat_pos < 1.0:
+                strat_pos = 1.0
 
-            ml_config = dict(pt_config)
-            ml_config["budget_usd"] = strat_pos
-            ml_config["active_strategies"] = [strat_name]
-            ml_config["top_n"] = 1
-            ml_config["ca_filter"] = False
+            strat_config = dict(pt_config)
+            strat_config["budget_usd"] = strat_pos
+            strat_config["active_strategies"] = [strat_name]
+            strat_config["top_n"] = 1
+            strat_config["ca_filter"] = False
 
-            opened = open_paper_trades(sb, [token_entry], cycle_ts=now, config=ml_config)
+            opened = open_paper_trades(sb, [token_entry], cycle_ts=now, config=strat_config)
             total_opened += opened
-    else:
-        # Exploration mode: DB-filtered strategies with same sizing
-        explore_config = dict(pt_config)
-        explore_config["budget_usd"] = pos_size
-        explore_config["active_strategies"] = valid_strategies
-        explore_config["top_n"] = 1
-        explore_config["ca_filter"] = False
 
-        total_opened = open_paper_trades(sb, [token_entry], cycle_ts=now, config=explore_config)
+        if total_opened > 0:
+            alloc_str = " + ".join(f"{s}={p:.0%}" for s, p in allocations.items())
+            logger.info(
+                "RT TRADE [HYBRID]: %s @ $%.6f | %s | KOL: %s (%s, wr=%.0f%%) "
+                "rt_score=%.0f pos=$%.2f liq=$%.0fK",
+                symbol, price, alloc_str, kol_username, tier,
+                kol_info.get("win_rate", 0) * 100,
+                rt_score, pos_size,
+                token_info.get("liquidity_usd", 0) / 1000,
+            )
+        return total_opened
+
+    # --- Fallback: exploration mode (all active strategies, equal sizing) ---
+    db_active = [s for s in pt_config.get("active_strategies", list(STRATEGIES.keys())) if s in STRATEGIES]
+    rt_strats = config.get("rt_strategies", "all")
+    if rt_strats == "all":
+        valid_strategies = db_active
+    else:
+        valid_strategies = [s for s in rt_strats if s in STRATEGIES]
+        if not valid_strategies:
+            valid_strategies = db_active
+
+    explore_config = dict(pt_config)
+    explore_config["budget_usd"] = pos_size
+    explore_config["active_strategies"] = valid_strategies
+    explore_config["top_n"] = 1
+    explore_config["ca_filter"] = False
+
+    total_opened = open_paper_trades(sb, [token_entry], cycle_ts=now, config=explore_config)
 
     if total_opened > 0:
-        mode_str = "ML" if ml_mode else "EXPLORE"
         logger.info(
-            "RT TRADE [%s]: %s @ $%.6f | %d strats | KOL: %s (%s, wr=%.0f%%) "
+            "RT TRADE [EXPLORE]: %s @ $%.6f | %d strats | KOL: %s (%s, wr=%.0f%%) "
             "rt_score=%.0f pos=$%.2f liq=$%.0fK",
-            mode_str, symbol, price, len(valid_strategies), kol_username, tier,
+            symbol, price, len(valid_strategies), kol_username, tier,
             kol_info.get("win_rate", 0) * 100,
             rt_score, pos_size,
             token_info.get("liquidity_usd", 0) / 1000,
@@ -1146,6 +1273,22 @@ async def _rt_on_new_message(event: events.NewMessage.Event):
 
     tier = GROUPS_TIER.get(username, "A")
     kol_info = kol_scores.get(username, {"score": 0.0, "win_rate": 0.0, "total_calls": 0})
+
+    # v71: KOL WR gate — only trade KOLs with proven historical win rate
+    kol_filter_cfg = config.get("kol_filter", {})
+    if kol_filter_cfg.get("enabled", False):
+        whitelist = _rt_load_kol_whitelist(config)
+        if whitelist:  # only apply gate when whitelist is actually populated
+            kol_wl = whitelist.get(username)
+            if kol_wl and kol_wl.get("approved"):
+                # Enrich kol_info with real KCO win rate (replaces kol_scores.json WR)
+                kol_info = dict(kol_info)  # don't mutate cached dict
+                kol_info["win_rate"] = kol_wl["wr"]
+                kol_info["total_calls"] = kol_wl["total"]
+            else:
+                wr_str = f" wr={kol_wl['wr']:.0%}/{kol_wl['total']}calls" if kol_wl else " (no KCO data)"
+                logger.info("RT SKIP (KOL WR): %s%s", username, wr_str)
+                return
 
     for symbol, source, ca in tokens:
         if not ca:
@@ -1394,7 +1537,12 @@ async def run_one_cycle(client: TelegramClient, dump: bool = False,
         try:
             from paper_trader import check_paper_trades, paper_trade_summary
             sb_pt = _get_supabase()
-            check_paper_trades(sb_pt)
+            pt_result = check_paper_trades(sb_pt)
+            # v71: Update bankroll with RT PnL from cycle-end check
+            rt_pnl = pt_result.get("rt_pnl_usd", 0)
+            rt_closed = pt_result.get("rt_closed", 0)
+            if rt_pnl != 0 or rt_closed > 0:
+                _rt_update_bankroll(rt_pnl, rt_closed)
             summary = paper_trade_summary(sb_pt)
             if summary:
                 logger.info("paper_trader: %s", summary)
@@ -1533,7 +1681,12 @@ async def main():
                 try:
                     from paper_trader import check_paper_trades
                     sb_pt = _get_supabase()
-                    check_paper_trades(sb_pt)
+                    pt_result = check_paper_trades(sb_pt)
+                    # v71: Update bankroll with RT PnL
+                    rt_pnl = pt_result.get("rt_pnl_usd", 0)
+                    rt_closed = pt_result.get("rt_closed", 0)
+                    if rt_pnl != 0 or rt_closed > 0:
+                        _rt_update_bankroll(rt_pnl, rt_closed)
                 except Exception as e:
                     logger.error("Paper trading (check) failed: %s", e)
             except Exception as e:
