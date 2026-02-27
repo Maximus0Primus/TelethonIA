@@ -37,6 +37,7 @@ try:
     from alerter import (
         send_startup_message, alert_cycle_failure, alert_rt_listener_down,
         alert_api_errors, alert_egress_warning, send_daily_summary,
+        reset_alert,
     )
     _monitoring = True
 except ImportError:
@@ -1000,15 +1001,19 @@ def _rt_open_trades(ca: str, symbol: str, price: float, mcap: float,
         except Exception as e:
             logger.debug("RT ML predict failed: %s (falling back to exploration)", e)
 
+    # v5: load DB config once — used for both strategy selection and trade opening
+    pt_config = _load_paper_trade_config(sb) if sb else {}
+    db_active = [s for s in pt_config.get("active_strategies", list(STRATEGIES.keys())) if s in STRATEGIES]
+
     if not ml_mode:
-        # --- EXPLORATION MODE: all strategies ---
+        # --- EXPLORATION MODE: use DB active_strategies (respects deprecated strategy removal) ---
         rt_strats = config.get("rt_strategies", "all")
         if rt_strats == "all":
-            valid_strategies = list(STRATEGIES.keys())
+            valid_strategies = db_active
         else:
             valid_strategies = [s for s in rt_strats if s in STRATEGIES]
             if not valid_strategies:
-                valid_strategies = list(STRATEGIES.keys())
+                valid_strategies = db_active
 
     # Build base token entry with RT metadata
     token_entry = {
@@ -1046,23 +1051,23 @@ def _rt_open_trades(ca: str, symbol: str, price: float, mcap: float,
             size_mult = strategy_size_mults.get(strat_name, 1.0)
             strat_pos = round(max(1.0, min(30.0, pos_size * size_mult)), 2)
 
-            pt_config = _load_paper_trade_config(sb)
-            pt_config["budget_usd"] = strat_pos
-            pt_config["active_strategies"] = [strat_name]
-            pt_config["top_n"] = 1
-            pt_config["ca_filter"] = False
+            ml_config = dict(pt_config)
+            ml_config["budget_usd"] = strat_pos
+            ml_config["active_strategies"] = [strat_name]
+            ml_config["top_n"] = 1
+            ml_config["ca_filter"] = False
 
-            opened = open_paper_trades(sb, [token_entry], cycle_ts=now, config=pt_config)
+            opened = open_paper_trades(sb, [token_entry], cycle_ts=now, config=ml_config)
             total_opened += opened
     else:
-        # Exploration mode: all strategies with same sizing
-        pt_config = _load_paper_trade_config(sb)
-        pt_config["budget_usd"] = pos_size
-        pt_config["active_strategies"] = valid_strategies
-        pt_config["top_n"] = 1
-        pt_config["ca_filter"] = False
+        # Exploration mode: DB-filtered strategies with same sizing
+        explore_config = dict(pt_config)
+        explore_config["budget_usd"] = pos_size
+        explore_config["active_strategies"] = valid_strategies
+        explore_config["top_n"] = 1
+        explore_config["ca_filter"] = False
 
-        total_opened = open_paper_trades(sb, [token_entry], cycle_ts=now, config=pt_config)
+        total_opened = open_paper_trades(sb, [token_entry], cycle_ts=now, config=explore_config)
 
     if total_opened > 0:
         mode_str = "ML" if ml_mode else "EXPLORE"
@@ -1380,6 +1385,8 @@ async def run_one_cycle(client: TelegramClient, dump: bool = False,
 
 
 async def main():
+    global _cycle_counter
+
     parser = argparse.ArgumentParser(description="Telegram KOL scraper")
     parser.add_argument(
         "--once",
@@ -1464,6 +1471,9 @@ async def main():
                 last_age = rt_stats.get("last_event_age_s")
                 if last_age is not None and last_age > 7200:
                     alert_rt_listener_down(last_age / 60)
+                elif last_age is not None and last_age <= 7200:
+                    # RT is healthy again — reset backoff so next outage re-alerts
+                    reset_alert("rt_listener_down")
 
                 # Check API error rates
                 api_stats = _metrics.get_api_stats(1.0)
@@ -1487,7 +1497,7 @@ async def main():
                     _last_daily_hour = now_utc.hour
 
             except Exception as e:
-                logger.debug("Monitor loop error: %s", e)
+                logger.warning("Monitor loop error: %s", e, exc_info=True)
 
     async def price_refresh_loop():
         """Mini-cycle: refresh top token prices every 5 minutes."""

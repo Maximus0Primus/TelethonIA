@@ -30,6 +30,9 @@ on:
           - '1.5'
           - '2.0'
 
+permissions:
+  contents: write
+
 jobs:
   train:
     runs-on: ubuntu-latest

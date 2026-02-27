@@ -1,14 +1,17 @@
 """
-Paper Trading System v4 — Multi-strategy with tranche support + portfolio allocation.
+Paper Trading System v5 — Multi-strategy with tranche support + portfolio allocation.
 
-7 strategies run in parallel per token (new strategies have entry filters):
-- TP50_SL30:   100% at 1.5x, -30% SL, 24h horizon (decoupled from TP100, same horizon)
-- TP100_SL30:  100% at 2x,   -30% SL, 24h horizon (wait for double)
-- SCALE_OUT:   25% tranches at 2x/3x/5x + moonbag, -50% SL, 48h horizon (wider SL for long hold)
-- MOONBAG:     80% at 2x + 20% moonbag, -70% SL, 7d horizon (widest SL for max duration)
+Strategies run in parallel per token:
+- TP30_SL50:   100% at 1.3x, -50% SL, 12h horizon (backtest best: +8.5% EV, 61% WR, PF 1.51)
+- TP50_SL30:   100% at 1.5x, -30% SL, 24h horizon (RT best: +$0.20 EV on top KOLs)
+- TP100_SL30:  100% at 2x,   -30% SL, 24h horizon (highest absolute EV: +$0.34 on top KOLs)
+- SCALE_OUT:   25% tranches at 2x/3x/5x + moonbag, -50% SL, 48h horizon
 - FRESH_MICRO: 100% at 1.3x, -70% SL, 24h (score 10-49, fresh KOL, micro-cap)
 - QUICK_SCALP: 100% at 1.5x, ~no SL, 6h timeout (score 10-49, momentum)
-- WIDE_RUNNER: 60%@2x + 40%@3x, -70% SL, 48h (score 10-49, fresh KOL, micro-cap)
+
+Deprecated (data shows negative EV — kept in code for backtesting, removed from active_strategies):
+- MOONBAG:     -21.9% ROI live, 16.4% WR.
+- WIDE_RUNNER: -31.1% ROI live, 0% WR in RT.
 
 Each tranche = 1 row in paper_trades. SL triggers close ALL open tranches
 for the same token+strategy. Moonbag tranches (tp_price=NULL) only close
@@ -17,6 +20,7 @@ on SL or timeout.
 v3: Score-weighted portfolio allocation. $50 budget per cycle split
 proportionally by token score. Tracks position_usd and pnl_usd.
 v4: Data-driven strategies with entry filters (STRATEGY_FILTERS).
+v5: +TP30_SL50, dedup cooldown 24h default, MOONBAG/WIDE_RUNNER deprecated.
 """
 
 import logging
@@ -39,12 +43,17 @@ BATCH_SIZE = 30
 # --- Defaults (overridden by scoring_config.paper_trade_config) ---
 TOP_N = 5
 PORTFOLIO_BUDGET = 50.0  # USD per cycle, score-weighted across top N
-DEDUP_COOLDOWN_HOURS = 0
+DEDUP_COOLDOWN_HOURS = 24  # v5: was 0 — re-trading same token across cycles was the #1 PnL killer
 CA_FILTER = True
 
 # --- Strategy Definitions ---
 # Each strategy has a list of tranches. Moonbag tranches have tp_mult=None.
 STRATEGIES = {
+    "TP30_SL50": [
+        # v5: backtest best — TP30_SL50_12h: +8.5% expectancy, 61% WR, PF 1.51 (report #602)
+        # KCO sim: 63.2% hit 1.3x across all KOLs, 71.4% on top 10
+        {"pct": 1.0, "tp_mult": 1.30, "sl_mult": 0.50, "horizon_min": 720, "label": "main"},
+    ],
     "TP50_SL30": [
         # v68: horizon 12h→24h (decoupled from TP level — analysis showed TP100 edge was from horizon, not TP)
         {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.70, "horizon_min": 1440, "label": "main"},

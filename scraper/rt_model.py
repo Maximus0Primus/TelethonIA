@@ -46,13 +46,14 @@ RT_FEATURES = [
 
 # Strategy encoding (deterministic order)
 STRATEGY_MAP = {
-    "TP50_SL30": 0,
-    "TP100_SL30": 1,
-    "SCALE_OUT": 2,
-    "MOONBAG": 3,
-    "FRESH_MICRO": 4,
-    "QUICK_SCALP": 5,
-    "WIDE_RUNNER": 6,
+    "TP30_SL50": 0,
+    "TP50_SL30": 1,
+    "TP100_SL30": 2,
+    "SCALE_OUT": 3,
+    "MOONBAG": 4,
+    "FRESH_MICRO": 5,
+    "QUICK_SCALP": 6,
+    "WIDE_RUNNER": 7,
 }
 STRATEGY_NAMES = {v: k for k, v in STRATEGY_MAP.items()}
 

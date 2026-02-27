@@ -21,11 +21,13 @@ _CHAT_ID = os.environ.get("MONITOR_CHAT_ID")
 
 # Throttling: category -> last_send_timestamp
 _last_alert_times: dict[str, float] = {}
+# v5: Exponential backoff — category -> consecutive send count
+_alert_counts: dict[str, int] = {}
 
-# Cooldowns per category (seconds)
+# Cooldowns per category (seconds) — BASE cooldown, doubles on each repeat
 _COOLDOWNS = {
-    "cycle_failure": 300,          # 5 min
-    "rt_listener_down": 600,       # 10 min
+    "cycle_failure": 300,          # 5 min base
+    "rt_listener_down": 600,       # 10 min base → 20 → 40 → cap 2h
     "api_errors": 300,             # 5 min per API
     "egress_warning": 3600,        # 1 hour
     "egress_critical": 1800,       # 30 min
@@ -33,15 +35,38 @@ _COOLDOWNS = {
     "startup": 60,                 # 1 min (prevent double-send on fast restart)
 }
 
+# Max consecutive alerts before going silent (0 = unlimited)
+_MAX_ALERTS = {
+    "rt_listener_down": 5,         # Alert 5x then stop (10+20+40+80+120 min = ~4.5h coverage)
+    "cycle_failure": 10,
+}
+
+# Max backoff cap (seconds)
+_MAX_BACKOFF = 7200  # 2 hours
+
 
 def _can_send(category: str) -> bool:
-    cooldown = _COOLDOWNS.get(category, 300)
+    base_cooldown = _COOLDOWNS.get(category, 300)
+    count = _alert_counts.get(category, 0)
+    # Exponential backoff: base * 2^(count-1), capped
+    cooldown = min(base_cooldown * (2 ** max(0, count - 1)), _MAX_BACKOFF) if count > 0 else base_cooldown
     last = _last_alert_times.get(category, 0)
+    # Check max alerts
+    max_alerts = _MAX_ALERTS.get(category, 0)
+    if max_alerts > 0 and count >= max_alerts:
+        return False
     return (time.time() - last) >= cooldown
 
 
 def _mark_sent(category: str):
     _last_alert_times[category] = time.time()
+    _alert_counts[category] = _alert_counts.get(category, 0) + 1
+
+
+def reset_alert(category: str):
+    """Call when a condition resolves to re-enable alerts for next occurrence."""
+    _alert_counts.pop(category, None)
+    _last_alert_times.pop(category, None)
 
 
 def _send(text: str, category: str) -> bool:

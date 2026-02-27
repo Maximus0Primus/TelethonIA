@@ -1393,6 +1393,15 @@ def _multi_tranche_bot_simulation(df: pd.DataFrame) -> dict:
 # MOONBAG horizon is 7d in paper_trader but we only have 48h OHLCV columns,
 # so we approximate with 48h (documented limitation).
 _PT_STRATEGIES = {
+    "TP30_SL50": {
+        "horizon": "12h",
+        "hz_min": 720,
+        "sl_col_suffix": "time_to_sl50_min",
+        "sl_pct": -0.50,
+        "tranches": [
+            {"pct": 1.0, "tp_col_suffix": "time_to_1_3x_min", "tp_pct": 0.30, "label": "main"},
+        ],
+    },
     "TP50_SL30": {
         "horizon": "12h",
         "hz_min": 720,
@@ -1439,10 +1448,10 @@ _PT_STRATEGIES = {
 
 # Default paper trade config (matches DB default)
 _PT_DEFAULT_CONFIG = {
-    "top_n": 5,
+    "top_n": 3,
     "budget_usd": 50.0,
-    "active_strategies": ["TP50_SL30", "TP100_SL30", "SCALE_OUT", "MOONBAG"],
-    "dedup_cooldown_hours": 0,
+    "active_strategies": ["TP30_SL50", "TP50_SL30", "TP100_SL30", "SCALE_OUT", "FRESH_MICRO", "QUICK_SCALP"],
+    "dedup_cooldown_hours": 24,
     "ca_filter": True,
 }
 
