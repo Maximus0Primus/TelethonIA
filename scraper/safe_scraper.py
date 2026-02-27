@@ -1187,12 +1187,32 @@ async def _rt_on_new_message(event: events.NewMessage.Event):
             # Position sizing: confidence → dollars
             pos_size = _rt_position_size(rt_score, kol_info, token_info, tier, config)
 
+            # v70: KCO model prediction — augment RT score with ML-predicted return
+            kco_predicted_return = None
+            try:
+                from pipeline import predict_kco_score
+                kco_predicted_return = predict_kco_score(username, tier, token_info)
+                if kco_predicted_return is not None:
+                    # Adjust position size based on KCO prediction
+                    # >1.5x predicted → boost, <1.0x → reduce
+                    if kco_predicted_return >= 1.5:
+                        pos_size = min(pos_size * 1.3, config.get("max_position_usd", 30))
+                    elif kco_predicted_return < 1.0:
+                        pos_size = max(pos_size * 0.5, config.get("min_position_usd", 1))
+            except Exception as e:
+                logger.debug("KCO prediction unavailable: %s", e)
+
+            # Store KCO prediction in token_info for paper trade metadata
+            if kco_predicted_return is not None:
+                token_info["kco_predicted_return"] = kco_predicted_return
+
             logger.info(
-                "RT score: %s rt_score=%.0f → pos=$%.2f | kol=%s(%.2f/%.0f%%) liq=$%.0fK bsr=%.2f",
+                "RT score: %s rt_score=%.0f → pos=$%.2f | kol=%s(%.2f/%.0f%%) liq=$%.0fK bsr=%.2f%s",
                 symbol, rt_score, pos_size, username,
                 kol_info.get("score", 0), kol_info.get("win_rate", 0) * 100,
                 token_info.get("liquidity_usd", 0) / 1000,
                 token_info.get("buy_sell_ratio", 0),
+                f" kco={kco_predicted_return:.2f}x" if kco_predicted_return else "",
             )
 
             # Open trades across all strategies

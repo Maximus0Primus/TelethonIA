@@ -141,6 +141,17 @@ NUMERIC_LIMITS = {
     "win_rate_7d": 1.0,
     "market_heat_24h": 99999.99,
     "relative_volume": 9999.9999,
+    # v70: Temporal features — accelerations
+    "mention_acceleration_v2": 9999999.999,
+    "volume_acceleration_v2": 9999999.999,
+    "price_acceleration": 9999999.999,
+    "buy_sell_ratio_delta": 9999.9999,
+    "holder_velocity": 9999999.999,
+    # v70: EMAs
+    "score_ema3": 9999999.999,
+    "mention_ema3": 9999999.999,
+    "volume_ema3": 999999999.999,
+    "recency_weighted_score_vel": 9999999.999,
 }
 
 # v24: Ordinal encoding for categorical phase features → ML numeric
@@ -176,6 +187,7 @@ _INT_COLS = {
     "lifecycle_velocity", "phase_duration_cycles",
     "whale_count", "whale_new_entries",
     "kol_saturation",
+    "whale_count_delta",
 }
 
 
@@ -329,7 +341,7 @@ def _fetch_previous_snapshots(client: Client, symbols: list[str]) -> dict[str, d
     try:
         result = (
             client.table("token_snapshots")
-            .select("symbol, mentions, sentiment, volume_24h, holder_count, score_at_snapshot, top_kols, snapshot_at, score_velocity, unique_kols, first_seen_price, price_at_snapshot, lifecycle_phase, lifecycle_phase_num, phase_duration_cycles")
+            .select("symbol, mentions, sentiment, volume_24h, holder_count, score_at_snapshot, top_kols, snapshot_at, score_velocity, unique_kols, first_seen_price, price_at_snapshot, lifecycle_phase, lifecycle_phase_num, phase_duration_cycles, mention_velocity, volume_velocity, price_velocity, whale_count, buy_sell_ratio_5m, score_ema3, mention_ema3, volume_ema3")
             .in_("symbol", symbols)
             .order("snapshot_at", desc=True)
             .limit(len(symbols) * 3)  # enough to get at least 1 per symbol
@@ -381,6 +393,17 @@ def _compute_temporal_features(current: dict, previous: dict | None) -> dict:
         "volume_velocity": None,
         "kol_arrival_rate": None,
         "price_velocity": None,
+        # v70: 10 new temporal features
+        "mention_acceleration_v2": None,
+        "volume_acceleration_v2": None,
+        "price_acceleration": None,
+        "whale_count_delta": None,
+        "buy_sell_ratio_delta": None,
+        "holder_velocity": None,
+        "score_ema3": None,
+        "mention_ema3": None,
+        "volume_ema3": None,
+        "recency_weighted_score_vel": None,
     }
 
     if previous is None:
@@ -487,6 +510,107 @@ def _compute_temporal_features(current: dict, previous: dict | None) -> dict:
     # --- ML v2: KOL arrival rate = new_kol_ratio / hours_between ---
     if result["new_kol_ratio"] is not None and hours_between is not None:
         result["kol_arrival_rate"] = round(new_kol_count / hours_between, 3)
+
+    # --- v70: Mention acceleration = mention_velocity(now) - mention_velocity(prev) ---
+    prev_mention_vel = previous.get("mention_velocity")
+    if result["mention_velocity"] is not None and prev_mention_vel is not None:
+        try:
+            result["mention_acceleration_v2"] = round(result["mention_velocity"] - float(prev_mention_vel), 3)
+        except (ValueError, TypeError):
+            pass
+
+    # --- v70: Volume acceleration = volume_velocity(now) - volume_velocity(prev) ---
+    prev_volume_vel = previous.get("volume_velocity")
+    if result["volume_velocity"] is not None and prev_volume_vel is not None:
+        try:
+            result["volume_acceleration_v2"] = round(result["volume_velocity"] - float(prev_volume_vel), 3)
+        except (ValueError, TypeError):
+            pass
+
+    # --- v70: Price acceleration = price_velocity(now) - price_velocity(prev) ---
+    prev_price_vel = previous.get("price_velocity")
+    if result["price_velocity"] is not None and prev_price_vel is not None:
+        try:
+            result["price_acceleration"] = round(result["price_velocity"] - float(prev_price_vel), 3)
+        except (ValueError, TypeError):
+            pass
+
+    # --- v70: Whale count delta = whale_count(now) - whale_count(prev) ---
+    curr_whales = current.get("whale_count")
+    prev_whales = previous.get("whale_count")
+    if curr_whales is not None and prev_whales is not None:
+        try:
+            result["whale_count_delta"] = int(curr_whales) - int(prev_whales)
+        except (ValueError, TypeError):
+            pass
+
+    # --- v70: Buy-sell ratio delta = bsr_5m(now) - bsr_5m(prev) ---
+    curr_bsr = current.get("buy_sell_ratio_5m")
+    prev_bsr = previous.get("buy_sell_ratio_5m")
+    if curr_bsr is not None and prev_bsr is not None:
+        try:
+            result["buy_sell_ratio_delta"] = round(float(curr_bsr) - float(prev_bsr), 4)
+        except (ValueError, TypeError):
+            pass
+
+    # --- v70: Holder velocity = holder_delta / hours_between ---
+    if result["holder_delta"] is not None and hours_between is not None:
+        try:
+            result["holder_velocity"] = round(float(result["holder_delta"]) / hours_between, 3)
+        except (ValueError, TypeError, ZeroDivisionError):
+            pass
+
+    # --- v70: EMAs (alpha=0.5, ~3 snapshot effective window) ---
+    # EMA formula: ema_new = alpha * current + (1 - alpha) * ema_prev
+    _ema_alpha = 0.5
+
+    # Score EMA
+    curr_score = current.get("score")
+    prev_score_ema = previous.get("score_ema3")
+    if curr_score is not None:
+        try:
+            cs = float(curr_score)
+            if prev_score_ema is not None:
+                result["score_ema3"] = round(_ema_alpha * cs + (1 - _ema_alpha) * float(prev_score_ema), 3)
+            else:
+                result["score_ema3"] = round(cs, 3)  # seed with first value
+        except (ValueError, TypeError):
+            pass
+
+    # Mention EMA
+    curr_mentions = current.get("mentions")
+    prev_mention_ema = previous.get("mention_ema3")
+    if curr_mentions is not None:
+        try:
+            cm = float(curr_mentions)
+            if prev_mention_ema is not None:
+                result["mention_ema3"] = round(_ema_alpha * cm + (1 - _ema_alpha) * float(prev_mention_ema), 3)
+            else:
+                result["mention_ema3"] = round(cm, 3)
+        except (ValueError, TypeError):
+            pass
+
+    # Volume EMA (log-scaled)
+    curr_vol = current.get("volume_24h")
+    prev_vol_ema = previous.get("volume_ema3")
+    if curr_vol is not None:
+        try:
+            cv_log = math.log1p(float(curr_vol))
+            if prev_vol_ema is not None:
+                result["volume_ema3"] = round(_ema_alpha * cv_log + (1 - _ema_alpha) * float(prev_vol_ema), 3)
+            else:
+                result["volume_ema3"] = round(cv_log, 3)
+        except (ValueError, TypeError):
+            pass
+
+    # --- v70: Recency-weighted score velocity ---
+    if result["score_velocity"] is not None and hours_between is not None:
+        try:
+            result["recency_weighted_score_vel"] = round(
+                result["score_velocity"] / (1.0 + hours_between), 3
+            )
+        except (ValueError, TypeError, ZeroDivisionError):
+            pass
 
     return result
 
@@ -746,6 +870,17 @@ def insert_snapshots(ranking: list[dict]) -> None:
             "jup_price_impact_5k": t.get("jup_price_impact_5k"),
             "liquidity_depth_score": t.get("liquidity_depth_score"),
             "momentum_mult": t.get("momentum_mult"),
+            # v70: 10 new temporal features
+            "mention_acceleration_v2": deltas.get("mention_acceleration_v2"),
+            "volume_acceleration_v2": deltas.get("volume_acceleration_v2"),
+            "price_acceleration": deltas.get("price_acceleration"),
+            "whale_count_delta": deltas.get("whale_count_delta"),
+            "buy_sell_ratio_delta": deltas.get("buy_sell_ratio_delta"),
+            "holder_velocity": deltas.get("holder_velocity"),
+            "score_ema3": deltas.get("score_ema3"),
+            "mention_ema3": deltas.get("mention_ema3"),
+            "volume_ema3": deltas.get("volume_ema3"),
+            "recency_weighted_score_vel": deltas.get("recency_weighted_score_vel"),
             # v54: ML calibrated win probability
             "ml_win_probability": t.get("ml_win_probability"),
             # v44: Raw activity ratio for Optuna re-scoring

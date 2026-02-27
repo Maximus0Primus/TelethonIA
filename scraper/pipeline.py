@@ -704,6 +704,13 @@ _ml_meta = None           # Full metadata dict (mode, weights, quality gate)
 _ml_calibrator = None     # v54: Isotonic calibrator (optional)
 _ml_loaded = False         # Prevent repeated load attempts
 
+# v70: KCO model globals (separate from main ML model)
+_kco_xgb = None
+_kco_lgb = None
+_kco_features = None
+_kco_meta = None
+_kco_loaded = False
+
 # Quality gate: refuse to load models below this threshold
 # v22: relaxed from 0.40 — lower return thresholds (e.g. +50%) are easier to predict
 _MIN_PRECISION_AT_5 = 0.30
@@ -814,6 +821,149 @@ def _load_ml_model(horizon: str = "12h"):
         mode, len(features), p_at_5, meta.get("ensemble_weights", {}),
     )
     return _ml_model, _ml_lgb_model, _ml_features, _ml_meta, _ml_calibrator
+
+
+def _load_kco_model():
+    """
+    v70: Lazy-load KCO model (separate from main ML model).
+    Returns (xgb_model, lgb_model, features, meta) or (None, None, None, None).
+    """
+    global _kco_xgb, _kco_lgb, _kco_features, _kco_meta, _kco_loaded
+    if _kco_loaded:
+        return _kco_xgb, _kco_lgb, _kco_features, _kco_meta
+
+    _kco_loaded = True
+
+    xgb_path = _ML_MODEL_DIR / "model_kco.json"
+    lgb_path = _ML_MODEL_DIR / "model_kco_lgb.txt"
+    meta_path = _ML_MODEL_DIR / "model_kco_meta.json"
+
+    if not meta_path.exists():
+        return None, None, None, None
+
+    try:
+        with open(meta_path, "r") as f:
+            meta = json.load(f)
+    except Exception as e:
+        logger.warning("KCO model: failed to read metadata: %s", e)
+        return None, None, None, None
+
+    if meta.get("quality_gate") != "PASSED":
+        logger.warning("KCO model: quality gate=%s — not loading", meta.get("quality_gate"))
+        return None, None, None, None
+
+    features = meta.get("features", [])
+    if not features:
+        return None, None, None, None
+
+    # Load XGBoost
+    if xgb_path.exists():
+        try:
+            import xgboost as xgb
+            _kco_xgb = xgb.XGBRegressor()
+            _kco_xgb.load_model(str(xgb_path))
+        except Exception as e:
+            logger.warning("KCO XGBoost load failed: %s", e)
+
+    # Load LightGBM
+    if lgb_path.exists():
+        try:
+            import lightgbm as lgb_lib
+            _kco_lgb = lgb_lib.Booster(model_file=str(lgb_path))
+        except Exception as e:
+            logger.warning("KCO LightGBM load failed: %s", e)
+
+    if _kco_xgb is None and _kco_lgb is None:
+        return None, None, None, None
+
+    _kco_features = features
+    _kco_meta = meta
+    p5 = meta.get("metrics", {}).get("precision_at_5", 0)
+    logger.info("KCO model loaded: %d features, p@5=%.3f", len(features), p5)
+    return _kco_xgb, _kco_lgb, _kco_features, _kco_meta
+
+
+def predict_kco_score(kol_group: str, kol_tier: str, token_features: dict) -> float | None:
+    """
+    v70: Predict expected return for a KOL call using the KCO model.
+    Returns predicted max_return (float, e.g. 1.8 = +80%) or None if model not available.
+
+    Args:
+        kol_group: KOL username
+        kol_tier: "S", "A", "B", "C"
+        token_features: dict with token snapshot features (from DexScreener/enrichment)
+    """
+    xgb_model, lgb_model, features, meta = _load_kco_model()
+    if (xgb_model is None and lgb_model is None) or not features:
+        return None
+
+    import numpy as np
+    _tier_map = {"S": 3, "A": 2, "B": 1, "C": 0}
+
+    # Build feature row
+    row = {}
+    for feat in features:
+        if feat == "kol_tier_encoded":
+            row[feat] = _tier_map.get(kol_tier, 1)
+        elif feat.startswith("snap_"):
+            # Map snap_X to token_features["X"] or direct key
+            raw_key = feat[5:]  # remove "snap_" prefix
+            if raw_key == "volume_24h_log":
+                v = token_features.get("volume_24h")
+                row[feat] = np.log1p(float(v)) if v is not None and float(v) > 0 else np.nan
+            elif raw_key == "market_cap_log":
+                v = token_features.get("market_cap") or token_features.get("mcap")
+                row[feat] = np.log1p(float(v)) if v is not None and float(v) > 0 else np.nan
+            elif raw_key == "score":
+                row[feat] = token_features.get("score") or token_features.get("score_at_snapshot")
+            elif raw_key == "is_pump_fun":
+                row[feat] = 1 if token_features.get("is_pump_fun") else 0
+            else:
+                row[feat] = token_features.get(raw_key)
+        elif feat == "call_hour":
+            from datetime import datetime, timezone
+            row[feat] = datetime.now(timezone.utc).hour
+        elif feat == "call_is_weekend":
+            from datetime import datetime, timezone
+            row[feat] = 1 if datetime.now(timezone.utc).weekday() >= 5 else 0
+        else:
+            # KOL features and context — pass through from token_features
+            row[feat] = token_features.get(feat)
+
+    # Convert to float
+    for k in row:
+        if row[k] is not None:
+            try:
+                row[k] = float(row[k])
+            except (ValueError, TypeError):
+                row[k] = np.nan
+        else:
+            row[k] = np.nan
+
+    import pandas as pd
+    X = pd.DataFrame([row], columns=features)
+
+    # Predict
+    try:
+        xgb_pred = xgb_model.predict(X)[0] if xgb_model is not None else None
+        lgb_pred = lgb_model.predict(X.values)[0] if lgb_model is not None else None
+
+        if xgb_pred is not None and lgb_pred is not None:
+            pred = 0.5 * xgb_pred + 0.5 * lgb_pred
+        elif xgb_pred is not None:
+            pred = xgb_pred
+        else:
+            pred = lgb_pred
+
+        # Target was log1p(max_return - 1), so reverse: max_return = expm1(pred) + 1
+        predicted_return = np.expm1(float(pred)) + 1.0
+        predicted_return = max(0.0, predicted_return)  # floor at 0
+
+        logger.debug("KCO predict: kol=%s, tier=%s → predicted_return=%.3f", kol_group, kol_tier, predicted_return)
+        return round(predicted_return, 3)
+    except Exception as e:
+        logger.warning("KCO prediction failed: %s", e)
+        return None
 
 
 def _build_feature_row(token: dict, features: list[str]) -> dict:

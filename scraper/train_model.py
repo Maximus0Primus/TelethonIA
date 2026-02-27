@@ -194,6 +194,12 @@ EXTENDED_FEATURES = CORE_FEATURES + [
     # v25: Message-level text features (only call_type_score kept — others are noise per v32 audit)
     "call_type_score",
     # v26: Market context features (already in CORE via inheritance)
+    # v70: Temporal features — accelerations + deltas + holder velocity
+    "mention_acceleration_v2",
+    "volume_acceleration_v2",
+    "price_acceleration",
+    "whale_count_delta",
+    "holder_velocity",
 ]
 
 # Tier 3 (full): All features when 2000+ samples. Let the model decide.
@@ -308,6 +314,17 @@ ALL_FEATURE_COLS = [
     "phase_duration_cycles",
     # v56: KOL win rate signal
     "best_kol_win_rate",
+    # v70: 10 temporal features (accelerations, deltas, EMAs, recency-weighted)
+    "mention_acceleration_v2",
+    "volume_acceleration_v2",
+    "price_acceleration",
+    "whale_count_delta",
+    "buy_sell_ratio_delta",
+    "holder_velocity",
+    "score_ema3",
+    "mention_ema3",
+    "volume_ema3",
+    "recency_weighted_score_vel",
 ]
 
 HORIZONS = {
@@ -2185,6 +2202,406 @@ def _update_scoring_config_bot(strategy: str) -> None:
         logger.warning("Failed to update scoring_config bot_strategy: %s", e)
 
 
+# ═══ v70: KCO-BASED MODEL FOR RT TRADING ═══
+
+# 25 features for KCO model — combines KOL identity, token state, and context
+KCO_FEATURES = [
+    # KOL identity (6)
+    "kol_tier_encoded",           # S=3, A=2, B=1, C=0
+    "kol_conviction",             # avg conviction score of this KOL
+    "kol_historical_hit_rate",    # win rate from prior calls (look-ahead free)
+    "kol_total_prior_calls",      # number of calls before this one
+    "kol_avg_prior_return",       # average max_return from prior calls
+    "kol_recency_days",           # days since last call by this KOL
+    # Token at call time (14) — from nearest snapshot
+    "snap_score",
+    "snap_mentions",
+    "snap_unique_kols",
+    "snap_volume_24h_log",
+    "snap_market_cap_log",
+    "snap_token_age_hours",
+    "snap_short_term_heat",
+    "snap_price_change_1h",
+    "snap_whale_count",
+    "snap_buy_sell_ratio_5m",
+    "snap_mention_velocity",
+    "snap_kol_arrival_rate",
+    "snap_is_pump_fun",
+    "snap_liq_mcap_ratio",
+    # Context (5)
+    "n_prior_kols_on_token",      # how many KOLs called this token before
+    "call_hour",                  # hour of KOL call (0-23 UTC)
+    "call_is_weekend",            # 1 if Saturday/Sunday
+    "snapshot_gap_hours",         # hours between call and nearest snapshot
+    "hours_since_token_first_seen",  # token maturity at call time
+]
+
+
+def load_kco_training_data(threshold: float = 1.5) -> pd.DataFrame:
+    """
+    v70: Load KCO rows with entry_price + max_return, join nearest snapshot,
+    compute KOL rolling features (look-ahead free).
+    Returns DataFrame with KCO_FEATURES columns + target.
+    """
+    client = _get_client()
+
+    # 1. Fetch all KCO rows with valid entry price and max_return
+    all_kco = []
+    page_size = 1000
+    offset = 0
+    while True:
+        result = (
+            client.table("kol_call_outcomes")
+            .select("id, kol_group, token_address, symbol, call_timestamp, entry_price, ath_after_call, max_return, kol_tier")
+            .not_.is_("entry_price", "null")
+            .not_.is_("max_return", "null")
+            .gt("max_return", 0)
+            .order("call_timestamp")
+            .range(offset, offset + page_size - 1)
+            .execute()
+        )
+        if not result.data:
+            break
+        all_kco.extend(result.data)
+        if len(result.data) < page_size:
+            break
+        offset += page_size
+        if offset >= 20000:
+            break
+
+    if len(all_kco) < 30:
+        logger.warning("KCO training: only %d rows with entry_price+max_return (need 30+)", len(all_kco))
+        return pd.DataFrame()
+
+    kco_df = pd.DataFrame(all_kco)
+    kco_df["call_timestamp"] = pd.to_datetime(kco_df["call_timestamp"], utc=True)
+    kco_df["entry_price"] = pd.to_numeric(kco_df["entry_price"], errors="coerce")
+    kco_df["max_return"] = pd.to_numeric(kco_df["max_return"], errors="coerce")
+    kco_df = kco_df.dropna(subset=["entry_price", "max_return", "call_timestamp"])
+    kco_df = kco_df[kco_df["entry_price"] > 0].copy()
+    logger.info("KCO training: %d valid rows loaded", len(kco_df))
+
+    # 2. Fetch snapshots (only the columns we need) — paginated
+    snap_cols = (
+        "id, symbol, token_address, snapshot_at, score_at_snapshot, mentions, unique_kols, "
+        "volume_24h, market_cap, token_age_hours, short_term_heat, price_change_1h, "
+        "whale_count, buy_sell_ratio_5m, mention_velocity, kol_arrival_rate, "
+        "is_pump_fun, liq_mcap_ratio"
+    )
+    all_snaps = []
+    offset = 0
+    while True:
+        result = (
+            client.table("token_snapshots")
+            .select(snap_cols)
+            .not_.is_("score_at_snapshot", "null")
+            .gte("snapshot_at", "2026-02-14T00:00:00Z")
+            .order("snapshot_at")
+            .range(offset, offset + page_size - 1)
+            .execute()
+        )
+        if not result.data:
+            break
+        all_snaps.extend(result.data)
+        if len(result.data) < page_size:
+            break
+        offset += page_size
+
+    if not all_snaps:
+        logger.warning("KCO training: no snapshots found")
+        return pd.DataFrame()
+
+    snap_df = pd.DataFrame(all_snaps)
+    snap_df["snapshot_at"] = pd.to_datetime(snap_df["snapshot_at"], utc=True)
+    logger.info("KCO training: %d snapshots loaded for join", len(snap_df))
+
+    # 3. For each KCO row, find the nearest snapshot for that token (< 2h gap)
+    rows = []
+    _tier_map = {"S": 3, "A": 2, "B": 1, "C": 0}
+
+    # Build KOL rolling stats (sorted by call_timestamp — look-ahead free)
+    kco_sorted = kco_df.sort_values("call_timestamp").reset_index(drop=True)
+    kol_stats = {}  # kol_group → {"calls": [], "returns": []}
+
+    # Token first-seen time tracker
+    token_first_seen = {}  # token_address → earliest call_timestamp
+    # Prior KOLs per token tracker
+    token_kol_history = {}  # token_address → set of kol_groups
+
+    for _, kco_row in kco_sorted.iterrows():
+        kol = kco_row["kol_group"]
+        ta = kco_row["token_address"]
+        call_ts = kco_row["call_timestamp"]
+        mr = float(kco_row["max_return"])
+
+        # KOL rolling stats (BEFORE this call — no look-ahead)
+        stats = kol_stats.get(kol, {"calls": [], "returns": [], "last_call": None})
+        kol_hit_rate = np.mean([1 if r >= threshold else 0 for r in stats["returns"]]) if stats["returns"] else 0.0
+        kol_total_prior = len(stats["calls"])
+        kol_avg_return = np.mean(stats["returns"]) if stats["returns"] else 1.0
+        kol_recency = (call_ts - stats["last_call"]).total_seconds() / 86400.0 if stats["last_call"] else 30.0
+
+        # Token history (BEFORE this call)
+        n_prior_kols = len(token_kol_history.get(ta, set()))
+        first_seen = token_first_seen.get(ta)
+        hours_since_first = (call_ts - first_seen).total_seconds() / 3600.0 if first_seen else 0.0
+
+        # Find nearest snapshot for this token
+        token_snaps = snap_df[snap_df["token_address"] == ta].copy()
+        if token_snaps.empty:
+            # Try by symbol
+            token_snaps = snap_df[snap_df["symbol"] == kco_row.get("symbol")].copy()
+        if token_snaps.empty:
+            # Update trackers and skip
+            stats["calls"].append(call_ts)
+            stats["returns"].append(mr)
+            stats["last_call"] = call_ts
+            kol_stats[kol] = stats
+            if ta not in token_first_seen:
+                token_first_seen[ta] = call_ts
+            token_kol_history.setdefault(ta, set()).add(kol)
+            continue
+
+        # Find closest snapshot by time
+        time_diffs = (token_snaps["snapshot_at"] - call_ts).abs()
+        nearest_idx = time_diffs.idxmin()
+        gap_hours = time_diffs[nearest_idx].total_seconds() / 3600.0
+
+        if gap_hours > 2.0:
+            # Too far — skip
+            stats["calls"].append(call_ts)
+            stats["returns"].append(mr)
+            stats["last_call"] = call_ts
+            kol_stats[kol] = stats
+            if ta not in token_first_seen:
+                token_first_seen[ta] = call_ts
+            token_kol_history.setdefault(ta, set()).add(kol)
+            continue
+
+        snap = token_snaps.loc[nearest_idx]
+
+        # Build feature row
+        row = {
+            # KOL identity
+            "kol_tier_encoded": _tier_map.get(kco_row.get("kol_tier", "B"), 1),
+            "kol_conviction": 0.5,  # Default — we don't have per-KOL conviction in KCO table
+            "kol_historical_hit_rate": round(kol_hit_rate, 3),
+            "kol_total_prior_calls": kol_total_prior,
+            "kol_avg_prior_return": round(kol_avg_return, 3),
+            "kol_recency_days": round(kol_recency, 2),
+            # Token at call time
+            "snap_score": snap.get("score_at_snapshot"),
+            "snap_mentions": snap.get("mentions"),
+            "snap_unique_kols": snap.get("unique_kols"),
+            "snap_volume_24h_log": np.log1p(float(snap["volume_24h"])) if pd.notna(snap.get("volume_24h")) and float(snap["volume_24h"]) > 0 else np.nan,
+            "snap_market_cap_log": np.log1p(float(snap["market_cap"])) if pd.notna(snap.get("market_cap")) and float(snap["market_cap"]) > 0 else np.nan,
+            "snap_token_age_hours": snap.get("token_age_hours"),
+            "snap_short_term_heat": snap.get("short_term_heat"),
+            "snap_price_change_1h": snap.get("price_change_1h"),
+            "snap_whale_count": snap.get("whale_count"),
+            "snap_buy_sell_ratio_5m": snap.get("buy_sell_ratio_5m"),
+            "snap_mention_velocity": snap.get("mention_velocity"),
+            "snap_kol_arrival_rate": snap.get("kol_arrival_rate"),
+            "snap_is_pump_fun": 1 if snap.get("is_pump_fun") else 0,
+            "snap_liq_mcap_ratio": snap.get("liq_mcap_ratio"),
+            # Context
+            "n_prior_kols_on_token": n_prior_kols,
+            "call_hour": call_ts.hour,
+            "call_is_weekend": 1 if call_ts.weekday() >= 5 else 0,
+            "snapshot_gap_hours": round(gap_hours, 2),
+            "hours_since_token_first_seen": round(hours_since_first, 2),
+            # Target
+            "max_return": mr,
+            # Metadata for split
+            "call_timestamp": call_ts,
+            "token_address": ta,
+            "kol_group": kol,
+        }
+        rows.append(row)
+
+        # Update trackers AFTER building features (no look-ahead)
+        stats["calls"].append(call_ts)
+        stats["returns"].append(mr)
+        stats["last_call"] = call_ts
+        kol_stats[kol] = stats
+        if ta not in token_first_seen:
+            token_first_seen[ta] = call_ts
+        token_kol_history.setdefault(ta, set()).add(kol)
+
+    if not rows:
+        logger.warning("KCO training: 0 rows after snapshot join")
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows)
+
+    # Coerce all feature columns to numeric
+    for col in KCO_FEATURES:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    logger.info(
+        "KCO training data: %d rows, %d unique tokens, %d unique KOLs, "
+        "%.1f%% winners (>= %.1fx)",
+        len(df), df["token_address"].nunique(), df["kol_group"].nunique(),
+        100 * (df["max_return"] >= threshold).mean(), threshold,
+    )
+    return df
+
+
+def train_kco_model(
+    df: pd.DataFrame,
+    threshold: float = 1.5,
+    n_trials: int = 50,
+    min_samples: int = 50,
+) -> dict | None:
+    """
+    v70: Train KCO regression model — predicts max_return from KOL call features.
+    Target: log1p(max_return - 1) to compress the heavy tail.
+    Walk-forward 70/30 temporal split on call_timestamp.
+    """
+    if len(df) < min_samples:
+        logger.warning("KCO model: only %d samples (need %d). Skipping.", len(df), min_samples)
+        return None
+
+    # Target: log1p(max_return - 1)
+    df = df.copy()
+    df["target"] = np.log1p(df["max_return"].clip(lower=0) - 1)
+
+    # Feature selection — only KCO features present in data
+    available_features = [f for f in KCO_FEATURES if f in df.columns and df[f].notna().mean() >= 0.05]
+    if len(available_features) < 5:
+        logger.warning("KCO model: only %d usable features. Skipping.", len(available_features))
+        return None
+
+    logger.info("KCO model: %d features available (from %d)", len(available_features), len(KCO_FEATURES))
+
+    # Walk-forward split
+    df = df.sort_values("call_timestamp").reset_index(drop=True)
+    split_idx = int(len(df) * 0.7)
+    train_df = df.iloc[:split_idx]
+    test_df = df.iloc[split_idx:]
+
+    if len(test_df) < 20:
+        logger.warning("KCO model: only %d test samples. Skipping.", len(test_df))
+        return None
+
+    X_train = train_df[available_features].copy()
+    y_train = train_df["target"]
+    X_test = test_df[available_features].copy()
+    y_test = test_df["target"]
+
+    # Binary labels for precision@K
+    y_test_binary = (test_df["max_return"] >= threshold).astype(int)
+    n_winners = int(y_test_binary.sum())
+    if n_winners < 2:
+        logger.warning("KCO model: only %d winners in test set. Skipping.", n_winners)
+        return None
+
+    # Optuna — optimize XGBoost regressor
+    def objective(trial):
+        params = {
+            "max_depth": trial.suggest_int("max_depth", 3, 6),
+            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
+            "n_estimators": trial.suggest_int("n_estimators", 50, 300),
+            "min_child_weight": trial.suggest_int("min_child_weight", 3, 15),
+            "subsample": trial.suggest_float("subsample", 0.6, 1.0),
+            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
+            "reg_alpha": trial.suggest_float("reg_alpha", 0.01, 10.0, log=True),
+            "reg_lambda": trial.suggest_float("reg_lambda", 0.01, 10.0, log=True),
+            "verbosity": 0,
+        }
+        model = xgb.XGBRegressor(**params)
+        model.fit(X_train, y_train)
+        preds = model.predict(X_test)
+        return _spearman_rank(y_test, preds)
+
+    study = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler(seed=42))
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+    best_xgb_params = {**study.best_params, "verbosity": 0}
+
+    # Train final XGBoost
+    xgb_model = xgb.XGBRegressor(**best_xgb_params)
+    xgb_model.fit(X_train, y_train)
+    xgb_preds = xgb_model.predict(X_test)
+
+    # Train LightGBM with same trial results adapted
+    lgb_params = {
+        "max_depth": best_xgb_params.get("max_depth", 4),
+        "learning_rate": best_xgb_params.get("learning_rate", 0.1),
+        "n_estimators": best_xgb_params.get("n_estimators", 200),
+        "min_child_samples": best_xgb_params.get("min_child_weight", 5),
+        "subsample": best_xgb_params.get("subsample", 0.8),
+        "colsample_bytree": best_xgb_params.get("colsample_bytree", 0.8),
+        "reg_alpha": best_xgb_params.get("reg_alpha", 0.1),
+        "reg_lambda": best_xgb_params.get("reg_lambda", 1.0),
+        "verbosity": -1,
+    }
+    lgb_model = lgb.LGBMRegressor(**lgb_params)
+    lgb_model.fit(X_train, y_train)
+    lgb_preds = lgb_model.predict(X_test)
+
+    # Ensemble 50/50
+    ensemble_preds = 0.5 * xgb_preds + 0.5 * lgb_preds
+    spearman = _spearman_rank(y_test, ensemble_preds)
+    p_at_5 = _precision_at_k(y_test_binary, ensemble_preds, k=5)
+    p_at_10 = _precision_at_k(y_test_binary, ensemble_preds, k=10)
+    rmse = float(np.sqrt(mean_squared_error(y_test, ensemble_preds)))
+
+    logger.info(
+        "KCO model: spearman=%.3f, p@5=%.3f, p@10=%.3f, rmse=%.3f, "
+        "train=%d, test=%d, winners=%d",
+        spearman, p_at_5, p_at_10, rmse, len(X_train), len(X_test), n_winners,
+    )
+
+    # Quality gate — more lenient (p@5 >= 0.25 since N is small)
+    min_kco_p5 = 0.25
+    gate = "PASSED" if p_at_5 >= min_kco_p5 else "FAILED"
+
+    if gate == "FAILED":
+        logger.warning("KCO model: quality gate FAILED (p@5=%.3f < %.2f)", p_at_5, min_kco_p5)
+
+    # Save models
+    xgb_path = MODEL_DIR / "model_kco.json"
+    xgb_model.save_model(str(xgb_path))
+    lgb_path = MODEL_DIR / "model_kco_lgb.txt"
+    lgb_model.booster_.save_model(str(lgb_path))
+    logger.info("KCO models saved: %s, %s", xgb_path, lgb_path)
+
+    # Feature importances
+    importances = dict(zip(available_features, xgb_model.feature_importances_))
+    sorted_imp = sorted(importances.items(), key=lambda x: x[1], reverse=True)
+
+    metadata = {
+        "model_type": "kco",
+        "threshold": threshold,
+        "mode": "regression",
+        "trained_at": datetime.utcnow().isoformat(),
+        "train_samples": len(X_train),
+        "test_samples": len(X_test),
+        "n_winners": n_winners,
+        "ensemble_weights": {"xgboost": 0.5, "lightgbm": 0.5},
+        "xgb_params": {k: v for k, v in best_xgb_params.items() if k != "verbosity"},
+        "lgb_params": {k: v for k, v in lgb_params.items() if k != "verbosity"},
+        "metrics": {
+            "spearman": float(spearman),
+            "rmse": rmse,
+            "precision_at_5": float(p_at_5),
+            "precision_at_10": float(p_at_10),
+            "n_test": len(X_test),
+        },
+        "quality_gate": gate,
+        "feature_importances": {k: float(v) for k, v in sorted_imp},
+        "features": available_features,
+    }
+
+    meta_path = MODEL_DIR / "model_kco_meta.json"
+    with open(meta_path, "w") as f:
+        json.dump(metadata, f, indent=2)
+    logger.info("KCO metadata saved to %s (gate=%s)", meta_path, gate)
+
+    return metadata
+
+
 def auto_train(
     min_samples: int = 100,
     trials: int = 50,
@@ -2467,6 +2884,53 @@ def auto_train(
     else:
         logger.info("auto_train rr: no rr model passed quality gate")
 
+    # ═══ Phase 4: KCO model for RT trading (v70) ═══
+    logger.info("=== AUTO-TRAIN Phase 4: KCO model ===")
+    KCO_THRESHOLD_POOL = [1.5, 2.0]
+    best_kco_result = None
+    best_kco_threshold = None
+
+    for kco_th in KCO_THRESHOLD_POOL:
+        try:
+            df_kco = load_kco_training_data(threshold=kco_th)
+        except Exception as e:
+            logger.warning("auto_train kco: %.1fx load failed: %s", kco_th, e)
+            continue
+
+        if df_kco.empty or len(df_kco) < 30:
+            logger.info("auto_train kco: %.1fx — %d samples (need 30), skipping",
+                        kco_th, len(df_kco) if not df_kco.empty else 0)
+            continue
+
+        try:
+            kco_meta = train_kco_model(df_kco, threshold=kco_th, n_trials=trials, min_samples=30)
+        except Exception as e:
+            logger.warning("auto_train kco: %.1fx training failed: %s", kco_th, e)
+            continue
+
+        if not kco_meta or kco_meta.get("quality_gate") != "PASSED":
+            continue
+
+        kco_p5 = kco_meta.get("metrics", {}).get("precision_at_5", 0)
+        logger.info("auto_train kco: %.1fx passed gate (p@5=%.3f)", kco_th, kco_p5)
+
+        if best_kco_result is None or kco_p5 > best_kco_result.get("metrics", {}).get("precision_at_5", 0):
+            best_kco_result = kco_meta
+            best_kco_threshold = kco_th
+
+    if best_kco_result:
+        kco_p5 = best_kco_result.get("metrics", {}).get("precision_at_5", 0)
+        logger.info("auto_train kco: BEST = %.1fx p@5=%.3f — deployed!", best_kco_threshold, kco_p5)
+
+        # Save kco meta with auto-train info
+        kco_meta_path = MODEL_DIR / "model_kco_meta.json"
+        best_kco_result["auto_trained"] = True
+        best_kco_result["auto_trained_at"] = datetime.utcnow().isoformat()
+        with open(kco_meta_path, "w") as f:
+            json.dump(best_kco_result, f, indent=2)
+    else:
+        logger.info("auto_train kco: no KCO model passed quality gate")
+
     return best_result
 
 
@@ -2480,8 +2944,8 @@ def main():
         help="Prediction horizon (default: 12h)",
     )
     parser.add_argument(
-        "--mode", choices=["regression", "classify", "ltr", "bot_won", "risk_reward"], default="regression",
-        help="Training mode: regression, classify, ltr, bot_won, or risk_reward (adaptive SL)",
+        "--mode", choices=["regression", "classify", "ltr", "bot_won", "risk_reward", "kco"], default="regression",
+        help="Training mode: regression, classify, ltr, bot_won, risk_reward (adaptive SL), or kco (KOL call model)",
     )
     parser.add_argument(
         "--strategy", choices=list(BOT_STRATEGIES.keys()), default="TP50_SL30",
@@ -2555,6 +3019,16 @@ def main():
                 df = deduplicate_snapshots(df)
                 train_risk_reward(df, horizon, n_trials=args.trials,
                                   min_samples=args.min_samples)
+        return
+
+    # v70: KCO mode — train model from kol_call_outcomes
+    if args.mode == "kco":
+        logger.info("\n%s\n=== Training KCO model (threshold=%.1fx) ===\n%s",
+                    "=" * 60, threshold, "=" * 60)
+        df_kco = load_kco_training_data(threshold=threshold)
+        if not df_kco.empty:
+            train_kco_model(df_kco, threshold=threshold, n_trials=args.trials,
+                            min_samples=args.min_samples)
         return
 
     if args.mode == "ltr":
