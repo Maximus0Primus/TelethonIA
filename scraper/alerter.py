@@ -33,6 +33,7 @@ _COOLDOWNS = {
     "egress_critical": 1800,       # 30 min
     "daily_summary": 86400,        # 24 hours
     "startup": 60,                 # 1 min (prevent double-send on fast restart)
+    "live_trade": 0,               # No cooldown — alert every live trade execution
 }
 
 # Max consecutive alerts before going silent (0 = unlimited)
@@ -195,6 +196,18 @@ def send_startup_message(total_groups: int, rt_groups: int):
         f"Time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"
     )
     _send(text, "startup")
+
+
+def alert_live_trade(symbol: str, action: str, amount_sol: float, signature: str):
+    """v72: Send Telegram alert for every live trade execution."""
+    solscan_link = f"https://solscan.io/tx/{signature}"
+    emoji = "BUY" if action == "BUY" else "SELL"
+    text = (
+        f"<b>LIVE {emoji}: ${symbol}</b>\n"
+        f"Amount: {amount_sol:.4f} SOL\n"
+        f"<a href=\"{solscan_link}\">View on Solscan</a>"
+    )
+    _send(text, "live_trade")
 
 
 def _truncate(s: str, max_len: int) -> str:

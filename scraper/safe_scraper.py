@@ -1177,9 +1177,28 @@ def _rt_open_trades(ca: str, symbol: str, price: float, mcap: float,
                 rt_score, pos_size,
                 token_info.get("liquidity_usd", 0) / 1000,
             )
+
+        # v72: Live trading — mirror paper trades with real execution
+        live_cfg = config.get("live_trading", {})
+        if live_cfg.get("enabled", False) and total_opened > 0:
+            try:
+                from live_trader import open_live_trade
+                live_allocs = live_cfg.get("allocations", allocations)
+                for strat_name, alloc_pct in live_allocs.items():
+                    live_pos = round(pos_size * float(alloc_pct), 2)
+                    open_live_trade(sb, token_entry, strat_name, live_pos, live_cfg)
+            except Exception as e:
+                logger.error("Live trading (open) failed: %s", e)
+
         return total_opened
 
     # --- Fallback: exploration mode (all active strategies, equal sizing) ---
+    # v72: Warn if live trading is enabled but hybrid mode is off (live trades only fire in hybrid mode)
+    live_cfg = config.get("live_trading", {})
+    if live_cfg.get("enabled", False):
+        logger.warning("live_trading.enabled=True but hybrid_strategy.enabled=False — "
+                        "live trades only fire in hybrid mode. Enable hybrid_strategy or disable live_trading.")
+
     db_active = [s for s in pt_config.get("active_strategies", list(STRATEGIES.keys())) if s in STRATEGIES]
     rt_strats = config.get("rt_strategies", "all")
     if rt_strats == "all":
@@ -1548,6 +1567,8 @@ async def run_one_cycle(client: TelegramClient, dump: bool = False,
                 logger.info("paper_trader: %s", summary)
         except Exception as e:
             logger.error("Paper trading (cycle-end) failed: %s", e)
+
+        # v72 note: live trades monitored by dedicated live_trade_monitor_loop (10s)
     else:
         logger.warning("No messages scraped — skipping push")
 
@@ -1689,13 +1710,67 @@ async def main():
                         _rt_update_bankroll(rt_pnl, rt_closed)
                 except Exception as e:
                     logger.error("Paper trading (check) failed: %s", e)
+                # v72 note: live trades monitored by dedicated live_trade_monitor_loop (10s)
             except Exception as e:
                 logger.error("Price refresh failed: %s", e)
+
+    # v72: Dedicated fast-poll loop for live trades (10s interval).
+    # Single owner of check_live_trades() — no calls from price_refresh or cycle-end.
+    LIVE_TRADE_POLL_INTERVAL = 10  # seconds
+
+    async def live_trade_monitor_loop():
+        """Fast monitoring loop for live trades only. 10s polling."""
+        _consecutive_empty = 0
+        while True:
+            await asyncio.sleep(LIVE_TRADE_POLL_INTERVAL)
+            try:
+                # Check if live trading is enabled (re-read config periodically)
+                config = _rt_load_config()
+                live_cfg = config.get("live_trading", {})
+                if not live_cfg.get("enabled", False):
+                    _consecutive_empty = 0
+                    continue
+
+                from live_trader import check_live_trades
+                sb_lt = _get_supabase()
+                if not sb_lt:
+                    continue
+
+                live_result = await asyncio.get_event_loop().run_in_executor(
+                    None, check_live_trades, sb_lt
+                )
+                checked = live_result.get("checked", 0)
+                closed = live_result.get("closed", 0)
+
+                if checked == 0:
+                    _consecutive_empty += 1
+                    # Reduce logging noise: only log every 30th empty check (~5 min)
+                    if _consecutive_empty % 30 == 1:
+                        logger.debug("live_trade_monitor: no open live trades")
+                    continue
+
+                _consecutive_empty = 0
+                if closed > 0:
+                    logger.info(
+                        "LIVE MONITOR: closed %d/%d trades (TP=%d SL=%d TO=%d) pnl=$%+.2f",
+                        closed, checked,
+                        live_result.get("tp", 0), live_result.get("sl", 0),
+                        live_result.get("timeout", 0), live_result.get("pnl_usd", 0),
+                    )
+                    # Update bankroll with live PnL
+                    live_pnl = live_result.get("rt_pnl_usd", 0)
+                    if live_pnl != 0 or closed > 0:
+                        _rt_update_bankroll(live_pnl, closed)
+
+            except Exception as e:
+                logger.error("live_trade_monitor error: %s", e)
 
     # Start the price refresh loop as a background task
     refresh_task = asyncio.create_task(price_refresh_loop())
     # v67: Start monitor loop
     monitor_task = asyncio.create_task(monitor_loop()) if _monitoring else None
+    # v72: Start live trade fast-poll loop
+    live_monitor_task = asyncio.create_task(live_trade_monitor_loop())
 
     try:
         while True:
@@ -1717,6 +1792,7 @@ async def main():
             await asyncio.sleep(remaining)
     finally:
         refresh_task.cancel()
+        live_monitor_task.cancel()
         if monitor_task:
             monitor_task.cancel()
 

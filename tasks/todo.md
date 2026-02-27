@@ -1,116 +1,134 @@
-# Pipeline Status — Updated Feb 25, 2026 (v67)
+# Pipeline Status — Updated Feb 27, 2026 (v72)
 
 ## Current State
 
-The pipeline is **production-ready with full monitoring**. Data accumulation gates are **PASSED** — 635 unique labeled tokens (24h), well above the 200 target. Both ML training and Optuna optimization are now unblocked. Paper trading is live with 4 strategies (309 trades). Real-time KOL listener + smart RT trading deployed. Monitoring via Telegram alerts (v67).
+The pipeline is **production with real trading bot via Jupiter Ultra API**. v72 adds live execution that mirrors paper trading. Runs in parallel with paper trades (`source='rt_live'` vs `'rt'`). Starts disabled — flip `live_trading.enabled = true` after funding wallet.
 
-### Live Metrics (Feb 25)
+### Live Config (Feb 27)
+
+| Setting | Value |
+|---------|-------|
+| KOL filter | enabled, WR >= 60%, min 5 calls, return >= 1.5x |
+| Hybrid strategy | TP50_SL30 (60%) + TP100_SL30 (40%) |
+| Position sizing | bankroll mode, 7% Kelly of balance |
+| Starting capital | $100 |
+| Min/max position | $1 / $200 |
+| **Live trading** | **disabled** (flip to true after funding) |
+| Max position (SOL) | 0.5 SOL per trade |
+| Max open positions | 5 concurrent |
+| SOL reserve | 0.05 SOL (for fees) |
+| Daily loss limit | 2.0 SOL |
+| Buy slippage | 300 bps (3%) |
+| Sell slippage | 500 bps (5%) |
+
+### Data Gates
 
 | Metric | Target | Current | Status |
 |--------|--------|---------|--------|
-| Unique labeled tokens (24h) | 200+ | **635** | PASSED |
-| Unique labeled tokens (12h) | 200+ | **633** | PASSED |
-| Unique labeled tokens (6h) | 200+ | **628** | PASSED |
-| Optuna gate (150 tokens) | 150 | 635 | PASSED |
-| ML gate (200 test samples) | 200 | 635 | PASSED |
-| Hit rate 24h | >10% | **14.2%** | Healthy |
-| Hit rate 12h | — | **10.0%** | OK |
-| Total snapshots | — | 34,550 | Growing ~2.5K/day |
-| Paper trades | — | 309 (53 open) | Active |
-| Labeling backlog (24h) | 0 | ~9,678 | Normal (OHLCV API budget limited) |
-| Marked failed (max_price=0) | — | 9,428 | Dead tokens, expected |
-
-### Paper Trading Performance
-
-| Strategy | TP Hit | SL Hit | Timeout | Open | Avg PnL% | Total PnL$ |
-|----------|--------|--------|---------|------|-----------|-------------|
-| TP100_SL30 | 4 | 23 | 12 | 2 | +0.6% | **+$374** |
-| MOONBAG | 6 | 28 | 0 | 35 | +0.6% | **+$287** |
-| SCALE_OUT | 7 | 110 | 16 | 16 | +0.4% | **+$225** |
-| TP50_SL30 | 5 | 21 | 24 | 0 | -0.1% | **-$31** |
-
-**Key insight:** TP100_SL30 and MOONBAG are the best strategies. TP50_SL30 is the only losing strategy. SCALE_OUT has too many SL hits (74% of closed trades).
+| Unique labeled tokens (24h) | 200+ | **635+** | PASSED |
+| KCO outcomes with max_return | 50+ | ~1,014 | PASSED |
+| KOLs with >= 5 calls | 10+ | ~40 | PASSED |
+| Approved KOLs (WR >= 60%) | 5+ | ~10 | PASSED |
+| Paper trades (7d) | — | 736+ | Active |
 
 ---
 
-## Completed Work (v34-v67)
+## Completed Work
 
-### P0-P9 (v34-v49, Feb 17-21) — See git history
+### v72 (Feb 27) — Real Trading Bot
+- [x] Jupiter Ultra API integration via `jup-python-sdk`
+- [x] `setup_wallet.py`: one-time Solana keypair generator
+- [x] `live_trader.py`: buy/sell execution, position management, daily loss limit
+- [x] DB migration: `tx_signature`, `tx_signature_exit`, `execution_price`, `slippage_actual_bps` on `paper_trades`
+- [x] `scoring_config.rt_trade_config.live_trading` section (starts disabled)
+- [x] Integration in `safe_scraper.py`: RT open + dedicated 10s monitor loop
+- [x] Telegram alerts for every live trade with Solscan link
+- [x] Fast 10s polling loop for live trades (single owner, no race conditions)
+
+### v34-v67 (Feb 17-25) — See git history
 - [x] Data recovery, phantom label fix, gate reform, labeling quality
-- [x] Scoring reform (weights 35/10/55/0), proxy signals, momentum_mult
-- [x] Data pipeline fixes (DexPaprika, zombies, FIFO ordering)
-- [x] CA identity collision fix (213 symbols, full CA propagation)
-- [x] Feature computation fixes (consensus norm, heat ratio, Helius TTL)
-- [x] momentum_mult fix (zero = neutral), KCO dead-marking
-- [x] Dynamic Optuna (119 params, 14/14 multipliers, walk-forward)
+- [x] Scoring reform, proxy signals, momentum_mult, Optuna (119 params)
+- [x] CA identity collision fix, feature computation fixes
+- [x] Paper Trading v2-v5: 7 strategies, tranche model, dedup cooldown
+- [x] Real-time KOL listener + smart RT trading (v64-v66)
+- [x] Monitoring system: metrics + Telegram alerts (v67)
 
-### P10 — CA RESOLUTION BUG + MULTI-STRATEGY PAPER TRADING (v50, Feb 21)
-- [x] Fixed 35% wrong CAs: `resolved_ca` was NULL for 50% of mentions with CAs in `extracted_cas`
-- [x] Fallback to `msg_cas` when unambiguous (1 token or 1 CA per message)
-- [x] Paper Trading v2: 4 strategies (TP50_SL30, TP100_SL30, SCALE_OUT, MOONBAG) with tranche model
-- [x] 15 new cols on token_snapshots, 2 on paper_trades
+### v68 (Feb 25) — Strategy Reform + ML Training
+- [x] Optuna optimization (snapshot + KCO modes)
+- [x] ML grid search: best 12h/1.5x (spearman=0.328, p@5=0.800)
+- [x] Hybrid scoring mode deployed
+- [x] TP50 horizon 12h→24h, SCALE_OUT SL widened, MOONBAG SL widened
 
-### P11 — NEW FEATURE BLOCKS (v53, Feb 21)
-- [x] 9 new columns: holder_turnover_pct, smart_money_retention, small_holder_pct, avg_tx_size_usd, kol_cooccurrence_avg, kol_combo_novelty, jup_price_impact_500, jup_price_impact_5k, liquidity_depth_score
-- [x] 3 new onchain sub-factors + hype_pen co-occurrence penalty
-- [x] 8 new Optuna params (~110 total)
+### v69-v70 (Feb 26-27) — RT Improvements + ML
+- [x] Auto-join all KOL groups for RT listener
+- [x] Cached IDs for JoinChannel (flood wait fix)
+- [x] ML training: 10 temporal features + KCO model
+- [x] Crash loop fix + paper trading v5 + alerter backoff
 
-### P12 — EGRESS CONTROL (v60-v63-v65)
-- [x] v60: Optuna multi-threshold + strategy PnL objective
-- [x] v63: Emergency egress fix (37GB -> ~300MB/day, 98% reduction)
-- [x] v65: Throttle expensive windows to cut Supabase egress ~60%
-
-### P13 — REAL-TIME TRADING (v64-v66)
-- [x] v64: Real-time KOL listener with instant paper trading
-- [x] v66: Smart RT trading with ML strategy selection + exploration mode
-- [x] Scoring config: `v66_exploration_mode`, scoring_mode=formula, ml_horizon=24h, ml_threshold=1.30
-
-### P14 — MONITORING SYSTEM (v67, Feb 25)
-- [x] `monitor.py`: In-memory MetricsCollector singleton (API calls, cycles, RT events, egress, paper trades)
-- [x] `alerter.py`: Telegram Bot API alerts with per-category throttling (6 alert types)
-- [x] Instrumentation: 9 API call tracking points, 3 egress tracking points, paper trade tracking
-- [x] `monitor_loop()`: 5min health checks (cycles, RT liveness, API errors, egress, daily summary)
-- [x] Zero new pip dependencies, fail-safe imports, zero Supabase egress for monitoring
+### v71 (Feb 27) — KOL WR Filter + Hybrid Strategy + Bankroll
+- [x] DB: `rt_bankroll` table (balance, peak, drawdown tracking, RLS)
+- [x] DB: `scoring_config.rt_trade_config` merged with kol_filter, hybrid_strategy, sizing
+- [x] `paper_trader.py`: check_paper_trades returns pnl_usd, rt_pnl_usd, rt_closed
+- [x] `safe_scraper.py`: KOL whitelist from kol_call_outcomes (1h cache, fail-open)
+- [x] `safe_scraper.py`: bankroll-based Kelly position sizing (legacy fallback preserved)
+- [x] `safe_scraper.py`: hybrid _rt_open_trades (60/40 TP50+TP100)
+- [x] `safe_scraper.py`: bankroll update in both price_refresh_loop and run_one_cycle
+- [x] Code review: 6 bugs caught and fixed before deploy
 
 ---
 
-## Completed (v68)
+## Monitoring v71 (THIS WEEK)
 
-### Optuna Optimization
-- [x] **Snapshot mode:** 970 tokens, improvement 0.5% < 1% threshold → params already near-optimal
-- [x] **KCO mode:** Fixed constraint violation bug (99.97% trials wasted). `_suggest_ordered()` helper guarantees ordering.
-- [x] **First-call mode:** Skipped (only 10/970 tokens have price_at_first_call)
+### 1. Verify v71 is Working (TODAY)
+- [ ] **Check VPS logs:** `journalctl -u kol-scraper -f | grep -E "RT KOL whitelist|RT SKIP|RT TRADE|RT bankroll"`
+- [ ] **Expected:** "RT KOL whitelist: ~10/40 approved"
+- [ ] **Expected:** "RT SKIP (KOL WR): ramcalls" for bad KOLs
+- [ ] **Expected:** "RT TRADE [HYBRID]: ... TP50_SL30=60% + TP100_SL30=40%" for good KOLs
+- [ ] **Check bankroll:** `SELECT * FROM rt_bankroll;` → balance should move after trades close
 
-### ML Training (Feb 25)
-- [x] **Grid search complete:** 27 combos (3h×3t×3e). Best: **12h/1.5x** (spearman=0.328, p@5=0.800)
-- [x] **Bug fix:** auto_train had first-wins bias when p@5 tied. Now uses (p@5, spearman) tuple tiebreaker.
-- [x] **Switched to hybrid mode:** scoring_config updated to `scoring_mode=hybrid, ml_horizon=12h, ml_threshold=1.5`
-- [x] **Model persistence:** train-models.yml now commits model files to git after training
-- [x] **Bot model:** 12h/TP30_SL20 (p@5=0.600) deployed
-- [x] **RR model:** 12h (p@5=0.600) deployed
+### 2. Collect A/B Test Data (1 WEEK)
+- [ ] **Target: 100+ RT trades** (50+ per strategy) for statistical significance
+- [ ] **Daily check:** TP50 vs TP100 head-to-head WR and PnL
+```sql
+SELECT strategy, COUNT(*) trades,
+       ROUND(AVG(CASE WHEN pnl_pct > 0 THEN 1.0 ELSE 0 END)*100,1) AS wr,
+       ROUND(SUM(pnl_usd),2) AS total_pnl
+FROM paper_trades WHERE source='rt' AND status != 'open'
+GROUP BY strategy;
+```
+- [ ] **Per-KOL breakdown:** which KOLs actually generate profit?
+```sql
+SELECT kol_group, strategy, COUNT(*), ROUND(AVG(pnl_usd),2) AS avg_pnl
+FROM paper_trades WHERE source='rt' AND status != 'open'
+GROUP BY kol_group, strategy ORDER BY avg_pnl DESC;
+```
 
-### Paper Trade Strategy Reform (v68)
-- [x] **TP50_SL30 horizon 12h→24h** — analysis showed TP100's edge was from horizon, not TP level
-- [x] **SCALE_OUT SL -30%→-50%** — 82% SL hit rate was too tight for 48h hold
-- [x] **MOONBAG SL -50%→-70%** — 7d hold needs room for intraday drawdowns
+### 3. Adjust Allocations (AFTER 100+ trades)
+- [ ] **If TP100 > TP50:** shift to 40/60 or 30/70
+- [ ] **If TP50 > TP100:** shift to 70/30 or 80/20
+- [ ] **If both positive:** increase Kelly fraction from 7% → 10%
+- [ ] **If both negative:** review KOL whitelist threshold (raise to 70%?)
+- [ ] **If bankroll drops >25%:** pause RT trading, review
 
 ---
 
-## Actionable Now
+## Actionable Next Steps
 
-### 1. VPS Update (IMMEDIATE)
-- [ ] **`git pull` on VPS** — Needs v68 code + model files (once training workflow commits them)
-- [ ] **Verify hybrid mode active** — Check logs for "ML multiplier applied (regression mode)" after next cycle
+### 4. Auto-Optimize Allocations with Optuna (AFTER 200+ RT trades)
+- [ ] Add allocation optimization to auto_backtest: try all ratios from 0/100 to 100/0
+- [ ] Possibly expand to 3 strategies (add SCALE_OUT?)
+- [ ] Score-dependent strategy routing (high score → TP100, low → TP50)
 
-### 2. Monitor Hybrid Mode (1-2 WEEKS)
-- [ ] **Compare paper trade PnL before/after** — hybrid mode started Feb 26. Mark this date.
-- [ ] **Watch for ML multiplier distribution** — Should be [0.3, 2.0] range, not all clustering at 1.0.
-- [ ] **DO NOT switch to ml_primary** — N still too small. Let hybrid prove itself first.
+### 5. KOL-Level Bankroll Tracking
+- [ ] Track PnL per KOL in rt_bankroll or separate table
+- [ ] Auto-adjust whitelist threshold based on actual RT performance (not just KCO)
+- [ ] Dynamic Kelly per KOL (high-performing KOLs get larger allocation)
 
-### 3. Score Calibration (AFTER 2 weeks hybrid)
-- [ ] **Re-check signal correlations at N=635+** — whale_new_entries was +0.578 at N=130 but signals collapsed at N=251.
-- [ ] **If hybrid PnL improves** — Consider narrowing ML bounds or increasing ML weight.
-- [ ] **If hybrid PnL doesn't improve** — Investigate if model is overfitting (same predictions for all tokens).
+### 6. Graduate to Real Trading
+- [ ] **Gate:** bankroll must be > $120 (20% profit) over 2+ weeks
+- [ ] **Gate:** max drawdown < 15%
+- [ ] **Gate:** WR > 40% across both strategies
+- [ ] Start with $50 real capital, mirror paper trade logic
 
 ---
 
@@ -118,36 +136,27 @@ The pipeline is **production-ready with full monitoring**. Data accumulation gat
 
 - [ ] **narrative / narrative_is_hot** — Never implemented. Dead columns. Low ROI.
 - [ ] **entry_drift_mult** — kol_stated_entry_mcaps ~95% empty. Not fixable without NLP.
-- [ ] **price_drift_from_first_seen** — 0.7% coverage. 95% of tokens die before cycle 2.
 - [ ] **Bubblemaps API** — Not using (too expensive).
-- [ ] **Labeling backlog (~9.7K snapshots)** — Limited by OHLCV API budget. Steady-state processing, not a bug.
+- [ ] **Labeling backlog (~9.7K snapshots)** — Limited by OHLCV API budget. Steady-state.
 
 ---
 
-## Architecture Summary (v67)
+## Architecture Summary (v71)
+
+### RT Trading Pipeline
+- **KOL filter:** whitelist from kol_call_outcomes (WR >= 60%, min 5 calls, 1h cache)
+- **Strategy:** hybrid 60/40 (TP50_SL30 + TP100_SL30), configurable via DB
+- **Sizing:** bankroll-based Kelly (7% × WR mult × score mult), $1-$200 range
+- **Bankroll:** rt_bankroll table, updated every 3min (price_refresh) + every 30min (cycle)
+- **Kill switch:** `kol_filter.enabled = false` → reverts to exploration mode
 
 ### Scoring Engine
 - **Weights:** 35/10/55/0 (consensus/conviction/breadth/PA)
-- **Multiplier chain:** 14 multipliers, all recomputable from raw snapshot fields
-- **Optuna:** 119 search params, 2-fold expanding walk-forward, hit-rate-dominant objective
-- **Guard-rails:** 150 token minimum, 5% improvement gate, 20% train/test gap, 30% max param change, bot expectancy check
+- **Multiplier chain:** 14 multipliers, all config-driven
+- **Optuna:** 119 search params, walk-forward, hit-rate objective
 
 ### Data Pipeline
 - **Scraper:** 15min full loop + 3min price refresh, 62 KOL groups
-- **RT Listener:** Real-time KOL message monitoring with instant paper trading (v64-v66)
-- **OHLCV sources:** DexPaprika (primary) -> Birdeye (fallback) -> GeckoTerminal (last resort)
-- **Enrichment:** DexScreener, RugCheck, Helius (30min TTL), Jupiter
-- **Labeling:** outcome_tracker with zombie prevention, FIFO ordering, dead-marking
-- **Cache TTLs:** DexScreener 5min, RugCheck 2h, Birdeye 1h, Jupiter 2h, Helius 30min
-
-### ML Pipeline
-- **train_model.py:** XGBoost + LightGBM ensemble, walk-forward temporal splits
-- **Quality gates:** N >= 200 test, Spearman >= 0.10, dynamic p@5 (0.25/0.30/0.35 by sample size)
-- **auto_train:** grid searches 6h/12h/24h x 1.3x/1.5x/2.0x, deploys best combo
-- **Current config:** ml_horizon=24h, ml_threshold=1.30, scoring_mode=formula
-
-### Monitoring (v67)
-- **MetricsCollector:** In-memory singleton, tracks API calls/cycles/RT/egress/paper trades
-- **Alerter:** Telegram Bot API, 6 alert types with cooldown throttling
-- **monitor_loop:** 5min health checks, daily summary at 8h UTC
-- **Fail-safe:** monitoring crash != scraper crash
+- **RT Listener:** Real-time monitoring, instant paper trading (v66+v71)
+- **OHLCV sources:** DexPaprika → Birdeye → GeckoTerminal
+- **Cache TTLs:** DexScreener 5min, RugCheck 2h, Birdeye 1h, Jupiter 2h, Helius 4h
