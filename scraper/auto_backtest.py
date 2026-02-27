@@ -4351,7 +4351,13 @@ def _optuna_optimize_params(
         return values
 
     def objective(trial):
-        # --- Weights (sum-to-1 via normalization) ---
+        # === v73: Reduced from ~139 to ~48 params ===
+        # Removed: death_config (17), entry_premium (6), lifecycle (5), entry_drift (6),
+        #   onchain fine-tuning (15), safety fine-tuning (16), momentum fine-tuning (12),
+        #   size_mult (6), PA config (6), conviction norm (2), consensus pump (3),
+        #   hype_pen (8). All hardcoded with current DB best values.
+
+        # --- Weights (4 params, sum-to-1 via normalization) ---
         w_consensus = trial.suggest_float("w_consensus", 0.0, 0.80, step=0.05)
         w_conviction = trial.suggest_float("w_conviction", 0.0, 0.30, step=0.05)
         w_breadth = trial.suggest_float("w_breadth", 0.10, 0.80, step=0.05)
@@ -4366,19 +4372,17 @@ def _optuna_optimize_params(
             "price_action": w_pa / total_w,
         }
 
-        # --- Scalar params ---
+        # --- Scalar params (6 params) ---
         params = {
             "combined_floor": trial.suggest_float("combined_floor", 0.10, 0.50, step=0.05),
             "combined_cap": trial.suggest_float("combined_cap", 1.5, 3.0, step=0.25),
             "activity_mult_floor": trial.suggest_float("activity_mult_floor", 0.60, 0.95, step=0.05),
             "activity_mult_cap": trial.suggest_float("activity_mult_cap", 1.10, 1.50, step=0.05),
-            "activity_pump_cap_hard": 0,  # placeholder, set below
-            "activity_pump_cap_soft": 0,  # placeholder, set below
             "s_tier_bonus": trial.suggest_float("s_tier_bonus", 1.0, 1.5, step=0.05),
             "ca_mention_bonus": trial.suggest_float("ca_mention_bonus", 1.0, 1.5, step=0.05),
         }
 
-        # v59: Sentiment blend weights (applied to future scrapes, not retroactive)
+        # --- Sentiment blend (3 params) ---
         sent_bert = trial.suggest_float("sent_bert_weight", 0.3, 0.8, step=0.05)
         sent_vader = trial.suggest_float("sent_vader_weight", 0.1, 0.5, step=0.05)
         sent_lexicon = trial.suggest_float("sent_lexicon_weight", 0.05, 0.4, step=0.05)
@@ -4393,7 +4397,7 @@ def _optuna_optimize_params(
             "no_bert_lexicon_weight": round(sent_lexicon / (sent_vader + sent_lexicon) if (sent_vader + sent_lexicon) > 0 else 0.3, 3),
         }
 
-        # v56: KOL win rate config (7 params)
+        # --- KOL win rate (7 params) ---
         wr_t0, wr_t1, wr_t2 = _suggest_ordered(trial, ["wr_t0", "wr_t1", "wr_t2"], 0.15, 0.65, 0.05)
         wr_f1, wr_f2, wr_f3 = _suggest_ordered(trial, ["wr_f1", "wr_f2", "wr_f3"], 1.0, 1.60, 0.05)
         wr_min_calls = trial.suggest_int("wr_min_calls", 2, 6)
@@ -4403,23 +4407,19 @@ def _optuna_optimize_params(
             "min_calls": wr_min_calls,
         }
 
-        # Ordered: low < mid < high (sample ascending, assign reversed)
+        # --- Activity ratio (6 params) ---
         _ar_low, _ar_mid, _ar_high = _suggest_ordered(
-            trial, ["activity_ratio_low", "activity_ratio_mid", "activity_ratio_high"], 0.05, 0.80, 0.05)
+            trial, ["activity_ratio_low", "activity_ratio_mid", "activity_ratio_high"], 0.0, 0.80, 0.05)
         params["activity_ratio_low"] = _ar_low
         params["activity_ratio_mid"] = _ar_mid
         params["activity_ratio_high"] = _ar_high
-        # Ordered: soft < hard
         _pc_soft, _pc_hard = _suggest_ordered(
             trial, ["activity_pump_cap_soft", "activity_pump_cap_hard"], 30, 150, 10)
         params["activity_pump_cap_soft"] = _pc_soft
         params["activity_pump_cap_hard"] = _pc_hard
+        params["activity_mid_mult"] = trial.suggest_float("activity_mid_mult", 1.0, 1.20, step=0.02)
 
-        # --- v49: conviction normalization params ---
-        params["conviction_offset"] = trial.suggest_float("conviction_offset", 3, 10, step=1)
-        params["conviction_divisor"] = trial.suggest_float("conviction_divisor", 2, 8, step=1)
-
-        # --- JSONB configs ---
+        # --- Breadth penalty (6 params) ---
         _bp_t0, _bp_t1, _bp_t2 = _suggest_ordered(trial, ["bp_t0", "bp_t1", "bp_t2"], 0.01, 0.15, 0.005)
         params["breadth_pen_config"] = {
             "thresholds": [_bp_t0, _bp_t1, _bp_t2],
@@ -4430,295 +4430,170 @@ def _optuna_optimize_params(
             ],
         }
 
-        # Hype pen: ordered int thresholds
-        _hp_t0 = trial.suggest_int("hp_t0", 1, 4)
-        _hp_t1 = trial.suggest_int("hp_t1", max(_hp_t0 + 1, 3), 7)
-        _hp_t2 = trial.suggest_int("hp_t2", max(_hp_t1 + 1, 5), 12)
-        params["hype_pen_config"] = {
-            "thresholds": [_hp_t0, _hp_t1, _hp_t2],
-            "penalties": [
-                1.0,  # sweet spot always 1.0
-                trial.suggest_float("hp_p1", 0.60, 1.00, step=0.05),
-                trial.suggest_float("hp_p2", 0.40, 0.85, step=0.05),
-                trial.suggest_float("hp_p3", 0.20, 0.70, step=0.05),
-            ],
-            # v53: KOL co-occurrence penalty params
-            "cooc_config": {
-                "threshold": trial.suggest_float("cooc_threshold", 0.3, 0.7, step=0.05),
-                "penalty": trial.suggest_float("cooc_penalty", 0.70, 0.95, step=0.05),
-            },
-        }
-        # --- v45: New scalar params ---
-        params["safety_floor"] = trial.suggest_float("safety_floor", 0.60, 1.00, step=0.05)
-        params["onchain_mult_floor"] = trial.suggest_float("onchain_mult_floor", 0.20, 0.60, step=0.05)
-        params["onchain_mult_cap"] = trial.suggest_float("onchain_mult_cap", 1.2, 2.0, step=0.1)
-
-        # --- v45: death_config params ---
-        death_stale_t0 = trial.suggest_int("death_stale_t0", 12, 36)
-        death_stale_t1 = trial.suggest_int("death_stale_t1", max(death_stale_t0 + 1, 24), 72)
-        death_stale_t2 = trial.suggest_int("death_stale_t2", max(death_stale_t1 + 1, 48), 96)
-        death_stale_b0 = trial.suggest_float("death_stale_b0", 0.40, 0.80, step=0.05)
-        death_stale_b1 = trial.suggest_float("death_stale_b1", 0.20, 0.60, step=0.05)
-        death_stale_b2 = trial.suggest_float("death_stale_b2", 0.10, 0.40, step=0.05)
-        death_stale_b3 = trial.suggest_float("death_stale_b3", 0.05, 0.25, step=0.05)
-        death_vol_24h = trial.suggest_float("death_vol_24h", 1000, 10000, step=1000)
-        # v59: Previously hardcoded death_config params now in search space
-        death_stale_start = trial.suggest_int("death_stale_start_hours", 6, 24, step=2)
-        death_vol_death_1h = trial.suggest_float("death_vol_death_1h", 100, 1000, step=100)
-        death_vol_floor_24h = trial.suggest_float("death_vol_floor_24h", 500, 5000, step=500)
-        death_vol_mod_t0 = trial.suggest_float("death_vol_mod_t0", 20000, 100000, step=10000)
-        death_vol_mod_t1 = trial.suggest_float("death_vol_mod_t1", max(death_vol_mod_t0 + 10000, 50000), 200000, step=10000)
-        death_vol_mod_t2 = trial.suggest_float("death_vol_mod_t2", max(death_vol_mod_t1 + 50000, 200000), 800000, step=50000)
-        death_vol_mod_t3 = trial.suggest_float("death_vol_mod_t3", max(death_vol_mod_t2 + 100000, 500000), 2000000, step=100000)
-        params["death_config"] = {
-            "stale_start_hours": death_stale_start,
-            "stale_tiers": [death_stale_t0, death_stale_t1, death_stale_t2],
-            "stale_bases": [death_stale_b0, death_stale_b1, death_stale_b2, death_stale_b3],
-            "vol_modulation_tiers": [death_vol_mod_t0, death_vol_mod_t1, death_vol_mod_t2, death_vol_mod_t3],
-            "vol_modulation_bonuses": [0.15, 0.25, 0.35, 0.45],
-            "vol_modulation_caps": [0.8, 0.85, 0.9, 0.95],
-            "vol_death_24h": death_vol_24h, "vol_death_1h": death_vol_death_1h, "vol_death_penalty": 0.15,
-            "vol_floor_24h": death_vol_floor_24h, "vol_floor_penalty": 0.1,
-            "price_moderate_social_alive_h": 6, "price_moderate_vol_alive": 0.5,
-            "price_mild_threshold": -30, "price_mild_stale_h": 24,
-        }
-
-        # --- v45: entry_premium_config params ---
-        ep_neutral_cap = trial.suggest_float("ep_neutral_cap", 1.0, 2.5, step=0.25)
-        ep_mild_cap = trial.suggest_float("ep_mild_cap", max(ep_neutral_cap + 0.5, 2.0), 6.0, step=0.5)
-        ep_harsh_cap = trial.suggest_float("ep_harsh_cap", max(ep_mild_cap + 1.0, 4.0), 12.0, step=1.0)
-        ep_floor_mult = trial.suggest_float("ep_floor_mult", 0.15, 0.40, step=0.05)
-        ep_mcap_threshold = trial.suggest_float("ep_mcap_threshold", 20000000, 100000000, step=10000000)
-        ep_duration_48h = trial.suggest_float("ep_duration_48h", 1.2, 2.0, step=0.1)
-        params["entry_premium_config"] = {
-            "tier_breakpoints": [1.0, ep_neutral_cap, ep_mild_cap, ep_harsh_cap, ep_harsh_cap * 2, ep_harsh_cap * 3],
-            "tier_multipliers": [1.1, 1.0, 0.9, 0.7, 0.5, 0.35, ep_floor_mult],
-            "tier_slopes": [0, 0, 0, 0.1, 0.05, 0.0125, 0],
-            "duration_thresholds": [12, 24, 48],
-            "duration_factors": [1.0, 1.15, 1.3, ep_duration_48h],
-            "mcap_fallback_threshold": ep_mcap_threshold,
-            "mcap_launch_assumed": 1000000,
-            "mcap_tiers": [50, 200, 500],
-            "mcap_multipliers": [0.85, 0.70, 0.50, 0.35],
-        }
-
-        # --- v45: lifecycle_config params ---
-        lc_panic_threshold = trial.suggest_float("lc_panic_threshold", -50, -20, step=5)
-        lc_panic_penalty = trial.suggest_float("lc_panic_penalty", 0.10, 0.50, step=0.05)
-        lc_euphoria_penalty = trial.suggest_float("lc_euphoria_penalty", 0.20, 0.70, step=0.05)
-        lc_boom_bonus = trial.suggest_float("lc_boom_bonus", 1.0, 1.30, step=0.05)
-        lc_boom_mcap = trial.suggest_float("lc_boom_mcap", 20000000, 100000000, step=10000000)
-        params["lifecycle_config"] = {
-            "panic_pc24": lc_panic_threshold, "panic_va": 0.5, "panic_penalty": lc_panic_penalty,
-            "profit_taking_pc24": 100, "profit_taking_vol_proxy": 40, "profit_taking_penalty": 0.35,
-            "euphoria_uk": 3, "euphoria_pc24": 100, "euphoria_sent": 0.2, "euphoria_penalty": lc_euphoria_penalty,
-            "boom_uk": 2, "boom_pc24_low": 10, "boom_pc24_high": 200, "boom_va": 1.0,
-            "boom_bonus": lc_boom_bonus, "boom_large_cap_penalty": 0.85, "boom_large_cap_mcap": lc_boom_mcap,
-            "displacement_age": 6, "displacement_uk": 1, "displacement_pc24": 50, "displacement_penalty": 0.9,
-        }
-
-        # --- v45: entry_drift_config params ---
-        ed_premium_gate = trial.suggest_float("ed_premium_gate", 1.0, 2.5, step=0.25)
-        ed_kol_weight = trial.suggest_float("ed_kol_weight", 0.15, 0.45, step=0.05)
-        ed_fresh_weight = trial.suggest_float("ed_fresh_weight", 0.15, 0.45, step=0.05)
-        ed_drift_factor = trial.suggest_float("ed_drift_factor", 0.10, 0.50, step=0.05)
-        ed_drift_floor = trial.suggest_float("ed_drift_floor", 0.30, 0.70, step=0.05)
-        # Normalize social weights to sum to 1.0 (4 weights: kol, activity, fresh, stier)
-        remaining = max(0.1, 1.0 - ed_kol_weight - ed_fresh_weight)
-        params["entry_drift_config"] = {
-            "premium_gate": ed_premium_gate,
-            "kol_divisor": 7,
-            "activity_base": 0.80, "activity_range": 0.45,
-            "fresh_tiers": [1, 4, 8], "fresh_scores": [1.0, 0.7, 0.4, 0.1],
-            "stier_divisor": 2,
-            "social_weights": [ed_kol_weight, remaining * 0.6, ed_fresh_weight, remaining * 0.4],
-            "drift_factor": ed_drift_factor, "drift_floor": ed_drift_floor,
-        }
-
-        # --- v46: pa_config params (direction penalties + norm bounds) ---
-        pa_dir_hard_pump = trial.suggest_float("pa_dir_hard_pump_mult", 0.3, 1.0, step=0.05)
-        pa_dir_pump = trial.suggest_float("pa_dir_pump_mult", max(pa_dir_hard_pump, 0.3), 1.0, step=0.05)
-        pa_dir_freefall = trial.suggest_float("pa_dir_freefall_mult", 0.3, 1.0, step=0.05)
-        pa_dir_dying = trial.suggest_float("pa_dir_dying_mult", max(pa_dir_freefall, 0.5), 1.0, step=0.05)
-        params["pa_norm_floor"] = trial.suggest_float("pa_norm_floor", 0.2, 0.6, step=0.05)
-        params["pa_norm_cap"] = trial.suggest_float("pa_norm_cap", 1.0, 1.8, step=0.1)
-        params["pa_config"] = {
-            "rsi_hard_pump": 80, "rsi_pump": 70,
-            "rsi_freefall": 20, "rsi_dying": 30,
-            "dir_hard_pump_mult": pa_dir_hard_pump,
-            "dir_pump_mult": pa_dir_pump,
-            "dir_freefall_mult": pa_dir_freefall,
-            "dir_dying_mult": pa_dir_dying,
-        }
-
-        # --- v47: Remaining hardcoded params ---
-        params["consensus_pump_threshold"] = trial.suggest_float("consensus_pump_threshold", 30, 100, step=10)
-        params["consensus_pump_floor"] = trial.suggest_float("consensus_pump_floor", 0.3, 0.8, step=0.05)
-        params["consensus_pump_divisor"] = trial.suggest_float("consensus_pump_divisor", 200, 600, step=50)
-        params["activity_mid_mult"] = trial.suggest_float("activity_mid_mult", 1.0, 1.20, step=0.02)
+        # --- Pump momentum (8 params) ---
         pp_hard, pp_mod, pp_light = _suggest_ordered(
             trial, ["pump_hard_penalty", "pump_moderate_penalty", "pump_light_penalty"], 0.3, 0.95, 0.05)
         pvp_floor = trial.suggest_float("pvp_normal_floor", 0.3, 0.7, step=0.05)
-        # v59: Previously hardcoded pvp params now in search space
         pvp_pf_floor = trial.suggest_float("pvp_pump_fun_floor", 0.4, 0.9, step=0.05)
         pvp_pf_scale = trial.suggest_float("pvp_pump_fun_scale", 0.02, 0.15, step=0.01)
         pvp_normal_scale = trial.suggest_float("pvp_normal_scale", 0.03, 0.20, step=0.01)
-        # v49: pump momentum threshold params
         pp_1h_hard = trial.suggest_float("pp_1h_hard", 15, 50, step=5)
         pp_5m_hard = trial.suggest_float("pp_5m_hard", 8, 30, step=2)
         pp_1h_mod_ratio = trial.suggest_float("pp_1h_mod_ratio", 0.3, 0.7, step=0.05)
         pp_5m_mod_ratio = trial.suggest_float("pp_5m_mod_ratio", 0.3, 0.7, step=0.05)
         pp_1h_light_ratio = trial.suggest_float("pp_1h_light_ratio", 0.15, 0.45, step=0.05)
         params["pump_pen_config"] = {
-            "hard_penalty": pp_hard,
-            "moderate_penalty": pp_mod,
-            "light_penalty": pp_light,
-            "pvp_pump_fun_floor": pvp_pf_floor,
-            "pvp_pump_fun_scale": pvp_pf_scale,
-            "pvp_normal_floor": pvp_floor,
-            "pvp_normal_scale": pvp_normal_scale,
-            "pump_1h_hard": pp_1h_hard,
-            "pump_5m_hard": pp_5m_hard,
+            "hard_penalty": pp_hard, "moderate_penalty": pp_mod, "light_penalty": pp_light,
+            "pvp_pump_fun_floor": pvp_pf_floor, "pvp_pump_fun_scale": pvp_pf_scale,
+            "pvp_normal_floor": pvp_floor, "pvp_normal_scale": pvp_normal_scale,
+            "pump_1h_hard": pp_1h_hard, "pump_5m_hard": pp_5m_hard,
             "pump_1h_mod": pp_1h_hard * pp_1h_mod_ratio,
             "pump_5m_mod": pp_5m_hard * pp_5m_mod_ratio,
             "pump_1h_light": pp_1h_hard * pp_1h_light_ratio,
         }
 
-        # --- v48: onchain_config params (~11 new) ---
-        oc_lmr_low = trial.suggest_float("oc_lmr_low", 0.01, 0.05, step=0.005)
-        oc_lmr_high = trial.suggest_float("oc_lmr_high", max(oc_lmr_low + 0.01, 0.05), 0.20, step=0.01)
+        # --- Onchain key params (6 params) ---
         oc_whale_count_f0 = trial.suggest_float("oc_whale_count_f0", 0.4, 0.9, step=0.05)
         oc_whale_count_f3 = trial.suggest_float("oc_whale_count_f3", 1.2, 1.8, step=0.1)
         oc_wne_f2 = trial.suggest_float("oc_wne_f2", 1.1, 1.5, step=0.05)
         oc_whale_accum = trial.suggest_float("oc_whale_accum_bonus", 1.0, 1.3, step=0.05)
-        oc_vol_proxy_t = trial.suggest_float("oc_vol_proxy_threshold", 30, 80, step=5)
-        oc_vol_proxy_p = trial.suggest_float("oc_vol_proxy_penalty", 0.6, 0.95, step=0.05)
-        oc_velocity_f0 = trial.suggest_float("oc_velocity_f0", 0.4, 0.8, step=0.05)
-        oc_velocity_f3 = trial.suggest_float("oc_velocity_f3", 1.1, 1.5, step=0.05)
-        oc_age_f0 = trial.suggest_float("oc_age_f0", 0.3, 0.7, step=0.05)
-        # v49: new onchain sub-params (BSR base, LMR interpolation, Jupiter non-tradeable)
-        oc_bsr_base = trial.suggest_float("oc_bsr_base", 0.3, 0.7, step=0.05)
-        oc_lmr_interp_base = trial.suggest_float("oc_lmr_interp_base", 0.5, 1.0, step=0.05)
-        oc_lmr_interp_slope = trial.suggest_float("oc_lmr_interp_slope", 2, 8, step=1)
-        oc_jup_nt_factor = trial.suggest_float("oc_jup_nt_factor", 0.3, 0.7, step=0.05)
-        # v53: onchain sub-factor params (6 new: floor+cap for smr, shp, lds)
-        oc_smr_f0 = trial.suggest_float("oc_smr_f0", 0.5, 0.95, step=0.05)
-        oc_smr_f3 = trial.suggest_float("oc_smr_f3", 1.1, 1.5, step=0.05)
-        oc_shp_f0 = trial.suggest_float("oc_shp_f0", 0.5, 0.9, step=0.05)
-        oc_shp_f3 = trial.suggest_float("oc_shp_f3", 1.1, 1.5, step=0.05)
-        oc_lds_f0 = trial.suggest_float("oc_lds_f0", 0.4, 0.8, step=0.05)
-        oc_lds_f3 = trial.suggest_float("oc_lds_f3", 1.05, 1.4, step=0.05)
+        params["onchain_mult_floor"] = trial.suggest_float("onchain_mult_floor", 0.20, 0.60, step=0.05)
+        params["onchain_mult_cap"] = trial.suggest_float("onchain_mult_cap", 1.2, 2.0, step=0.1)
+        # Rest of onchain_config hardcoded from current DB best
         params["onchain_config"] = {
-            "lmr_low": oc_lmr_low, "lmr_low_factor": 0.5,
-            "lmr_high": oc_lmr_high, "lmr_high_factor": 1.2,
-            "lmr_interp_base": oc_lmr_interp_base, "lmr_interp_slope": oc_lmr_interp_slope,
-            "bsr_base": oc_bsr_base,
-            "jup_non_tradeable_factor": oc_jup_nt_factor,
-            "age_thresholds": [1, 6, 48, 168],
-            "age_factors": [oc_age_f0, 1.0, 1.2, 1.0, 0.8],
+            "lmr_low": 0.01, "lmr_low_factor": 0.5,
+            "lmr_high": 0.12, "lmr_high_factor": 1.2,
+            "lmr_interp_base": 1.0, "lmr_interp_slope": 2,
+            "bsr_base": 0.65, "jup_non_tradeable_factor": 0.6,
+            "age_thresholds": [1, 6, 48, 168], "age_factors": [0.65, 1.0, 1.2, 1.0, 0.8],
             "tx_thresholds": [5, 20, 40], "tx_factors": [0.7, 1.0, 1.1, 1.3],
             "jup_impact_thresholds": [1.0, 5.0], "jup_impact_factors": [1.3, 1.0, 0.7],
-            "whale_change_thresholds": [-10.0, 0, 5.0],
-            "whale_change_factors": [0.6, 0.8, 1.1, 1.3],
-            "velocity_thresholds": [0.2, 1.0, 5.0],
-            "velocity_factors": [oc_velocity_f0, 1.0, 1.1, oc_velocity_f3],
+            "whale_change_thresholds": [-10.0, 0, 5.0], "whale_change_factors": [0.6, 0.8, 1.1, 1.3],
+            "velocity_thresholds": [0.2, 1.0, 5.0], "velocity_factors": [0.8, 1.0, 1.1, 1.3],
             "wne_thresholds": [1, 3], "wne_factors": [1.0, 1.1, oc_wne_f2],
             "whale_count_thresholds": [1, 3, 5],
             "whale_count_factors": [oc_whale_count_f0, 1.0, 1.2, oc_whale_count_f3],
-            "uw_change_thresholds": [-20, -5, 5, 20],
-            "uw_change_factors": [0.6, 0.8, 1.0, 1.15, 1.3],
-            "vol_proxy_threshold": oc_vol_proxy_t, "vol_proxy_penalty": oc_vol_proxy_p,
+            "uw_change_thresholds": [-20, -5, 5, 20], "uw_change_factors": [0.6, 0.8, 1.0, 1.15, 1.3],
+            "vol_proxy_threshold": 75, "vol_proxy_penalty": 0.9,
             "whale_accum_bonus": oc_whale_accum,
-            # v53: holder stability + liquidity depth
-            "smr_thresholds": [50, 70, 90], "smr_factors": [oc_smr_f0, 1.0, 1.15, oc_smr_f3],
-            "shp_thresholds": [50, 70, 85], "shp_factors": [oc_shp_f0, 0.9, 1.1, oc_shp_f3],
-            "lds_thresholds": [0.2, 0.5, 0.8], "lds_factors": [oc_lds_f0, 0.85, 1.05, oc_lds_f3],
+            "smr_thresholds": [50, 70, 90], "smr_factors": [0.95, 1.0, 1.15, 1.15],
+            "shp_thresholds": [50, 70, 85], "shp_factors": [0.55, 0.9, 1.1, 1.45],
+            "lds_thresholds": [0.2, 0.5, 0.8], "lds_factors": [0.6, 0.85, 1.05, 1.2],
         }
 
-        # --- v48: safety_config params (~10 new) + v49: 6 slope params ---
+        # --- Safety key params (4 params) ---
+        params["safety_floor"] = trial.suggest_float("safety_floor", 0.60, 1.00, step=0.05)
         sf_insider_t = trial.suggest_float("sf_insider_threshold", 20, 50, step=5)
         sf_insider_f = trial.suggest_float("sf_insider_floor", 0.3, 0.7, step=0.05)
-        sf_gini_t = trial.suggest_float("sf_gini_threshold", 0.70, 0.95, step=0.05)
         sf_gini_p = trial.suggest_float("sf_gini_penalty", 0.6, 0.95, step=0.05)
-        sf_holder_t = trial.suggest_float("sf_holder_count_threshold", 30, 100, step=10)
-        sf_holder_p = trial.suggest_float("sf_holder_count_penalty", 0.6, 0.95, step=0.05)
-        sf_whale_conc_t = trial.suggest_float("sf_whale_conc_threshold", 40, 80, step=5)
-        sf_whale_dump_p = trial.suggest_float("sf_whale_dump_penalty", 0.4, 0.8, step=0.05)
-        sf_whale_dist_p = trial.suggest_float("sf_whale_dist_penalty", max(sf_whale_dump_p, 0.5), 0.9, step=0.05)
-        sf_lp_unlock_p = trial.suggest_float("sf_lp_unlock_penalty", 0.3, 0.8, step=0.05)
-        # v49: 6 safety slope params
-        sf_insider_slope = trial.suggest_float("sf_insider_slope", 50, 200, step=25)
-        sf_top10_slope = trial.suggest_float("sf_top10_slope", 50, 200, step=25)
-        sf_risk_score_slope = trial.suggest_float("sf_risk_score_slope", 2000, 10000, step=1000)
-        sf_whale_conc_slope = trial.suggest_float("sf_whale_conc_slope", 40, 150, step=10)
-        sf_bb_cluster_slope = trial.suggest_float("sf_bb_cluster_slope", 30, 120, step=10)
-        sf_cex_slope = trial.suggest_float("sf_cex_slope", 50, 200, step=25)
+        # Rest of safety_config hardcoded from current DB best
         params["safety_config"] = {
-            "insider_threshold": sf_insider_t, "insider_floor": sf_insider_f, "insider_slope": sf_insider_slope,
-            "top10_threshold": 50, "top10_floor": 0.7, "top10_slope": sf_top10_slope,
-            "risk_score_threshold": 5000, "risk_score_floor": 0.5, "risk_score_slope": sf_risk_score_slope,
+            "insider_threshold": sf_insider_t, "insider_floor": sf_insider_f, "insider_slope": 200,
+            "top10_threshold": 50, "top10_floor": 0.7, "top10_slope": 50,
+            "risk_score_threshold": 5000, "risk_score_floor": 0.5, "risk_score_slope": 2000,
             "risk_count_threshold": 3, "risk_count_penalty": 0.9,
             "jito_hard_threshold": 5, "jito_hard_penalty": 0.4,
             "jito_soft_threshold": 3, "jito_soft_penalty": 0.6,
             "bundle_hard_threshold": 20, "bundle_hard_penalty": 0.5,
             "bundle_soft_threshold": 10, "bundle_soft_penalty": 0.7,
-            "gini_threshold": sf_gini_t, "gini_penalty": sf_gini_p,
-            "holder_count_threshold": sf_holder_t, "holder_count_penalty": sf_holder_p,
-            "whale_conc_threshold": sf_whale_conc_t, "whale_conc_floor": 0.7, "whale_conc_slope": sf_whale_conc_slope,
+            "gini_threshold": 0.75, "gini_penalty": sf_gini_p,
+            "holder_count_threshold": 90, "holder_count_penalty": 0.7,
+            "whale_conc_threshold": 50, "whale_conc_floor": 0.7, "whale_conc_slope": 70,
             "bb_score_thresholds": [20, 40], "bb_score_penalties": [0.6, 0.85],
-            "bb_cluster_threshold": 30, "bb_cluster_floor": 0.6, "bb_cluster_slope": sf_bb_cluster_slope,
+            "bb_cluster_threshold": 30, "bb_cluster_floor": 0.6, "bb_cluster_slope": 100,
             "whale_dom_threshold": 0.5, "whale_dom_penalty": 0.85,
-            "whale_dist_penalty": sf_whale_dist_p, "whale_dump_penalty": sf_whale_dump_p,
-            "lp_unlock_penalty": sf_lp_unlock_p, "lp_partial_threshold": 50, "lp_partial_penalty": 0.85,
-            "cex_threshold": 20, "cex_floor": 0.7, "cex_slope": sf_cex_slope,
+            "whale_dist_penalty": 0.9, "whale_dump_penalty": 0.8,
+            "lp_unlock_penalty": 0.55, "lp_partial_threshold": 50, "lp_partial_penalty": 0.85,
+            "cex_threshold": 20, "cex_floor": 0.7, "cex_slope": 200,
         }
 
-        # --- v48: momentum_config params (~8 new) ---
-        mom_kf_t0 = trial.suggest_float("mom_kf_t0", 0.3, 0.7, step=0.05)
-        mom_kf_f0 = trial.suggest_float("mom_kf_f0", 1.10, 1.35, step=0.05)
-        mom_mhr_t0 = trial.suggest_float("mom_mhr_t0", 1.0, 4.0, step=0.5)
-        mom_mhr_f0 = trial.suggest_float("mom_mhr_f0", 1.05, 1.25, step=0.05)
-        mom_sth_t0 = trial.suggest_float("mom_sth_t0", 1.5, 5.0, step=0.5)
-        mom_sth_pen_t = trial.suggest_float("mom_sth_pen_threshold", 0.1, 0.5, step=0.05)
-        mom_floor_v = trial.suggest_float("mom_floor", 0.50, 0.85, step=0.05)
-        mom_cap_v = trial.suggest_float("mom_cap", 1.2, 1.6, step=0.05)
+        # === HARDCODED FROM DB (v73 — removed from Optuna search) ===
+
+        # v73: hype_pen DISABLED (contradicts breadth)
+        params["hype_pen_config"] = {
+            "thresholds": [1, 4, 5], "penalties": [1.0, 1.0, 1.0, 1.0],
+            "cooc_config": {"threshold": 0.65, "penalty": 1.0},
+        }
+
+        # v73: entry_drift DISABLED (95% empty data)
+        params["entry_drift_config"] = {
+            "premium_gate": 999,  # never triggers
+            "kol_divisor": 7, "activity_base": 0.80, "activity_range": 0.45,
+            "fresh_tiers": [1, 4, 8], "fresh_scores": [1.0, 0.7, 0.4, 0.1],
+            "stier_divisor": 2, "social_weights": [0.15, 0.42, 0.15, 0.28],
+            "drift_factor": 0.15, "drift_floor": 0.45,
+        }
+
+        # Conviction normalization — hardcoded from DB best
+        params["conviction_offset"] = 9.0
+        params["conviction_divisor"] = 2.0
+
+        # Consensus pump — hardcoded from DB best
+        params["consensus_pump_threshold"] = 50.0
+        params["consensus_pump_floor"] = 0.75
+        params["consensus_pump_divisor"] = 550.0
+
+        # Death config — hardcoded from DB best
+        params["death_config"] = {
+            "stale_start_hours": 16, "stale_tiers": [35, 60, 63],
+            "stale_bases": [0.75, 0.30, 0.1, 0.05],
+            "vol_modulation_tiers": [60000, 190000, 590000, 1190000],
+            "vol_modulation_bonuses": [0.15, 0.25, 0.35, 0.45],
+            "vol_modulation_caps": [0.8, 0.85, 0.9, 0.95],
+            "vol_death_24h": 8000, "vol_death_1h": 600, "vol_death_penalty": 0.15,
+            "vol_floor_24h": 5000, "vol_floor_penalty": 0.1,
+            "price_moderate_social_alive_h": 6, "price_moderate_vol_alive": 0.5,
+            "price_mild_threshold": -30, "price_mild_stale_h": 24,
+        }
+
+        # Entry premium config — hardcoded from DB best
+        params["entry_premium_config"] = {
+            "tier_breakpoints": [1, 2.25, 5.75, 8.75, 17.5, 26.25],
+            "tier_multipliers": [1.1, 1.0, 0.9, 0.7, 0.5, 0.35, 0.30],
+            "tier_slopes": [0, 0, 0, 0.1, 0.05, 0.0125, 0],
+            "duration_thresholds": [12, 24, 48], "duration_factors": [1.0, 1.15, 1.3, 1.5],
+            "mcap_fallback_threshold": 60000000, "mcap_launch_assumed": 1000000,
+            "mcap_tiers": [50, 200, 500], "mcap_multipliers": [0.85, 0.70, 0.50, 0.35],
+        }
+
+        # Lifecycle config — hardcoded from DB best
+        params["lifecycle_config"] = {
+            "panic_pc24": -40, "panic_va": 0.5, "panic_penalty": 0.15,
+            "profit_taking_pc24": 100, "profit_taking_vol_proxy": 40, "profit_taking_penalty": 0.35,
+            "euphoria_uk": 3, "euphoria_pc24": 100, "euphoria_sent": 0.2, "euphoria_penalty": 0.6,
+            "boom_uk": 2, "boom_pc24_low": 10, "boom_pc24_high": 200, "boom_va": 1.0,
+            "boom_bonus": 1.15, "boom_large_cap_penalty": 0.85, "boom_large_cap_mcap": 100000000,
+            "displacement_age": 6, "displacement_uk": 1, "displacement_pc24": 50, "displacement_penalty": 0.9,
+        }
+
+        # PA config — hardcoded from DB best
+        params["pa_norm_floor"] = 0.4
+        params["pa_norm_cap"] = 1.3
+        params["pa_config"] = {
+            "rsi_hard_pump": 80, "rsi_pump": 70, "rsi_freefall": 20, "rsi_dying": 30,
+            "dir_hard_pump_mult": 0.55, "dir_pump_mult": 0.8,
+            "dir_freefall_mult": 0.8, "dir_dying_mult": 0.85,
+        }
+
+        # Momentum config — hardcoded from DB best
         params["momentum_config"] = {
-            "kol_fresh_thresholds": [mom_kf_t0, mom_kf_t0 * 0.4],
-            "kol_fresh_factors": [mom_kf_f0, mom_kf_f0 * 0.92, 1.05],
-            "mhr_thresholds": [mom_mhr_t0, mom_mhr_t0 * 0.5, 0.3],
-            "mhr_factors": [mom_mhr_f0, mom_mhr_f0 * 0.87, 1.05],
-            "sth_thresholds": [mom_sth_t0, mom_sth_t0 * 0.5],
-            "sth_factors": [1.10, 1.05],
-            "sth_penalty_threshold": mom_sth_pen_t,
-            "sth_penalty_factor": 0.95,
-            # v52: KOL timing alpha factors
-            "cascade_factor_3plus": trial.suggest_float("cascade_factor_3plus", 1.0, 1.30, step=0.05),
-            "cascade_factor_2plus": trial.suggest_float("cascade_factor_2plus", 1.0, 1.20, step=0.05),
-            "early_factor_30min": trial.suggest_float("early_factor_30min", 1.0, 1.40, step=0.05),
-            "early_factor_60min": trial.suggest_float("early_factor_60min", 1.0, 1.25, step=0.05),
-            "late_penalty_360min": trial.suggest_float("late_penalty_360min", 0.60, 1.0, step=0.05),
-            "pvfc_penalty_3x": trial.suggest_float("pvfc_penalty_3x", 0.30, 0.80, step=0.05),
-            "pvfc_penalty_2x": trial.suggest_float("pvfc_penalty_2x", 0.50, 0.90, step=0.05),
-            "pvfc_penalty_1_5x": trial.suggest_float("pvfc_penalty_1_5x", 0.70, 1.0, step=0.05),
-            "floor": mom_floor_v,
-            "cap": mom_cap_v,
+            "kol_fresh_thresholds": [0.45, 0.18], "kol_fresh_factors": [1.35, 1.242, 1.05],
+            "mhr_thresholds": [1.0, 0.5, 0.3], "mhr_factors": [1.25, 1.0875, 1.05],
+            "sth_thresholds": [5.0, 2.5], "sth_factors": [1.10, 1.05],
+            "sth_penalty_threshold": 0.25, "sth_penalty_factor": 0.95,
+            "cascade_factor_3plus": 1.0, "cascade_factor_2plus": 1.15,
+            "early_factor_30min": 1.25, "early_factor_60min": 1.2,
+            "late_penalty_360min": 0.6,
+            "pvfc_penalty_3x": 0.8, "pvfc_penalty_2x": 0.65, "pvfc_penalty_1_5x": 1.0,
+            "floor": 0.65, "cap": 1.55,
         }
 
-        # --- v48: size_mult_config params (~6 new) ---
-        sm_mcap_f0 = trial.suggest_float("sm_mcap_f0", 1.1, 1.5, step=0.05)
-        sm_mcap_f6 = trial.suggest_float("sm_mcap_f6", 0.15, 0.40, step=0.05)
-        sm_fresh_f0 = trial.suggest_float("sm_fresh_f0", 1.05, 1.35, step=0.05)
-        sm_large_cap_t = trial.suggest_float("sm_large_cap_threshold", 20000000, 100000000, step=10000000)
-        sm_floor_v = trial.suggest_float("sm_floor", 0.15, 0.40, step=0.05)
-        sm_cap_opt = trial.suggest_float("sm_cap", 1.2, 1.8, step=0.1)
+        # Size mult config — hardcoded from DB best
         params["size_mult_config"] = {
             "mcap_thresholds": [300000, 1000000, 5000000, 20000000, 50000000, 200000000, 500000000],
-            "mcap_factors": [sm_mcap_f0, 1.15, 1.0, 0.85, 0.70, 0.50, 0.35, sm_mcap_f6],
-            "fresh_thresholds": [4, 12],
-            "fresh_factors": [sm_fresh_f0, 1.1, 1.0],
-            "large_cap_threshold": sm_large_cap_t,
-            "floor": sm_floor_v,
-            "cap": sm_cap_opt,
+            "mcap_factors": [1.5, 1.15, 1.0, 0.85, 0.70, 0.50, 0.35, 0.15],
+            "fresh_thresholds": [4, 12], "fresh_factors": [1.05, 1.1, 1.0],
+            "large_cap_threshold": 80000000, "floor": 0.25, "cap": 1.8,
         }
 
         # v49: 2-fold expanding walk-forward evaluation
@@ -5459,6 +5334,96 @@ def run_optuna_optimization(n_trials: int = 500, dry_run: bool = False, df: pd.D
     return result
 
 
+def _optimize_kol_threshold(client) -> dict | None:
+    """
+    v73 FIX 5: Grid search KOL whitelist thresholds (WR × min_calls).
+    Objective: maximize Sharpe ratio of hypothetical KOL-filtered trades.
+    Saves best combo to scoring_config.kol_filter_config.
+    """
+    try:
+        result = client.table("kol_call_outcomes").select(
+            "kol_group, did_2x, max_return"
+        ).not_.is_("max_return", "null").execute()
+        outcomes = result.data or []
+    except Exception as e:
+        logger.error("KOL threshold opt: query failed: %s", e)
+        return None
+
+    if len(outcomes) < 30:
+        logger.info("KOL threshold opt: only %d outcomes (need 30+), skipping", len(outcomes))
+        return None
+
+    import pandas as pd
+    df = pd.DataFrame(outcomes)
+    df["max_return"] = df["max_return"].astype(float)
+    df["did_2x"] = df["did_2x"].fillna(False).astype(bool)
+
+    # Compute per-KOL stats
+    kol_stats = df.groupby("kol_group").agg(
+        total_calls=("max_return", "size"),
+        wins=("did_2x", "sum"),
+        avg_return=("max_return", "mean"),
+    ).reset_index()
+    kol_stats["wr"] = kol_stats["wins"] / kol_stats["total_calls"]
+
+    best_sharpe = -999
+    best_combo = {"wr_threshold": 40, "min_calls": 5}
+
+    for wr_threshold in [30, 40, 50, 60, 70]:
+        for min_calls in [3, 5, 10]:
+            # Filter KOLs passing threshold
+            passing = kol_stats[
+                (kol_stats["wr"] >= wr_threshold / 100) &
+                (kol_stats["total_calls"] >= min_calls)
+            ]
+            if len(passing) < 3:
+                continue
+            # Get all outcomes for passing KOLs
+            passing_groups = set(passing["kol_group"])
+            filtered = df[df["kol_group"].isin(passing_groups)]
+            returns = filtered["max_return"] - 1.0  # excess return
+            if len(returns) < 10 or returns.std() == 0:
+                continue
+            sharpe = float(returns.mean() / returns.std())
+            n_kols = len(passing)
+            n_trades = len(filtered)
+            wr = float(filtered["did_2x"].mean())
+            logger.info(
+                "KOL grid: WR>=%d%% min_calls>=%d → %d KOLs, %d trades, WR=%.1f%%, Sharpe=%.3f",
+                wr_threshold, min_calls, n_kols, n_trades, wr * 100, sharpe,
+            )
+            if sharpe > best_sharpe:
+                best_sharpe = sharpe
+                best_combo = {
+                    "wr_threshold": wr_threshold,
+                    "min_calls": min_calls,
+                    "n_kols": n_kols,
+                    "n_trades": n_trades,
+                    "sharpe": round(sharpe, 4),
+                    "filtered_wr": round(wr, 4),
+                }
+
+    if best_sharpe <= 0:
+        logger.info("KOL threshold opt: no combo with positive Sharpe — keeping current config")
+        return None
+
+    logger.info("KOL threshold opt: BEST → WR>=%d%% min_calls>=%d (Sharpe=%.3f, %d KOLs, WR=%.1f%%)",
+                best_combo["wr_threshold"], best_combo["min_calls"],
+                best_sharpe, best_combo.get("n_kols", 0), best_combo.get("filtered_wr", 0) * 100)
+
+    # Save to scoring_config
+    try:
+        client.table("scoring_config").update({
+            "kol_filter_config": best_combo,
+            "updated_by": "optuna_v73_kol_grid",
+        }).eq("id", 1).execute()
+        logger.info("KOL threshold opt: saved to scoring_config.kol_filter_config")
+    except Exception as e:
+        logger.warning("KOL threshold opt: DB save failed: %s", e)
+
+    return best_combo
+
+
 def run_outcomes_pipeline(n_trials: int = 100) -> None:
     """
     v63: Combined entry point for Optuna + auto_backtest.
@@ -5491,13 +5456,19 @@ def run_outcomes_pipeline(n_trials: int = 100) -> None:
     except Exception as e:
         logger.error("outcomes_pipeline: auto_backtest failed: %s", e)
 
-    # Step 3 (v66): RT trade analysis + Optuna sizing optimization (gated on N>=50)
+    # Step 3 (v73): KOL whitelist threshold grid search
+    try:
+        _optimize_kol_threshold(client)
+    except Exception as e:
+        logger.error("outcomes_pipeline: KOL threshold opt failed: %s", e)
+
+    # Step 4 (v66): RT trade analysis + Optuna sizing optimization (gated on N>=50)
     try:
         run_rt_optimization(client=client, n_trials=min(n_trials, 100))
     except Exception as e:
         logger.error("outcomes_pipeline: RT optimization failed: %s", e)
 
-    # Step 4 (v66): Train RT ML model for strategy selection (gated on N>=100)
+    # Step 5 (v66): Train RT ML model for strategy selection (gated on N>=100)
     try:
         from rt_model import train_rt_model
         rt_result = train_rt_model(client=client)

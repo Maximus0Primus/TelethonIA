@@ -52,6 +52,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger(__name__)
 
 MODEL_DIR = Path(__file__).parent
+BACKUP_DIR = MODEL_DIR / "backups"
 
 # Quality gate: model must exceed this precision@5 to be saved
 # v49: dynamic threshold based on sample size (see quality gate below)
@@ -61,6 +62,23 @@ MIN_PRECISION_AT_5 = 0.30  # fallback default
 # Minimum test set size for quality gate to be meaningful
 # v58: Overridden by scoring_config.pipeline_config.ml.min_n_test
 MIN_N_TEST = 200
+
+
+def _backup_model_files(horizon: str) -> None:
+    """v73: Backup existing model files before overwriting."""
+    import shutil
+    BACKUP_DIR.mkdir(exist_ok=True)
+    ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    suffixes = [".json", "_lgb.txt", "_calibrator.joblib", "_meta.json"]
+    backed = 0
+    for sfx in suffixes:
+        src = MODEL_DIR / f"model_{horizon}{sfx}"
+        if src.exists():
+            dst = BACKUP_DIR / f"model_{horizon}{sfx}.{ts}"
+            shutil.copy2(src, dst)
+            backed += 1
+    if backed:
+        logger.info("v73: Backed up %d existing model files for %s to %s", backed, horizon, BACKUP_DIR)
 
 
 def _load_ml_config() -> None:
@@ -1204,6 +1222,9 @@ def train_regression(
             logger.info("Pruned model spearman=%.3f (< 95%% of %.3f) — keeping original features",
                          spearman_p, spearman)
 
+    # v73: Backup existing models before overwriting
+    _backup_model_files(horizon)
+
     # Save models
     xgb_path = MODEL_DIR / f"model_{horizon}.json"
     xgb_model.save_model(str(xgb_path))
@@ -1213,37 +1234,51 @@ def train_regression(
     lgb_model.booster_.save_model(str(lgb_path))
     logger.info("LightGBM regressor saved to %s", lgb_path)
 
-    # v54: Isotonic calibration — map raw ensemble predictions to win probabilities
+    # v73: Isotonic calibration with leakage fix — calibrator trained on held-out
+    # 30% of train_df, NOT the same data used to train the models.
     calibration_meta = {}
     try:
         from sklearn.isotonic import IsotonicRegression
         from sklearn.metrics import brier_score_loss
         from joblib import dump as joblib_dump
 
-        # Train calibrator on training set predictions → binary outcome
-        ensemble_preds_train = (
-            xgb_weight * xgb_model.predict(train_df[available_features])
-            + lgb_weight * lgb_model.predict(train_df[available_features])
-        )
-        y_train_binary = (train_df["_winner"]).astype(int)
+        # v73: Split train_df into model-training (70%) and calibration (30%)
+        # Models were trained on full train_df (maximize data), but calibrator
+        # is fitted on predictions for data the models haven't directly optimized on.
+        n_train = len(train_df)
+        cal_split = int(n_train * 0.7)
+        cal_df = train_df.iloc[cal_split:]
 
-        iso = IsotonicRegression(out_of_bounds="clip")
-        iso.fit(ensemble_preds_train, y_train_binary)
+        if len(cal_df) >= 20:
+            # Get model predictions on calibration subset
+            ensemble_preds_cal = (
+                xgb_weight * xgb_model.predict(cal_df[available_features])
+                + lgb_weight * lgb_model.predict(cal_df[available_features])
+            )
+            y_cal_binary = (cal_df["_winner"]).astype(int)
 
-        # Evaluate calibration on test set
-        calibrated_test = iso.predict(ensemble_preds)
-        brier = float(brier_score_loss(y_test_binary, calibrated_test))
-        cal_p5 = float(_precision_at_k(y_test_binary, calibrated_test, k=5))
+            iso = IsotonicRegression(out_of_bounds="clip")
+            iso.fit(ensemble_preds_cal, y_cal_binary)
 
-        cal_path = MODEL_DIR / f"model_{horizon}_calibrator.joblib"
-        joblib_dump(iso, cal_path)
-        logger.info("Isotonic calibrator saved to %s (brier=%.4f, cal_p@5=%.3f)", cal_path, brier, cal_p5)
+            # Evaluate calibration on test set (unchanged)
+            calibrated_test = iso.predict(ensemble_preds)
+            brier = float(brier_score_loss(y_test_binary, calibrated_test))
+            cal_p5 = float(_precision_at_k(y_test_binary, calibrated_test, k=5))
 
-        calibration_meta = {
-            "method": "isotonic",
-            "brier_score": brier,
-            "calibrated_p_at_5": cal_p5,
-        }
+            cal_path = MODEL_DIR / f"model_{horizon}_calibrator.joblib"
+            joblib_dump(iso, cal_path)
+            logger.info("Isotonic calibrator saved to %s (brier=%.4f, cal_p@5=%.3f, cal_samples=%d)",
+                        cal_path, brier, cal_p5, len(cal_df))
+
+            calibration_meta = {
+                "method": "isotonic",
+                "brier_score": brier,
+                "calibrated_p_at_5": cal_p5,
+                "calibration_samples": len(cal_df),
+            }
+        else:
+            logger.warning("Calibration skipped: only %d cal samples (need >= 20)", len(cal_df))
+            calibration_meta = {"method": "skipped", "reason": f"insufficient_cal_samples_{len(cal_df)}"}
     except Exception as e:
         logger.warning("Calibration failed: %s — skipping", e)
 
@@ -1252,6 +1287,7 @@ def train_regression(
     sorted_imp = sorted(xgb_importances.items(), key=lambda x: x[1], reverse=True)
 
     metadata = {
+        "version": datetime.utcnow().strftime("v%Y%m%d_%H%M%S"),
         "horizon": horizon,
         "threshold": threshold,
         "mode": "regression",

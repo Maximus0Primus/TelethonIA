@@ -28,10 +28,14 @@ LAMPORTS_PER_SOL = 1_000_000_000
 _ultra_client = None
 _ultra_client_init_attempted = False
 
-# --- Daily loss tracking ---
+# --- Loss tracking (v73: daily + weekly + monthly) ---
 _daily_pnl_sol: float = 0.0
 _daily_pnl_reset_date: str = ""
 _daily_halted: bool = False
+_weekly_pnl_sol: float = 0.0
+_weekly_pnl_reset_week: str = ""
+_monthly_pnl_sol: float = 0.0
+_monthly_pnl_reset_month: str = ""
 
 
 def _get_ultra_client():
@@ -243,29 +247,59 @@ def _get_sol_price_usd() -> float:
     return 170.0  # Fallback estimate
 
 
-def _check_daily_loss(config: dict) -> bool:
-    """Check if daily loss limit has been hit. Returns True if trading should be halted."""
+def _check_loss_limits(config: dict) -> bool:
+    """
+    v73: Check daily + weekly + monthly loss limits.
+    Returns True if trading should be halted.
+    """
     global _daily_pnl_sol, _daily_pnl_reset_date, _daily_halted
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    global _weekly_pnl_sol, _weekly_pnl_reset_week
+    global _monthly_pnl_sol, _monthly_pnl_reset_month
+
+    now = datetime.now(timezone.utc)
+    today = now.strftime("%Y-%m-%d")
+    week = now.strftime("%Y-W%W")
+    month = now.strftime("%Y-%m")
+
+    # Reset counters on period change
     if _daily_pnl_reset_date != today:
         _daily_pnl_sol = 0.0
         _daily_pnl_reset_date = today
         _daily_halted = False
+    if _weekly_pnl_reset_week != week:
+        _weekly_pnl_sol = 0.0
+        _weekly_pnl_reset_week = week
+    if _monthly_pnl_reset_month != month:
+        _monthly_pnl_sol = 0.0
+        _monthly_pnl_reset_month = month
 
-    limit = float(config.get("daily_loss_limit_sol", 2.0))
-    if _daily_pnl_sol < -limit:
+    daily_limit = float(config.get("daily_loss_limit_sol", 2.0))
+    weekly_limit = float(config.get("weekly_loss_limit_sol", 5.0))
+    monthly_limit = float(config.get("monthly_loss_limit_sol", 10.0))
+
+    if _daily_pnl_sol < -daily_limit:
         if not _daily_halted:
             logger.warning("LIVE TRADING HALTED: daily loss %.4f SOL exceeds limit %.1f SOL",
-                           _daily_pnl_sol, limit)
+                           _daily_pnl_sol, daily_limit)
             _daily_halted = True
+        return True
+    if _weekly_pnl_sol < -weekly_limit:
+        logger.warning("LIVE TRADING HALTED: weekly loss %.4f SOL exceeds limit %.1f SOL",
+                       _weekly_pnl_sol, weekly_limit)
+        return True
+    if _monthly_pnl_sol < -monthly_limit:
+        logger.warning("LIVE TRADING HALTED: monthly loss %.4f SOL exceeds limit %.1f SOL",
+                       _monthly_pnl_sol, monthly_limit)
         return True
     return False
 
 
-def _track_daily_pnl(pnl_sol: float):
-    """Track cumulative daily PnL in SOL."""
-    global _daily_pnl_sol
+def _track_pnl(pnl_sol: float):
+    """v73: Track cumulative PnL across daily/weekly/monthly windows."""
+    global _daily_pnl_sol, _weekly_pnl_sol, _monthly_pnl_sol
     _daily_pnl_sol += pnl_sol
+    _weekly_pnl_sol += pnl_sol
+    _monthly_pnl_sol += pnl_sol
 
 
 def open_live_trade(client_sb, token_entry: dict, strategy: str,
@@ -288,7 +322,7 @@ def open_live_trade(client_sb, token_entry: dict, strategy: str,
         return False
 
     # Safety checks
-    if _check_daily_loss(config):
+    if _check_loss_limits(config):
         return False
 
     # Check max open positions
@@ -482,7 +516,7 @@ def check_live_trades(client_sb) -> dict:
         # Track daily PnL in SOL
         sol_price = _get_sol_price_usd()
         pnl_sol = pnl_usd / sol_price if sol_price > 0 else 0
-        _track_daily_pnl(pnl_sol)
+        _track_pnl(pnl_sol)
 
         update = {
             "status": new_status,

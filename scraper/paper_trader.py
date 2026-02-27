@@ -45,6 +45,9 @@ TOP_N = 5
 PORTFOLIO_BUDGET = 50.0  # USD per cycle, score-weighted across top N
 DEDUP_COOLDOWN_HOURS = 24  # v5: was 0 — re-trading same token across cycles was the #1 PnL killer
 CA_FILTER = True
+# v73: Slippage simulation — realistic entry/exit price adjustments
+BUY_SLIPPAGE_BPS = 150   # 1.5% buy slippage
+SELL_SLIPPAGE_BPS = 300   # 3.0% sell slippage (memecoins have wide spreads)
 
 # --- Strategy Definitions ---
 # Each strategy has a list of tranches. Moonbag tranches have tp_mult=None.
@@ -184,6 +187,8 @@ def _load_paper_trade_config(client) -> dict:
         "active_strategies": list(STRATEGIES.keys()),
         "dedup_cooldown_hours": DEDUP_COOLDOWN_HOURS,
         "ca_filter": CA_FILTER,
+        "buy_slippage_bps": BUY_SLIPPAGE_BPS,
+        "sell_slippage_bps": SELL_SLIPPAGE_BPS,
     }
     try:
         result = client.table("scoring_config").select("paper_trade_config").eq("id", 1).execute()
@@ -235,6 +240,8 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
     active_strategies = [s for s in config["active_strategies"] if s in STRATEGIES]
     dedup_cooldown_h = config.get("dedup_cooldown_hours", 0)
     ca_filter = config.get("ca_filter", True)
+    buy_slip_bps = int(config.get("buy_slippage_bps", BUY_SLIPPAGE_BPS))
+    sell_slip_bps = int(config.get("sell_slippage_bps", SELL_SLIPPAGE_BPS))
 
     # Filter candidates
     base_filter = [
@@ -298,7 +305,9 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
     opened = 0
     for rank_idx, token in enumerate(candidates, 1):
         addr = token["token_address"]
-        entry_price = float(token["price_usd"])
+        raw_price = float(token["price_usd"])
+        # v73: Simulate buy slippage — actual fill price is worse than spot
+        entry_price = raw_price * (1 + buy_slip_bps / 10_000)
         alloc_usd = token.get("_alloc_usd", budget_usd / top_n)
 
         # Common fields for all tranches of this token
@@ -386,6 +395,7 @@ def check_paper_trades(client) -> dict:
     """
     Check all open paper trades against current prices.
     Closes trades that hit TP, SL, or timeout.
+    v73: Exit prices include sell slippage simulation.
 
     SL cascade: when SL triggers, ALL open tranches for the same
     (token_address, strategy, cycle_ts) close at -SL%.
@@ -412,6 +422,15 @@ def check_paper_trades(client) -> dict:
     # Batch fetch current prices
     addresses = list({t["token_address"] for t in open_trades})
     prices = _fetch_prices_batch(addresses)
+
+    # v73: Load sell slippage config for exit price simulation
+    _sell_slip_bps = SELL_SLIPPAGE_BPS
+    try:
+        _cfg = _load_paper_trade_config(client)
+        _sell_slip_bps = int(_cfg.get("sell_slippage_bps", SELL_SLIPPAGE_BPS))
+    except Exception:
+        pass
+    _sell_slip_factor = 1 - _sell_slip_bps / 10_000
 
     counts = {"checked": len(open_trades), "closed": 0, "tp": 0, "sl": 0, "timeout": 0}
     _total_pnl_usd = 0.0  # v67: accumulate for monitoring
@@ -455,23 +474,23 @@ def check_paper_trades(client) -> dict:
         # Check if this group already had SL triggered by a sibling tranche
         if group_key in sl_triggered:
             new_status = "sl_hit"
-            exit_price = sl_price  # Cap at SL price for cascade too
+            exit_price = sl_price * _sell_slip_factor  # v73: + sell slippage
 
         elif current_price is not None:
             # SL check (applies to all tranches including moonbag)
             if current_price <= sl_price:
                 new_status = "sl_hit"
-                exit_price = sl_price  # Cap at SL price, not actual (gap-down)
+                exit_price = sl_price * _sell_slip_factor  # v73: + sell slippage
                 sl_triggered.add(group_key)
             # TP check (only for tranches with a TP target)
             elif tp_price is not None and current_price >= tp_price:
                 new_status = "tp_hit"
-                exit_price = tp_price  # Cap at TP price, not actual (gap-up)
+                exit_price = tp_price * _sell_slip_factor  # v73: + sell slippage
 
         # Timeout check
         if new_status is None and elapsed_minutes >= horizon:
             new_status = "timeout"
-            exit_price = current_price if current_price else entry_price
+            exit_price = (current_price if current_price else entry_price) * _sell_slip_factor  # v73
 
         if new_status is None:
             continue
@@ -528,7 +547,7 @@ def check_paper_trades(client) -> dict:
             continue
         elapsed_minutes = (now - created_at).total_seconds() / 60
 
-        exit_price = sl_price  # Cap at SL price, not actual (gap-down)
+        exit_price = sl_price * _sell_slip_factor  # v73: + sell slippage
         pnl_pct = round((exit_price / entry_price) - 1, 4) if exit_price and entry_price else 0
         pos_usd = float(trade.get("position_usd") or 0)
         pnl_usd = round(pos_usd * pnl_pct, 2) if pos_usd else None

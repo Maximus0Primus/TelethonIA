@@ -1,6 +1,8 @@
-name: Train ML Models (Manual)
+name: Train ML Models
 
 on:
+  schedule:
+    - cron: '0 3 * * *'  # v73: Daily at 3am UTC
   workflow_dispatch:
     inputs:
       mode:
@@ -66,7 +68,8 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         working-directory: scraper
         run: |
-          if [ "${{ inputs.mode }}" = "auto" ]; then
+          MODE="${{ inputs.mode || 'auto' }}"
+          if [ "$MODE" = "auto" ]; then
             echo "Running auto_train (grid search all combos)..."
             python -c "from train_model import auto_train; auto_train()"
           else

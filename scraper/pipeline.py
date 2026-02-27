@@ -106,6 +106,9 @@ BARE_WORD_SUSPECTS = {
     "STRONG", "CRAZY", "LEVEL", "COST", "HERE", "SOON", "EVERY",
     "ANYMORE", "NOBODY", "PERFECT", "BREATHE", "CAMP", "WORTH",
     "RANGE", "MOVE", "TRUST", "HOLY", "PAIN",
+    # v73: Crypto slang that bare ALLCAPS regex catches as false tokens
+    "PUMP", "FUN", "BASED", "SEND", "MOON", "GEM", "ALPHA", "DEGEN",
+    "CALL", "ENTRY", "FILL", "LONG", "SHORT",
 }
 
 # === CRYPTO LEXICON ===
@@ -2167,7 +2170,7 @@ _DEFAULT_SCORING_PARAMS = {
     "safety_floor": 0.75,
     # v20: 15 critical constants made dynamic via scoring_config table
     "decay_lambda": 0.12,
-    "activity_mult_floor": 0.80,
+    "activity_mult_floor": 0.85,  # v73: softer penalty (was 0.80)
     "activity_mult_cap": 1.25,
     "pa_norm_floor": 0.4,
     "pa_norm_cap": 1.3,
@@ -2188,10 +2191,10 @@ _DEFAULT_SCORING_PARAMS = {
     "bot_strategy": "TP50_SL30",
     # v26: Market benchmarks (populated by auto_backtest)
     "market_benchmarks": {},
-    # v44: Dynamic parameter optimization — activity bucketing
-    "activity_ratio_high": 0.6,
-    "activity_ratio_mid": 0.3,
-    "activity_ratio_low": 0.1,
+    # v73: Recalibrated — only penalize ZERO recent mentions (was 0.1/0.3/0.6)
+    "activity_ratio_high": 0.35,
+    "activity_ratio_mid": 0.15,
+    "activity_ratio_low": 0.0,
     "activity_pump_cap_hard": 80,
     "activity_pump_cap_soft": 50,
     # v44: S-tier bonus
@@ -2873,6 +2876,12 @@ def aggregate_ranking(
     # v10: Collect raw KOL mentions for NLP storage
     raw_kol_mentions: list[dict] = []
 
+    # v73: Per-KOL-per-token dedup — cap scoring impact of repeated mentions.
+    # First KOL_MENTION_CAP mentions per (KOL, token) get full impact on
+    # mention count, breadth, conviction. Beyond that: only update freshness.
+    KOL_MENTION_CAP = 2
+    kol_token_mention_counter: dict[tuple[str, str], int] = {}
+
     for group_name, msgs in messages_dict.items():
         conviction = groups_conviction.get(group_name, 7)
 
@@ -3029,23 +3038,33 @@ def aggregate_ranking(
                 is_positive_mention = sentiment >= mwcfg["positive_mention_threshold"]
 
                 if is_positive_mention:
-                    # v14: Weighted mentions — updates/brags count 0.3x, short msgs 0.5x
-                    token_data[token]["mentions"] += mention_weight
-                    # v35b: Bot messages excluded from breadth/conviction/kol_counts
-                    if not is_forwarded and not is_bot_msg:
-                        token_data[token]["groups"].add(group_name)
+                    # v73: Per-KOL-per-token dedup — cap scoring impact
+                    _dedup_key = (group_name, token)
+                    _dedup_count = kol_token_mention_counter.get(_dedup_key, 0) + 1
+                    kol_token_mention_counter[_dedup_key] = _dedup_count
+                    _within_cap = _dedup_count <= KOL_MENTION_CAP
+
+                    if _within_cap:
+                        # v14: Weighted mentions — updates/brags count 0.3x, short msgs 0.5x
+                        token_data[token]["mentions"] += mention_weight
+                        # v35b: Bot messages excluded from breadth/conviction/kol_counts
+                        if not is_forwarded and not is_bot_msg:
+                            token_data[token]["groups"].add(group_name)
+                        if not is_bot_msg:
+                            token_data[token]["convictions"].append(conviction)
+                            # Track per-KOL mention counts (weighted) for quality-weighted breadth
+                            kol_counts = token_data[token]["kol_mention_counts"]
+                            kol_counts[group_name] = kol_counts.get(group_name, 0) + mention_weight
+                            if msg_conv["has_price_target"]:
+                                token_data[token]["price_target_count"] += 1
+                            # v14: Store KOL-stated entry mcap
+                            if stated_mcap is not None:
+                                token_data[token]["kol_stated_entry_mcaps"].append(stated_mcap)
+
+                    # Always update freshness + recency (even beyond cap)
                     if not is_bot_msg:
-                        token_data[token]["convictions"].append(conviction)
-                        # Track per-KOL mention counts (weighted) for quality-weighted breadth
-                        kol_counts = token_data[token]["kol_mention_counts"]
-                        kol_counts[group_name] = kol_counts.get(group_name, 0) + mention_weight
                         # v9: Track hours_ago per group for recency-weighted consensus/breadth
                         token_data[token]["hours_ago_by_group"][group_name].append(hours_ago)
-                        if msg_conv["has_price_target"]:
-                            token_data[token]["price_target_count"] += 1
-                        # v14: Store KOL-stated entry mcap
-                        if stated_mcap is not None:
-                            token_data[token]["kol_stated_entry_mcaps"].append(stated_mcap)
 
                 if msg_conv["has_hedging"]:
                     token_data[token]["hedging_count"] += 1
@@ -3776,8 +3795,9 @@ def aggregate_ranking(
         token["entry_premium"] = entry_premium
         token["entry_premium_mult"] = entry_premium_mult
 
-        # v24: Entry drift multiplier — penalizes when price outpaced social growth
-        entry_drift_mult = _compute_entry_drift_mult(token)
+        # v73: entry_drift_mult DISABLED — kol_stated_entry_mcaps 95% empty,
+        # always returns ~1.0. Wasted computation + noise.
+        entry_drift_mult = 1.0
         token["entry_drift_mult"] = entry_drift_mult
 
         # Freshest mention hours (used by size_mult freshness tier)
@@ -3857,25 +3877,10 @@ def aggregate_ranking(
         token["_breadth_val"] = _get_component_value(token, "breadth")
         token["_price_action_val"] = _get_component_value(token, "price_action")
 
-        # v32: Hype penalty — more KOLs = WORSE outcomes (corr -0.132, N=1630)
-        # v44: thresholds/penalties from scoring_config (Optuna-tunable).
-        hpcfg = SCORING_PARAMS["hype_pen_config"]
-        hp_thresh = hpcfg.get("thresholds", [2, 4, 7])
-        hp_pens = hpcfg.get("penalties", [1.0, 0.85, 0.65, 0.50])
-        uk_count = token.get("unique_kols") or 1
-        if uk_count <= hp_thresh[0]:
-            hype_pen = hp_pens[0]     # sweet spot — early discovery
-        elif uk_count <= hp_thresh[1]:
-            hype_pen = hp_pens[1]     # moderate hype
-        elif uk_count <= hp_thresh[2]:
-            hype_pen = hp_pens[2]     # crowded trade
-        else:
-            hype_pen = hp_pens[3]     # everyone knows — probably too late
-        # v53: KOL co-occurrence penalty — shill ring detection
-        cooc_cfg = hpcfg.get("cooc_config", {"threshold": 0.5, "penalty": 0.85})
-        cooc = token.get("kol_cooccurrence_avg")
-        if cooc is not None and cooc > cooc_cfg["threshold"]:
-            hype_pen *= cooc_cfg["penalty"]
+        # v73: hype_pen DISABLED — contradicts breadth (55% weight).
+        # More KOLs = higher breadth but lower hype_pen = they cancel out.
+        # Kept as 1.0 so the multiplier chain is unaffected.
+        hype_pen = 1.0
         token["hype_pen"] = hype_pen
 
         # v21: gate_mult — soft safety penalties (top10, risk, liquidity, holders, single_a_tier)

@@ -730,12 +730,16 @@ def enrich_token(symbol: str, cache: dict, birdeye_key: str | None = None, known
 
     if mint:
         # --- RugCheck (2h TTL, free, ~60/min) ---
-        if now - entry.get("_rug_at", 0) > TTL_RUGCHECK:
+        # v73: Skip by default — wasted API, data rarely used. Enable with RUGCHECK_ENABLED=1.
+        rugcheck_enabled = os.environ.get("RUGCHECK_ENABLED", "0") == "1"
+        if rugcheck_enabled and now - entry.get("_rug_at", 0) > TTL_RUGCHECK:
             rug_data = _fetch_rugcheck(mint)
             if rug_data:
                 result.update(rug_data)
                 entry["_rug_at"] = now
-            time.sleep(0.5)  # v34: 1.0→0.5s (RugCheck ~60/min, 0.5s = safe)
+            time.sleep(0.5)
+        elif not rugcheck_enabled:
+            pass  # Silently skip RugCheck
         else:
             logger.debug("RugCheck cache hit for %s", symbol)
 
