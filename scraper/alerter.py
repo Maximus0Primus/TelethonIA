@@ -34,11 +34,13 @@ _COOLDOWNS = {
     "daily_summary": 86400,        # 24 hours
     "startup": 60,                 # 1 min (prevent double-send on fast restart)
     "live_trade": 0,               # No cooldown — alert every live trade execution
+    "ml_disabled": 86400,          # v74: Once per day if ML quality gate failed
+    "gh_actions_failure": 3600,    # v74: 1 hour cooldown
 }
 
 # Max consecutive alerts before going silent (0 = unlimited)
 _MAX_ALERTS = {
-    "rt_listener_down": 5,         # Alert 5x then stop (10+20+40+80+120 min = ~4.5h coverage)
+    "rt_listener_down": 0,         # v74: unlimited (was 5 — silent after 4.5h was dangerous)
     "cycle_failure": 10,
 }
 
@@ -208,6 +210,28 @@ def alert_live_trade(symbol: str, action: str, amount_sol: float, signature: str
         f"<a href=\"{solscan_link}\">View on Solscan</a>"
     )
     _send(text, "live_trade")
+
+
+def alert_ml_disabled(reason: str, horizon: str = ""):
+    """v74: Alert when ML model is disabled due to quality gate failure."""
+    text = (
+        "<b>ML MODEL DISABLED</b>\n"
+        f"Horizon: {horizon or 'all'}\n"
+        f"Reason: {_truncate(reason, 200)}\n"
+        "ML multiplier = 1.0 (no effect on scoring)"
+    )
+    _send(text, "ml_disabled")
+
+
+def alert_gh_actions_failure(workflow: str, step: str, error: str):
+    """v74: Alert when a GH Actions step fails (called from workflow via curl)."""
+    text = (
+        f"<b>GH ACTIONS FAILURE</b>\n"
+        f"Workflow: {workflow}\n"
+        f"Step: {step}\n"
+        f"<code>{_truncate(error, 200)}</code>"
+    )
+    _send(text, "gh_actions_failure")
 
 
 def _truncate(s: str, max_len: int) -> str:

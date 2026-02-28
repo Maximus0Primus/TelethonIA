@@ -4605,12 +4605,28 @@ def _optuna_optimize_params(
             return -999.0
         return (fold1_score + fold2_score) / 2.0
 
+    # v74: 2-phase optimization — coarse search first, then full search seeded with best
+    phase1_trials = max(20, int(n_trials * 0.4))
+    phase2_trials = n_trials - phase1_trials
+    phase1_timeout = int(timeout * 0.4)
+    phase2_timeout = timeout - phase1_timeout
+
+    # Phase 1: Coarse search
     study = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler())
-    study.optimize(objective, n_trials=n_trials, timeout=timeout)
+    study.optimize(objective, n_trials=phase1_trials, timeout=phase1_timeout)
+    logger.info("optuna phase 1: best=%.4f after %d trials", study.best_value, len(study.trials))
+
+    # Phase 2: Fine search seeded with phase 1 best params
+    study.sampler = optuna.samplers.TPESampler(
+        seed=42, n_startup_trials=5,
+        consider_prior=True, prior_weight=1.0,
+    )
+    study.enqueue_trial(study.best_trial.params)
+    study.optimize(objective, n_trials=phase2_trials, timeout=phase2_timeout)
 
     best_trial = study.best_trial
     logger.info(
-        "optuna: best trial #%d, train_score=%.4f (n_trials=%d)",
+        "optuna: best trial #%d, train_score=%.4f (n_trials=%d, 2-phase)",
         best_trial.number, best_trial.value, len(study.trials),
     )
 

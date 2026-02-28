@@ -1,0 +1,47 @@
+name: Daily Summary
+
+on:
+  schedule:
+    - cron: '0 8 * * *'  # v74: Daily at 8am UTC — independent of scraper loop
+  workflow_dispatch: {} # Manual trigger
+
+jobs:
+  summary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install minimal dependencies
+        run: pip install supabase requests
+
+      - name: Send daily summary
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          MONITOR_BOT_TOKEN: ${{ secrets.MONITOR_BOT_TOKEN }}
+          MONITOR_CHAT_ID: ${{ secrets.MONITOR_CHAT_ID }}
+        working-directory: scraper
+        run: python -c "from daily_summary import send_summary; send_summary()"
+
+      - name: Alert on failure
+        if: failure()
+        env:
+          MONITOR_BOT_TOKEN: ${{ secrets.MONITOR_BOT_TOKEN }}
+          MONITOR_CHAT_ID: ${{ secrets.MONITOR_CHAT_ID }}
+        run: |
+          if [ -n "$MONITOR_BOT_TOKEN" ] && [ -n "$MONITOR_CHAT_ID" ]; then
+            MSG="<b>GH ACTIONS FAILURE</b>%0AWorkflow: daily-summary.yml%0ADaily summary failed"
+            curl -s -X POST "https://api.telegram.org/bot${MONITOR_BOT_TOKEN}/sendMessage" \
+              -d chat_id="${MONITOR_CHAT_ID}" \
+              -d text="${MSG}" \
+              -d parse_mode=HTML \
+              -d disable_web_page_preview=true || true
+          fi

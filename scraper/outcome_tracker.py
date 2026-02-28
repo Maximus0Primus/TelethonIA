@@ -59,6 +59,28 @@ _birdeye_limiter = _RateLimiter(10)
 # v54: DexPaprika rate limiter (replaces hardcoded time.sleep(0.3))
 _dexpaprika_limiter = _RateLimiter(requests_per_minute=180)  # ~3 req/s
 
+# v74: DexPaprika daily budget counter (10K req/day hard limit)
+_DEXPAPRIKA_DAILY_LIMIT = 9000  # Leave 1K headroom for enrichment
+_dexpaprika_daily_count = 0
+_dexpaprika_daily_reset_date = ""
+
+
+def _dexpaprika_budget_ok() -> bool:
+    """Check if DexPaprika daily budget is not exhausted."""
+    global _dexpaprika_daily_count, _dexpaprika_daily_reset_date
+    today = time.strftime("%Y-%m-%d")
+    if _dexpaprika_daily_reset_date != today:
+        _dexpaprika_daily_count = 0
+        _dexpaprika_daily_reset_date = today
+    return _dexpaprika_daily_count < _DEXPAPRIKA_DAILY_LIMIT
+
+
+def _dexpaprika_track():
+    """Increment DexPaprika daily request counter."""
+    global _dexpaprika_daily_count
+    _dexpaprika_daily_count += 1
+
+
 # v34: Adaptive GeckoTerminal circuit breaker.
 # After N consecutive 429s, skip Gecko for the rest of the run.
 # Logs show 179 rate limits per 18min run — each wastes 2.14s for nothing.
@@ -710,7 +732,12 @@ def _fetch_ohlcv_candles(
         end_dt = datetime.fromtimestamp(end_ts, tz=timezone.utc)
         num_candles_15m = int(window_seconds / 900) + 10
         try:
+            if not _dexpaprika_budget_ok():
+                logger.info("DexPaprika daily budget exhausted (%d/%d) — skipping",
+                            _dexpaprika_daily_count, _DEXPAPRIKA_DAILY_LIMIT)
+                return []
             _dexpaprika_limiter.wait()
+            _dexpaprika_track()
             resp = requests.get(
                 f"{DEXPAPRIKA_BASE}/networks/solana/pools/{pool_addr}/ohlcv",
                 params={
@@ -1469,11 +1496,12 @@ def backfill_first_call_prices(client: Client = None, limit: int = 500) -> int:
         close_price = None
 
         # 1. DexPaprika (primary) — needs pool_addr
-        if pool_addr and close_price is None:
+        if pool_addr and close_price is None and _dexpaprika_budget_ok():
             start_dt = datetime.fromtimestamp(start_ts, tz=timezone.utc)
             end_dt = datetime.fromtimestamp(end_ts, tz=timezone.utc)
             try:
                 _dexpaprika_limiter.wait()
+                _dexpaprika_track()
                 resp = requests.get(
                     f"{DEXPAPRIKA_BASE}/networks/solana/pools/{pool_addr}/ohlcv",
                     params={

@@ -7,6 +7,7 @@ import os
 import json
 import math
 import logging
+from pathlib import Path
 from datetime import datetime, timezone
 
 from supabase import create_client, Client
@@ -21,6 +22,89 @@ try:
     _monitoring = True
 except ImportError:
     _monitoring = False
+
+# v74: Write-ahead log for failed Supabase writes
+_FAILED_WRITES_PATH = Path(__file__).parent / "failed_writes.jsonl"
+
+
+def _save_failed_write(table: str, rows: list[dict]):
+    """Buffer failed writes to local JSONL file for retry."""
+    try:
+        with open(_FAILED_WRITES_PATH, "a") as f:
+            entry = {
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "table": table,
+                "rows": rows[:50],  # Cap at 50 rows per entry to prevent bloat
+            }
+            f.write(json.dumps(entry, default=str) + "\n")
+        logger.info("Buffered %d failed rows for %s to %s", len(rows), table, _FAILED_WRITES_PATH)
+    except Exception as e:
+        logger.error("Failed to save write buffer: %s", e)
+
+
+def retry_failed_writes() -> dict:
+    """Replay failed writes from local buffer. Called at cycle start."""
+    if not _FAILED_WRITES_PATH.exists():
+        return {"replayed": 0, "succeeded": 0, "failed": 0}
+
+    result = {"replayed": 0, "succeeded": 0, "failed": 0}
+    remaining = []
+
+    try:
+        with open(_FAILED_WRITES_PATH, "r") as f:
+            entries = [json.loads(line) for line in f if line.strip()]
+    except Exception as e:
+        logger.warning("Failed to read write buffer: %s", e)
+        return result
+
+    if not entries:
+        return result
+
+    client = _get_client()
+    for entry in entries:
+        result["replayed"] += 1
+        table = entry.get("table", "")
+        rows = entry.get("rows", [])
+        try:
+            if table == "tokens":
+                for row in rows:
+                    client.table("tokens").upsert(row, on_conflict="symbol").execute()
+            elif table == "token_snapshots":
+                for batch in _chunked(rows, 50):
+                    client.table("token_snapshots").insert(batch).execute()
+            elif table == "kol_mentions":
+                for batch in _chunked(rows, 50):
+                    client.table("kol_mentions").insert(batch).execute()
+            else:
+                logger.warning("Unknown table in write buffer: %s", table)
+                continue
+            result["succeeded"] += 1
+        except Exception as e:
+            logger.warning("Replay failed for %s (%d rows): %s", table, len(rows), e)
+            remaining.append(entry)
+            result["failed"] += 1
+
+    # Rewrite buffer with only failed entries
+    try:
+        if remaining:
+            with open(_FAILED_WRITES_PATH, "w") as f:
+                for entry in remaining:
+                    f.write(json.dumps(entry, default=str) + "\n")
+        else:
+            _FAILED_WRITES_PATH.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+    if result["replayed"] > 0:
+        logger.info("Write buffer replay: %d replayed, %d succeeded, %d still failing",
+                     result["replayed"], result["succeeded"], result["failed"])
+    return result
+
+
+def _chunked(lst, n):
+    """Yield successive n-sized chunks from list."""
+    for i in range(0, len(lst), n):
+        yield lst[i:i + n]
 
 
 def _sanitize_value(v):
@@ -961,6 +1045,7 @@ def insert_snapshots(ranking: list[dict]) -> None:
         else:
             logger.error("Batch snapshot insert failed (%s: %s) — trying row-by-row", type(e).__name__, e)
         inserted = 0
+        failed_rows = []
         for row in rows:
             try:
                 client.table("token_snapshots").insert(row).execute()
@@ -973,7 +1058,11 @@ def insert_snapshots(ranking: list[dict]) -> None:
                     "Snapshot insert failed for %s (%s: %s)",
                     row.get("symbol", "?"), type(row_err).__name__, row_err,
                 )
+                failed_rows.append(row)
         logger.info("Row-by-row fallback: inserted %d/%d snapshots (dupes skipped)", inserted, len(rows))
+        # v74: Buffer non-duplicate failures for retry
+        if failed_rows:
+            _save_failed_write("token_snapshots", failed_rows)
 
 
 def insert_kol_mentions(mentions: list[dict]) -> None:

@@ -240,7 +240,7 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
     active_strategies = [s for s in config["active_strategies"] if s in STRATEGIES]
     dedup_cooldown_h = config.get("dedup_cooldown_hours", 0)
     ca_filter = config.get("ca_filter", True)
-    buy_slip_bps = int(config.get("buy_slippage_bps", BUY_SLIPPAGE_BPS))
+    buy_slip_bps_base = int(config.get("buy_slippage_bps", BUY_SLIPPAGE_BPS))
     sell_slip_bps = int(config.get("sell_slippage_bps", SELL_SLIPPAGE_BPS))
 
     # Filter candidates
@@ -306,7 +306,13 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
     for rank_idx, token in enumerate(candidates, 1):
         addr = token["token_address"]
         raw_price = float(token["price_usd"])
-        # v73: Simulate buy slippage — actual fill price is worse than spot
+        # v74: Dynamic slippage — scale with liquidity depth score
+        # liquidity_depth_score: 1.0 = deep liquidity, 0.1 = shallow
+        lds = float(token.get("liquidity_depth_score") or token.get("_rt_liquidity_depth_score") or 1.0)
+        lds = max(0.1, min(1.0, lds))
+        # Shallow liquidity → up to 3x base slippage; deep → 1x
+        slip_mult = 1.0 + 2.0 * (1.0 - lds)  # 1.0 for lds=1.0, 3.0 for lds=0.0
+        buy_slip_bps = int(buy_slip_bps_base * slip_mult)
         entry_price = raw_price * (1 + buy_slip_bps / 10_000)
         alloc_usd = token.get("_alloc_usd", budget_usd / top_n)
 
@@ -782,3 +788,68 @@ def paper_trade_summary(client) -> dict | None:
 
 def _days_ago_iso(days: int) -> str:
     return (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+
+def kol_attribution(client, days: int = 7) -> dict:
+    """
+    v74: Aggregate paper trade outcomes by KOL.
+    Returns {kol_group: {total, wins, wr, pnl_usd, avg_pnl_pct, best_trade, worst_trade}}.
+    Feeds back into KOL whitelist optimization.
+    """
+    try:
+        result = (
+            client.table("paper_trades")
+            .select("kol_group, kol_tier, pnl_pct, pnl_usd, status, strategy, symbol")
+            .neq("status", "open")
+            .not_.is_("kol_group", "null")
+            .gte("created_at", _days_ago_iso(days))
+            .execute()
+        )
+        trades = result.data or []
+    except Exception as e:
+        logger.error("kol_attribution: query failed: %s", e)
+        return {}
+
+    if not trades:
+        return {}
+
+    # Group by KOL
+    by_kol: dict[str, list[dict]] = {}
+    for t in trades:
+        kol = t.get("kol_group")
+        if kol:
+            by_kol.setdefault(kol, []).append(t)
+
+    attribution = {}
+    for kol, kol_trades in by_kol.items():
+        total = len(kol_trades)
+        pnls = [float(t.get("pnl_pct") or 0) for t in kol_trades]
+        wins = sum(1 for p in pnls if p > 0)
+        pnl_usd = sum(float(t.get("pnl_usd") or 0) for t in kol_trades)
+
+        best = max(kol_trades, key=lambda t: float(t.get("pnl_pct") or 0))
+        worst = min(kol_trades, key=lambda t: float(t.get("pnl_pct") or 0))
+
+        attribution[kol] = {
+            "tier": kol_trades[0].get("kol_tier", "?"),
+            "total": total,
+            "wins": wins,
+            "wr": round(wins / total, 3) if total else 0,
+            "pnl_usd": round(pnl_usd, 2),
+            "avg_pnl_pct": round(sum(pnls) / total * 100, 2) if total else 0,
+            "best_trade": f"{best.get('symbol')} +{float(best.get('pnl_pct') or 0)*100:.1f}%",
+            "worst_trade": f"{worst.get('symbol')} {float(worst.get('pnl_pct') or 0)*100:.1f}%",
+        }
+
+    # Log top and bottom 5 KOLs
+    sorted_kols = sorted(attribution.items(), key=lambda x: x[1]["pnl_usd"], reverse=True)
+    logger.info("KOL Attribution (%dd, %d KOLs, %d trades):", days, len(attribution), sum(v["total"] for v in attribution.values()))
+    for kol, stats in sorted_kols[:5]:
+        logger.info("  TOP: %s (%s) — %d trades, WR=%.0f%%, PnL=$%+.2f",
+                     kol, stats["tier"], stats["total"], stats["wr"]*100, stats["pnl_usd"])
+    for kol, stats in sorted_kols[-3:]:
+        if stats["pnl_usd"] < 0:
+            logger.info("  BOT: %s (%s) — %d trades, WR=%.0f%%, PnL=$%+.2f",
+                         kol, stats["tier"], stats["total"], stats["wr"]*100, stats["pnl_usd"])
+
+    return attribution

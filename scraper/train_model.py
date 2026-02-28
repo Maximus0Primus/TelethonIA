@@ -1322,7 +1322,62 @@ def train_regression(
         json.dump(metadata, f, indent=2)
     logger.info("Metadata saved to %s", meta_path)
 
+    # v74: Persist SHAP importances to Supabase for trend tracking
+    try:
+        _persist_shap_to_db(horizon, xgb_shap, lgb_shap, metadata)
+    except Exception as e:
+        logger.debug("SHAP persistence to DB failed (non-fatal): %s", e)
+
     return metadata
+
+
+def _persist_shap_to_db(horizon: str, xgb_shap: dict, lgb_shap: dict, metadata: dict):
+    """v74: Save SHAP importances to scoring_config for trend analysis."""
+    url = os.environ.get("SUPABASE_URL")
+    key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+    if not url or not key:
+        return
+
+    from supabase import create_client
+    client = create_client(url, key)
+
+    # Merge XGB + LGB SHAP into combined ranking
+    combined = {}
+    all_features = set(list(xgb_shap.keys()) + list(lgb_shap.keys()))
+    for feat in all_features:
+        combined[feat] = round(
+            (xgb_shap.get(feat, 0) + lgb_shap.get(feat, 0)) / 2, 6
+        )
+    top_15 = dict(sorted(combined.items(), key=lambda x: -x[1])[:15])
+
+    shap_record = {
+        "horizon": horizon,
+        "trained_at": metadata.get("trained_at"),
+        "n_train": metadata.get("train_samples"),
+        "n_test": metadata.get("test_samples"),
+        "p_at_5": metadata.get("metrics", {}).get("precision_at_5"),
+        "top_features": top_15,
+        "full_shap": combined,
+    }
+
+    try:
+        # Store in scoring_config as JSONB (append to history array)
+        result = client.table("scoring_config").select("ml_shap_history").eq("id", 1).execute()
+        history = []
+        if result.data and result.data[0].get("ml_shap_history"):
+            history = result.data[0]["ml_shap_history"]
+            if isinstance(history, str):
+                history = json.loads(history)
+        history.append(shap_record)
+        # Keep last 30 entries
+        history = history[-30:]
+        client.table("scoring_config").update({
+            "ml_shap_history": json.dumps(history),
+        }).eq("id", 1).execute()
+        logger.info("SHAP importances persisted to DB (%d entries, top: %s)",
+                     len(history), list(top_15.keys())[:5])
+    except Exception as e:
+        logger.debug("SHAP DB persistence failed: %s", e)
 
 
 # ═══ LEARNING-TO-RANK TRAINING (ML v2 Phase A) ═══

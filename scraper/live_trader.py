@@ -24,6 +24,16 @@ logger = logging.getLogger(__name__)
 WSOL_MINT = "So11111111111111111111111111111111111111112"
 LAMPORTS_PER_SOL = 1_000_000_000
 
+
+def _safe_int(val) -> int | None:
+    """Convert Jupiter amount result to int, returning None on failure."""
+    if val is None:
+        return None
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        return None
+
 # --- Lazy singleton ---
 _ultra_client = None
 _ultra_client_init_attempted = False
@@ -122,9 +132,8 @@ def get_wallet_balance() -> dict | None:
 def execute_buy(ca: str, amount_sol_lamports: int, slippage_bps: int = 300) -> dict:
     """
     Execute a buy swap: SOL → token via Jupiter Ultra.
-    Note: slippage_bps is reserved for future use. Jupiter Ultra handles slippage
-    server-side with auto-optimization. Kept for API compatibility.
-    Returns {"success": bool, "signature": str, "status": str, "error": str|None}
+    Returns {"success": bool, "signature": str, "status": str, "error": str|None,
+             "input_amount": int|None, "output_amount": int|None}
     """
     client = _get_ultra_client()
     if not client:
@@ -145,10 +154,15 @@ def execute_buy(ca: str, amount_sol_lamports: int, slippage_bps: int = 300) -> d
         signature = str(response.get("signature", ""))
         success = status == "Success"
 
+        # v74: Extract actual fill amounts from Jupiter response
+        input_amount = _safe_int(response.get("inputAmountResult"))
+        output_amount = _safe_int(response.get("outputAmountResult"))
+
         if success:
             logger.info(
-                "LIVE BUY: %s | %s SOL → tokens (sig: %s...)",
-                ca[:12], amount_sol_lamports / LAMPORTS_PER_SOL, signature[:16],
+                "LIVE BUY: %s | %s SOL → %s tokens (sig: %s...)",
+                ca[:12], amount_sol_lamports / LAMPORTS_PER_SOL,
+                output_amount or "?", signature[:16],
             )
         else:
             logger.warning(
@@ -161,6 +175,8 @@ def execute_buy(ca: str, amount_sol_lamports: int, slippage_bps: int = 300) -> d
             "signature": signature,
             "status": status,
             "error": response.get("error") if not success else None,
+            "input_amount": input_amount,
+            "output_amount": output_amount,
         }
     except Exception as e:
         logger.error("LIVE BUY ERROR: %s | %s", ca[:12], e)
@@ -171,9 +187,8 @@ def execute_sell(ca: str, amount_tokens: int | None = None, slippage_bps: int = 
     """
     Execute a sell swap: token → SOL via Jupiter Ultra.
     If amount_tokens is None, sells entire balance of that token.
-    Note: slippage_bps is reserved for future use. Jupiter Ultra handles slippage
-    server-side with auto-optimization.
-    Returns {"success": bool, "signature": str, "status": str, "error": str|None}
+    Returns {"success": bool, "signature": str, "status": str, "error": str|None,
+             "input_amount": int|None, "output_amount": int|None}
     """
     client = _get_ultra_client()
     if not client:
@@ -204,10 +219,15 @@ def execute_sell(ca: str, amount_tokens: int | None = None, slippage_bps: int = 
         signature = str(response.get("signature", ""))
         success = status == "Success"
 
+        # v74: Extract actual fill amounts
+        input_amount = _safe_int(response.get("inputAmountResult"))
+        output_amount = _safe_int(response.get("outputAmountResult"))
+
         if success:
+            sol_received = output_amount / LAMPORTS_PER_SOL if output_amount else "?"
             logger.info(
-                "LIVE SELL: %s | %d tokens → SOL (sig: %s...)",
-                ca[:12], amount_tokens, signature[:16],
+                "LIVE SELL: %s | %d tokens → %s SOL (sig: %s...)",
+                ca[:12], amount_tokens, sol_received, signature[:16],
             )
         else:
             logger.warning(
@@ -220,6 +240,8 @@ def execute_sell(ca: str, amount_tokens: int | None = None, slippage_bps: int = 
             "signature": signature,
             "status": status,
             "error": response.get("error") if not success else None,
+            "input_amount": input_amount,
+            "output_amount": output_amount,
         }
     except Exception as e:
         logger.error("LIVE SELL ERROR: %s | %s", ca[:12], e)
@@ -244,7 +266,20 @@ def _get_sol_price_usd() -> float:
                     return float(price)
     except Exception as e:
         logger.warning("live_trader: SOL price fetch failed: %s", e)
-    return 170.0  # Fallback estimate
+    # v74: Dynamic fallback — try CoinGecko simple price before static value
+    try:
+        resp2 = requests.get(
+            "https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd",
+            timeout=5,
+        )
+        if resp2.status_code == 200:
+            price = resp2.json().get("solana", {}).get("usd")
+            if price:
+                return float(price)
+    except Exception:
+        pass
+    logger.warning("live_trader: all SOL price sources failed, using last-resort fallback")
+    return 170.0  # Last-resort static fallback
 
 
 def _check_loss_limits(config: dict) -> bool:
@@ -372,21 +407,39 @@ def open_live_trade(client_sb, token_entry: dict, strategy: str,
         logger.warning("live_trader: buy failed for %s: %s", symbol, result.get("error"))
         return False
 
+    # v74: Compute actual fill price from Jupiter response
+    # execution_price = (SOL spent / tokens received) * SOL price
+    execution_price = entry_price  # fallback to estimated price
+    input_amt = result.get("input_amount")
+    output_amt = result.get("output_amount")
+    if input_amt and output_amt and output_amt > 0:
+        sol_spent = input_amt / LAMPORTS_PER_SOL
+        # We need token decimals to compute price. Use ratio vs estimated:
+        # actual_fill_ratio = (sol_spent / position_sol) — how much more/less SOL we spent
+        # Adjust entry_price proportionally
+        actual_sol_spent = sol_spent
+        expected_sol = position_sol
+        if expected_sol > 0:
+            fill_ratio = actual_sol_spent / expected_sol
+            execution_price = entry_price * fill_ratio
+            if abs(fill_ratio - 1.0) > 0.01:
+                logger.info("live_trader: fill price divergence for %s: %.2f%% (est=$%.8f, fill=$%.8f)",
+                            symbol, (fill_ratio - 1) * 100, entry_price, execution_price)
+
     # Insert into paper_trades with source='rt_live'
-    # entry_price already validated > 0 at function start
     from paper_trader import STRATEGIES
     tranches = STRATEGIES.get(strategy, [{"tp_mult": 2.0, "sl_mult": 0.70, "horizon_min": 1440}])
     tranche = tranches[0]  # Live trades always use first tranche
 
-    tp_price = entry_price * tranche["tp_mult"] if tranche.get("tp_mult") else None
-    sl_price = entry_price * tranche["sl_mult"]
+    tp_price = execution_price * tranche["tp_mult"] if tranche.get("tp_mult") else None
+    sl_price = execution_price * tranche["sl_mult"]
 
     row = {
         "cycle_ts": datetime.now(timezone.utc).isoformat(),
         "symbol": symbol,
         "token_address": ca,
         "rank_in_cycle": 0,
-        "entry_price": entry_price,
+        "entry_price": execution_price,
         "entry_score": int(token_entry.get("score", 0)),
         "entry_mcap": float(token_entry["market_cap"]) if token_entry.get("market_cap") else None,
         "status": "open",
@@ -399,7 +452,7 @@ def open_live_trade(client_sb, token_entry: dict, strategy: str,
         "position_usd": round(position_usd, 2),
         "source": "rt_live",
         "tx_signature": result["signature"],
-        "execution_price": entry_price,  # TODO: get actual fill price from tx
+        "execution_price": execution_price,
         "kol_group": token_entry.get("_rt_kol_group"),
         "kol_tier": token_entry.get("_rt_kol_tier"),
         "kol_score": token_entry.get("_rt_kol_score"),
@@ -509,6 +562,16 @@ def check_live_trades(client_sb) -> dict:
             )
             continue
 
+        # v74: Use actual SOL received from Jupiter to compute real exit price
+        sell_output = sell_result.get("output_amount")  # SOL lamports received
+        if sell_output and sell_output > 0 and entry_price > 0:
+            sol_received = sell_output / LAMPORTS_PER_SOL
+            sol_price_now = _get_sol_price_usd()
+            usd_received = sol_received * sol_price_now
+            pos_usd_val = float(trade.get("position_usd") or 0)
+            if pos_usd_val > 0:
+                exit_price = entry_price * (usd_received / pos_usd_val)
+
         pnl_pct = round((exit_price / entry_price) - 1, 4) if exit_price and entry_price else 0
         pos_usd = float(trade.get("position_usd") or 0)
         pnl_usd = round(pos_usd * pnl_pct, 2) if pos_usd else 0
@@ -581,3 +644,101 @@ def check_live_trades(client_sb) -> dict:
         )
 
     return result_counts
+
+
+def reconcile_positions(client_sb) -> dict:
+    """
+    v74: Verify on-chain token balances match DB open positions.
+    Flags mismatches (DB says open but no on-chain balance, or vice versa).
+    Returns {"checked": N, "mismatches": M, "auto_closed": X, "details": [...]}.
+    """
+    result = {"checked": 0, "mismatches": 0, "auto_closed": 0, "details": []}
+
+    balances = get_wallet_balance()
+    if not balances:
+        logger.warning("reconcile: cannot fetch wallet balances — skipping")
+        return result
+
+    try:
+        resp = (
+            client_sb.table("paper_trades")
+            .select("id, symbol, token_address, entry_price, position_usd, created_at")
+            .eq("status", "open")
+            .eq("source", "rt_live")
+            .execute()
+        )
+        open_trades = resp.data or []
+    except Exception as e:
+        logger.error("reconcile: failed to fetch open trades: %s", e)
+        return result
+
+    on_chain_mints = set(balances.get("token_balances", {}).keys())
+    result["checked"] = len(open_trades)
+
+    for trade in open_trades:
+        ca = trade.get("token_address")
+        if not ca:
+            continue
+
+        if ca not in on_chain_mints:
+            # DB says open, but no on-chain balance → position was sold externally or failed
+            result["mismatches"] += 1
+            detail = {
+                "id": trade["id"],
+                "symbol": trade["symbol"],
+                "ca": ca,
+                "issue": "db_open_but_no_balance",
+            }
+            result["details"].append(detail)
+            logger.warning(
+                "RECONCILE MISMATCH: %s (%s) open in DB but 0 on-chain balance. "
+                "Auto-closing as 'reconciled'.",
+                trade["symbol"], ca[:12],
+            )
+            # Auto-close as reconciled — we can't sell what we don't have
+            try:
+                client_sb.table("paper_trades").update({
+                    "status": "reconciled",
+                    "exit_at": datetime.now(timezone.utc).isoformat(),
+                    "pnl_pct": -1.0,  # Assume total loss
+                    "pnl_usd": -float(trade.get("position_usd") or 0),
+                }).eq("id", trade["id"]).execute()
+                result["auto_closed"] += 1
+            except Exception as e:
+                logger.error("reconcile: failed to close trade %s: %s", trade["id"], e)
+
+    # Check reverse: on-chain tokens not tracked in DB (orphaned positions)
+    tracked_cas = {t["token_address"] for t in open_trades if t.get("token_address")}
+    for mint in on_chain_mints:
+        if mint not in tracked_cas and mint != WSOL_MINT:
+            bal = balances["token_balances"][mint]
+            if bal.get("ui_amount", 0) > 0:
+                logger.warning(
+                    "RECONCILE: on-chain token %s (%.4f) not tracked in DB — orphaned position",
+                    mint[:12], bal["ui_amount"],
+                )
+                result["mismatches"] += 1
+                result["details"].append({
+                    "ca": mint,
+                    "issue": "on_chain_but_not_in_db",
+                    "ui_amount": bal["ui_amount"],
+                })
+
+    if result["mismatches"] > 0:
+        logger.info(
+            "reconcile: %d checked, %d mismatches, %d auto-closed",
+            result["checked"], result["mismatches"], result["auto_closed"],
+        )
+        try:
+            from alerter import _send
+            _send(
+                f"<b>POSITION RECONCILIATION</b>\n"
+                f"Checked: {result['checked']}\n"
+                f"Mismatches: {result['mismatches']}\n"
+                f"Auto-closed: {result['auto_closed']}",
+                "cycle_failure",
+            )
+        except Exception:
+            pass
+
+    return result

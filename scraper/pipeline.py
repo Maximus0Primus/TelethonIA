@@ -755,19 +755,27 @@ def _load_ml_model(horizon: str = "12h"):
     p_at_5 = meta.get("metrics", {}).get("precision_at_5", 0)
     n_test = meta.get("metrics", {}).get("n_test", meta.get("n_test", 0))
     if meta.get("quality_gate") != "PASSED" or p_at_5 < _MIN_PRECISION_AT_5:
-        logger.warning(
-            "ML quality gate REJECTED: precision@5=%.3f (need >=%.2f), gate=%s. Using manual scores only.",
-            p_at_5, _MIN_PRECISION_AT_5, meta.get("quality_gate", "UNKNOWN"),
-        )
+        reason = (f"precision@5={p_at_5:.3f} (need >={_MIN_PRECISION_AT_5:.2f}), "
+                  f"gate={meta.get('quality_gate', 'UNKNOWN')}")
+        logger.warning("ML quality gate REJECTED: %s. Using manual scores only.", reason)
+        # v74: Telegram alert when ML disabled
+        try:
+            from alerter import alert_ml_disabled
+            alert_ml_disabled(reason, meta.get("horizon", ""))
+        except Exception:
+            pass
         return None, None, None, None, None
 
     # Refuse models trained on tiny test sets — statistically meaningless
     if n_test < 200:
-        logger.warning(
-            "ML DISABLED: model trained on only %d test samples (need >=200). "
-            "Collect more data before trusting ML scores.",
-            n_test,
-        )
+        reason = f"only {n_test} test samples (need >=200)"
+        logger.warning("ML DISABLED: %s. Collect more data before trusting ML scores.", reason)
+        # v74: Telegram alert when ML disabled
+        try:
+            from alerter import alert_ml_disabled
+            alert_ml_disabled(reason, meta.get("horizon", ""))
+        except Exception:
+            pass
         return None, None, None, None, None
 
     mode = meta.get("mode", "classification")

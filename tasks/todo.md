@@ -1,111 +1,95 @@
-# Pipeline Status — Updated Feb 28, 2026 (v73)
+# Pipeline Status — Updated Feb 28, 2026 (v74)
 
 ## Current State
 
-The pipeline is **production with real trading bot via Jupiter Ultra API**. v73 is an audit fix release addressing 15 issues causing -$264.40 total PnL. Key changes: broken dedup fixed, anti-predictive hype_pen disabled, ML overfitting reduced (139→48 Optuna params), slippage simulation added, weekly/monthly drawdown limits.
+v74 = robustness + completeness release. 16 fixes addressing P0 bugs, alerting gaps, compute waste, and structural improvements on top of v73 audit.
 
-### Live Config (Feb 28)
+### v74 Changes (16 Items)
 
-| Setting | Value |
-|---------|-------|
-| KOL filter | enabled, WR >= 60%, min 5 calls, return >= 1.5x |
-| Hybrid strategy | TP50_SL30 (60%) + TP100_SL30 (40%) |
-| Position sizing | bankroll mode, 7% Kelly of balance |
-| Starting capital | $100 |
-| Min/max position | $1 / $200 |
-| **Live trading** | **disabled** (flip to true after funding) |
-| Max position (SOL) | 0.5 SOL per trade |
-| Max open positions | 5 concurrent |
-| SOL reserve | 0.05 SOL (for fees) |
-| Daily loss limit | 2.0 SOL |
-| Weekly loss limit | 5.0 SOL (v73) |
-| Monthly loss limit | 10.0 SOL (v73) |
-| Buy slippage (paper) | 150 bps (1.5%) (v73) |
-| Sell slippage (paper) | 300 bps (3.0%) (v73) |
-| RugCheck | disabled by default (v73) |
-| Optuna params | ~48 (was ~139) (v73) |
-| KOL mention cap | 2 per (KOL, token) (v73) |
+#### P0 — Active Bugs Fixed
+- [x] **FIX 1**: Real Jupiter fill price — `execution_price` now computed from `inputAmountResult`/`outputAmountResult` in buy AND sell
+- [x] **FIX 2**: RT ML model wired — `_rt_ml_model` (LightGBM) now consulted in `_rt_on_new_message` to adjust position size
+- [x] **FIX 3**: Position reconciliation on startup — `reconcile_positions()` checks DB vs on-chain balance, auto-closes orphaned trades
 
----
+#### P1 — Missing Features
+- [x] **FIX 7**: model_kco.json — verified code handles absence gracefully (returns None), not dead code
 
-## v73 Audit Fixes (15 Issues) ✅
+#### P3 — Robustness & Alerting
+- [x] **FIX 12**: ML disabled alert — `alert_ml_disabled()` fires when quality gate fails (daily cooldown)
+- [x] **FIX 13**: rt_listener_down uncapped — `_MAX_ALERTS` set to 0 (unlimited) to prevent silent outages
+- [x] **FIX 14**: GH Actions failure alerts — all 4 workflows now have `if: failure()` step with `curl` to Telegram
+- [x] **FIX 15**: Write-ahead log — `_save_failed_write()` buffers failed Supabase writes to `failed_writes.jsonl`, `retry_failed_writes()` replays at cycle start
+- [x] **FIX 16**: DexPaprika daily budget — `_dexpaprika_budget_ok()` tracks 9K/day limit, skips when exhausted
+- [x] **FIX 17**: Dynamic SOL price fallback — CoinGecko simple price API as secondary source before $170 static
 
-### Phase 1: Infrastructure ✅
-- [x] **FIX 2**: ML Training Auto-Schedule — daily cron at 3am UTC
-- [x] **FIX 6**: Outcomes.yml — `continue-on-error` removed from steps 1-3
-- [x] **FIX 13**: Pin requirements.txt — all `==` exact versions
-- [x] **FIX 14**: ML Model Versioning — backup before overwrite + version field
-
-### Phase 2: Scoring Formula ✅
-- [x] **FIX 8**: Disable hype_pen (contradicts breadth 55% weight)
-- [x] **FIX 12**: Disable entry_drift_mult (95% empty data)
-- [x] **FIX 9**: Recalibrate activity_mult (softer penalty, 0.0/0.15/0.35)
-- [x] **FIX 15**: Expand BARE_WORD_SUSPECTS (+13 crypto slang words)
-
-### Phase 3: Optuna + KOL ✅
-- [x] **FIX 4**: Reduce Optuna ~139→~48 params (hardcode DB best for rest)
-- [x] **FIX 5**: KOL Whitelist Grid Search (WR × min_calls → Sharpe)
-
-### Phase 4: Pipeline Dedup ✅
-- [x] **FIX 1**: Per-KOL-Per-Token dedup cap (KOL_MENTION_CAP=2)
-
-### Phase 5: ML Calibration ✅
-- [x] **FIX 3**: Calibration leakage fix (70/30 train/cal split)
-
-### Phase 6: Trading Safety ✅
-- [x] **FIX 7**: Slippage simulation (buy 150bps, sell 300bps)
-- [x] **FIX 10**: Weekly/monthly drawdown limits (5/10 SOL defaults)
-- [x] **FIX 11**: Skip RugCheck (RUGCHECK_ENABLED=0 default)
+#### P4 — Structural Improvements
+- [x] **FIX 18**: Dynamic slippage — `liquidity_depth_score` scales buy slippage 1x-3x (deep→shallow liquidity)
+- [x] **FIX 19**: Optuna 2-phase — 40% coarse trials + 60% fine trials seeded with best, using same study
+- [x] **FIX 20**: SHAP persistence — `_persist_shap_to_db()` saves top 15 features to `scoring_config.ml_shap_history` (last 30)
+- [x] **FIX 21**: Daily summary cron — `daily-summary.yml` at 8am UTC, independent `daily_summary.py` module
+- [x] **FIX 22**: KOL attribution — `kol_attribution()` aggregates paper trade PnL by KOL, logs top/bottom performers
 
 ---
 
-## Post-Deploy Monitoring (v73)
+## Files Modified (v74)
 
-### Immediate (Day 1)
-- [ ] **Deploy to VPS** and verify logs: no crashes, no import errors
-- [ ] **Check GH Actions**: train-models.yml fires daily at 3am UTC
-- [ ] **Verify outcomes.yml**: steps 1-3 fail visibly when broken
-- [ ] **Score distributions**: hype_pen=1.0 should boost multi-KOL tokens
-- [ ] **Dedup impact**: spidersjournal flood tokens should drop in rank
-
-### Week 1
-- [ ] **Paper trade PnL**: expect ~4.5% drop from slippage (more realistic)
-- [ ] **KOL grid search results**: check scoring_config.kol_filter_config
-- [ ] **Optuna convergence**: 48 params should converge faster than 139
-- [ ] **ML calibration**: compare Brier scores with previous
-
----
-
-## Completed Work
-
-### v72 (Feb 27) — Real Trading Bot
-- [x] Jupiter Ultra API integration via `jup-python-sdk`
-- [x] `live_trader.py`: buy/sell, position management, daily loss limit
-- [x] 10s fast polling loop, Telegram alerts
-
-### v71 (Feb 27) — KOL WR Filter + Hybrid Strategy + Bankroll
-- [x] KOL whitelist, bankroll-based Kelly, hybrid 60/40
-
-### v34-v70 — See git history
+| File | Fixes | Changes |
+|------|-------|---------|
+| `scraper/live_trader.py` | 1, 3, 17 | Jupiter fill price, position reconciliation, CoinGecko SOL fallback |
+| `scraper/safe_scraper.py` | 2, 3, 15, 22 | RT ML model wiring, reconciliation at startup, write replay, KOL attribution |
+| `scraper/alerter.py` | 12, 13 | ML disabled alert, uncapped RT listener alerts |
+| `scraper/pipeline.py` | 12 | ML quality gate → Telegram alert |
+| `scraper/paper_trader.py` | 18, 22 | Dynamic slippage from LDS, KOL attribution function |
+| `scraper/push_to_supabase.py` | 15 | Write-ahead log + retry buffer |
+| `scraper/outcome_tracker.py` | 16 | DexPaprika daily budget counter |
+| `scraper/auto_backtest.py` | 19 | 2-phase Optuna optimization |
+| `scraper/train_model.py` | 20 | SHAP importance persistence to DB |
+| `scraper/daily_summary.py` | 21 | **NEW** standalone daily summary module |
+| `.github/workflows/scrape.yml` | 14 | Failure alert step |
+| `.github/workflows/outcomes.yml` | 14 | Failure alert step |
+| `.github/workflows/train-models.yml` | 14 | Failure alert step |
+| `.github/workflows/daily-summary.yml` | 21 | **NEW** daily summary workflow |
+| `.gitignore` | 15 | Add `failed_writes.jsonl` |
 
 ---
 
-## Known Limitations (low priority)
-- [ ] **narrative / narrative_is_hot** — Never implemented. Dead columns.
-- [ ] **Bubblemaps API** — Not using (too expensive).
-- [ ] **Labeling backlog (~9.7K snapshots)** — Limited by OHLCV API budget.
+## Still Pending (Lower Priority)
+
+### P1 — Not Yet Addressed
+- [ ] **Narrative/meta alignment** — Signal #1 in MemecoinGuide. Needs external data source (Twitter/CT trends API)
+- [ ] **Birdeye top N expansion** — `BIRDEYE_TOP_N = 20` means whale_new_entries NULL for 80%+ tokens. Need to increase to 50+ (costs CUs)
+- [ ] **Dashboard time-window selector** — Frontend always sends 7d. Need UI dropdown for 3h/6h/24h
+
+### P2 — Compute Optimization
+- [ ] **PA computation gated** — PA weight=0% but OHLCV still fetched. Gate on `SCORING_PARAMS["price_action"] > 0`
+- [ ] **gate_mult dead compute** — RugCheck/wash-trading still executed despite result always 1.0
+- [ ] **v53 features** — holder_turnover, kol_cooccurrence computed but excluded from ML (<6% fill)
 
 ---
 
-## Architecture Summary (v73)
+## v73 Audit Fixes (Complete) ✅
+
+All 15 v73 audit fixes deployed and verified. See git history for details.
+
+---
+
+## Architecture Summary (v74)
 
 ### Scoring Engine
 - **Weights:** 35/10/55/0 (consensus/conviction/breadth/PA)
-- **Multiplier chain:** 14 multipliers — hype_pen=1.0, entry_drift=1.0 (both disabled v73)
-- **Optuna:** ~48 search params (was ~139), walk-forward, hit-rate objective
+- **16-multiplier chain:** hype_pen=1.0, entry_drift=1.0 (both disabled v73)
+- **Optuna:** ~48 params, 2-phase search (v74), walk-forward
 - **KOL dedup:** max 2 mentions per (KOL, token) pair per cycle
 
 ### Trading Safety
-- **Paper slippage:** buy 1.5%, sell 3.0% (realistic memecoin spreads)
+- **Paper slippage:** dynamic from `liquidity_depth_score` (v74), base 150bps buy / 300bps sell
 - **Loss limits:** daily 2 SOL, weekly 5 SOL, monthly 10 SOL
-- **RugCheck:** disabled by default (save ~30s/cycle)
+- **Position reconciliation:** on-chain balance verified at startup (v74)
+- **Fill price:** real Jupiter amounts recorded (v74)
+
+### Alerting
+- ML disabled → Telegram (v74)
+- RT listener down → unlimited alerts (v74)
+- GH Actions failures → Telegram via curl (v74)
+- Failed writes → local buffer + retry (v74)
+- Daily summary → independent cron (v74)

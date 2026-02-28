@@ -1368,13 +1368,38 @@ async def _rt_on_new_message(event: events.NewMessage.Event):
             if kco_predicted_return is not None:
                 token_info["kco_predicted_return"] = kco_predicted_return
 
+            # v74: RT ML model — adjust position size based on predicted PnL
+            ml_tag = ""
+            if _rt_ml_model is not None:
+                try:
+                    from rt_model import predict_strategy_pnl
+                    hour = datetime.now(timezone.utc).hour
+                    preds = predict_strategy_pnl(
+                        _rt_ml_model, kol_info, token_info, tier, rt_score,
+                        n_confirmations=0, hour=hour,
+                    )
+                    # Average predicted PnL across strategies
+                    avg_pred = sum(preds.values()) / len(preds) if preds else 0
+                    if avg_pred > 0.02:
+                        pos_size = min(pos_size * 1.5, config.get("max_position_usd", 30))
+                        ml_tag = f" ml_pred=+{avg_pred:.1%}(boost)"
+                    elif avg_pred < -0.02:
+                        pos_size = max(pos_size * 0.5, config.get("min_position_usd", 1))
+                        ml_tag = f" ml_pred={avg_pred:.1%}(reduce)"
+                    else:
+                        ml_tag = f" ml_pred={avg_pred:.1%}"
+                    token_info["_rt_ml_pred"] = avg_pred
+                except Exception as e:
+                    logger.debug("RT ML prediction failed: %s", e)
+
             logger.info(
-                "RT score: %s rt_score=%.0f → pos=$%.2f | kol=%s(%.2f/%.0f%%) liq=$%.0fK bsr=%.2f%s",
+                "RT score: %s rt_score=%.0f → pos=$%.2f | kol=%s(%.2f/%.0f%%) liq=$%.0fK bsr=%.2f%s%s",
                 symbol, rt_score, pos_size, username,
                 kol_info.get("score", 0), kol_info.get("win_rate", 0) * 100,
                 token_info.get("liquidity_usd", 0) / 1000,
                 token_info.get("buy_sell_ratio", 0),
                 f" kco={kco_predicted_return:.2f}x" if kco_predicted_return else "",
+                ml_tag,
             )
 
             # Open trades across all strategies
@@ -1535,6 +1560,17 @@ async def run_one_cycle(client: TelegramClient, dump: bool = False,
     """Execute a single scrape-process-push cycle."""
     global _cycle_counter
     logger.info("=== Scrape cycle starting (cycle #%d) ===", _cycle_counter)
+
+    # v74: Replay any buffered failed writes from previous cycles
+    try:
+        from push_to_supabase import retry_failed_writes
+        replay = retry_failed_writes()
+        if replay.get("replayed", 0) > 0:
+            logger.info("Write buffer replay: %d/%d succeeded",
+                        replay["succeeded"], replay["replayed"])
+    except Exception as e:
+        logger.debug("Write buffer replay skipped: %s", e)
+
     messages_data = await scrape_groups(client)
 
     total_msgs = sum(len(v) for v in messages_data.values())
@@ -1565,6 +1601,9 @@ async def run_one_cycle(client: TelegramClient, dump: bool = False,
             summary = paper_trade_summary(sb_pt)
             if summary:
                 logger.info("paper_trader: %s", summary)
+            # v74: KOL attribution — aggregate paper trade PnL by KOL
+            from paper_trader import kol_attribution
+            kol_attribution(sb_pt, days=7)
         except Exception as e:
             logger.error("Paper trading (cycle-end) failed: %s", e)
 
@@ -1629,6 +1668,19 @@ async def main():
             logger.warning("RT: dialog/catch_up failed (non-fatal): %s", e)
     except Exception as e:
         logger.error("Failed to setup RT listener (batch mode continues): %s", e)
+
+    # v74: Position reconciliation on startup — verify DB vs on-chain balance
+    try:
+        from live_trader import reconcile_positions
+        sb_recon = _get_supabase()
+        if sb_recon:
+            recon = await asyncio.get_event_loop().run_in_executor(
+                None, reconcile_positions, sb_recon
+            )
+            if recon["mismatches"] > 0:
+                logger.warning("Startup reconciliation: %d mismatches found", recon["mismatches"])
+    except Exception as e:
+        logger.debug("Startup reconciliation skipped: %s", e)
 
     # v67: Send startup alert + launch monitor loop
     if _monitoring:
