@@ -1098,6 +1098,81 @@ def _rt_position_size(rt_score: float, kol_info: dict, token_info: dict,
     return round(max(min_pos, min(max_pos, size)), 2)
 
 
+def _rt_ml_position_mult(
+    username: str, tier: str,
+    kol_info: dict, token_info: dict,
+    rt_score: float, config: dict,
+) -> tuple[float, str]:
+    """v79: Unified ML position multiplier. Weighted blend of KCO (primary) + RT ML (secondary).
+
+    KCO has N=1,035 labeled calls → more reliable signal.
+    RT ML has N=~90 paper trades → smaller but strategy-specific.
+    Weights auto-updated every 2h by auto_backtest._compute_rt_ml_weights()
+    based on direction accuracy from paper_trades A/B data.
+
+    Returns (mult: float in [floor, cap], label: str for logging).
+    """
+    floor = float(config.get("rt_ml_mult_floor", 0.4))
+    cap   = float(config.get("rt_ml_mult_cap",   1.8))
+
+    # Load blend weights (auto-updated by auto_backtest every 2h)
+    w = SCORING_PARAMS.get("rt_ml_weights") or {}
+    kco_w  = float(w.get("kco_w",  0.7))
+    rtml_w = float(w.get("rtml_w", 0.3))
+
+    # --- KCO signal [-1, +1] ---
+    kco_signal = 0.0
+    kco_label  = ""
+    try:
+        from pipeline import predict_kco_score
+        kco_pred = predict_kco_score(username, tier, token_info)
+        if kco_pred is not None:
+            # 1.5x = neutral(0), 2.0x = +1, 1.0x = -1
+            kco_signal = max(-1.0, min(1.0, (kco_pred - 1.5) / 0.5))
+            kco_label  = f"kco={kco_pred:.2f}x"
+            token_info["_rt_kol_ml_pred"] = kco_pred  # → paper_trades.kol_ml_pred
+    except Exception as e:
+        logger.debug("KCO prediction unavailable: %s", e)
+        kco_w = 0.0  # fallback: all weight to RT ML
+
+    # --- RT ML signal [-1, +1] ---
+    rtml_signal = 0.0
+    rtml_label  = ""
+    if _rt_ml_model is not None:
+        try:
+            from rt_model import predict_strategy_pnl
+            hour  = datetime.now(timezone.utc).hour
+            preds = predict_strategy_pnl(
+                _rt_ml_model, kol_info, token_info, tier,
+                rt_score, n_confirmations=0, hour=hour,
+            )
+            avg_pred = sum(preds.values()) / len(preds) if preds else 0.0
+            # ±30% PnL maps to ±1 signal
+            rtml_signal = max(-1.0, min(1.0, avg_pred / 0.30))
+            rtml_label  = f"rtml={avg_pred:.1%}"
+            token_info["_rt_ml_pred"] = avg_pred
+        except Exception as e:
+            logger.debug("RT ML prediction failed: %s", e)
+            rtml_w = 0.0  # fallback: all weight to KCO
+
+    # Normalize weights (graceful degradation when one model unavailable)
+    total_w = kco_w + rtml_w
+    if total_w <= 0:
+        return 1.0, ""  # both unavailable → neutral
+
+    kco_w  /= total_w
+    rtml_w /= total_w
+
+    # Weighted blend → mult in [floor, cap]
+    signal = kco_w * kco_signal + rtml_w * rtml_signal
+    mult   = 1.0 + (cap - floor) / 2.0 * signal
+    mult   = round(max(floor, min(cap, mult)), 3)
+
+    label_parts = [p for p in [kco_label, rtml_label] if p]
+    label = " ".join(label_parts) + (f" blend={mult:.2f}x" if label_parts else "")
+    return mult, label
+
+
 def _rt_count_confirmations(kol: str, ca: str) -> int:
     """Count distinct other KOLs that traded the same CA within the last hour."""
     now = time.time()
@@ -1356,57 +1431,23 @@ async def _rt_on_new_message(event: events.NewMessage.Event):
             # Position sizing: confidence → dollars
             pos_size = _rt_position_size(rt_score, kol_info, token_info, tier, config)
 
-            # v70: KCO model prediction — augment RT score with ML-predicted return
-            kco_predicted_return = None
-            try:
-                from pipeline import predict_kco_score
-                kco_predicted_return = predict_kco_score(username, tier, token_info)
-                if kco_predicted_return is not None:
-                    # Adjust position size based on KCO prediction
-                    # >1.5x predicted → boost, <1.0x → reduce
-                    if kco_predicted_return >= 1.5:
-                        pos_size = min(pos_size * 1.3, config.get("max_position_usd", 30))
-                    elif kco_predicted_return < 1.0:
-                        pos_size = max(pos_size * 0.5, config.get("min_position_usd", 1))
-            except Exception as e:
-                logger.debug("KCO prediction unavailable: %s", e)
-
-            # Store KCO prediction in token_info for paper trade metadata
-            if kco_predicted_return is not None:
-                token_info["kco_predicted_return"] = kco_predicted_return
-
-            # v74: RT ML model — adjust position size based on predicted PnL
-            ml_tag = ""
-            if _rt_ml_model is not None:
-                try:
-                    from rt_model import predict_strategy_pnl
-                    hour = datetime.now(timezone.utc).hour
-                    preds = predict_strategy_pnl(
-                        _rt_ml_model, kol_info, token_info, tier, rt_score,
-                        n_confirmations=0, hour=hour,
-                    )
-                    # Average predicted PnL across strategies
-                    avg_pred = sum(preds.values()) / len(preds) if preds else 0
-                    if avg_pred > 0.02:
-                        pos_size = min(pos_size * 1.5, config.get("max_position_usd", 30))
-                        ml_tag = f" ml_pred=+{avg_pred:.1%}(boost)"
-                    elif avg_pred < -0.02:
-                        pos_size = max(pos_size * 0.5, config.get("min_position_usd", 1))
-                        ml_tag = f" ml_pred={avg_pred:.1%}(reduce)"
-                    else:
-                        ml_tag = f" ml_pred={avg_pred:.1%}"
-                    token_info["_rt_ml_pred"] = avg_pred
-                except Exception as e:
-                    logger.debug("RT ML prediction failed: %s", e)
+            # v79: Unified ML position multiplier (KCO primary + RT ML secondary)
+            ml_mult, ml_label = _rt_ml_position_mult(
+                username, tier, kol_info, token_info, rt_score, config
+            )
+            if ml_mult != 1.0:
+                pos_size = max(
+                    float(config.get("min_position_usd", 1)),
+                    min(pos_size * ml_mult, float(config.get("max_position_usd", 30))),
+                )
 
             logger.info(
-                "RT score: %s rt_score=%.0f → pos=$%.2f | kol=%s(%.2f/%.0f%%) liq=$%.0fK bsr=%.2f%s%s",
+                "RT score: %s rt_score=%.0f → pos=$%.2f | kol=%s(%.2f/%.0f%%) liq=$%.0fK bsr=%.2f%s",
                 symbol, rt_score, pos_size, username,
                 kol_info.get("score", 0), kol_info.get("win_rate", 0) * 100,
                 token_info.get("liquidity_usd", 0) / 1000,
                 token_info.get("buy_sell_ratio", 0),
-                f" kco={kco_predicted_return:.2f}x" if kco_predicted_return else "",
-                ml_tag,
+                f" {ml_label}" if ml_label else "",
             )
 
             # Open trades across all strategies

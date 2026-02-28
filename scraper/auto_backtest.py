@@ -20,7 +20,7 @@ import sys
 import json
 import math
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -5440,6 +5440,77 @@ def _optimize_kol_threshold(client) -> dict | None:
     return best_combo
 
 
+def _compute_rt_ml_weights(client) -> dict | None:
+    """v79: Compute KCO vs RT ML direction accuracy from paper_trades (last 30d).
+
+    Updates scoring_config.rt_ml_weights with proportional weights based on
+    which model's predictions actually correlated with profitable trades.
+    Only active once N >= 50 trades per model; falls back to 0.7/0.3 defaults.
+    """
+    try:
+        r = client.table("paper_trades").select(
+            "kol_ml_pred,ml_pred,pnl_usd"
+        ).eq("source", "rt").neq("status", "open").gte(
+            "created_at",
+            (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+        ).execute()
+        rows = r.data or []
+    except Exception as e:
+        logger.warning("rt_ml_weights: fetch failed: %s", e)
+        return None
+
+    kco_rows  = [row for row in rows if row.get("kol_ml_pred") is not None]
+    rtml_rows = [row for row in rows if row.get("ml_pred")      is not None]
+    n_kco     = len(kco_rows)
+    n_rtml    = len(rtml_rows)
+
+    def dir_acc(data, pred_key, threshold):
+        correct = sum(
+            1 for row in data
+            if (float(row[pred_key]) > threshold) == (float(row["pnl_usd"] or 0) > 0)
+        )
+        return correct / len(data) if data else 0.5
+
+    # Only trust accuracy when N >= 50 to avoid noise
+    kco_acc  = dir_acc(kco_rows,  "kol_ml_pred", 1.5) if n_kco  >= 50 else 0.5
+    rtml_acc = dir_acc(rtml_rows, "ml_pred",      0.0) if n_rtml >= 50 else 0.5
+
+    # Weight proportional to accuracy edge above random (50%)
+    kco_edge   = max(0.0, kco_acc  - 0.5)
+    rtml_edge  = max(0.0, rtml_acc - 0.5)
+    total_edge = kco_edge + rtml_edge
+
+    if total_edge > 0:
+        kco_w  = kco_edge  / total_edge
+        rtml_w = rtml_edge / total_edge
+    else:
+        kco_w, rtml_w = 0.7, 0.3  # fallback defaults
+
+    weights = {
+        "kco_w":      round(kco_w,   3),
+        "rtml_w":     round(rtml_w,  3),
+        "kco_acc":    round(kco_acc, 3),
+        "rtml_acc":   round(rtml_acc, 3),
+        "n_kco":      n_kco,
+        "n_rtml":     n_rtml,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    try:
+        client.table("scoring_config").update(
+            {"rt_ml_weights": weights}
+        ).eq("id", 1).execute()
+        logger.info(
+            "rt_ml_weights: kco_w=%.2f(acc=%.1f%%, N=%d) rtml_w=%.2f(acc=%.1f%%, N=%d)",
+            kco_w, kco_acc * 100, n_kco, rtml_w, rtml_acc * 100, n_rtml,
+        )
+    except Exception as e:
+        logger.warning("rt_ml_weights: update failed: %s", e)
+        return None
+
+    return weights
+
+
 def run_outcomes_pipeline(n_trials: int = 100) -> None:
     """
     v63: Combined entry point for Optuna + auto_backtest.
@@ -5494,6 +5565,12 @@ def run_outcomes_pipeline(n_trials: int = 100) -> None:
                         rt_result.get("direction_accuracy", 0) * 100)
     except Exception as e:
         logger.error("outcomes_pipeline: RT ML training failed: %s", e)
+
+    # Step 6 (v79): Compute optimal KCO/RT ML blend weights from paper_trades A/B
+    try:
+        _compute_rt_ml_weights(client)
+    except Exception as e:
+        logger.error("outcomes_pipeline: rt_ml_weights failed: %s", e)
 
 
 # ---------------------------------------------------------------------------
