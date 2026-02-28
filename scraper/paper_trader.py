@@ -7,6 +7,8 @@ Strategies run in parallel per token:
 - TP100_SL50:   100% at 2x,   -50% SL, 48h horizon (v6: wide SL to survive memecoin volatility)
 - FRESH_MICRO:  100% at 1.3x, -70% SL, 24h (score 10-49, fresh KOL, micro-cap)
 - QUICK_SCALP:  100% at 1.5x, ~no SL, 6h timeout (score 10-49, momentum)
+- TP30_SL30:    100% at 1.3x, -30% SL, 12h horizon (symmetric risk/reward, cuts losses early)
+- TP50_SL50:    100% at 1.5x, -50% SL, 24h horizon (symmetric risk/reward, room to recover)
 
 Deprecated (data shows negative EV — kept in code for backtesting, removed from active_strategies):
 - TP100_SL30:  -14% ROI live, 12% WR. Tight SL (-30%) too small for 2x target.
@@ -82,6 +84,14 @@ STRATEGIES = {
         # v68: SL widened 0.50→0.30 (-70% SL). 7d hold needs room to breathe — memecoins drop 50%+ intraday.
         {"pct": 0.80, "tp_mult": 2.00, "sl_mult": 0.30, "horizon_min": 10080, "label": "main"},
         {"pct": 0.20, "tp_mult": None, "sl_mult": 0.30, "horizon_min": 10080, "label": "moonbag"},
+    ],
+    "TP30_SL30": [
+        # v81: symmetric 30/30, 12h. Sim Feb 28: 50% WR, +$12.20. Cuts losses early vs TP30_SL50.
+        {"pct": 1.0, "tp_mult": 1.30, "sl_mult": 0.70, "horizon_min": 720, "label": "main"},
+    ],
+    "TP50_SL50": [
+        # v81: symmetric 50/50, 24h. Sim Feb 28: 40% WR, +$14.13. Room to recover vs TP50_SL30.
+        {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.50, "horizon_min": 1440, "label": "main"},
     ],
     "FRESH_MICRO": [
         # TP30/SL70/24h — data-driven: score 10-49 + fresh KOL + momentum > 1 + mcap < 5M
