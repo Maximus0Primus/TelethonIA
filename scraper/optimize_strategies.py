@@ -53,7 +53,7 @@ HORIZONS = [1, 6, 12, 24]
 # Columns to fetch
 FETCH_COLUMNS = ",".join([
     "id", "symbol", "token_address", "price_at_snapshot", "market_cap",
-    "kol_freshness", "momentum_mult", "score", "mention_velocity",
+    "kol_freshness", "momentum_mult", "score_at_snapshot", "mention_velocity",
     "volume_velocity", "token_age_hours", "snapshot_at",
     "max_price_1h", "min_price_1h", "price_after_1h",
     "max_price_6h", "min_price_6h", "price_after_6h",
