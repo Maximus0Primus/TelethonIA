@@ -1,17 +1,18 @@
 """
-Paper Trading System v5 — Multi-strategy with tranche support + portfolio allocation.
+Paper Trading System v6 — Multi-strategy with tranche support + portfolio allocation.
 
 Strategies run in parallel per token:
-- TP30_SL50:   100% at 1.3x, -50% SL, 12h horizon (backtest best: +8.5% EV, 61% WR, PF 1.51)
-- TP50_SL30:   100% at 1.5x, -30% SL, 24h horizon (RT best: +$0.20 EV on top KOLs)
-- TP100_SL30:  100% at 2x,   -30% SL, 24h horizon (highest absolute EV: +$0.34 on top KOLs)
-- SCALE_OUT:   25% tranches at 2x/3x/5x + moonbag, -50% SL, 48h horizon
-- FRESH_MICRO: 100% at 1.3x, -70% SL, 24h (score 10-49, fresh KOL, micro-cap)
-- QUICK_SCALP: 100% at 1.5x, ~no SL, 6h timeout (score 10-49, momentum)
+- TP30_SL50:    100% at 1.3x, -50% SL, 12h horizon (backtest best: +8.5% EV, 61% WR, PF 1.51)
+- TP50_SL30:    100% at 1.5x, -30% SL, 24h horizon (RT best 7d: +8% ROI, 50% WR)
+- TP100_SL50:   100% at 2x,   -50% SL, 48h horizon (v6: wide SL to survive memecoin volatility)
+- FRESH_MICRO:  100% at 1.3x, -70% SL, 24h (score 10-49, fresh KOL, micro-cap)
+- QUICK_SCALP:  100% at 1.5x, ~no SL, 6h timeout (score 10-49, momentum)
 
 Deprecated (data shows negative EV — kept in code for backtesting, removed from active_strategies):
-- MOONBAG:     -21.9% ROI live, 16.4% WR.
-- WIDE_RUNNER: -31.1% ROI live, 0% WR in RT.
+- TP100_SL30:  -14% ROI live, 12% WR. Tight SL (-30%) too small for 2x target.
+- MOONBAG:     -45.6% ROI live, 8% WR.
+- WIDE_RUNNER: -70.4% ROI live, 0% WR in RT.
+- SCALE_OUT:   -29% ROI live, 6% WR.
 
 Each tranche = 1 row in paper_trades. SL triggers close ALL open tranches
 for the same token+strategy. Moonbag tranches (tp_price=NULL) only close
@@ -62,7 +63,13 @@ STRATEGIES = {
         {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.70, "horizon_min": 1440, "label": "main"},
     ],
     "TP100_SL30": [
+        # Deprecated: 12% WR, -14% ROI. SL -30% too tight for 2x target. Kept for backtesting.
         {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.70, "horizon_min": 1440, "label": "main"},
+    ],
+    "TP100_SL50": [
+        # v6: TP at 2x, SL at -50%, 48h horizon. Wide SL gives room for memecoin volatility.
+        # TP50_SL30 sibling but targets bigger gains with more patience.
+        {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.50, "horizon_min": 2880, "label": "main"},
     ],
     "SCALE_OUT": [
         # v68: SL widened 0.70→0.50 (-50% SL). Was 82% SL hit rate at -30% — too tight for 48h hold.
