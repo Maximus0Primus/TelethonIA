@@ -63,11 +63,21 @@ FETCH_COLUMNS = ",".join([
 ])
 
 
-def fetch_snapshots() -> list[dict]:
-    """Fetch all usable snapshots with OHLCV data from Supabase."""
-    sb = create_client(SUPABASE_URL, SUPABASE_KEY)
-    logger.info("Fetching snapshots with OHLCV data...")
+def fetch_snapshots(top_n_per_cycle: int = 5) -> list[dict]:
+    """
+    Fetch snapshots that simulate paper trader selection.
 
+    Uses a SQL query to rank tokens by score within each hourly cycle
+    and return only the top N — matching what the paper trader would actually
+    trade. This avoids the bias of optimizing on all 23K+ snapshots (most of
+    which are untradeable shitcoins).
+    """
+    sb = create_client(SUPABASE_URL, SUPABASE_KEY)
+    logger.info(f"Fetching top-{top_n_per_cycle} snapshots per cycle (simulating paper trader)...")
+
+    # Use RPC or direct SQL via the REST API with a view
+    # Since we can't run raw SQL through supabase-py easily, we fetch all scored
+    # snapshots and do the ranking in Python
     all_rows = []
     page_size = 1000
     offset = 0
@@ -80,6 +90,8 @@ def fetch_snapshots() -> list[dict]:
             .gt("price_at_snapshot", 0)
             .not_.is_("max_price_1h", "null")
             .not_.is_("min_price_1h", "null")
+            .not_.is_("score_at_snapshot", "null")
+            .gt("score_at_snapshot", 0)
             .order("snapshot_at", desc=True)
             .range(offset, offset + page_size - 1)
             .execute()
@@ -92,8 +104,42 @@ def fetch_snapshots() -> list[dict]:
         if len(rows) < page_size:
             break
 
-    logger.info(f"Fetched {len(all_rows)} usable snapshots")
-    return all_rows
+    logger.info(f"Fetched {len(all_rows)} scored snapshots, selecting top {top_n_per_cycle}/cycle...")
+
+    # Group by hourly cycle and pick top N by score
+    from collections import defaultdict
+    cycles = defaultdict(list)
+    for row in all_rows:
+        # Group by hour
+        ts = row.get("snapshot_at", "")[:13]  # "2026-02-28T12"
+        cycles[ts].append(row)
+
+    # Select top N per cycle, with 24h token dedup
+    selected = []
+    recent_tokens = {}  # token_address -> last_selected_ts
+
+    for cycle_ts in sorted(cycles.keys()):
+        cycle_snaps = cycles[cycle_ts]
+        # Sort by score descending
+        cycle_snaps.sort(key=lambda x: float(x.get("score_at_snapshot") or 0), reverse=True)
+
+        picked = 0
+        for snap in cycle_snaps:
+            if picked >= top_n_per_cycle:
+                break
+            addr = snap.get("token_address")
+            if not addr:
+                continue
+            # 24h dedup check
+            last_ts = recent_tokens.get(addr)
+            if last_ts and cycle_ts < last_ts:
+                continue
+            selected.append(snap)
+            recent_tokens[addr] = cycle_ts[:10] + "T" + str(int(cycle_ts[11:13]) + 24).zfill(2) if len(cycle_ts) > 11 else cycle_ts
+            picked += 1
+
+    logger.info(f"Selected {len(selected)} snapshots after top-{top_n_per_cycle} + 24h dedup")
+    return selected
 
 
 def simulate_trade(snap: dict, tp_pct: float, sl_pct: float, horizon_h: int) -> dict:
