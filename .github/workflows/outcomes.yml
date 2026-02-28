@@ -2,9 +2,9 @@ name: Fill Outcome Labels
 
 on:
   schedule:
-    # Every 60 min — jobs take 35-55min, 60min gives buffer before next trigger.
-    # cancel-in-progress: true means stuck runs (>60min) get killed by the next one.
-    - cron: '0 * * * *'
+    # Every 2h — jobs take 35-80min. 2h gives enough buffer that runs don't cancel each other.
+    # cancel-in-progress: true kills stuck runs (>2h) but lets normal ones finish.
+    - cron: '0 */2 * * *'
   workflow_dispatch: {} # Manual trigger
 
 concurrency:
