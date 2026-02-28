@@ -132,6 +132,32 @@ certifiedprintor (62%), DegenSeals (61%), eveesL (60%), legerlegends (60%)...
 
 ---
 
+## Bankroll Compound — Config (Feb 28, 2026)
+
+**Capital départ : $100. Mode bankroll activé (v77b).**
+
+```
+sizing.mode          = "bankroll"
+kelly_fraction       = 0.10   → pos = bankroll × 10%
+max_position_usd     = 175    → cap 1 SOL
+min_position_usd     = 1.0
+```
+
+**Progression théorique à 62% WR, 20 calls/jour :**
+| Bankroll | Pos/call | PnL/jour | Temps depuis départ |
+|----------|----------|----------|---------------------|
+| $100     | $10      | ~$35     | J0                  |
+| $250     | $25      | ~$88     | ~J5                 |
+| $500     | $50      | ~$175    | ~J8                 |
+| $1 000   | $100     | ~$350    | ~J11                |
+| $1 750   | **$175 (cap)** | ~$490 | **~J14**        |
+
+**Une fois le cap atteint :** ~$400-500/jour (simulation path-indépendante). Réaliste avec path dependency : **$250-350/jour**.
+
+WR multipliers dans le code :
+- KOL WR ≥ 80% → pos ×1.5 | ≥ 70% → ×1.2 | ≥ 60% → ×1.0
+- RT score 0→0.7x, 100→1.3x
+
 ## Idées à tester / backlog
 
 - [ ] **Monte Carlo avec path simulation** : Modéliser le chemin prix (GBM) pour avoir une vraie proba de SL avant TP
