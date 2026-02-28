@@ -670,7 +670,8 @@ RT_BANKROLL_TTL = 60          # 1min
 
 
 def _rt_load_kol_whitelist(config: dict) -> dict:
-    """v71: Load KOL whitelist based on historical WR from kol_call_outcomes. Cached 1h."""
+    """v77: Load KOL whitelist based on historical WR from kol_call_outcomes.
+    Rolling window (lookback_days) instead of all-time. Cached 1h."""
     global _rt_kol_whitelist, _rt_kol_whitelist_loaded_at
     now = time.time()
     if _rt_kol_whitelist and now - _rt_kol_whitelist_loaded_at < RT_KOL_WHITELIST_TTL:
@@ -680,18 +681,21 @@ def _rt_load_kol_whitelist(config: dict) -> dict:
     wr_threshold = float(kf.get("wr_threshold", 0.60))
     return_threshold = float(kf.get("return_threshold", 1.5))
     min_calls = int(kf.get("min_calls", 5))
+    lookback_days = int(kf.get("lookback_days", 30))
 
     try:
         sb = _get_supabase()
         if not sb:
             return _rt_kol_whitelist
-        # Fetch all KCO rows with a max_return value
+        from datetime import datetime, timezone, timedelta
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=lookback_days)).isoformat()
+        # Fetch KCO rows within rolling window
         result = sb.table("kol_call_outcomes").select(
             "kol_group, max_return"
-        ).filter("max_return", "not.is", "null").execute()
+        ).filter("max_return", "not.is", "null").gte("created_at", cutoff).execute()
         rows = result.data or []
         if not rows:
-            logger.warning("RT KOL whitelist: no KCO rows with max_return")
+            logger.warning("RT KOL whitelist: no KCO rows with max_return in last %dd", lookback_days)
             return _rt_kol_whitelist
 
         # Aggregate by kol_group
@@ -719,8 +723,9 @@ def _rt_load_kol_whitelist(config: dict) -> dict:
 
         _rt_kol_whitelist = whitelist
         _rt_kol_whitelist_loaded_at = now
-        logger.info("RT KOL whitelist: %d/%d approved (wr>=%.0f%%, calls>=%d, ret>=%.1fx)",
-                     approved_count, len(whitelist), wr_threshold * 100, min_calls, return_threshold)
+        logger.info("RT KOL whitelist: %d/%d approved (wr>=%.0f%%, calls>=%d, ret>=%.1fx, last %dd)",
+                     approved_count, len(whitelist), wr_threshold * 100, min_calls, return_threshold,
+                     lookback_days)
     except Exception as e:
         logger.warning("RT KOL whitelist load failed: %s", e)
     return _rt_kol_whitelist
