@@ -72,6 +72,19 @@ jobs:
         working-directory: scraper
         run: python -c "from outcome_tracker import fill_kol_outcomes; fill_kol_outcomes()"
 
+      # v78: KOL ML model training — trains on kol_call_outcomes + token_snapshots join.
+      # Non-destructive: separate model (model_kco.*), does not touch general ML model.
+      # Deploys to scoring_config.kol_ml_meta → pipeline applies as kol_ml_mult multiplier.
+      - name: Train KOL ML model
+        id: train_kol
+        continue-on-error: true
+        timeout-minutes: 10
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        working-directory: scraper
+        run: python -c "from train_model import train_kol_model; train_kol_model()"
+
       # v63: Combined Optuna + auto_backtest in single pipeline to share DataFrame.
       # Fetches snapshots ONCE instead of twice → saves ~400MB egress per run.
       - name: Run Optuna + auto-backtest pipeline
@@ -94,6 +107,7 @@ jobs:
           echo "| Fill outcomes | ${{ steps.fill_outcomes.outcome }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Backfill bot data | ${{ steps.backfill.outcome }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Fill KOL outcomes | ${{ steps.fill_kol.outcome }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Train KOL ML | ${{ steps.train_kol.outcome }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Optuna + Backtest | ${{ steps.optuna_backtest.outcome }} |" >> $GITHUB_STEP_SUMMARY
 
       # v74: Telegram alert on critical step failure

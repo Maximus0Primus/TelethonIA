@@ -1161,6 +1161,89 @@ def _apply_ml_scores(ranking: list[dict]) -> None:
         logger.warning("ML scoring failed: %s — keeping manual scores", e)
 
 
+def _apply_kol_ml_scores(ranking: list[dict]) -> None:
+    """
+    v78: KCO model as multiplier — applied ONLY to tokens with an active whitelist KOL call.
+    Tokens without whitelist KOL (best_kol_win_rate < threshold) get kol_ml_mult=1.0 (no impact).
+
+    Uses predict_kco_score() to get expected max_return per token+KOL combo.
+    Converts predictions to percentile ranks within the whitelist subset → multiplier [floor, cap].
+
+    Non-destructive: if model unavailable or token has no whitelist KOL → score unchanged.
+    """
+    kol_ml_floor = SCORING_PARAMS.get("kol_ml_mult_floor", 0.7)
+    kol_ml_cap = SCORING_PARAMS.get("kol_ml_mult_cap", 1.4)
+    kol_wr_threshold = 0.60  # same as RT whitelist threshold
+
+    # Check if KCO model is available
+    xgb_model, lgb_model, features, meta = _load_kco_model()
+    model_available = (xgb_model is not None or lgb_model is not None) and bool(features)
+
+    if not model_available:
+        for token in ranking:
+            token["kol_ml_mult"] = 1.0
+        return
+
+    # Collect predictions for whitelist-KOL tokens only
+    whitelist_indices = []
+    raw_predictions = []
+
+    for i, token in enumerate(ranking):
+        best_kol_wr = float(token.get("best_kol_win_rate") or 0)
+        if best_kol_wr < kol_wr_threshold:
+            token["kol_ml_mult"] = 1.0
+            continue
+
+        # Build token_features for predict_kco_score()
+        # KOL identity features — mapped from available token fields
+        token_features = {
+            **token,
+            # KOL rolling stats (approximate from stored fields)
+            "kol_historical_hit_rate": best_kol_wr,
+            "kol_total_prior_calls": float(token.get("best_kol_total_calls") or 10),
+            "kol_avg_prior_return": 1.5,   # neutral default — not stored
+            "kol_recency_days": 0.0,       # just called = very recent
+            # Context
+            "n_prior_kols_on_token": float(token.get("unique_kols") or 1),
+            "hours_since_token_first_seen": float(token.get("token_age_hours") or 0),
+            "snapshot_gap_hours": 0.0,     # current snapshot
+        }
+
+        # top_kols is a list — use first entry as kol_group label (for debug logging only)
+        top_kols = token.get("top_kols") or []
+        kol_group = top_kols[0] if isinstance(top_kols, list) and top_kols else "unknown"
+        kol_tier = "S" if (token.get("s_tier_count") or 0) > 0 else "A"
+
+        pred_return = predict_kco_score(kol_group, kol_tier, token_features)
+        if pred_return is None:
+            token["kol_ml_mult"] = 1.0
+            continue
+
+        whitelist_indices.append(i)
+        raw_predictions.append(pred_return)
+
+    if not raw_predictions:
+        return
+
+    # Convert to percentile ranks within the whitelist subset → [floor, cap]
+    from scipy.stats import rankdata
+    ranks = rankdata(raw_predictions) / len(raw_predictions)   # 0..1
+    multipliers = kol_ml_floor + ranks * (kol_ml_cap - kol_ml_floor)
+
+    for wi, mult in zip(whitelist_indices, multipliers):
+        token = ranking[wi]
+        mult = float(np.clip(mult, kol_ml_floor, kol_ml_cap))
+        token["kol_ml_mult"] = round(mult, 3)
+        token["score"] = min(100, max(0, int(token["score"] * mult)))
+        token["score_conviction"] = min(100, max(0, int((token.get("score_conviction") or 0) * mult)))
+        token["score_momentum"] = min(100, max(0, int((token.get("score_momentum") or 0) * mult)))
+
+    logger.info(
+        "v78: KCO ML multiplier applied to %d whitelist-KOL tokens [%.2f - %.2f]",
+        len(raw_predictions), float(min(multipliers)), float(max(multipliers)),
+    )
+
+
 # === PUBLIC API ===
 
 def extract_tokens(
@@ -2251,6 +2334,9 @@ _DEFAULT_SCORING_PARAMS = {
     # v44: ML multiplier bounds (widened from [0.5,1.5])
     "ml_mult_floor": 0.3,
     "ml_mult_cap": 2.0,
+    # v78: KOL ML multiplier bounds (applied ONLY to whitelist-KOL tokens)
+    "kol_ml_mult_floor": 0.7,
+    "kol_ml_mult_cap": 1.4,
     # v44: Scoring mode — formula (default), hybrid, ml_primary
     "scoring_mode": "formula",
     # v45: Full multiplier chain optimization — 6 new JSONB configs
@@ -3936,6 +4022,10 @@ def aggregate_ranking(
     # In "hybrid" mode, formula score is blended with ML score (handled in _apply_ml_scores)
     # In "ml_primary" mode, ML provides ranking, formula provides safety guardrails only
     # Note: "formula" mode = current behavior (ML as multiplier on formula score)
+
+    # v78: KOL-conditional ML multiplier — only activates for whitelist-KOL tokens
+    # Non-destructive: kol_ml_mult=1.0 for tokens without whitelist KOL call
+    _apply_kol_ml_scores(ranking)
 
     # === v26: Market context features (regime + relative positioning) ===
     # Computed AFTER all individual scoring, BEFORE final sort.

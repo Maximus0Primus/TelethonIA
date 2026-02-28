@@ -2690,7 +2690,63 @@ def train_kco_model(
         json.dump(metadata, f, indent=2)
     logger.info("KCO metadata saved to %s (gate=%s)", meta_path, gate)
 
+    # v78: Deploy metadata to scoring_config.kol_ml_meta for monitoring
+    if gate == "PASSED":
+        _deploy_kco_meta(metadata)
+
     return metadata
+
+
+def _deploy_kco_meta(metadata: dict) -> None:
+    """v78: Write KCO model metadata to scoring_config.kol_ml_meta for pipeline monitoring."""
+    try:
+        client = _get_client()
+        if not client:
+            return
+        deploy_meta = {
+            "status": "deployed",
+            "version": metadata.get("trained_at", "unknown"),
+            "trained_at": metadata.get("trained_at"),
+            "n_train": metadata.get("train_samples"),
+            "n_test": metadata.get("test_samples"),
+            "n_winners": metadata.get("n_winners"),
+            "threshold": metadata.get("threshold", 1.5),
+            "precision_at_5": metadata.get("metrics", {}).get("precision_at_5"),
+            "spearman": metadata.get("metrics", {}).get("spearman"),
+            "quality_gate": metadata.get("quality_gate"),
+            "features": metadata.get("features", []),
+            "feature_importances": dict(list(metadata.get("feature_importances", {}).items())[:10]),
+        }
+        client.table("scoring_config").update(
+            {"kol_ml_meta": deploy_meta}
+        ).eq("id", 1).execute()
+        logger.info("v78: KCO metadata deployed to scoring_config.kol_ml_meta (p@5=%.3f)",
+                    deploy_meta.get("precision_at_5", 0))
+    except Exception as e:
+        logger.warning("v78: Failed to deploy KCO meta to DB: %s", e)
+
+
+def train_kol_model(threshold: float = 1.5, n_trials: int = 50, min_samples: int = 50) -> dict | None:
+    """
+    v78: Public entry point for KOL-conditional ML training.
+    Trains on kol_call_outcomes + token_snapshots join, deploys to scoring_config.kol_ml_meta.
+    Called by GH Actions every 2h (outcomes.yml) to continuously improve the KOL ML multiplier.
+
+    Non-destructive: does NOT touch the general ML model (model_*.json/lgb.txt).
+    Output: model_kco.json + model_kco_lgb.txt + model_kco_meta.json
+    """
+    logger.info("=== train_kol_model: loading KCO training data (threshold=%.1fx) ===", threshold)
+    df = load_kco_training_data(threshold=threshold)
+    if df.empty:
+        logger.warning("train_kol_model: no training data — skipping")
+        return None
+    logger.info("train_kol_model: %d samples loaded, training KCO model...", len(df))
+    result = train_kco_model(df, threshold=threshold, n_trials=n_trials, min_samples=min_samples)
+    if result:
+        gate = result.get("quality_gate", "FAILED")
+        p5 = result.get("metrics", {}).get("precision_at_5", 0)
+        logger.info("train_kol_model: done — gate=%s, p@5=%.3f", gate, p5)
+    return result
 
 
 def auto_train(
