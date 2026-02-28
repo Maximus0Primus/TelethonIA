@@ -98,8 +98,8 @@ STRATEGIES = {
         {"pct": 1.0, "tp_mult": 1.30, "sl_mult": 0.30, "horizon_min": 1440, "label": "main"},
     ],
     "QUICK_SCALP": [
-        # TP50/no real SL/6h timeout — ride the fast pump or timeout
-        {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.05, "horizon_min": 360, "label": "main"},
+        # v81: TP30/SL15/6h — tight SL for fast scalps. Was TP50/SL95 (no real SL = dumb).
+        {"pct": 1.0, "tp_mult": 1.30, "sl_mult": 0.85, "horizon_min": 360, "label": "main"},
     ],
     "WIDE_RUNNER": [
         # TP100/SL70/48h — patient 2x with wide SL
