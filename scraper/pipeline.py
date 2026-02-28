@@ -753,7 +753,7 @@ def _load_ml_model(horizon: str = "12h"):
 
     # Quality gate check
     p_at_5 = meta.get("metrics", {}).get("precision_at_5", 0)
-    n_test = meta.get("metrics", {}).get("n_test", meta.get("n_test", 0))
+    n_test = meta.get("test_samples", meta.get("metrics", {}).get("n_test", 0))
     if meta.get("quality_gate") != "PASSED" or p_at_5 < _MIN_PRECISION_AT_5:
         reason = (f"precision@5={p_at_5:.3f} (need >={_MIN_PRECISION_AT_5:.2f}), "
                   f"gate={meta.get('quality_gate', 'UNKNOWN')}")
