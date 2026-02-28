@@ -36,6 +36,9 @@ _COOLDOWNS = {
     "live_trade": 0,               # No cooldown — alert every live trade execution
     "ml_disabled": 86400,          # v74: Once per day if ML quality gate failed
     "gh_actions_failure": 3600,    # v74: 1 hour cooldown
+    "api_health_warning":  3600,   # v80: 1h between warnings (degraded 70-50%)
+    "api_health_critical": 1800,   # v80: 30min between critiques (<50%)
+    "api_health_ok":       7200,   # v80: 2h between "recovered" alerts
 }
 
 # Max consecutive alerts before going silent (0 = unlimited)
@@ -210,6 +213,37 @@ def alert_live_trade(symbol: str, action: str, amount_sol: float, signature: str
         f"<a href=\"{solscan_link}\">View on Solscan</a>"
     )
     _send(text, "live_trade")
+
+
+def alert_api_health(fill_rates: dict, total: int) -> None:
+    """v80: Alert when API fill rates drop — called every 15min cycle.
+
+    fill_rates: {api_name: fill_pct} where 0-100.
+    Birdeye is reported as % of expected fill (top-N only), not absolute.
+    """
+    degraded = {api: pct for api, pct in fill_rates.items() if pct < 85}
+    if not degraded:
+        reset_alert("api_health_warning")
+        reset_alert("api_health_critical")
+        return
+
+    critical = {api: pct for api, pct in degraded.items() if pct < 50}
+    category = "api_health_critical" if critical else "api_health_warning"
+    level    = "🚨 CRITIQUE"        if critical else "⚠️ DÉGRADÉ"
+
+    lines = "\n".join(f"• {api.upper()}: {pct}%" for api, pct in sorted(degraded.items()))
+    hints = []
+    if "helius"  in degraded: hints.append("helius.dev/dashboard")
+    if "birdeye" in degraded: hints.append("birdeye.so")
+    hint_str = " | ".join(hints)
+
+    text = (
+        f"<b>API HEALTH {level}</b>\n"
+        f"{lines}\n"
+        f"Sur {total} tokens ce cycle"
+        + (f"\n💡 Crédits: {hint_str}" if hint_str else "")
+    )
+    _send(text, category)
 
 
 def alert_ml_disabled(reason: str, horizon: str = ""):

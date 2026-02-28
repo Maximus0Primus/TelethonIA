@@ -392,6 +392,32 @@ def _fetch_sol_price() -> float | None:
     return None
 
 
+def _check_api_health(tokens: list) -> None:
+    """v80: Check fill rates for all enrichment APIs after each cycle. Alert if degraded."""
+    if not tokens:
+        return
+    total = len(tokens)
+
+    fill_rates = {
+        "dexscreener": round(sum(1 for t in tokens if t.get("price_usd")           is not None) / total * 100),
+        "helius":      round(sum(1 for t in tokens if t.get("whale_count")          is not None) / total * 100),
+        "jupiter":     round(sum(1 for t in tokens if t.get("jup_tradeable")        is not None) / total * 100),
+    }
+
+    # Birdeye: only top-N tokens enriched — report as % of expected, not absolute
+    try:
+        from enrich import BIRDEYE_TOP_N
+        bird_expected = min(BIRDEYE_TOP_N, total) / total
+        bird_actual   = sum(1 for t in tokens if t.get("holder_count") is not None) / total
+        if bird_expected > 0:
+            fill_rates["birdeye"] = round(bird_actual / bird_expected * 100)
+    except Exception:
+        pass
+
+    from alerter import alert_api_health
+    alert_api_health(fill_rates, total)
+
+
 def process_and_push(messages_data: dict[str, list[dict]], dump: bool = False,
                      cycle_num: int = 0, once_mode: bool = False) -> None:
     """Run the pipeline and push results to Supabase.
@@ -469,6 +495,11 @@ def process_and_push(messages_data: dict[str, list[dict]], dump: bool = False,
         insert_snapshots(all_24h)
         logger.info("Inserted %d snapshots (24h): %d penalized",
                      len(all_24h), penalized_24h)
+        # v80: Proactive API health check
+        try:
+            _check_api_health(all_24h)
+        except Exception as e:
+            logger.debug("api health check failed: %s", e)
 
     # Also insert snapshots for 7d window (covers tokens not in 24h)
     all_7d = all_enriched_by_window.get("7d", [])
@@ -1431,6 +1462,15 @@ async def _rt_on_new_message(event: events.NewMessage.Event):
             # Position sizing: confidence → dollars
             pos_size = _rt_position_size(rt_score, kol_info, token_info, tier, config)
 
+            # v80: Multi-KOL confirmation position boost
+            n_confs = _rt_count_confirmations(username, ca)
+            if n_confs >= 2:
+                pos_size = min(pos_size * 1.5, float(config.get("max_position_usd", 30)))
+            elif n_confs == 1:
+                pos_size = min(pos_size * 1.3, float(config.get("max_position_usd", 30)))
+            if n_confs > 0:
+                token_info["_rt_n_kol_confirmations"] = n_confs
+
             # v79: Unified ML position multiplier (KCO primary + RT ML secondary)
             ml_mult, ml_label = _rt_ml_position_mult(
                 username, tier, kol_info, token_info, rt_score, config
@@ -1442,11 +1482,12 @@ async def _rt_on_new_message(event: events.NewMessage.Event):
                 )
 
             logger.info(
-                "RT score: %s rt_score=%.0f → pos=$%.2f | kol=%s(%.2f/%.0f%%) liq=$%.0fK bsr=%.2f%s",
+                "RT score: %s rt_score=%.0f → pos=$%.2f | kol=%s(%.2f/%.0f%%) liq=$%.0fK bsr=%.2f%s%s",
                 symbol, rt_score, pos_size, username,
                 kol_info.get("score", 0), kol_info.get("win_rate", 0) * 100,
                 token_info.get("liquidity_usd", 0) / 1000,
                 token_info.get("buy_sell_ratio", 0),
+                f" confs={n_confs}" if n_confs else "",
                 f" {ml_label}" if ml_label else "",
             )
 
