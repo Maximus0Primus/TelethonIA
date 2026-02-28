@@ -1,7 +1,8 @@
 """
-v75: Standalone daily summary — runs from GH Actions cron.
-Adds: API health (whale/helius fill rates), per-strategy breakdown, RT vs Batch split,
-      alerts when critical APIs are down.
+v76: Standalone daily summary — runs from GH Actions cron.
+Two-message report:
+  Msg 1: Alerts + 24h overview + per-strategy table (WR, PnL, ROI, avg pos, TP/SL)
+  Msg 2: 7-day strategy simulation + per-day PnL table
 """
 
 import os
@@ -14,9 +15,88 @@ from supabase import create_client
 
 logger = logging.getLogger(__name__)
 
+# Strategies known to be deprecated (legacy positions still closing)
+LEGACY_STRATEGIES = {"MOONBAG", "WIDE_RUNNER", "SCALE_OUT"}
+
+
+def _send_telegram(bot_token: str, chat_id: str, text: str) -> bool:
+    try:
+        resp = requests.post(
+            f"https://api.telegram.org/bot{bot_token}/sendMessage",
+            json={
+                "chat_id": chat_id,
+                "text": text,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+            },
+            timeout=10,
+        )
+        return resp.status_code == 200
+    except Exception as e:
+        logger.error("Telegram send failed: %s", e)
+        return False
+
+
+def _strat_row(strat: str, st: dict) -> str:
+    n = st["n"]
+    tp = st["tp"]
+    sl = st["sl"]
+    to = st["to"]
+    pnl = st["pnl"]
+    invested = st["invested"]
+    avg_pos = st["avg_pos"]
+    wr = round(tp / n * 100) if n else 0
+    roi = round(pnl / invested * 100, 1) if invested > 0 else 0.0
+    sign = "📈" if pnl >= 0 else "📉"
+    tag = " [leg]" if strat in LEGACY_STRATEGIES else ""
+    return (
+        f"  {sign} <b>{strat}{tag}</b>: {n}t "
+        f"WR {wr}% TP {tp}/SL {sl}/TO {to} "
+        f"${pnl:+.0f}/${invested:.0f} ({avg_pos:.0f}$/t ROI {roi:+.1f}%)"
+    )
+
+
+def _aggregate(trades: list[dict]) -> dict:
+    """Per-strategy stats."""
+    strats: dict = defaultdict(lambda: {
+        "n": 0, "tp": 0, "sl": 0, "to": 0,
+        "pnl": 0.0, "invested": 0.0, "avg_pos": 0.0,
+    })
+    for t in trades:
+        s = t.get("strategy", "?")
+        pos = float(t.get("position_usd") or 0)
+        pnl = float(t.get("pnl_usd") or 0)
+        strats[s]["n"] += 1
+        strats[s]["pnl"] += pnl
+        strats[s]["invested"] += pos
+        st = t.get("status", "")
+        if st == "tp_hit":
+            strats[s]["tp"] += 1
+        elif st == "sl_hit":
+            strats[s]["sl"] += 1
+        elif st == "timeout":
+            strats[s]["to"] += 1
+    for s, d in strats.items():
+        d["avg_pos"] = d["invested"] / d["n"] if d["n"] else 0
+    return strats
+
+
+def _source_line(source: str, trades: list[dict]) -> str:
+    sub = [t for t in trades if t.get("source") == source]
+    if not sub:
+        return ""
+    n = len(sub)
+    tp = sum(1 for t in sub if t.get("status") == "tp_hit")
+    pnl = sum(float(t.get("pnl_usd") or 0) for t in sub)
+    inv = sum(float(t.get("position_usd") or 0) for t in sub)
+    wr = round(tp / n * 100)
+    roi = round(pnl / inv * 100, 1) if inv > 0 else 0
+    sign = "📈" if pnl >= 0 else "📉"
+    return f"  {source.upper()}: {n}t WR {wr}% {sign} ${pnl:+.0f}/${inv:.0f} (ROI {roi:+.1f}%)"
+
 
 def send_summary():
-    """Query Supabase for 24h stats and send Telegram summary."""
+    """Query Supabase for 24h + 7d stats and send two Telegram messages."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
     url = os.environ.get("SUPABASE_URL")
@@ -33,26 +113,28 @@ def send_summary():
 
     client = create_client(url, key)
     now = datetime.now(timezone.utc)
-    yesterday = (now - timedelta(hours=24)).isoformat()
+    h24_ago = (now - timedelta(hours=24)).isoformat()
+    d7_ago = (now - timedelta(days=7)).isoformat()
 
-    # ── 1. Snapshots count + API health (sample 500 rows, representative) ──
-    n_snapshots = "?"
-    whale_fill_pct = "?"
-    helius_fill_pct = "?"
-    avg_score = "?"
+    # ── API health ──
     api_alerts = []
+    whale_fill_pct: str | int = "?"
+    helius_fill_pct: str | int = "?"
+    avg_score: str | float = "?"
+    n_snapshots: str | int = "?"
+    n_mentions: str | int = "?"
+
     try:
-        count_result = client.table("token_snapshots").select(
-            "id", count="exact"
-        ).gte("snapshot_at", yesterday).limit(1).execute()
-        n_snapshots = count_result.count or 0
-    except Exception as e:
-        logger.warning("Snapshot count failed: %s", e)
+        r = client.table("token_snapshots").select("id", count="exact").gte(
+            "snapshot_at", h24_ago).limit(1).execute()
+        n_snapshots = r.count or 0
+    except Exception:
+        pass
 
     try:
         sample = client.table("token_snapshots").select(
             "whale_count,helius_holder_count,score_at_snapshot"
-        ).gte("snapshot_at", yesterday).limit(500).execute()
+        ).gte("snapshot_at", h24_ago).limit(500).execute()
         rows = sample.data or []
         if rows:
             has_whale = sum(1 for r in rows if r.get("whale_count") is not None)
@@ -62,110 +144,66 @@ def send_summary():
             whale_fill_pct = round(has_whale / len(rows) * 100)
             helius_fill_pct = round(has_helius / len(rows) * 100)
             avg_score = round(sum(scores) / len(scores), 1) if scores else "?"
-            if whale_fill_pct < 50:
+            if isinstance(whale_fill_pct, int) and whale_fill_pct < 50:
                 api_alerts.append(
-                    f"🚨 HELIUS API DOWN — whale_count fill: {whale_fill_pct}%"
-                    " (scores blind, check helius.dev credits)"
+                    f"🚨 HELIUS DOWN — whale fill {whale_fill_pct}% (check helius.dev credits)"
                 )
-            if helius_fill_pct < 50:
+            if isinstance(helius_fill_pct, int) and helius_fill_pct < 50:
                 api_alerts.append(
-                    f"🚨 BIRDEYE/HELIUS DOWN — holder fill: {helius_fill_pct}%"
+                    f"🚨 BIRDEYE/HELIUS DOWN — holder fill {helius_fill_pct}%"
                 )
     except Exception as e:
         logger.warning("API health sample failed: %s", e)
 
-    # ── 2. Paper trades opened today ──
-    n_opened = "?"
-    n_open = "?"
     try:
-        opened = client.table("paper_trades").select(
-            "id", count="exact"
-        ).gte("created_at", yesterday).limit(1).execute()
-        n_opened = opened.count or 0
+        r = client.table("kol_mentions").select("id", count="exact").gte(
+            "created_at", h24_ago).limit(1).execute()
+        n_mentions = r.count or 0
     except Exception:
         pass
 
+    # ── Trade counts ──
+    n_opened: str | int = "?"
+    n_open: str | int = "?"
     try:
-        open_result = client.table("paper_trades").select(
-            "id", count="exact"
-        ).eq("status", "open").limit(1).execute()
-        n_open = open_result.count or 0
+        r = client.table("paper_trades").select("id", count="exact").gte(
+            "created_at", h24_ago).limit(1).execute()
+        n_opened = r.count or 0
+    except Exception:
+        pass
+    try:
+        r = client.table("paper_trades").select("id", count="exact").eq(
+            "status", "open").limit(1).execute()
+        n_open = r.count or 0
     except Exception:
         pass
 
-    # ── 3. Closed trades in last 24h (full fetch for aggregation) ──
-    closed_trades = []
+    # ── Fetch 7d closed trades ──
+    trades_7d: list[dict] = []
     try:
-        closed = client.table("paper_trades").select(
-            "pnl_usd,status,strategy,source"
-        ).neq("status", "open").gte("exit_at", yesterday).execute()
-        closed_trades = closed.data or []
+        r = client.table("paper_trades").select(
+            "pnl_usd,status,strategy,source,position_usd,created_at,exit_at"
+        ).neq("status", "open").gte("created_at", d7_ago).execute()
+        trades_7d = r.data or []
     except Exception as e:
-        logger.warning("Closed trades query failed: %s", e)
+        logger.warning("7d trades fetch failed: %s", e)
 
-    n_closed = len(closed_trades)
-    pnl_total = sum(float(t.get("pnl_usd") or 0) for t in closed_trades)
-    tp_count = sum(1 for t in closed_trades if t.get("status") == "tp_hit")
-    sl_count = sum(1 for t in closed_trades if t.get("status") == "sl_hit")
-    to_count = sum(1 for t in closed_trades if t.get("status") == "timeout")
-    wr = tp_count / n_closed * 100 if n_closed > 0 else 0
+    trades_24h = [t for t in trades_7d if t.get("exit_at") and t["exit_at"] >= h24_ago]
 
-    # Per-source: RT vs Batch
-    def _source_stats(source):
-        trades = [t for t in closed_trades if t.get("source") == source]
-        if not trades:
-            return None
-        n = len(trades)
-        tp = sum(1 for t in trades if t.get("status") == "tp_hit")
-        pnl = sum(float(t.get("pnl_usd") or 0) for t in trades)
-        return {"n": n, "wr": round(tp / n * 100), "pnl": pnl}
+    strats_24h = _aggregate(trades_24h)
+    strats_7d = _aggregate(trades_7d)
 
-    rt_stats = _source_stats("rt")
-    batch_stats = _source_stats("batch")
+    # ── 24h totals ──
+    n_closed = len(trades_24h)
+    pnl_24h = sum(float(t.get("pnl_usd") or 0) for t in trades_24h)
+    tp_24h = sum(1 for t in trades_24h if t.get("status") == "tp_hit")
+    sl_24h = sum(1 for t in trades_24h if t.get("status") == "sl_hit")
+    to_24h = sum(1 for t in trades_24h if t.get("status") == "timeout")
+    invested_24h = sum(float(t.get("position_usd") or 0) for t in trades_24h)
+    wr_24h = round(tp_24h / n_closed * 100) if n_closed else 0
+    roi_24h = round(pnl_24h / invested_24h * 100, 1) if invested_24h > 0 else 0
 
-    # Per-strategy breakdown (sorted by PnL desc)
-    strat_stats = defaultdict(lambda: {"n": 0, "tp": 0, "sl": 0, "pnl": 0.0})
-    for t in closed_trades:
-        s = t.get("strategy", "?")
-        strat_stats[s]["n"] += 1
-        strat_stats[s]["pnl"] += float(t.get("pnl_usd") or 0)
-        if t.get("status") == "tp_hit":
-            strat_stats[s]["tp"] += 1
-        elif t.get("status") == "sl_hit":
-            strat_stats[s]["sl"] += 1
-
-    strat_lines = []
-    for strat, st in sorted(strat_stats.items(), key=lambda x: x[1]["pnl"], reverse=True):
-        wr_s = round(st["tp"] / st["n"] * 100) if st["n"] else 0
-        sign = "📈" if st["pnl"] >= 0 else "📉"
-        strat_lines.append(
-            f"  {sign} {strat}: {st['n']} | WR {wr_s}% | ${st['pnl']:+.0f}"
-        )
-
-    # ── 4. Live trades ──
-    n_live = 0
-    live_pnl = 0.0
-    try:
-        live = client.table("paper_trades").select(
-            "pnl_usd,status"
-        ).eq("source", "rt_live").neq("status", "open").gte("exit_at", yesterday).execute()
-        live_trades = live.data or []
-        n_live = len(live_trades)
-        live_pnl = sum(float(t.get("pnl_usd") or 0) for t in live_trades)
-    except Exception:
-        pass
-
-    # ── 5. KOL mentions ──
-    n_mentions = "?"
-    try:
-        mentions = client.table("kol_mentions").select(
-            "id", count="exact"
-        ).gte("created_at", yesterday).limit(1).execute()
-        n_mentions = mentions.count or 0
-    except Exception:
-        pass
-
-    # ── 6. ML status ──
+    # ── ML status ──
     ml_status = "unknown"
     try:
         ml = client.table("scoring_config").select(
@@ -180,58 +218,83 @@ def send_summary():
     except Exception:
         pass
 
-    # ── Build message ──
-    pnl_emoji = "📈" if pnl_total >= 0 else "📉"
-    alert_block = ("\n\n" + "\n".join(api_alerts)) if api_alerts else ""
+    # ── Message 1: 24h ──
+    alert_block = ("\n" + "\n".join(api_alerts) + "\n") if api_alerts else ""
+    pnl_emoji = "📈" if pnl_24h >= 0 else "📉"
 
-    rt_line = (
-        f"\n  RT:    {rt_stats['n']} trades | WR {rt_stats['wr']}% | ${rt_stats['pnl']:+.0f}"
-        if rt_stats else ""
-    )
-    batch_line = (
-        f"\n  Batch: {batch_stats['n']} trades | WR {batch_stats['wr']}% | ${batch_stats['pnl']:+.0f}"
-        if batch_stats else ""
-    )
-    strat_block = (
-        "\n\n<b>Strategies (24h):</b>\n" + "\n".join(strat_lines)
-        if strat_lines else ""
-    )
+    strat_rows_24h = [
+        _strat_row(s, strats_24h[s])
+        for s in sorted(strats_24h, key=lambda x: strats_24h[x]["pnl"], reverse=True)
+    ]
+    rt_line = _source_line("rt", trades_24h)
+    batch_line = _source_line("batch", trades_24h)
 
-    text = (
-        f"<b>DAILY SUMMARY</b> — {now.strftime('%Y-%m-%d %H:%M UTC')}"
-        f"{alert_block}\n"
-        f"\n<b>Data Quality:</b>\n"
-        f"  Snapshots: {n_snapshots} | KOL mentions: {n_mentions}\n"
-        f"  Avg score: {avg_score}/100\n"
-        f"  Whale fill: {whale_fill_pct}% | Holder fill: {helius_fill_pct}%\n"
-        f"\n<b>Paper Trades (24h):</b>\n"
-        f"  Opened: {n_opened} | Closed: {n_closed} | Open: {n_open}\n"
-        f"  TP: {tp_count} | SL: {sl_count} | Timeout: {to_count}\n"
-        f"  WR: {wr:.0f}% | {pnl_emoji} PnL: ${pnl_total:+.2f}"
-        f"{rt_line}"
-        f"{batch_line}"
-        f"{strat_block}\n"
-        f"\n<b>Live Trades (24h):</b> {n_live} closed | PnL: ${live_pnl:+.2f}\n"
-        f"\n<b>ML:</b> {ml_status}"
+    msg1 = (
+        f"<b>📊 DAILY SUMMARY</b> — {now.strftime('%Y-%m-%d %H:%M UTC')}"
+        f"\n{alert_block}"
+        f"\n<b>Data Quality:</b>"
+        f"\n  Snapshots: {n_snapshots} | Mentions: {n_mentions}"
+        f"\n  Score moy: {avg_score}/100 | Whale: {whale_fill_pct}% | Holder: {helius_fill_pct}%"
+        f"\n\n<b>Trades 24h:</b>"
+        f"\n  Ouvert: {n_opened} | Fermé: {n_closed} | Open: {n_open}"
+        f"\n  TP: {tp_24h} | SL: {sl_24h} | Timeout: {to_24h}"
+        f"\n  WR: {wr_24h}% | {pnl_emoji} PnL: ${pnl_24h:+.2f}/${invested_24h:.0f} (ROI {roi_24h:+.1f}%)"
+        + (f"\n{rt_line}" if rt_line else "")
+        + (f"\n{batch_line}" if batch_line else "")
+        + "\n\n<b>Stratégies 24h:</b>\n"
+        + "\n".join(strat_rows_24h)
+        + f"\n\n<b>ML:</b> {ml_status}"
     )
 
-    try:
-        resp = requests.post(
-            f"https://api.telegram.org/bot{bot_token}/sendMessage",
-            json={
-                "chat_id": chat_id,
-                "text": text,
-                "parse_mode": "HTML",
-                "disable_web_page_preview": True,
-            },
-            timeout=10,
+    # ── Message 2: 7-day ──
+    strat_rows_7d = [
+        _strat_row(s, strats_7d[s])
+        for s in sorted(strats_7d, key=lambda x: strats_7d[x]["pnl"], reverse=True)
+    ]
+
+    # Daily PnL table
+    daily_pnl: dict[str, float] = defaultdict(float)
+    daily_inv: dict[str, float] = defaultdict(float)
+    for t in trades_7d:
+        if t.get("exit_at"):
+            day = t["exit_at"][:10]
+            daily_pnl[day] += float(t.get("pnl_usd") or 0)
+            daily_inv[day] += float(t.get("position_usd") or 0)
+
+    daily_lines = []
+    cumul = 0.0
+    for day in sorted(daily_pnl):
+        p = daily_pnl[day]
+        inv = daily_inv[day]
+        cumul += p
+        roi_d = round(p / inv * 100, 1) if inv > 0 else 0
+        sign = "📈" if p >= 0 else "📉"
+        daily_lines.append(
+            f"  {day}: {sign} ${p:+.0f}/${inv:.0f} "
+            f"(ROI {roi_d:+.1f}%) cumul ${cumul:+.0f}"
         )
-        if resp.status_code == 200:
-            logger.info("Daily summary sent successfully")
-        else:
-            logger.error("Daily summary failed: HTTP %d", resp.status_code)
-    except Exception as e:
-        logger.error("Daily summary send failed: %s", e)
+
+    total_7d_pnl = sum(daily_pnl.values())
+    total_7d_inv = sum(daily_inv.values())
+    total_7d_roi = round(total_7d_pnl / total_7d_inv * 100, 1) if total_7d_inv > 0 else 0
+    emoji_7d = "📈" if total_7d_pnl >= 0 else "📉"
+
+    msg2 = (
+        f"<b>📅 SIMULATION 7 JOURS</b> — au {now.strftime('%Y-%m-%d')}"
+        f"\n\n<b>Stratégies 7j:</b>\n"
+        + "\n".join(strat_rows_7d)
+        + f"\n\n<b>PnL journalier:</b>\n"
+        + "\n".join(daily_lines)
+        + f"\n\n<b>Total 7j:</b> {len(trades_7d)}t | "
+        + f"{emoji_7d} ${total_7d_pnl:+.0f}/${total_7d_inv:.0f} (ROI {total_7d_roi:+.1f}%)"
+    )
+
+    ok1 = _send_telegram(bot_token, chat_id, msg1)
+    ok2 = _send_telegram(bot_token, chat_id, msg2)
+    if ok1 and ok2:
+        logger.info("Daily summary sent (2 messages)")
+    else:
+        logger.error("Daily summary partial failure: msg1=%s msg2=%s", ok1, ok2)
 
 
 if __name__ == "__main__":
