@@ -154,7 +154,7 @@ export function KolLeaderboard() {
           {
             label: wrThreshold === "2x" ? "Avg WR 2x"
               : wrThreshold === "50" ? "Avg WR +50%"
-              : "Avg WR",
+              : "Avg WR > 0%",
             value:
               withWinRate.length > 0
                 ? `${(avgWinRate * 100).toFixed(0)}%`
@@ -223,7 +223,7 @@ export function KolLeaderboard() {
                     : "bg-white/5 text-white/40 hover:text-white/60"
                 )}
               >
-                WR
+                {"> 0%"}
               </button>
               <button
                 onClick={() => setWrThreshold("50")}

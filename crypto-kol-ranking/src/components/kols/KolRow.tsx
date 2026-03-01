@@ -123,7 +123,7 @@ export function KolRow({ kol, rank, index, mode, wrThreshold }: KolRowProps) {
   if (isPaper) {
     winRate = wrThreshold === "50" ? kol.rtWr50 : kol.rtWr;
     altWr = wrThreshold === "50" ? kol.rtWr : kol.rtWr50;
-    altLabel = wrThreshold === "50" ? "WR" : "+50%";
+    altLabel = wrThreshold === "50" ? ">0%" : "+50%";
   } else {
     winRate = wrThreshold === "2x" ? (kol.winRate2xExact ?? kol.winRateAll) : kol.winRate1_5xExact;
     altWr = wrThreshold === "2x" ? kol.winRate1_5xExact : (kol.winRate2xExact ?? kol.winRateAll);
