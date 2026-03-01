@@ -4,7 +4,7 @@ import type { Metadata } from "next";
 export const metadata: Metadata = {
   title: "KOL Leaderboard | Cryptosensus",
   description:
-    "Track the performance of 59 crypto KOLs. See win rates, call accuracy, and tier rankings updated in real-time.",
+    "Track the performance of 62 crypto KOLs. See win rates, call accuracy, and tier rankings updated in real-time.",
 };
 
 export default function KolsPage() {
@@ -15,7 +15,7 @@ export default function KolsPage() {
           KOL Leaderboard
         </h1>
         <p className="text-sm text-white/40">
-          Performance tracking for 59 monitored Telegram KOLs
+          Performance tracking for 62 monitored Telegram KOLs
         </p>
       </div>
 

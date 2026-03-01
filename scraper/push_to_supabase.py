@@ -967,6 +967,8 @@ def insert_snapshots(ranking: list[dict]) -> None:
             "recency_weighted_score_vel": deltas.get("recency_weighted_score_vel"),
             # v54: ML calibrated win probability
             "ml_win_probability": t.get("ml_win_probability"),
+            # v83: ML ensemble multiplier
+            "ml_multiplier": t.get("ml_multiplier"),
             # v44: Raw activity ratio for Optuna re-scoring
             "activity_ratio_raw": t.get("activity_ratio_raw"),
             # v25: Message-level text features

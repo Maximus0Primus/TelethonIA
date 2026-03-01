@@ -197,7 +197,7 @@ export async function GET(request: Request) {
       }
     }
 
-    // Merge all 59 KOLs (even those with no snapshots)
+    // Merge all 62 KOLs (even those with no snapshots)
     const entries: KolLeaderboardEntry[] = Object.entries(KOL_TIERS).map(
       ([name, tierInfo]) => {
         const rpc = rpcMap.get(name);
