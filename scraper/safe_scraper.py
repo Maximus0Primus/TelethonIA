@@ -1476,24 +1476,33 @@ async def _rt_on_new_message(event: events.NewMessage.Event):
     tier = GROUPS_TIER.get(username, "A")
     kol_info = kol_scores.get(username, {"score": 0.0, "win_rate": 0.0, "total_calls": 0})
 
-    # v82: KOL WR gate — only trade KOLs with proven paper trade win rate
+    # v82: KOL WR gate — probation mode for new KOLs, block proven losers
     kol_filter_cfg = config.get("kol_filter", {})
+    _rt_probation_mult = 1.0  # position size multiplier (reduced for probation KOLs)
     if kol_filter_cfg.get("enabled", False):
         whitelist = _rt_load_kol_whitelist(config)
         if whitelist:  # only apply gate when whitelist is actually populated
             kol_wl = whitelist.get(username)
+            min_calls = int(kol_filter_cfg.get("min_calls", 3))
+            wr_threshold = float(kol_filter_cfg.get("wr_threshold", 0.40))
+
             if kol_wl and kol_wl.get("approved"):
-                # Enrich kol_info with real paper trade win rate
-                kol_info = dict(kol_info)  # don't mutate cached dict
+                # Approved KOL — full position, enrich with real WR
+                kol_info = dict(kol_info)
                 kol_info["win_rate"] = kol_wl["wr"]
                 kol_info["total_calls"] = kol_wl["total"]
-            else:
-                if kol_wl:
-                    wr_str = f" wr={kol_wl['wr']:.0%}/{kol_wl['total']}trades pnl=${kol_wl.get('pnl', 0):.0f}"
-                else:
-                    wr_str = " (no paper trade data)"
-                logger.info("RT SKIP (KOL WR): %s%s", username, wr_str)
+            elif kol_wl and kol_wl.get("total", 0) >= min_calls:
+                # Enough data but bad WR — BLOCK
+                wr_str = f" wr={kol_wl['wr']:.0%}/{kol_wl['total']}trades pnl=${kol_wl.get('pnl', 0):.0f}"
+                logger.info("RT SKIP (KOL blacklisted): %s%s", username, wr_str)
                 return
+            else:
+                # Not enough data — PROBATION MODE (reduced position to gather data)
+                probation_pct = float(kol_filter_cfg.get("probation_mult", 0.30))
+                _rt_probation_mult = probation_pct
+                n_trades = kol_wl["total"] if kol_wl else 0
+                logger.info("RT PROBATION: %s (%d/%d trades, pos=%.0f%%) — gathering data",
+                            username, n_trades, min_calls, probation_pct * 100)
 
     for symbol, source, ca in tokens:
         if not ca:
@@ -1554,14 +1563,20 @@ async def _rt_on_new_message(event: events.NewMessage.Event):
                     min(pos_size * ml_mult, float(config.get("max_position_usd", 30))),
                 )
 
+            # v82: Probation mode — reduce position for unproven KOLs
+            if _rt_probation_mult < 1.0:
+                pos_size = max(float(config.get("min_position_usd", 1)),
+                               pos_size * _rt_probation_mult)
+
             logger.info(
-                "RT score: %s rt_score=%.0f → pos=$%.2f | kol=%s(%.2f/%.0f%%) liq=$%.0fK bsr=%.2f%s%s",
+                "RT score: %s rt_score=%.0f → pos=$%.2f | kol=%s(%.2f/%.0f%%) liq=$%.0fK bsr=%.2f%s%s%s",
                 symbol, rt_score, pos_size, username,
                 kol_info.get("score", 0), kol_info.get("win_rate", 0) * 100,
                 token_info.get("liquidity_usd", 0) / 1000,
                 token_info.get("buy_sell_ratio", 0),
                 f" confs={n_confs}" if n_confs else "",
                 f" {ml_label}" if ml_label else "",
+                f" PROBATION({_rt_probation_mult:.0%})" if _rt_probation_mult < 1.0 else "",
             )
 
             # Open trades across all strategies
