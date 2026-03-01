@@ -7,6 +7,7 @@ Strategies run in parallel per token:
 - TP100_SL50:   100% at 2x,   -50% SL, 48h horizon (v6: wide SL to survive memecoin volatility)
 - FRESH_MICRO:  100% at 1.3x, -70% SL, 24h (score 10-49, fresh KOL, micro-cap)
 - QUICK_SCALP:  100% at 1.5x, ~no SL, 6h timeout (score 10-49, momentum)
+- TP50_SL15:    100% at 1.5x, -15% SL, 24h horizon (tight SL, best EV on KOL-filtered tokens)
 - TP30_SL30:    100% at 1.3x, -30% SL, 12h horizon (symmetric risk/reward, cuts losses early)
 - TP50_SL50:    100% at 1.5x, -50% SL, 24h horizon (symmetric risk/reward, room to recover)
 
@@ -84,6 +85,11 @@ STRATEGIES = {
         # v68: SL widened 0.50→0.30 (-70% SL). 7d hold needs room to breathe — memecoins drop 50%+ intraday.
         {"pct": 0.80, "tp_mult": 2.00, "sl_mult": 0.30, "horizon_min": 10080, "label": "main"},
         {"pct": 0.20, "tp_mult": None, "sl_mult": 0.30, "horizon_min": 10080, "label": "moonbag"},
+    ],
+    "TP50_SL15": [
+        # v82: tight SL for KOL-filtered tokens. Feb 28 sim: +$10.50 vs SL30 +$6.00 on 4 trades.
+        # Limits losses to -$2.25 on dumps vs -$4.50 with SL30. TP50 still hits on pumps.
+        {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.85, "horizon_min": 1440, "label": "main"},
     ],
     "TP30_SL30": [
         # v81: symmetric 30/30, 12h. Sim Feb 28: 50% WR, +$12.20. Cuts losses early vs TP30_SL50.
@@ -872,4 +878,91 @@ def kol_attribution(client, days: int = 7) -> dict:
             logger.info("  BOT: %s (%s) — %d trades, WR=%.0f%%, PnL=$%+.2f",
                          kol, stats["tier"], stats["total"], stats["wr"]*100, stats["pnl_usd"])
 
+    # v82 P2-2: Closed-loop — feed attribution back into kol_rt_whitelist
+    _update_whitelist_from_attribution(client, attribution, by_kol, days)
+
     return attribution
+
+
+def _update_whitelist_from_attribution(client, attribution: dict, by_kol: dict, days: int):
+    """v82: Merge kol_attribution results into scoring_config.kol_rt_whitelist.
+    Adds per-strategy breakdown and best_strategy for adaptive trading."""
+    deprecated = {"MOONBAG", "WIDE_RUNNER", "SCALE_OUT", "TP100_SL30"}
+    min_calls = 3
+    wr_threshold = 0.40
+
+    try:
+        # Read current whitelist
+        r = client.table("scoring_config").select("kol_rt_whitelist").eq("id", 1).execute()
+        whitelist = {}
+        if r.data and r.data[0].get("kol_rt_whitelist"):
+            cached = r.data[0]["kol_rt_whitelist"]
+            if isinstance(cached, str):
+                import json
+                cached = json.loads(cached)
+            whitelist = cached
+
+        # Build per-strategy breakdown from raw trades
+        for kol, kol_trades in by_kol.items():
+            active_trades = [t for t in kol_trades if t.get("strategy") not in deprecated]
+            if not active_trades:
+                continue
+
+            attr = attribution.get(kol, {})
+            total = len(active_trades)
+            wins = sum(1 for t in active_trades if float(t.get("pnl_usd") or 0) > 0)
+            pnl = sum(float(t.get("pnl_usd") or 0) for t in active_trades)
+            wr = wins / total if total > 0 else 0
+
+            # Per-strategy
+            strat_map = {}
+            from collections import defaultdict
+            strat_agg = defaultdict(lambda: {"n": 0, "wins": 0, "pnl": 0.0})
+            for t in active_trades:
+                s = t.get("strategy", "?")
+                p = float(t.get("pnl_usd") or 0)
+                strat_agg[s]["n"] += 1
+                strat_agg[s]["pnl"] += p
+                if p > 0:
+                    strat_agg[s]["wins"] += 1
+
+            best_strat = None
+            best_pnl = -999
+            for s, ss in strat_agg.items():
+                swr = ss["wins"] / ss["n"] if ss["n"] > 0 else 0
+                strat_map[s] = {"n": ss["n"], "wr": round(swr, 4), "pnl": round(ss["pnl"], 2)}
+                if ss["pnl"] > best_pnl:
+                    best_pnl = ss["pnl"]
+                    best_strat = s
+
+            approved = wr >= wr_threshold and total >= min_calls
+            whitelist[kol] = {
+                "wr": round(wr, 4),
+                "total": total,
+                "hits": wins,
+                "pnl": round(pnl, 2),
+                "approved": approved,
+                "best_strategy": best_strat,
+                "strategies": strat_map,
+            }
+
+        # Fallback: relax to 30% if < 3 approved
+        approved_count = sum(1 for v in whitelist.values() if v.get("approved"))
+        if approved_count < 3:
+            for kol, wl in whitelist.items():
+                if not wl.get("approved") and wl.get("total", 0) >= min_calls:
+                    if wl.get("wr", 0) >= 0.30:
+                        wl["approved"] = True
+
+        # Write back
+        from datetime import datetime, timezone
+        client.table("scoring_config").update({
+            "kol_rt_whitelist": whitelist,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }).eq("id", 1).execute()
+
+        approved_count = sum(1 for v in whitelist.values() if v.get("approved"))
+        logger.info("kol_attribution → whitelist updated: %d/%d approved", approved_count, len(whitelist))
+
+    except Exception as e:
+        logger.warning("kol_attribution → whitelist update failed: %s", e)

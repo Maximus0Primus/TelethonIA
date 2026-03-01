@@ -191,7 +191,7 @@ def send_summary():
     trades_raw: list[dict] = []
     try:
         r = client.table("paper_trades").select(
-            "pnl_usd,status,strategy,source,position_usd,created_at,exit_at"
+            "pnl_usd,status,strategy,source,position_usd,created_at,exit_at,kol_group"
         ).neq("status", "open").gte("created_at", d14_ago).execute()
         trades_raw = r.data or []
     except Exception as e:
@@ -291,10 +291,38 @@ def send_summary():
     total_7d_roi = round(total_7d_pnl / total_7d_inv * 100, 1) if total_7d_inv > 0 else 0
     emoji_7d = "📈" if total_7d_pnl >= 0 else "📉"
 
+    # ── KOL Leaderboard (7d, RT trades only) ──
+    kol_pnl: dict[str, dict] = {}
+    for t in trades_7d:
+        kol = t.get("kol_group")
+        if not kol:
+            continue
+        if kol not in kol_pnl:
+            kol_pnl[kol] = {"n": 0, "wins": 0, "pnl": 0.0}
+        pnl = float(t.get("pnl_usd") or 0)
+        kol_pnl[kol]["n"] += 1
+        kol_pnl[kol]["pnl"] += pnl
+        if pnl > 0:
+            kol_pnl[kol]["wins"] += 1
+
+    kol_lines = []
+    for kol in sorted(kol_pnl, key=lambda k: kol_pnl[k]["pnl"], reverse=True):
+        kd = kol_pnl[kol]
+        wr = round(kd["wins"] / kd["n"] * 100) if kd["n"] else 0
+        sign = "🟢" if kd["pnl"] >= 0 else "🔴"
+        kol_lines.append(
+            f"  {sign} {kol}: {kd['n']}t WR {wr}% ${kd['pnl']:+.0f}"
+        )
+
+    kol_block = ""
+    if kol_lines:
+        kol_block = "\n\n<b>KOL Leaderboard 7j (RT):</b>\n" + "\n".join(kol_lines)
+
     msg2 = (
         f"<b>📅 SIMULATION 7 JOURS</b> — au {now.strftime('%Y-%m-%d')}"
         f"\n\n<b>Stratégies 7j:</b>\n"
         + "\n".join(strat_rows_7d)
+        + kol_block
         + f"\n\n<b>PnL journalier:</b>\n"
         + "\n".join(daily_lines)
         + f"\n\n<b>Total 7j:</b> {len(trades_7d)}t | "
