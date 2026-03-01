@@ -701,20 +701,51 @@ RT_BANKROLL_TTL = 60          # 1min
 
 
 def _rt_load_kol_whitelist(config: dict) -> dict:
-    """v82: Load KOL whitelist from PAPER TRADES (not KCO).
-    KCO uses max_return (theoretical ATH) which is anti-correlated with actual
-    paper trading results. This queries real closed paper_trades by kol_group.
-    Rolling window (lookback_days). Cached 1h."""
+    """v82: Load KOL whitelist from scoring_config.kol_rt_whitelist (cached by auto_backtest).
+    Falls back to live paper_trades query if cache is empty.
+    Cached in-memory for 1h (RT_KOL_WHITELIST_TTL)."""
     global _rt_kol_whitelist, _rt_kol_whitelist_loaded_at
     now = time.time()
     if _rt_kol_whitelist and now - _rt_kol_whitelist_loaded_at < RT_KOL_WHITELIST_TTL:
         return _rt_kol_whitelist
 
+    try:
+        sb = _get_supabase()
+        if not sb:
+            return _rt_kol_whitelist
+
+        # Primary: read cached whitelist from scoring_config (updated by auto_backtest every 2h)
+        result = sb.table("scoring_config").select("kol_rt_whitelist").eq("id", 1).execute()
+        cached = None
+        if result.data and result.data[0].get("kol_rt_whitelist"):
+            cached = result.data[0]["kol_rt_whitelist"]
+            if isinstance(cached, str):
+                cached = json.loads(cached)
+
+        if cached and len(cached) > 0:
+            _rt_kol_whitelist = cached
+            _rt_kol_whitelist_loaded_at = now
+            approved_count = sum(1 for v in cached.values() if v.get("approved"))
+            logger.info("RT KOL whitelist (cached): %d/%d approved", approved_count, len(cached))
+            return _rt_kol_whitelist
+
+        # Fallback: live query paper_trades (first boot before auto_backtest runs)
+        logger.info("RT KOL whitelist: no cache in scoring_config, querying paper_trades live")
+        return _rt_load_kol_whitelist_live(config)
+
+    except Exception as e:
+        logger.warning("RT KOL whitelist load failed: %s", e)
+    return _rt_kol_whitelist
+
+
+def _rt_load_kol_whitelist_live(config: dict) -> dict:
+    """Fallback: compute whitelist from paper_trades directly (used before auto_backtest populates cache)."""
+    global _rt_kol_whitelist, _rt_kol_whitelist_loaded_at
+
     kf = config.get("kol_filter", {})
     wr_threshold = float(kf.get("wr_threshold", 0.40))
     min_calls = int(kf.get("min_calls", 3))
     lookback_days = int(kf.get("lookback_days", 7))
-
     deprecated = {"MOONBAG", "WIDE_RUNNER", "SCALE_OUT", "TP100_SL30"}
 
     try:
@@ -723,24 +754,20 @@ def _rt_load_kol_whitelist(config: dict) -> dict:
             return _rt_kol_whitelist
         cutoff = (datetime.now(timezone.utc) - timedelta(days=lookback_days)).isoformat()
 
-        # Fetch closed RT paper trades (kol_group IS NOT NULL = RT trades)
         result = sb.table("paper_trades").select(
-            "kol_group, pnl_usd, strategy, source"
+            "kol_group, pnl_usd, strategy"
         ).neq("status", "open").filter(
             "kol_group", "not.is", "null"
         ).gte("exit_at", cutoff).execute()
         rows = result.data or []
         if not rows:
-            logger.warning("RT KOL whitelist: no closed RT paper trades in last %dd", lookback_days)
+            logger.warning("RT KOL whitelist live: no closed RT paper trades in last %dd", lookback_days)
             return _rt_kol_whitelist
 
-        # Filter out deprecated strategies
         rows = [r for r in rows if r.get("strategy") not in deprecated]
         if not rows:
-            logger.warning("RT KOL whitelist: no non-deprecated RT trades in last %dd", lookback_days)
             return _rt_kol_whitelist
 
-        # Aggregate by kol_group
         from collections import defaultdict
         agg = defaultdict(lambda: {"total": 0, "wins": 0, "pnl": 0.0})
         for r in rows:
@@ -766,28 +793,21 @@ def _rt_load_kol_whitelist(config: dict) -> dict:
             }
             if approved:
                 approved_count += 1
-                logger.info("  KOL APPROVED: %s — %dt WR %.0f%% PnL $%.2f",
-                            kol, stats["total"], wr * 100, stats["pnl"])
-            elif has_enough:
-                logger.info("  KOL REJECTED: %s — %dt WR %.0f%% PnL $%.2f (below %.0f%% threshold)",
-                            kol, stats["total"], wr * 100, stats["pnl"], wr_threshold * 100)
 
-        # Fallback: if < 3 KOLs pass, relax threshold to 30%
+        # Fallback: relax to 30% if < 3 KOLs pass
         if approved_count < 3:
-            relaxed_threshold = 0.30
             for kol, stats in agg.items():
                 wr = stats["wins"] / stats["total"] if stats["total"] > 0 else 0
-                if not whitelist[kol]["approved"] and wr >= relaxed_threshold and stats["total"] >= min_calls:
+                if not whitelist[kol]["approved"] and wr >= 0.30 and stats["total"] >= min_calls:
                     whitelist[kol]["approved"] = True
                     approved_count += 1
-                    logger.info("  KOL APPROVED (relaxed 30%%): %s — %dt WR %.0f%%", kol, stats["total"], wr * 100)
 
         _rt_kol_whitelist = whitelist
-        _rt_kol_whitelist_loaded_at = now
-        logger.info("RT KOL whitelist (paper-trade-based): %d/%d approved (wr>=%.0f%%, trades>=%d, last %dd)",
+        _rt_kol_whitelist_loaded_at = time.time()
+        logger.info("RT KOL whitelist (live): %d/%d approved (wr>=%.0f%%, trades>=%d, last %dd)",
                      approved_count, len(whitelist), wr_threshold * 100, min_calls, lookback_days)
     except Exception as e:
-        logger.warning("RT KOL whitelist load failed: %s", e)
+        logger.warning("RT KOL whitelist live query failed: %s", e)
     return _rt_kol_whitelist
 
 
@@ -1289,10 +1309,31 @@ def _rt_open_trades(ca: str, symbol: str, price: float, mcap: float,
     now = datetime.now(timezone.utc)
     total_opened = 0
 
-    # v71: Hybrid strategy — split position across configured allocations
+    # v82: Hybrid strategy — split position across configured allocations
+    # KOL-adaptive: if whitelist has per-KOL strategy data, boost best strategy
     hybrid_cfg = config.get("hybrid_strategy", {})
     if hybrid_cfg.get("enabled", False):
-        allocations = hybrid_cfg.get("allocations", {"TP50_SL30": 0.60, "TP100_SL30": 0.40})
+        allocations = dict(hybrid_cfg.get("allocations", {"TP50_SL30": 0.50, "TP30_SL50": 0.30, "TP50_SL50": 0.20}))
+
+        # v82: KOL-adaptive strategy selection — boost KOL's best-performing strategy
+        whitelist = _rt_load_kol_whitelist(config)
+        kol_wl = whitelist.get(kol_username, {}) if whitelist else {}
+        kol_strats = kol_wl.get("strategies", {})
+        kol_best = kol_wl.get("best_strategy")
+        if kol_best and kol_best in allocations and kol_strats:
+            # Only override if KOL has >= 3 trades in best strategy AND it's profitable
+            best_stats = kol_strats.get(kol_best, {})
+            if best_stats.get("n", 0) >= 3 and best_stats.get("pnl", 0) > 0:
+                # Boost best strategy to 60%, distribute rest evenly
+                others = {s: a for s, a in allocations.items() if s != kol_best}
+                remaining = 0.40
+                allocations = {kol_best: 0.60}
+                for s in others:
+                    allocations[s] = round(remaining / len(others), 2) if others else remaining
+                logger.info("RT KOL-adaptive: %s → boost %s to 60%% (n=%d, wr=%.0f%%, pnl=$%.1f)",
+                            kol_username, kol_best, best_stats["n"],
+                            best_stats.get("wr", 0) * 100, best_stats.get("pnl", 0))
+
         for strat_name, alloc_pct in allocations.items():
             if strat_name not in STRATEGIES:
                 continue

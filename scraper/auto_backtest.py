@@ -5511,6 +5511,118 @@ def _compute_rt_ml_weights(client) -> dict | None:
     return weights
 
 
+def _update_kol_whitelist(client) -> dict | None:
+    """
+    v82: Compute KOL whitelist from paper trades and cache in scoring_config.kol_rt_whitelist.
+    This replaces the KCO-based whitelist (max_return is anti-correlated with real trading).
+    safe_scraper.py reads this cached whitelist instead of querying paper_trades live.
+    """
+    from collections import defaultdict
+
+    deprecated = {"MOONBAG", "WIDE_RUNNER", "SCALE_OUT", "TP100_SL30"}
+    lookback_days = 7
+
+    try:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=lookback_days)).isoformat()
+        result = client.table("paper_trades").select(
+            "kol_group, pnl_usd, strategy"
+        ).neq("status", "open").filter(
+            "kol_group", "not.is", "null"
+        ).gte("exit_at", cutoff).execute()
+        rows = result.data or []
+    except Exception as e:
+        logger.error("KOL whitelist update: query failed: %s", e)
+        return None
+
+    rows = [r for r in rows if r.get("strategy") not in deprecated]
+    if not rows:
+        logger.info("KOL whitelist update: no non-deprecated RT trades in last %dd", lookback_days)
+        return None
+
+    # Aggregate per KOL
+    agg = defaultdict(lambda: {"total": 0, "wins": 0, "pnl": 0.0})
+    for r in rows:
+        kol = r["kol_group"]
+        pnl = float(r.get("pnl_usd") or 0)
+        agg[kol]["total"] += 1
+        agg[kol]["pnl"] += pnl
+        if pnl > 0:
+            agg[kol]["wins"] += 1
+
+    # Also compute per-KOL per-strategy breakdown
+    strat_agg = defaultdict(lambda: defaultdict(lambda: {"n": 0, "wins": 0, "pnl": 0.0}))
+    for r in rows:
+        kol = r["kol_group"]
+        strat = r.get("strategy", "?")
+        pnl = float(r.get("pnl_usd") or 0)
+        strat_agg[kol][strat]["n"] += 1
+        strat_agg[kol][strat]["pnl"] += pnl
+        if pnl > 0:
+            strat_agg[kol][strat]["wins"] += 1
+
+    wr_threshold = 0.40
+    min_calls = 3
+    whitelist = {}
+    approved = 0
+
+    for kol, stats in sorted(agg.items(), key=lambda x: x[1]["pnl"], reverse=True):
+        wr = stats["wins"] / stats["total"] if stats["total"] > 0 else 0
+        has_enough = stats["total"] >= min_calls
+        is_approved = wr >= wr_threshold and has_enough
+
+        # Per-strategy breakdown
+        best_strat = None
+        best_strat_pnl = -999
+        strat_detail = {}
+        for strat, ss in strat_agg[kol].items():
+            swr = ss["wins"] / ss["n"] if ss["n"] > 0 else 0
+            strat_detail[strat] = {
+                "n": ss["n"], "wr": round(swr, 4), "pnl": round(ss["pnl"], 2)
+            }
+            if ss["pnl"] > best_strat_pnl:
+                best_strat_pnl = ss["pnl"]
+                best_strat = strat
+
+        whitelist[kol] = {
+            "wr": round(wr, 4),
+            "total": stats["total"],
+            "hits": stats["wins"],
+            "pnl": round(stats["pnl"], 2),
+            "approved": is_approved,
+            "best_strategy": best_strat,
+            "strategies": strat_detail,
+        }
+        if is_approved:
+            approved += 1
+
+    # Fallback: relax to 30% if < 3 KOLs pass
+    if approved < 3:
+        for kol, stats in agg.items():
+            wr = stats["wins"] / stats["total"] if stats["total"] > 0 else 0
+            if not whitelist[kol]["approved"] and wr >= 0.30 and stats["total"] >= min_calls:
+                whitelist[kol]["approved"] = True
+                approved += 1
+
+    logger.info("KOL whitelist update: %d/%d approved (wr>=%.0f%%, trades>=%d, last %dd)",
+                approved, len(whitelist), wr_threshold * 100, min_calls, lookback_days)
+    for kol, wl in whitelist.items():
+        tag = "OK" if wl["approved"] else "NO"
+        logger.info("  %s %-24s %dt WR %.0f%% PnL $%+.1f best=%s",
+                     tag, kol, wl["total"], wl["wr"] * 100, wl["pnl"], wl.get("best_strategy", "?"))
+
+    # Save to scoring_config
+    try:
+        client.table("scoring_config").update({
+            "kol_rt_whitelist": whitelist,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }).eq("id", 1).execute()
+        logger.info("KOL whitelist update: saved to scoring_config.kol_rt_whitelist (%d KOLs)", len(whitelist))
+    except Exception as e:
+        logger.warning("KOL whitelist update: DB save failed: %s", e)
+
+    return whitelist
+
+
 def run_outcomes_pipeline(n_trials: int = 100) -> None:
     """
     v63: Combined entry point for Optuna + auto_backtest.
@@ -5571,6 +5683,12 @@ def run_outcomes_pipeline(n_trials: int = 100) -> None:
         _compute_rt_ml_weights(client)
     except Exception as e:
         logger.error("outcomes_pipeline: rt_ml_weights failed: %s", e)
+
+    # Step 7 (v82): Update KOL whitelist from paper trades
+    try:
+        _update_kol_whitelist(client)
+    except Exception as e:
+        logger.error("outcomes_pipeline: KOL whitelist update failed: %s", e)
 
 
 # ---------------------------------------------------------------------------

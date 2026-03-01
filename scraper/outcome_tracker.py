@@ -2393,13 +2393,26 @@ def _kco_phase_c_update_ath(client: Client, pool_cache: dict, stats: dict, start
             current_ath = float(row.get("ath_after_call") or 0)
 
             # Filter candles to only those AFTER this row's call_timestamp
+            # Two-pass: first find ATH, then find min low before ATH for drawdown
             max_high = 0.0
             ath_ts = None
+            post_call_candles = []
             for candle in candles:
                 if candle[0] >= call_ts:  # candle timestamp >= call time
+                    post_call_candles.append(candle)
                     if candle[2] > max_high:  # candle high
                         max_high = candle[2]
                         ath_ts = candle[0]
+
+            # v82: Track min price BEFORE ATH for drawdown computation
+            min_low_before_ath = float("inf")
+            if ath_ts and post_call_candles:
+                for candle in post_call_candles:
+                    if candle[0] <= ath_ts:  # candles up to and including ATH candle
+                        if candle[3] < min_low_before_ath:  # candle low (index 3)
+                            min_low_before_ath = candle[3]
+            if min_low_before_ath == float("inf"):
+                min_low_before_ath = 0.0
 
             # v40: SOL price leak filter — same as Phase B ($50 threshold)
             # Memecoins are < $1, large-caps like $TRUMP/$HYPE can be $1-$50
@@ -2447,6 +2460,12 @@ def _kco_phase_c_update_ath(client: Client, pool_cache: dict, stats: dict, start
                 if not row.get("pair_address") and pool_addr:
                     update_data["pair_address"] = pool_addr
 
+            # v82: Drawdown before ATH — how much did it dump before reaching peak?
+            if min_low_before_ath > 0 and entry > 0:
+                dd = (entry - min_low_before_ath) / entry
+                update_data["max_dd_before_ath"] = round(max(dd, 0.0), 4)
+                update_data["min_price_before_ath"] = float(min_low_before_ath)
+
             # max_return + did_2x are GENERATED ALWAYS columns — auto-computed from ath_after_call / entry_price
             best_ath = max(max_high, current_ath)
             max_return = best_ath / entry if entry > 0 else 0
@@ -2455,8 +2474,9 @@ def _kco_phase_c_update_ath(client: Client, pool_cache: dict, stats: dict, start
                 client.table("kol_call_outcomes").update(update_data).eq("id", row["id"]).execute()
                 if max_high > current_ath:
                     stats["ath_updated"] += 1
-                    logger.debug("KCO Phase C: %s ATH=%.10f (%.1fx entry)",
-                                 row["symbol"], max_high, max_return if entry > 0 else 0)
+                    dd_pct = update_data.get("max_dd_before_ath", 0) * 100
+                    logger.debug("KCO Phase C: %s ATH=%.10f (%.1fx entry, dd=%.0f%% before ATH)",
+                                 row["symbol"], max_high, max_return if entry > 0 else 0, dd_pct)
             except Exception as e:
                 logger.error("KCO Phase C: update failed for id=%d: %s", row["id"], e)
 
