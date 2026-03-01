@@ -26,8 +26,10 @@ const COLUMNS: { key: SortKey; label: string; labelShort?: string; className: st
 ];
 
 function getWr(k: KolRowData, mode: KolMode, wrThreshold: WrThreshold): number {
-  if (mode === "paper") return (wrThreshold === "2x" ? k.rtWr2x : k.rtWr50) ?? -1;
-  return (k.winRate2xExact ?? k.winRateAll) ?? -1;
+  if (mode === "paper") {
+    return (wrThreshold === "50" ? k.rtWr50 : k.rtWr) ?? -1;
+  }
+  return (wrThreshold === "2x" ? (k.winRate2xExact ?? k.winRateAll) : k.winRate1_5xExact) ?? -1;
 }
 
 function getCalls(k: KolRowData, mode: KolMode): number {
@@ -65,7 +67,7 @@ export function KolLeaderboard() {
   const [loading, setLoading] = useState(true);
   const [caOnly, setCaOnly] = useState(false);
   const [mode, setMode] = useState<KolMode>("paper");
-  const [wrThreshold, setWrThreshold] = useState<WrThreshold>("50");
+  const [wrThreshold, setWrThreshold] = useState<WrThreshold>("wr");
   const [sortKey, setSortKey] = useState<SortKey>("score");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
 
@@ -110,16 +112,13 @@ export function KolLeaderboard() {
       : 0;
 
   // Mode-aware win rate stats
-  const getPaperWr = (k: KolRowData) => wrThreshold === "2x" ? k.rtWr2x : k.rtWr50;
+  const getDisplayWr = (k: KolRowData) => getWr(k, mode, wrThreshold);
   const withWinRate = mode === "paper"
-    ? kols.filter((k) => getPaperWr(k) !== null && k.rtTrades > 0)
-    : kols.filter((k) => (k.winRate2xExact ?? k.winRateAll) !== null);
+    ? kols.filter((k) => k.rtTrades > 0 && getDisplayWr(k) >= 0)
+    : kols.filter((k) => getDisplayWr(k) >= 0);
   const avgWinRate =
     withWinRate.length > 0
-      ? withWinRate.reduce((s, k) => {
-          const wr = mode === "paper" ? (getPaperWr(k) ?? 0) : (k.winRate2xExact ?? k.winRateAll ?? 0);
-          return s + wr;
-        }, 0) / withWinRate.length
+      ? withWinRate.reduce((s, k) => s + Math.max(0, getDisplayWr(k)), 0) / withWinRate.length
       : 0;
   const totalRtPnl = mode === "paper"
     ? kols.reduce((s, k) => s + (k.rtPnl ?? 0), 0)
@@ -153,9 +152,9 @@ export function KolLeaderboard() {
                 accent: "text-[#22D3EE]",
               },
           {
-            label: mode === "paper"
-              ? (wrThreshold === "2x" ? "Avg WR 2x" : "Avg WR +50%")
-              : "Avg Win Rate 2x",
+            label: wrThreshold === "2x" ? "Avg WR 2x"
+              : wrThreshold === "50" ? "Avg WR +50%"
+              : "Avg WR",
             value:
               withWinRate.length > 0
                 ? `${(avgWinRate * 100).toFixed(0)}%`
@@ -187,7 +186,7 @@ export function KolLeaderboard() {
         {/* Paper / KCO toggle */}
         <div className="flex rounded-md border border-white/10 overflow-hidden">
           <button
-            onClick={() => setMode("paper")}
+            onClick={() => { setMode("paper"); setWrThreshold("wr"); }}
             className={cn(
               "flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium transition-all",
               mode === "paper"
@@ -199,7 +198,7 @@ export function KolLeaderboard() {
             Paper WR
           </button>
           <button
-            onClick={() => setMode("kco")}
+            onClick={() => { setMode("kco"); setWrThreshold("50"); }}
             className={cn(
               "flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium transition-all border-l border-white/10",
               mode === "kco"
@@ -211,33 +210,60 @@ export function KolLeaderboard() {
             KCO WR
           </button>
         </div>
-        {/* WR threshold toggle (paper mode only) */}
-        {mode === "paper" && (
-          <div className="flex rounded-md border border-white/10 overflow-hidden">
-            <button
-              onClick={() => setWrThreshold("50")}
-              className={cn(
-                "px-2.5 py-1.5 text-xs font-medium transition-all",
-                wrThreshold === "50"
-                  ? "bg-[#F97316]/10 text-[#F97316]"
-                  : "bg-white/5 text-white/40 hover:text-white/60"
-              )}
-            >
-              +50%
-            </button>
-            <button
-              onClick={() => setWrThreshold("2x")}
-              className={cn(
-                "px-2.5 py-1.5 text-xs font-medium transition-all border-l border-white/10",
-                wrThreshold === "2x"
-                  ? "bg-[#F97316]/10 text-[#F97316]"
-                  : "bg-white/5 text-white/40 hover:text-white/60"
-              )}
-            >
-              2x
-            </button>
-          </div>
-        )}
+        {/* WR threshold toggle — Paper: WR / +50%, KCO: +50% / 2x */}
+        <div className="flex rounded-md border border-white/10 overflow-hidden">
+          {mode === "paper" ? (
+            <>
+              <button
+                onClick={() => setWrThreshold("wr")}
+                className={cn(
+                  "px-2.5 py-1.5 text-xs font-medium transition-all",
+                  wrThreshold === "wr"
+                    ? "bg-[#F97316]/10 text-[#F97316]"
+                    : "bg-white/5 text-white/40 hover:text-white/60"
+                )}
+              >
+                WR
+              </button>
+              <button
+                onClick={() => setWrThreshold("50")}
+                className={cn(
+                  "px-2.5 py-1.5 text-xs font-medium transition-all border-l border-white/10",
+                  wrThreshold === "50"
+                    ? "bg-[#F97316]/10 text-[#F97316]"
+                    : "bg-white/5 text-white/40 hover:text-white/60"
+                )}
+              >
+                +50%
+              </button>
+            </>
+          ) : (
+            <>
+              <button
+                onClick={() => setWrThreshold("50")}
+                className={cn(
+                  "px-2.5 py-1.5 text-xs font-medium transition-all",
+                  wrThreshold === "50"
+                    ? "bg-[#F97316]/10 text-[#F97316]"
+                    : "bg-white/5 text-white/40 hover:text-white/60"
+                )}
+              >
+                +50%
+              </button>
+              <button
+                onClick={() => setWrThreshold("2x")}
+                className={cn(
+                  "px-2.5 py-1.5 text-xs font-medium transition-all border-l border-white/10",
+                  wrThreshold === "2x"
+                    ? "bg-[#F97316]/10 text-[#F97316]"
+                    : "bg-white/5 text-white/40 hover:text-white/60"
+                )}
+              >
+                2x
+              </button>
+            </>
+          )}
+        </div>
         <button
           onClick={() => setCaOnly(!caOnly)}
           className={cn(

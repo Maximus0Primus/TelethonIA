@@ -22,7 +22,9 @@ export interface KolRowData {
   totalCalls: number;
   withEntryPrice: number;
   hits2xExact: number;
+  hits1_5xExact: number;
   winRate2xExact: number | null;
+  winRate1_5xExact: number | null;
   avgMaxReturn: number | null;
   bestReturn: number | null;
   // Paper trade (RT) metrics
@@ -34,7 +36,8 @@ export interface KolRowData {
 }
 
 export type KolMode = "paper" | "kco";
-export type WrThreshold = "50" | "2x";
+/** Paper: "wr" = any profit, "50" = +50%. KCO: "50" = 1.5x, "2x" = 2x */
+export type WrThreshold = "wr" | "50" | "2x";
 
 interface KolRowProps {
   kol: KolRowData;
@@ -113,11 +116,19 @@ export function KolRow({ kol, rank, index, mode, wrThreshold }: KolRowProps) {
   const podiumBorder = PODIUM_BORDER[rank];
   const isPaper = mode === "paper";
 
-  // Paper mode: WR based on threshold toggle. KCO mode: v2 exact preferred, v1 fallback
-  const paperWr = wrThreshold === "2x" ? kol.rtWr2x : kol.rtWr50;
-  const paperWrAlt = wrThreshold === "2x" ? kol.rtWr50 : kol.rtWr2x;
-  const altLabel = wrThreshold === "2x" ? "+50%" : "2x";
-  const winRate = isPaper ? paperWr : (kol.winRate2xExact ?? kol.winRateAll);
+  // Paper: toggle WR / WR+50%. KCO: toggle +50% / 2x.
+  let winRate: number | null;
+  let altWr: number | null;
+  let altLabel: string;
+  if (isPaper) {
+    winRate = wrThreshold === "50" ? kol.rtWr50 : kol.rtWr;
+    altWr = wrThreshold === "50" ? kol.rtWr : kol.rtWr50;
+    altLabel = wrThreshold === "50" ? "WR" : "+50%";
+  } else {
+    winRate = wrThreshold === "2x" ? (kol.winRate2xExact ?? kol.winRateAll) : kol.winRate1_5xExact;
+    altWr = wrThreshold === "2x" ? kol.winRate1_5xExact : (kol.winRate2xExact ?? kol.winRateAll);
+    altLabel = wrThreshold === "2x" ? "+50%" : "2x";
+  }
   const callCount = isPaper
     ? kol.rtTrades
     : (kol.winRate2xExact !== null ? kol.totalCalls : kol.labeledCalls);
@@ -174,9 +185,9 @@ export function KolRow({ kol, rank, index, mode, wrThreshold }: KolRowProps) {
         ) : winRate !== null ? (
           <div className="space-y-0.5">
             <WinRateBar rate={winRate} />
-            {isPaper && paperWrAlt !== null && (
+            {altWr !== null && (
               <div className="text-[10px] text-white/30 font-mono text-right">
-                {altLabel}: {(paperWrAlt * 100).toFixed(0)}%
+                {altLabel}: {(altWr * 100).toFixed(0)}%
               </div>
             )}
           </div>

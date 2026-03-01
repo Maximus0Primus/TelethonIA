@@ -24,6 +24,7 @@ interface RpcRowV2 {
   total_calls: number;
   with_entry_price: number;
   hits_2x: number;
+  hits_1_5x: number;
   avg_max_return: number | null;
   best_return: number | null;
   unique_tokens: number;
@@ -61,7 +62,9 @@ export interface KolLeaderboardEntry {
   totalCalls: number;
   withEntryPrice: number;
   hits2xExact: number;
+  hits1_5xExact: number;
   winRate2xExact: number | null;
+  winRate1_5xExact: number | null;
   avgMaxReturn: number | null;
   bestReturn: number | null;
   // Paper trade (RT) metrics
@@ -275,8 +278,10 @@ export async function GET(request: Request) {
         const totalCalls = v2 ? Number(v2.total_calls) : 0;
         const withEntryPrice = v2 ? Number(v2.with_entry_price) : 0;
         const hits2xExact = v2 ? Number(v2.hits_2x) : 0;
+        const hits1_5xExact = v2 ? Number(v2.hits_1_5x) : 0;
         // v36: show v2 winrate as soon as any entry price exists (was >= 5)
         const winRate2xExact = withEntryPrice >= 1 ? hits2xExact / withEntryPrice : null;
+        const winRate1_5xExact = withEntryPrice >= 1 ? hits1_5xExact / withEntryPrice : null;
 
         // v36: Score from displayed winrate (v2 preferred → v1 fallback → static fallback)
         let score: number | null;
@@ -306,7 +311,9 @@ export async function GET(request: Request) {
           totalCalls,
           withEntryPrice,
           hits2xExact,
+          hits1_5xExact,
           winRate2xExact,
+          winRate1_5xExact,
           avgMaxReturn: v2?.avg_max_return != null ? Number(v2.avg_max_return) : null,
           bestReturn: v2?.best_return != null ? Number(v2.best_return) : null,
           // Paper trade (RT) metrics
