@@ -110,8 +110,8 @@ export function KolRow({ kol, rank, index, mode }: KolRowProps) {
   const podiumBorder = PODIUM_BORDER[rank];
   const isPaper = mode === "paper";
 
-  // Paper mode: RT win rate. KCO mode: v2 exact preferred, v1 fallback
-  const winRate = isPaper ? kol.rtWr : (kol.winRate2xExact ?? kol.winRateAll);
+  // Paper mode: WR+50% primary. KCO mode: v2 exact preferred, v1 fallback
+  const winRate = isPaper ? kol.rtWr50 : (kol.winRate2xExact ?? kol.winRateAll);
   const callCount = isPaper
     ? kol.rtTrades
     : (kol.winRate2xExact !== null ? kol.totalCalls : kol.labeledCalls);
@@ -168,9 +168,9 @@ export function KolRow({ kol, rank, index, mode }: KolRowProps) {
         ) : winRate !== null ? (
           <div className="space-y-0.5">
             <WinRateBar rate={winRate} />
-            {isPaper && kol.rtWr50 !== null && (
+            {isPaper && kol.rtWr !== null && (
               <div className="text-[10px] text-white/30 font-mono text-right">
-                +50%: {(kol.rtWr50 * 100).toFixed(0)}%
+                WR: {(kol.rtWr * 100).toFixed(0)}%
               </div>
             )}
           </div>

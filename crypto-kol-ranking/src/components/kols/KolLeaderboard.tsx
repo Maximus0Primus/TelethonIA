@@ -26,7 +26,7 @@ const COLUMNS: { key: SortKey; label: string; labelShort?: string; className: st
 ];
 
 function getWr(k: KolRowData, mode: KolMode): number {
-  if (mode === "paper") return k.rtWr ?? -1;
+  if (mode === "paper") return k.rtWr50 ?? -1;
   return (k.winRate2xExact ?? k.winRateAll) ?? -1;
 }
 
@@ -108,14 +108,14 @@ export function KolLeaderboard() {
       ? scoredKols.reduce((s, k) => s + (k.score ?? 0), 0) / scoredKols.length
       : 0;
 
-  // Mode-aware win rate stats
+  // Mode-aware win rate stats (paper = WR+50%, kco = 2x)
   const withWinRate = mode === "paper"
-    ? kols.filter((k) => k.rtWr !== null && k.rtTrades > 0)
+    ? kols.filter((k) => k.rtWr50 !== null && k.rtTrades > 0)
     : kols.filter((k) => (k.winRate2xExact ?? k.winRateAll) !== null);
   const avgWinRate =
     withWinRate.length > 0
       ? withWinRate.reduce((s, k) => {
-          const wr = mode === "paper" ? (k.rtWr ?? 0) : (k.winRate2xExact ?? k.winRateAll ?? 0);
+          const wr = mode === "paper" ? (k.rtWr50 ?? 0) : (k.winRate2xExact ?? k.winRateAll ?? 0);
           return s + wr;
         }, 0) / withWinRate.length
       : 0;
@@ -151,7 +151,7 @@ export function KolLeaderboard() {
                 accent: "text-[#22D3EE]",
               },
           {
-            label: mode === "paper" ? "Avg Paper WR" : "Avg Win Rate 2x",
+            label: mode === "paper" ? "Avg WR +50%" : "Avg Win Rate 2x",
             value:
               withWinRate.length > 0
                 ? `${(avgWinRate * 100).toFixed(0)}%`
