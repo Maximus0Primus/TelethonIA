@@ -706,6 +706,7 @@ _ml_features = None       # Feature list
 _ml_meta = None           # Full metadata dict (mode, weights, quality gate)
 _ml_calibrator = None     # v54: Isotonic calibrator (optional)
 _ml_loaded = False         # Prevent repeated load attempts
+_ml_loaded_mtime = 0.0    # v82: mtime of model file when loaded (for hot-reload)
 
 # v70: KCO model globals (separate from main ML model)
 _kco_xgb = None
@@ -726,7 +727,7 @@ def _load_ml_model(horizon: str = "12h"):
     v54: Also loads isotonic calibrator if available.
     Returns (xgb_model, lgb_model, features, meta, calibrator) or (None, None, None, None, None).
     """
-    global _ml_model, _ml_lgb_model, _ml_features, _ml_meta, _ml_calibrator, _ml_loaded
+    global _ml_model, _ml_lgb_model, _ml_features, _ml_meta, _ml_calibrator, _ml_loaded, _ml_loaded_mtime
     if _ml_loaded:
         return _ml_model, _ml_lgb_model, _ml_features, _ml_meta, _ml_calibrator
 
@@ -738,6 +739,9 @@ def _load_ml_model(horizon: str = "12h"):
 
     if not xgb_path.exists():
         return None, None, None, None, None
+
+    # v82: Record file mtime for hot-reload detection
+    _ml_loaded_mtime = xgb_path.stat().st_mtime
 
     # Load metadata first — check quality gate BEFORE loading models
     if not meta_path.exists():
@@ -832,6 +836,35 @@ def _load_ml_model(horizon: str = "12h"):
         mode, len(features), p_at_5, meta.get("ensemble_weights", {}),
     )
     return _ml_model, _ml_lgb_model, _ml_features, _ml_meta, _ml_calibrator
+
+
+def _check_ml_hot_reload() -> None:
+    """
+    v82: Hot-reload ML model if files on disk have changed.
+    Called from load_scoring_config() at the start of each cycle.
+    After git pull delivers new model files, this detects the mtime change
+    and resets _ml_loaded so the next _apply_ml_scores() reloads from disk.
+    """
+    global _ml_loaded, _ml_model, _ml_lgb_model, _ml_features, _ml_meta, _ml_calibrator, _ml_loaded_mtime
+    if not _ml_loaded:
+        return  # Not loaded yet — nothing to reload
+    horizon = SCORING_PARAMS.get("ml_horizon", "12h")
+    xgb_path = _ML_MODEL_DIR / f"model_{horizon}.json"
+    if not xgb_path.exists():
+        return
+    try:
+        current_mtime = xgb_path.stat().st_mtime
+        if current_mtime > _ml_loaded_mtime:
+            logger.info("v82: ML model file changed on disk (mtime %.0f -> %.0f), triggering reload",
+                        _ml_loaded_mtime, current_mtime)
+            _ml_loaded = False
+            _ml_model = None
+            _ml_lgb_model = None
+            _ml_features = None
+            _ml_meta = None
+            _ml_calibrator = None
+    except OSError:
+        pass  # File stat failed — ignore
 
 
 def _load_kco_model():
@@ -2339,6 +2372,9 @@ _DEFAULT_SCORING_PARAMS = {
     "kol_ml_mult_cap": 1.4,
     # v44: Scoring mode — formula (default), hybrid, ml_primary
     "scoring_mode": "formula",
+    # v82: Per-KOL-per-token dedup cap + max tickers per message (were hardcoded)
+    "kol_mention_cap": 2,
+    "token_cap_per_message": 3,
     # v45: Full multiplier chain optimization — 6 new JSONB configs
     "safety_config": {
         "insider_threshold": 30, "insider_floor": 0.5,
@@ -2611,6 +2647,9 @@ def load_scoring_config() -> None:
             "consensus_pump_divisor": 400,
             "activity_mid_mult": 1.10,
             "mention_heat_divisor": 4,
+            # v82: Per-KOL dedup cap + token cap per message
+            "kol_mention_cap": 2,
+            "token_cap_per_message": 3,
         }
         for key, default in _V44_SCALAR_KEYS.items():
             SCORING_PARAMS[key] = float(row.get(key, default))
@@ -2652,6 +2691,9 @@ def load_scoring_config() -> None:
         )
     except Exception as e:
         logger.warning("scoring_config: failed to load (%s), using defaults", e)
+
+    # v82: Check if ML model files changed on disk (hot-reload after git pull)
+    _check_ml_hot_reload()
 
 
 def _get_component_value(token: dict, component: str) -> float | None:
@@ -2971,9 +3013,10 @@ def aggregate_ranking(
     raw_kol_mentions: list[dict] = []
 
     # v73: Per-KOL-per-token dedup — cap scoring impact of repeated mentions.
-    # First KOL_MENTION_CAP mentions per (KOL, token) get full impact on
+    # First kol_mention_cap mentions per (KOL, token) get full impact on
     # mention count, breadth, conviction. Beyond that: only update freshness.
-    KOL_MENTION_CAP = 2
+    # v82: Dynamic from scoring_config (was hardcoded KOL_MENTION_CAP = 2)
+    KOL_MENTION_CAP = int(SCORING_PARAMS.get("kol_mention_cap", 2))
     kol_token_mention_counter: dict[tuple[str, str], int] = {}
 
     for group_name, msgs in messages_dict.items():
@@ -3000,12 +3043,14 @@ def aggregate_ranking(
                 continue
 
             # v14: Cap tickers per message — scorecard/DCA-list posts
-            # inflate many tickers at once. Keep first 3 only.
+            # inflate many tickers at once. Keep first N only.
+            # v82: Dynamic from scoring_config (was hardcoded 3)
+            _token_cap = int(SCORING_PARAMS.get("token_cap_per_message", 3))
             token_tuples = extract_tokens(text, ca_cache=ca_cache, confirmed_symbols=confirmed_symbols)
             if not token_tuples:
                 continue
-            if len(token_tuples) > 3:
-                token_tuples = token_tuples[:3]
+            if len(token_tuples) > _token_cap:
+                token_tuples = token_tuples[:_token_cap]
 
             # Flat list of symbols for backward-compat uses (raw_kol_mentions etc.)
             tokens = [t[0] for t in token_tuples]

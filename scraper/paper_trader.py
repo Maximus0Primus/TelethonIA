@@ -232,7 +232,7 @@ def _load_paper_trade_config(client) -> dict:
             # Type safety: JSONB stores numbers as float, but top_n must be int
             config["top_n"] = int(config["top_n"])
             config["budget_usd"] = float(config["budget_usd"])
-            config["dedup_cooldown_hours"] = int(config.get("dedup_cooldown_hours", 0))
+            config["dedup_cooldown_hours"] = int(config.get("dedup_cooldown_hours", DEDUP_COOLDOWN_HOURS))
             # Validate active_strategies against known strategies
             config["active_strategies"] = [
                 s for s in config["active_strategies"] if s in STRATEGIES
@@ -268,7 +268,7 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
     top_n = config["top_n"]
     budget_usd = config["budget_usd"]
     active_strategies = [s for s in config["active_strategies"] if s in STRATEGIES]
-    dedup_cooldown_h = config.get("dedup_cooldown_hours", 0)
+    dedup_cooldown_h = config.get("dedup_cooldown_hours", DEDUP_COOLDOWN_HOURS)
     ca_filter = config.get("ca_filter", True)
     buy_slip_bps_base = int(config.get("buy_slippage_bps", BUY_SLIPPAGE_BPS))
     sell_slip_bps = int(config.get("sell_slippage_bps", SELL_SLIPPAGE_BPS))

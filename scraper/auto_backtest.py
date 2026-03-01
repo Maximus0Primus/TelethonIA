@@ -1731,17 +1731,21 @@ def _recommend_strategies(report: dict, client=None) -> dict:
     result["reasoning"].append(f"Optimal top_n={best_topn} (best expectancy={best_topn_exp:.4f})")
 
     # Apply to DB if we have client and clear recommendations
+    # IMPORTANT: only update strategies + top_n — preserve existing config values
     if client and result["recommended_strategies"]:
         try:
-            new_config = {
-                "top_n": best_topn,
-                "budget_usd": 50.0,
-                "active_strategies": result["recommended_strategies"],
-                "dedup_cooldown_hours": 0,
-                "ca_filter": True,
-            }
+            existing_cfg = {}
+            try:
+                r = client.table("scoring_config").select("paper_trade_config").eq("id", 1).execute()
+                if r.data and r.data[0].get("paper_trade_config"):
+                    existing_cfg = r.data[0]["paper_trade_config"]
+            except Exception:
+                pass
+            existing_cfg["top_n"] = best_topn
+            existing_cfg["active_strategies"] = result["recommended_strategies"]
+            # Preserve dedup_cooldown_hours, budget_usd, ca_filter, etc.
             client.table("scoring_config").update({
-                "paper_trade_config": new_config,
+                "paper_trade_config": existing_cfg,
                 "updated_by": "auto_backtest_recommend",
             }).eq("id", 1).execute()
             result["applied_to_db"] = True
