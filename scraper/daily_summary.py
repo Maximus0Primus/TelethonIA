@@ -39,13 +39,14 @@ def _send_telegram(bot_token: str, chat_id: str, text: str) -> bool:
 
 def _strat_row(strat: str, st: dict) -> str:
     n = st["n"]
+    wins = st["wins"]
     tp = st["tp"]
     sl = st["sl"]
     to = st["to"]
     pnl = st["pnl"]
     invested = st["invested"]
     avg_pos = st["avg_pos"]
-    wr = round(tp / n * 100) if n else 0
+    wr = round(wins / n * 100) if n else 0
     roi = round(pnl / invested * 100, 1) if invested > 0 else 0.0
     sign = "📈" if pnl >= 0 else "📉"
     tag = " [leg]" if strat in LEGACY_STRATEGIES else ""
@@ -59,7 +60,7 @@ def _strat_row(strat: str, st: dict) -> str:
 def _aggregate(trades: list[dict]) -> dict:
     """Per-strategy stats."""
     strats: dict = defaultdict(lambda: {
-        "n": 0, "tp": 0, "sl": 0, "to": 0,
+        "n": 0, "wins": 0, "tp": 0, "sl": 0, "to": 0,
         "pnl": 0.0, "invested": 0.0, "avg_pos": 0.0,
     })
     for t in trades:
@@ -69,6 +70,8 @@ def _aggregate(trades: list[dict]) -> dict:
         strats[s]["n"] += 1
         strats[s]["pnl"] += pnl
         strats[s]["invested"] += pos
+        if pnl > 0:
+            strats[s]["wins"] += 1
         st = t.get("status", "")
         if st == "tp_hit":
             strats[s]["tp"] += 1
@@ -82,17 +85,22 @@ def _aggregate(trades: list[dict]) -> dict:
 
 
 def _source_line(source: str, trades: list[dict]) -> str:
-    sub = [t for t in trades if t.get("source") == source]
+    if source == "rt":
+        sub = [t for t in trades if t.get("source") == "rt"]
+    else:
+        # Batch trades have source=NULL in DB
+        sub = [t for t in trades if t.get("source") != "rt"]
     if not sub:
         return ""
     n = len(sub)
-    tp = sum(1 for t in sub if t.get("status") == "tp_hit")
+    wins = sum(1 for t in sub if float(t.get("pnl_usd") or 0) > 0)
     pnl = sum(float(t.get("pnl_usd") or 0) for t in sub)
     inv = sum(float(t.get("position_usd") or 0) for t in sub)
-    wr = round(tp / n * 100)
+    wr = round(wins / n * 100)
     roi = round(pnl / inv * 100, 1) if inv > 0 else 0
     sign = "📈" if pnl >= 0 else "📉"
-    return f"  {source.upper()}: {n}t WR {wr}% {sign} ${pnl:+.0f}/${inv:.0f} (ROI {roi:+.1f}%)"
+    label = "RT" if source == "rt" else "BATCH"
+    return f"  {label}: {n}t WR {wr}% {sign} ${pnl:+.0f}/${inv:.0f} (ROI {roi:+.1f}%)"
 
 
 def send_summary():
@@ -115,6 +123,7 @@ def send_summary():
     now = datetime.now(timezone.utc)
     h24_ago = (now - timedelta(hours=24)).isoformat()
     d7_ago = (now - timedelta(days=7)).isoformat()
+    d14_ago = (now - timedelta(days=14)).isoformat()  # wide fetch to catch long-running trades
 
     # ── API health ──
     api_alerts = []
@@ -178,17 +187,19 @@ def send_summary():
     except Exception:
         pass
 
-    # ── Fetch 7d closed trades ──
-    trades_7d: list[dict] = []
+    # ── Fetch closed trades (14d window to catch long-running MOONBAG/WIDE_RUNNER) ──
+    trades_raw: list[dict] = []
     try:
         r = client.table("paper_trades").select(
             "pnl_usd,status,strategy,source,position_usd,created_at,exit_at"
-        ).neq("status", "open").gte("created_at", d7_ago).execute()
-        trades_7d = r.data or []
+        ).neq("status", "open").gte("created_at", d14_ago).execute()
+        trades_raw = r.data or []
     except Exception as e:
-        logger.warning("7d trades fetch failed: %s", e)
+        logger.warning("trades fetch failed: %s", e)
 
-    trades_24h = [t for t in trades_7d if t.get("exit_at") and t["exit_at"] >= h24_ago]
+    # Filter by exit_at for consistent time windows (a trade counts in the period it CLOSED)
+    trades_7d = [t for t in trades_raw if t.get("exit_at") and t["exit_at"] >= d7_ago]
+    trades_24h = [t for t in trades_raw if t.get("exit_at") and t["exit_at"] >= h24_ago]
 
     strats_24h = _aggregate(trades_24h)
     strats_7d = _aggregate(trades_7d)
@@ -196,11 +207,12 @@ def send_summary():
     # ── 24h totals ──
     n_closed = len(trades_24h)
     pnl_24h = sum(float(t.get("pnl_usd") or 0) for t in trades_24h)
+    wins_24h = sum(1 for t in trades_24h if float(t.get("pnl_usd") or 0) > 0)
     tp_24h = sum(1 for t in trades_24h if t.get("status") == "tp_hit")
     sl_24h = sum(1 for t in trades_24h if t.get("status") == "sl_hit")
     to_24h = sum(1 for t in trades_24h if t.get("status") == "timeout")
     invested_24h = sum(float(t.get("position_usd") or 0) for t in trades_24h)
-    wr_24h = round(tp_24h / n_closed * 100) if n_closed else 0
+    wr_24h = round(wins_24h / n_closed * 100) if n_closed else 0
     roi_24h = round(pnl_24h / invested_24h * 100, 1) if invested_24h > 0 else 0
 
     # ── ML status ──
@@ -227,7 +239,7 @@ def send_summary():
         for s in sorted(strats_24h, key=lambda x: strats_24h[x]["pnl"], reverse=True)
     ]
     rt_line = _source_line("rt", trades_24h)
-    batch_line = _source_line("batch", trades_24h)
+    batch_line = _source_line("batch", trades_24h)  # "batch" → filters source != "rt"
 
     msg1 = (
         f"<b>📊 DAILY SUMMARY</b> — {now.strftime('%Y-%m-%d %H:%M UTC')}"
