@@ -29,16 +29,19 @@ export interface KolRowData {
   rtTrades: number;
   rtWr: number | null;
   rtWr50: number | null;
+  rtWr2x: number | null;
   rtPnl: number | null;
 }
 
 export type KolMode = "paper" | "kco";
+export type WrThreshold = "50" | "2x";
 
 interface KolRowProps {
   kol: KolRowData;
   rank: number;
   index: number;
   mode: KolMode;
+  wrThreshold: WrThreshold;
 }
 
 function formatRelativeTime(iso: string | null): string {
@@ -106,12 +109,15 @@ function WinRateBar({ rate, label }: { rate: number; label?: string }) {
   );
 }
 
-export function KolRow({ kol, rank, index, mode }: KolRowProps) {
+export function KolRow({ kol, rank, index, mode, wrThreshold }: KolRowProps) {
   const podiumBorder = PODIUM_BORDER[rank];
   const isPaper = mode === "paper";
 
-  // Paper mode: WR+50% primary. KCO mode: v2 exact preferred, v1 fallback
-  const winRate = isPaper ? kol.rtWr50 : (kol.winRate2xExact ?? kol.winRateAll);
+  // Paper mode: WR based on threshold toggle. KCO mode: v2 exact preferred, v1 fallback
+  const paperWr = wrThreshold === "2x" ? kol.rtWr2x : kol.rtWr50;
+  const paperWrAlt = wrThreshold === "2x" ? kol.rtWr50 : kol.rtWr2x;
+  const altLabel = wrThreshold === "2x" ? "+50%" : "2x";
+  const winRate = isPaper ? paperWr : (kol.winRate2xExact ?? kol.winRateAll);
   const callCount = isPaper
     ? kol.rtTrades
     : (kol.winRate2xExact !== null ? kol.totalCalls : kol.labeledCalls);
@@ -168,9 +174,9 @@ export function KolRow({ kol, rank, index, mode }: KolRowProps) {
         ) : winRate !== null ? (
           <div className="space-y-0.5">
             <WinRateBar rate={winRate} />
-            {isPaper && kol.rtWr !== null && (
+            {isPaper && paperWrAlt !== null && (
               <div className="text-[10px] text-white/30 font-mono text-right">
-                WR: {(kol.rtWr * 100).toFixed(0)}%
+                {altLabel}: {(paperWrAlt * 100).toFixed(0)}%
               </div>
             )}
           </div>

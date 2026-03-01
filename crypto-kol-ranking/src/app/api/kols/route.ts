@@ -35,9 +35,11 @@ interface RpcRowPaper {
   rt_trades: number;
   rt_wins: number;
   rt_wins_50: number;
+  rt_wins_2x: number;
   rt_pnl: number | null;
   rt_wr: number | null;
   rt_wr_50: number | null;
+  rt_wr_2x: number | null;
 }
 
 export interface KolLeaderboardEntry {
@@ -66,6 +68,7 @@ export interface KolLeaderboardEntry {
   rtTrades: number;
   rtWr: number | null;
   rtWr50: number | null;
+  rtWr2x: number | null;
   rtPnl: number | null;
 }
 
@@ -310,6 +313,7 @@ export async function GET(request: Request) {
           rtTrades: paper ? Number(paper.rt_trades) : 0,
           rtWr: paper?.rt_wr != null ? Number(paper.rt_wr) : null,
           rtWr50: paper?.rt_wr_50 != null ? Number(paper.rt_wr_50) : null,
+          rtWr2x: paper?.rt_wr_2x != null ? Number(paper.rt_wr_2x) : null,
           rtPnl: paper?.rt_pnl != null ? Number(paper.rt_pnl) : null,
         };
       }

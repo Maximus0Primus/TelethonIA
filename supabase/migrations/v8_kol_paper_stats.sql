@@ -1,15 +1,19 @@
 -- v8: KOL paper trade stats RPC
 -- Returns per-KOL paper trade performance (RT trades only, last 7d, active strategies)
 
+DROP FUNCTION IF EXISTS get_kol_paper_stats();
+
 CREATE OR REPLACE FUNCTION get_kol_paper_stats()
 RETURNS TABLE (
   kol_name    TEXT,
   rt_trades   BIGINT,
   rt_wins     BIGINT,
   rt_wins_50  BIGINT,
+  rt_wins_2x  BIGINT,
   rt_pnl      NUMERIC,
   rt_wr       NUMERIC,
-  rt_wr_50    NUMERIC
+  rt_wr_50    NUMERIC,
+  rt_wr_2x    NUMERIC
 ) AS $$
 BEGIN
   RETURN QUERY
@@ -18,6 +22,7 @@ BEGIN
     COUNT(*)                                           AS rt_trades,
     COUNT(*) FILTER (WHERE pt.pnl_pct > 0)             AS rt_wins,
     COUNT(*) FILTER (WHERE pt.pnl_pct >= 0.50)         AS rt_wins_50,
+    COUNT(*) FILTER (WHERE pt.pnl_pct >= 1.00)         AS rt_wins_2x,
     ROUND(SUM(pt.pnl_usd)::NUMERIC, 2)                AS rt_pnl,
     ROUND(
       COUNT(*) FILTER (WHERE pt.pnl_pct > 0)::NUMERIC
@@ -26,7 +31,11 @@ BEGIN
     ROUND(
       COUNT(*) FILTER (WHERE pt.pnl_pct >= 0.50)::NUMERIC
       / NULLIF(COUNT(*), 0), 4
-    )                                                  AS rt_wr_50
+    )                                                  AS rt_wr_50,
+    ROUND(
+      COUNT(*) FILTER (WHERE pt.pnl_pct >= 1.00)::NUMERIC
+      / NULLIF(COUNT(*), 0), 4
+    )                                                  AS rt_wr_2x
   FROM paper_trades pt
   WHERE pt.source = 'rt'
     AND pt.kol_group IS NOT NULL
