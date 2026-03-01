@@ -701,62 +701,91 @@ RT_BANKROLL_TTL = 60          # 1min
 
 
 def _rt_load_kol_whitelist(config: dict) -> dict:
-    """v77: Load KOL whitelist based on historical WR from kol_call_outcomes.
-    Rolling window (lookback_days) instead of all-time. Cached 1h."""
+    """v82: Load KOL whitelist from PAPER TRADES (not KCO).
+    KCO uses max_return (theoretical ATH) which is anti-correlated with actual
+    paper trading results. This queries real closed paper_trades by kol_group.
+    Rolling window (lookback_days). Cached 1h."""
     global _rt_kol_whitelist, _rt_kol_whitelist_loaded_at
     now = time.time()
     if _rt_kol_whitelist and now - _rt_kol_whitelist_loaded_at < RT_KOL_WHITELIST_TTL:
         return _rt_kol_whitelist
 
     kf = config.get("kol_filter", {})
-    wr_threshold = float(kf.get("wr_threshold", 0.60))
-    return_threshold = float(kf.get("return_threshold", 1.5))
-    min_calls = int(kf.get("min_calls", 5))
-    lookback_days = int(kf.get("lookback_days", 30))
+    wr_threshold = float(kf.get("wr_threshold", 0.40))
+    min_calls = int(kf.get("min_calls", 3))
+    lookback_days = int(kf.get("lookback_days", 7))
+
+    deprecated = {"MOONBAG", "WIDE_RUNNER", "SCALE_OUT", "TP100_SL30"}
 
     try:
         sb = _get_supabase()
         if not sb:
             return _rt_kol_whitelist
-        from datetime import datetime, timezone, timedelta
         cutoff = (datetime.now(timezone.utc) - timedelta(days=lookback_days)).isoformat()
-        # Fetch KCO rows within rolling window
-        result = sb.table("kol_call_outcomes").select(
-            "kol_group, max_return"
-        ).filter("max_return", "not.is", "null").gte("created_at", cutoff).execute()
+
+        # Fetch closed RT paper trades (kol_group IS NOT NULL = RT trades)
+        result = sb.table("paper_trades").select(
+            "kol_group, pnl_usd, strategy, source"
+        ).neq("status", "open").filter(
+            "kol_group", "not.is", "null"
+        ).gte("exit_at", cutoff).execute()
         rows = result.data or []
         if not rows:
-            logger.warning("RT KOL whitelist: no KCO rows with max_return in last %dd", lookback_days)
+            logger.warning("RT KOL whitelist: no closed RT paper trades in last %dd", lookback_days)
+            return _rt_kol_whitelist
+
+        # Filter out deprecated strategies
+        rows = [r for r in rows if r.get("strategy") not in deprecated]
+        if not rows:
+            logger.warning("RT KOL whitelist: no non-deprecated RT trades in last %dd", lookback_days)
             return _rt_kol_whitelist
 
         # Aggregate by kol_group
         from collections import defaultdict
-        agg = defaultdict(lambda: {"total": 0, "hits": 0})
+        agg = defaultdict(lambda: {"total": 0, "wins": 0, "pnl": 0.0})
         for r in rows:
             kol = r["kol_group"]
+            pnl = float(r.get("pnl_usd") or 0)
             agg[kol]["total"] += 1
-            if float(r["max_return"] or 0) >= return_threshold:
-                agg[kol]["hits"] += 1
+            agg[kol]["pnl"] += pnl
+            if pnl > 0:
+                agg[kol]["wins"] += 1
 
         whitelist = {}
         approved_count = 0
         for kol, stats in agg.items():
-            wr = stats["hits"] / stats["total"] if stats["total"] > 0 else 0
-            approved = wr >= wr_threshold and stats["total"] >= min_calls
+            wr = stats["wins"] / stats["total"] if stats["total"] > 0 else 0
+            has_enough = stats["total"] >= min_calls
+            approved = wr >= wr_threshold and has_enough
             whitelist[kol] = {
                 "wr": round(wr, 4),
                 "total": stats["total"],
-                "hits": stats["hits"],
+                "hits": stats["wins"],
+                "pnl": round(stats["pnl"], 2),
                 "approved": approved,
             }
             if approved:
                 approved_count += 1
+                logger.info("  KOL APPROVED: %s — %dt WR %.0f%% PnL $%.2f",
+                            kol, stats["total"], wr * 100, stats["pnl"])
+            elif has_enough:
+                logger.info("  KOL REJECTED: %s — %dt WR %.0f%% PnL $%.2f (below %.0f%% threshold)",
+                            kol, stats["total"], wr * 100, stats["pnl"], wr_threshold * 100)
+
+        # Fallback: if < 3 KOLs pass, relax threshold to 30%
+        if approved_count < 3:
+            relaxed_threshold = 0.30
+            for kol, stats in agg.items():
+                wr = stats["wins"] / stats["total"] if stats["total"] > 0 else 0
+                if not whitelist[kol]["approved"] and wr >= relaxed_threshold and stats["total"] >= min_calls:
+                    whitelist[kol]["approved"] = True
+                    approved_count += 1
+                    logger.info("  KOL APPROVED (relaxed 30%%): %s — %dt WR %.0f%%", kol, stats["total"], wr * 100)
 
         _rt_kol_whitelist = whitelist
         _rt_kol_whitelist_loaded_at = now
-        logger.info("RT KOL whitelist: %d/%d approved (wr>=%.0f%%, calls>=%d, ret>=%.1fx, last %dd)",
-                     approved_count, len(whitelist), wr_threshold * 100, min_calls, return_threshold,
-                     lookback_days)
+        logger.info("RT KOL whitelist (paper-trade-based): %d/%d approved (wr>=%.0f%%, trades>=%d, last %dd)",
+                     approved_count, len(whitelist), wr_threshold * 100, min_calls, lookback_days)
     except Exception as e:
         logger.warning("RT KOL whitelist load failed: %s", e)
     return _rt_kol_whitelist
@@ -1406,19 +1435,22 @@ async def _rt_on_new_message(event: events.NewMessage.Event):
     tier = GROUPS_TIER.get(username, "A")
     kol_info = kol_scores.get(username, {"score": 0.0, "win_rate": 0.0, "total_calls": 0})
 
-    # v71: KOL WR gate — only trade KOLs with proven historical win rate
+    # v82: KOL WR gate — only trade KOLs with proven paper trade win rate
     kol_filter_cfg = config.get("kol_filter", {})
     if kol_filter_cfg.get("enabled", False):
         whitelist = _rt_load_kol_whitelist(config)
         if whitelist:  # only apply gate when whitelist is actually populated
             kol_wl = whitelist.get(username)
             if kol_wl and kol_wl.get("approved"):
-                # Enrich kol_info with real KCO win rate (replaces kol_scores.json WR)
+                # Enrich kol_info with real paper trade win rate
                 kol_info = dict(kol_info)  # don't mutate cached dict
                 kol_info["win_rate"] = kol_wl["wr"]
                 kol_info["total_calls"] = kol_wl["total"]
             else:
-                wr_str = f" wr={kol_wl['wr']:.0%}/{kol_wl['total']}calls" if kol_wl else " (no KCO data)"
+                if kol_wl:
+                    wr_str = f" wr={kol_wl['wr']:.0%}/{kol_wl['total']}trades pnl=${kol_wl.get('pnl', 0):.0f}"
+                else:
+                    wr_str = " (no paper trade data)"
                 logger.info("RT SKIP (KOL WR): %s%s", username, wr_str)
                 return
 
