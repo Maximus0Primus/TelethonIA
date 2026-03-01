@@ -83,6 +83,7 @@ def _fetch_closed_rt_trades(client) -> list[dict]:
             )
             .eq("source", "rt")
             .neq("status", "open")
+            .eq("is_shadow", False)
             .execute()
         )
         return result.data or []

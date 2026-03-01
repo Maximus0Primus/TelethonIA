@@ -756,7 +756,9 @@ def _rt_load_kol_whitelist_live(config: dict) -> dict:
 
         result = sb.table("paper_trades").select(
             "kol_group, pnl_usd, strategy"
-        ).neq("status", "open").filter(
+        ).neq("status", "open").eq(
+            "is_shadow", False
+        ).filter(
             "kol_group", "not.is", "null"
         ).gte("exit_at", cutoff).execute()
         rows = result.data or []

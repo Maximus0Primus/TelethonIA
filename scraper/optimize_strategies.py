@@ -617,7 +617,9 @@ def backtest_per_kol(days: int = 14) -> dict:
     while True:
         resp = sb.table("paper_trades").select(
             "kol_group, kol_tier, strategy, pnl_usd, pnl_pct, status, symbol, position_usd"
-        ).neq("status", "open").filter(
+        ).neq("status", "open").eq(
+            "is_shadow", False
+        ).filter(
             "kol_group", "not.is", "null"
         ).gte("exit_at", cutoff).range(offset, offset + page_size - 1).execute()
         rows = resp.data or []

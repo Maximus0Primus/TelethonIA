@@ -5450,7 +5450,9 @@ def _compute_rt_ml_weights(client) -> dict | None:
     try:
         r = client.table("paper_trades").select(
             "kol_ml_pred,ml_pred,pnl_usd"
-        ).eq("source", "rt").neq("status", "open").gte(
+        ).eq("source", "rt").neq("status", "open").eq(
+            "is_shadow", False
+        ).gte(
             "created_at",
             (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
         ).execute()
@@ -5526,7 +5528,9 @@ def _update_kol_whitelist(client) -> dict | None:
         cutoff = (datetime.now(timezone.utc) - timedelta(days=lookback_days)).isoformat()
         result = client.table("paper_trades").select(
             "kol_group, pnl_usd, strategy"
-        ).neq("status", "open").filter(
+        ).neq("status", "open").eq(
+            "is_shadow", False
+        ).filter(
             "kol_group", "not.is", "null"
         ).gte("exit_at", cutoff).execute()
         rows = result.data or []
@@ -5706,6 +5710,7 @@ def _analyze_rt_trades(client) -> dict | None:
             .select("*")
             .eq("source", "rt")
             .neq("status", "open")
+            .eq("is_shadow", False)
             .execute()
         )
         trades = result.data or []
@@ -5853,6 +5858,7 @@ def _optimize_rt_scoring(client, n_trials: int = 100) -> dict | None:
                     "pnl_pct, pnl_usd, position_usd, strategy")
             .eq("source", "rt")
             .neq("status", "open")
+            .eq("is_shadow", False)
             .execute()
         )
         trades = result.data or []
