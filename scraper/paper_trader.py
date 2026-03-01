@@ -455,9 +455,12 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
                 if val is not None:
                     shadow_base[db_col] = val
 
+            # all_real_strategies: full list of strategies opened as real (across all calls)
+            # In RT hybrid mode, this includes all hybrid allocations (not just this call's active_strategies)
+            real_strats = set(config.get("all_real_strategies", active_strategies))
             for strat_name in SHADOW_STRATEGIES:
-                if strat_name in active_strategies:
-                    continue  # already opened as real trade
+                if strat_name in real_strats:
+                    continue  # opened as real trade (this call or sibling call)
                 if not _passes_strategy_filter(token, strat_name):
                     continue
                 if (addr, strat_name) in open_combos:

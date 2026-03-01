@@ -1334,7 +1334,8 @@ def _rt_open_trades(ca: str, symbol: str, price: float, mcap: float,
                             kol_username, kol_best, best_stats["n"],
                             best_stats.get("wr", 0) * 100, best_stats.get("pnl", 0))
 
-        for strat_name, alloc_pct in allocations.items():
+        all_hybrid_strats = [s for s in allocations if s in STRATEGIES]
+        for i, (strat_name, alloc_pct) in enumerate(allocations.items()):
             if strat_name not in STRATEGIES:
                 continue
             strat_pos = round(pos_size * float(alloc_pct), 2)
@@ -1344,8 +1345,13 @@ def _rt_open_trades(ca: str, symbol: str, price: float, mcap: float,
             strat_config = dict(pt_config)
             strat_config["budget_usd"] = strat_pos
             strat_config["active_strategies"] = [strat_name]
+            # Shadow knows all hybrid strategies to avoid blocking sibling real trades
+            strat_config["all_real_strategies"] = all_hybrid_strats
             strat_config["top_n"] = 1
             strat_config["ca_filter"] = False
+            # Only first call opens shadows (others would dedup anyway)
+            if i > 0:
+                strat_config["shadow_enabled"] = False
 
             opened = open_paper_trades(sb, [token_entry], cycle_ts=now, config=strat_config)
             total_opened += opened
