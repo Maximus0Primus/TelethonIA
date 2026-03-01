@@ -708,6 +708,10 @@ _ml_calibrator = None     # v54: Isotonic calibrator (optional)
 _ml_loaded = False         # Prevent repeated load attempts
 _ml_loaded_mtime = 0.0    # v82: mtime of model file when loaded (for hot-reload)
 
+# v83: Multi-horizon ensemble — load 6h+12h+24h and weight-average predictions
+_ml_ensemble: list[dict] = []   # [{xgb, lgb, features, meta, calibrator, weight}, ...]
+_ml_ensemble_loaded = False
+
 # v70: KCO model globals (separate from main ML model)
 _kco_xgb = None
 _kco_lgb = None
@@ -843,31 +847,126 @@ def _load_ml_model(horizon: str = "12h"):
 
 def _check_ml_hot_reload() -> None:
     """
-    v82: Hot-reload ML model if files on disk have changed.
+    v82/v83: Hot-reload ML models if files on disk have changed.
     Called from load_scoring_config() at the start of each cycle.
-    After git pull delivers new model files, this detects the mtime change
-    and resets _ml_loaded so the next _apply_ml_scores() reloads from disk.
+    Checks all horizon model files (6h, 12h, 24h) for mtime changes.
     """
     global _ml_loaded, _ml_model, _ml_lgb_model, _ml_features, _ml_meta, _ml_calibrator, _ml_loaded_mtime
-    if not _ml_loaded:
+    global _ml_ensemble, _ml_ensemble_loaded
+    if not _ml_loaded and not _ml_ensemble_loaded:
         return  # Not loaded yet — nothing to reload
-    horizon = SCORING_PARAMS.get("ml_horizon", "12h")
-    xgb_path = _ML_MODEL_DIR / f"model_{horizon}.json"
-    if not xgb_path.exists():
-        return
     try:
-        current_mtime = xgb_path.stat().st_mtime
-        if current_mtime > _ml_loaded_mtime:
-            logger.info("v82: ML model file changed on disk (mtime %.0f -> %.0f), triggering reload",
-                        _ml_loaded_mtime, current_mtime)
+        # Check all horizon model files for changes
+        max_mtime = 0.0
+        for h in ("6h", "12h", "24h"):
+            p = _ML_MODEL_DIR / f"model_{h}.json"
+            if p.exists():
+                max_mtime = max(max_mtime, p.stat().st_mtime)
+        if max_mtime > _ml_loaded_mtime:
+            logger.info("v83: ML model files changed on disk (mtime %.0f -> %.0f), triggering reload",
+                        _ml_loaded_mtime, max_mtime)
             _ml_loaded = False
             _ml_model = None
             _ml_lgb_model = None
             _ml_features = None
             _ml_meta = None
             _ml_calibrator = None
+            _ml_ensemble = []
+            _ml_ensemble_loaded = False
     except OSError:
         pass  # File stat failed — ignore
+
+
+def _load_ml_ensemble() -> list[dict]:
+    """
+    v83: Load multiple horizon models (6h, 12h, 24h) and return ensemble list.
+    Each entry: {xgb, lgb, features, meta, calibrator, weight (=spearman)}.
+    Falls back to single-model if only one passes quality gate.
+    """
+    global _ml_ensemble, _ml_ensemble_loaded, _ml_loaded_mtime
+    if _ml_ensemble_loaded:
+        return _ml_ensemble
+
+    _ml_ensemble_loaded = True
+    _ml_ensemble = []
+    min_test = int(SCORING_PARAMS.get("min_ml_test_samples", _MIN_ML_TEST_SAMPLES))
+    best_mtime = 0.0
+
+    for horizon in ("6h", "12h", "24h"):
+        xgb_path = _ML_MODEL_DIR / f"model_{horizon}.json"
+        lgb_path = _ML_MODEL_DIR / f"model_{horizon}_lgb.txt"
+        meta_path = _ML_MODEL_DIR / f"model_{horizon}_meta.json"
+        cal_path = _ML_MODEL_DIR / f"model_{horizon}_calibrator.joblib"
+
+        if not xgb_path.exists() or not meta_path.exists():
+            continue
+
+        try:
+            with open(meta_path) as f:
+                meta = json.load(f)
+        except Exception:
+            continue
+
+        # Quality gate
+        p_at_5 = meta.get("metrics", {}).get("precision_at_5", 0)
+        n_test = meta.get("test_samples", 0)
+        if meta.get("quality_gate") != "PASSED" or p_at_5 < _MIN_PRECISION_AT_5 or n_test < min_test:
+            logger.info("ML ensemble: skipping %s (gate=%s, p@5=%.2f, n_test=%d)",
+                        horizon, meta.get("quality_gate"), p_at_5, n_test)
+            continue
+
+        mode = meta.get("mode", "regression")
+        if mode not in ("regression", "ltr"):
+            continue  # ensemble only for regression/ltr models
+
+        entry = {"horizon": horizon, "meta": meta, "features": meta.get("features", []),
+                 "xgb": None, "lgb": None, "calibrator": None,
+                 "weight": meta.get("metrics", {}).get("spearman", 0.3)}
+
+        try:
+            import xgboost as xgb
+            if mode == "ltr":
+                m = xgb.Booster(); m.load_model(str(xgb_path))
+            else:
+                m = xgb.XGBRegressor(); m.load_model(str(xgb_path))
+            entry["xgb"] = m
+        except Exception as e:
+            logger.warning("ML ensemble: XGB %s load failed: %s", horizon, e)
+
+        if lgb_path.exists():
+            try:
+                import lightgbm as lgb_lib
+                entry["lgb"] = lgb_lib.Booster(model_file=str(lgb_path))
+            except Exception:
+                pass
+
+        if entry["xgb"] is None and entry["lgb"] is None:
+            continue
+
+        if cal_path.exists():
+            try:
+                from joblib import load as joblib_load
+                entry["calibrator"] = joblib_load(cal_path)
+            except Exception:
+                pass
+
+        _ml_ensemble.append(entry)
+        mtime = xgb_path.stat().st_mtime
+        if mtime > best_mtime:
+            best_mtime = mtime
+
+    _ml_loaded_mtime = best_mtime
+
+    if _ml_ensemble:
+        horizons = [e["horizon"] for e in _ml_ensemble]
+        weights = [e["weight"] for e in _ml_ensemble]
+        logger.info("ML ensemble loaded: %d models (%s), spearman weights=%s",
+                    len(_ml_ensemble), "+".join(horizons),
+                    [round(w, 3) for w in weights])
+    else:
+        logger.warning("ML ensemble: no models passed quality gate")
+
+    return _ml_ensemble
 
 
 def _load_kco_model():
@@ -1090,98 +1189,108 @@ def _build_feature_row(token: dict, features: list[str]) -> dict:
 
 def _apply_ml_scores(ranking: list[dict]) -> None:
     """
-    ML as MULTIPLIER: predictions scale the manual score within [0.5, 1.5].
-    This preserves manual penalties (safety, death, crash) while letting ML boost/dampen.
-
-    Supports 3 modes:
-    - regression: raw prediction → percentile rank → scale to [0.5, 1.5]
-    - classification: predict_proba → scale to [0.5, 1.5]
-    - ltr (Learning-to-Rank): relevance score → percentile rank → [0.5, 1.5]
+    v83: Multi-horizon ML ensemble as MULTIPLIER.
+    Loads 6h+12h+24h regression models, predicts with each, weight-averages by spearman,
+    then converts to percentile-rank multiplier in [floor, cap].
+    Falls back to single-model if only one passes quality gate.
     """
-    # v22: Read ML horizon from scoring_config (dynamic)
-    ml_horizon = SCORING_PARAMS.get("ml_horizon", "12h")
-    xgb_model, lgb_model, features, meta, calibrator = _load_ml_model(horizon=ml_horizon)
-    if (xgb_model is None and lgb_model is None) or not features or not meta:
-        return
-
-    mode = meta.get("mode", "classification")
-    weights = meta.get("ensemble_weights", {"xgboost": 0.5, "lightgbm": 0.5})
-    xgb_w = weights.get("xgboost", 0.5)
-    lgb_w = weights.get("lightgbm", 0.5)
-
-    # Build feature matrix
-    rows = [_build_feature_row(token, features) for token in ranking]
+    ensemble = _load_ml_ensemble()
+    if not ensemble:
+        # Fallback: try legacy single-model path
+        ml_horizon = SCORING_PARAMS.get("ml_horizon", "12h")
+        xgb_model, lgb_model, features, meta, calibrator = _load_ml_model(horizon=ml_horizon)
+        if (xgb_model is None and lgb_model is None) or not features or not meta:
+            return
+        # Wrap single model as 1-entry ensemble for unified code path
+        ensemble = [{"horizon": ml_horizon, "xgb": xgb_model, "lgb": lgb_model,
+                     "features": features, "meta": meta, "calibrator": calibrator,
+                     "weight": meta.get("metrics", {}).get("spearman", 0.3)}]
 
     try:
         import pandas as pd
-        X = pd.DataFrame(rows, columns=features)
+        from scipy.stats import rankdata
 
-        # Get raw predictions from each model
-        preds = None
+        ml_floor = SCORING_PARAMS["ml_mult_floor"]  # default 0.3
+        ml_cap = SCORING_PARAMS["ml_mult_cap"]      # default 2.0
 
-        if mode in ("regression", "ltr"):
-            # Both regression and LTR output raw scores → percentile-based scaling
-            # LTR: XGBoost rank:ndcg outputs relevance scores (higher = better ranking)
-            if mode == "ltr" and xgb_model is not None:
-                # LTR uses Booster.predict(DMatrix), not sklearn .predict(DataFrame)
-                import xgboost as _xgb
-                dmat = _xgb.DMatrix(X)
-                xgb_preds = xgb_model.predict(dmat)
+        # Collect weighted predictions from each model
+        all_preds = []       # list of (preds_array, weight)
+        best_calibrator = None
+        best_cal_preds = None
+
+        for entry in ensemble:
+            features = entry["features"]
+            meta = entry["meta"]
+            xgb_model = entry["xgb"]
+            lgb_model = entry["lgb"]
+            mode = meta.get("mode", "regression")
+            ew = meta.get("ensemble_weights", {"xgboost": 0.5, "lightgbm": 0.5})
+            xgb_w = ew.get("xgboost", 0.5)
+            lgb_w = ew.get("lightgbm", 0.5)
+
+            rows = [_build_feature_row(token, features) for token in ranking]
+            X = pd.DataFrame(rows, columns=features)
+
+            if mode in ("regression", "ltr"):
+                if mode == "ltr" and xgb_model is not None:
+                    import xgboost as _xgb
+                    xgb_preds = xgb_model.predict(_xgb.DMatrix(X))
+                else:
+                    xgb_preds = xgb_model.predict(X) if xgb_model is not None else None
+                lgb_preds = lgb_model.predict(X.values) if lgb_model is not None else None
+
+                if xgb_preds is not None and lgb_preds is not None:
+                    preds = xgb_w * xgb_preds + lgb_w * lgb_preds
+                elif xgb_preds is not None:
+                    preds = xgb_preds
+                else:
+                    preds = lgb_preds
             else:
-                xgb_preds = xgb_model.predict(X) if xgb_model is not None else None
-            lgb_preds = lgb_model.predict(X.values) if lgb_model is not None else None
+                # Classification fallback
+                xgb_proba = xgb_model.predict_proba(X)[:, 1] if xgb_model is not None else None
+                lgb_proba = lgb_model.predict(X.values) if lgb_model is not None else None
+                if xgb_proba is not None and lgb_proba is not None:
+                    preds = xgb_w * xgb_proba + lgb_w * lgb_proba
+                elif xgb_proba is not None:
+                    preds = xgb_proba
+                else:
+                    preds = lgb_proba
 
-            if xgb_preds is not None and lgb_preds is not None:
-                preds = xgb_w * xgb_preds + lgb_w * lgb_preds
-            elif xgb_preds is not None:
-                preds = xgb_preds
-            else:
-                preds = lgb_preds
+            if preds is not None:
+                all_preds.append((preds, entry["weight"]))
+                # Use calibrator from the model with highest spearman
+                if entry.get("calibrator") is not None:
+                    if best_calibrator is None or entry["weight"] > (best_cal_preds or (None, 0))[1]:
+                        best_calibrator = entry["calibrator"]
+                        best_cal_preds = (preds, entry["weight"])
 
-            # Convert to percentile ranks (0-1), then scale to [floor, cap]
-            # v44: dynamic bounds from scoring_config (widened from [0.5, 1.5])
-            ml_floor = SCORING_PARAMS["ml_mult_floor"]  # default 0.3
-            ml_cap = SCORING_PARAMS["ml_mult_cap"]      # default 2.0
-            from scipy.stats import rankdata
-            ranks = rankdata(preds) / len(preds)  # 0..1 percentile
-            ml_multipliers = ml_floor + ranks * (ml_cap - ml_floor)
+                logger.info("ML ensemble %s: spearman=%.3f, preds [%.2f - %.2f]",
+                            entry["horizon"], entry["weight"],
+                            float(preds.min()), float(preds.max()))
 
-        else:
-            # Classification: predict_proba → [0.5, 1.5]
-            xgb_proba = xgb_model.predict_proba(X)[:, 1] if xgb_model is not None else None
-            lgb_proba = None
-            if lgb_model is not None:
-                # LightGBM Booster.predict returns raw probabilities directly
-                lgb_proba = lgb_model.predict(X.values)
+        if not all_preds:
+            return
 
-            if xgb_proba is not None and lgb_proba is not None:
-                proba = xgb_w * xgb_proba + lgb_w * lgb_proba
-            elif xgb_proba is not None:
-                proba = xgb_proba
-            else:
-                proba = lgb_proba
+        # Weight-average predictions by spearman correlation
+        total_weight = sum(w for _, w in all_preds)
+        combined = sum(p * (w / total_weight) for p, w in all_preds)
 
-            # Scale probability to multiplier: p=0 → floor, p=1 → cap
-            # v44: dynamic bounds from scoring_config
-            ml_floor = SCORING_PARAMS["ml_mult_floor"]  # default 0.3
-            ml_cap = SCORING_PARAMS["ml_mult_cap"]      # default 2.0
-            ml_multipliers = ml_floor + np.clip(proba, 0, 1) * (ml_cap - ml_floor)
+        # Percentile rank → multiplier
+        ranks = rankdata(combined) / len(combined)
+        ml_multipliers = ml_floor + ranks * (ml_cap - ml_floor)
 
-        # v54: Apply calibrated win probabilities if calibrator available
-        if calibrator is not None and preds is not None:
+        # Calibrated win probabilities from best calibrator
+        if best_calibrator is not None:
             try:
-                calibrated = calibrator.predict(preds)
+                calibrated = best_calibrator.predict(best_cal_preds[0])
                 for token, cal_prob in zip(ranking, calibrated):
                     token["ml_win_probability"] = round(float(cal_prob), 4)
                 logger.info("Calibrated win probabilities applied [%.3f - %.3f]",
                             float(calibrated.min()), float(calibrated.max()))
             except Exception as cal_err:
-                logger.warning("Calibration failed at inference: %s", cal_err)
+                logger.warning("Calibration failed: %s", cal_err)
 
-        # Apply multiplier to all score variants
-        # v44: dynamic bounds from scoring_config
-        ml_floor = SCORING_PARAMS["ml_mult_floor"]
-        ml_cap = SCORING_PARAMS["ml_mult_cap"]
+        # Apply multiplier to scores
         for token, ml_mult in zip(ranking, ml_multipliers):
             ml_mult = float(np.clip(ml_mult, ml_floor, ml_cap))
             token["ml_multiplier"] = round(ml_mult, 3)
@@ -1189,9 +1298,10 @@ def _apply_ml_scores(ranking: list[dict]) -> None:
             token["score_conviction"] = int(token["score_conviction"] * ml_mult)
             token["score_momentum"] = int(token["score_momentum"] * ml_mult)
 
+        horizons = "+".join(e["horizon"] for e in ensemble)
         logger.info(
-            "ML multiplier applied (%s mode) for %d tokens [%.2f - %.2f]",
-            mode, len(ranking), float(ml_multipliers.min()), float(ml_multipliers.max()),
+            "ML ensemble (%s) applied for %d tokens [%.2f - %.2f]",
+            horizons, len(ranking), float(ml_multipliers.min()), float(ml_multipliers.max()),
         )
     except Exception as e:
         logger.warning("ML scoring failed: %s — keeping manual scores", e)

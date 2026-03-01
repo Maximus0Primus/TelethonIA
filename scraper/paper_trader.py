@@ -44,6 +44,11 @@ except ImportError:
 DEXSCREENER_BATCH_URL = "https://api.dexscreener.com/tokens/v1/solana/{addresses}"
 BATCH_SIZE = 30
 
+# v83: Bot ML models — predict TP-before-SL for specific strategies
+# Maps strategy name → bot model file suffix. Only strategies with trained models get ML filtering.
+_BOT_ML_MODELS: dict = {}  # {strategy: {xgb, lgb, features, meta, threshold}}
+_BOT_ML_LOADED = False
+
 # --- Defaults (overridden by scoring_config.paper_trade_config) ---
 TOP_N = 5
 PORTFOLIO_BUDGET = 50.0  # USD per cycle, score-weighted across top N
@@ -143,6 +148,130 @@ STRATEGY_FILTERS = {
         "max_mcap": 5_000_000,
     },
 }
+
+
+def _load_bot_ml_models() -> dict:
+    """
+    v83: Lazy-load bot_won ML models (predict TP-before-SL per strategy).
+    Scans for model_{horizon}_bot_meta.json files on disk.
+    Returns dict mapping strategy_name → model info.
+    """
+    global _BOT_ML_MODELS, _BOT_ML_LOADED
+    if _BOT_ML_LOADED:
+        return _BOT_ML_MODELS
+    _BOT_ML_LOADED = True
+
+    from pathlib import Path
+    import json
+    model_dir = Path(__file__).parent
+
+    for meta_path in sorted(model_dir.glob("model_*_bot_meta.json")):
+        try:
+            with open(meta_path) as f:
+                meta = json.load(f)
+            if meta.get("quality_gate") != "PASSED":
+                continue
+            n_test = meta.get("test_samples", 0)
+            if n_test < 50:  # bot models can have smaller test sets
+                continue
+
+            strategy = meta.get("strategy", "")
+            horizon = meta.get("horizon", "12h")
+            features = meta.get("features", [])
+            if not strategy or not features:
+                continue
+
+            # Load models
+            stem = meta_path.stem.replace("_meta", "")  # e.g. "model_12h_bot"
+            xgb_path = model_dir / f"{stem}.json"
+            lgb_path = model_dir / f"{stem}_lgb.txt"
+
+            xgb_model, lgb_model = None, None
+            if xgb_path.exists():
+                try:
+                    import xgboost as xgb
+                    xgb_model = xgb.XGBClassifier()
+                    xgb_model.load_model(str(xgb_path))
+                except Exception:
+                    pass
+            if lgb_path.exists():
+                try:
+                    import lightgbm as lgb_lib
+                    lgb_model = lgb_lib.Booster(model_file=str(lgb_path))
+                except Exception:
+                    pass
+
+            if xgb_model is None and lgb_model is None:
+                continue
+
+            ew = meta.get("ensemble_weights", {"xgboost": 0.5, "lightgbm": 0.5})
+            p5 = meta.get("metrics", {}).get("precision_at_5", 0)
+
+            _BOT_ML_MODELS[strategy] = {
+                "xgb": xgb_model, "lgb": lgb_model, "features": features,
+                "meta": meta, "xgb_w": ew.get("xgboost", 0.5),
+                "lgb_w": ew.get("lightgbm", 0.5), "horizon": horizon,
+            }
+            logger.info("Bot ML model loaded: %s/%s (p@5=%.2f, n_test=%d)",
+                        strategy, horizon, p5, n_test)
+        except Exception as e:
+            logger.warning("Failed to load bot model %s: %s", meta_path, e)
+
+    if _BOT_ML_MODELS:
+        logger.info("Bot ML: %d strategy models loaded (%s)",
+                    len(_BOT_ML_MODELS), ", ".join(_BOT_ML_MODELS.keys()))
+    return _BOT_ML_MODELS
+
+
+def _bot_ml_gate(token: dict, strategy_name: str) -> float:
+    """
+    v83: Bot ML gate — returns position multiplier [0, 1].
+    1.0 = model predicts win or no model available (pass through).
+    0.5 = model uncertain (win_prob 0.3-0.45).
+    0.0 = model predicts loss with confidence (win_prob < 0.3) → skip trade.
+    """
+    models = _load_bot_ml_models()
+    if strategy_name not in models:
+        return 1.0  # no model for this strategy → full position
+
+    import numpy as np
+    model = models[strategy_name]
+    features = model["features"]
+
+    try:
+        from pipeline import _build_feature_row
+        import pandas as pd
+        row = _build_feature_row(token, features)
+        X = pd.DataFrame([row], columns=features)
+
+        xgb_proba = None
+        if model["xgb"] is not None:
+            xgb_proba = model["xgb"].predict_proba(X)[:, 1][0]
+        lgb_proba = None
+        if model["lgb"] is not None:
+            raw = model["lgb"].predict(X.values)
+            lgb_proba = float(raw[0])
+
+        if xgb_proba is not None and lgb_proba is not None:
+            win_prob = model["xgb_w"] * xgb_proba + model["lgb_w"] * lgb_proba
+        elif xgb_proba is not None:
+            win_prob = xgb_proba
+        else:
+            win_prob = lgb_proba
+
+        if win_prob is None:
+            return 1.0
+
+        # Gate thresholds
+        if win_prob < 0.30:
+            return 0.0   # strong sell signal → skip
+        elif win_prob < 0.45:
+            return 0.5   # uncertain → half position
+        else:
+            return 1.0   # model says go → full position
+    except Exception as e:
+        logger.warning("Bot ML gate failed for %s/%s: %s", token.get("symbol"), strategy_name, e)
+        return 1.0  # fail-open: don't block on ML error
 
 
 def _passes_strategy_filter(token: dict, strategy_name: str) -> bool:
@@ -397,6 +526,13 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
             if (addr, strat_name) in cooldown_combos:
                 continue
 
+            # v83: Bot ML gate — reduce or skip position if model predicts loss
+            bot_mult = _bot_ml_gate(token, strat_name)
+            if bot_mult <= 0.0:
+                logger.info("paper_trader: BOT ML skip %s/%s (win_prob < 0.30)",
+                            token.get("symbol"), strat_name)
+                continue
+
             for tranche in tranches:
                 tp_price = entry_price * tranche["tp_mult"] if tranche["tp_mult"] else None
                 sl_price = entry_price * tranche["sl_mult"]
@@ -409,7 +545,7 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
                     "horizon_minutes": tranche["horizon_min"],
                     "tranche_pct": tranche["pct"],
                     "tranche_label": tranche["label"],
-                    "position_usd": round(alloc_usd * tranche["pct"], 2),
+                    "position_usd": round(alloc_usd * tranche["pct"] * bot_mult, 2),
                 }
 
                 try:
