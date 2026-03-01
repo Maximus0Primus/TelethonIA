@@ -718,6 +718,7 @@ _kco_loaded = False
 # Quality gate: refuse to load models below this threshold
 # v22: relaxed from 0.40 — lower return thresholds (e.g. +50%) are easier to predict
 _MIN_PRECISION_AT_5 = 0.30
+_MIN_ML_TEST_SAMPLES = 80  # v83: lowered from 200 — configurable via scoring_config.min_ml_test_samples
 
 
 def _load_ml_model(horizon: str = "12h"):
@@ -771,8 +772,10 @@ def _load_ml_model(horizon: str = "12h"):
         return None, None, None, None, None
 
     # Refuse models trained on tiny test sets — statistically meaningless
-    if n_test < 200:
-        reason = f"only {n_test} test samples (need >=200)"
+    # v83: configurable via scoring_config instead of hardcoded 200
+    min_test = int(SCORING_PARAMS.get("min_ml_test_samples", _MIN_ML_TEST_SAMPLES))
+    if n_test < min_test:
+        reason = f"only {n_test} test samples (need >={min_test})"
         logger.warning("ML DISABLED: %s. Collect more data before trusting ML scores.", reason)
         # v74: Telegram alert when ML disabled
         try:
@@ -2311,6 +2314,8 @@ _DEFAULT_SCORING_PARAMS = {
     # v22: ML model horizon + threshold (dynamic)
     "ml_horizon": "12h",
     "ml_threshold": 2.0,
+    # v83: Min test samples for ML quality gate (lowered from 200)
+    "min_ml_test_samples": 80,
     # ML v3: Bot strategy for capturable profit prediction
     "bot_strategy": "TP50_SL30",
     # v26: Market benchmarks (populated by auto_backtest)
@@ -2650,6 +2655,8 @@ def load_scoring_config() -> None:
             # v82: Per-KOL dedup cap + token cap per message
             "kol_mention_cap": 2,
             "token_cap_per_message": 3,
+            # v83: ML quality gate — min test samples
+            "min_ml_test_samples": 80,
         }
         for key, default in _V44_SCALAR_KEYS.items():
             SCORING_PARAMS[key] = float(row.get(key, default))
