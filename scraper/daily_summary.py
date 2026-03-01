@@ -297,32 +297,55 @@ def send_summary():
     total_7d_roi = round(total_7d_pnl / total_7d_inv * 100, 1) if total_7d_inv > 0 else 0
     emoji_7d = "📈" if total_7d_pnl >= 0 else "📉"
 
-    # ── KOL Leaderboard (7d, RT trades only) ──
-    kol_pnl: dict[str, dict] = {}
-    for t in trades_7d:
-        kol = t.get("kol_group")
-        if not kol:
-            continue
-        if kol not in kol_pnl:
-            kol_pnl[kol] = {"n": 0, "wins": 0, "pnl": 0.0}
-        pnl = float(t.get("pnl_usd") or 0)
-        kol_pnl[kol]["n"] += 1
-        kol_pnl[kol]["pnl"] += pnl
-        if pnl > 0:
-            kol_pnl[kol]["wins"] += 1
+    # ── KOL Leaderboard (7d, split RT / batch) ──
+    def _build_kol_stats(trade_list: list[dict]) -> dict:
+        stats: dict[str, dict] = {}
+        for t in trade_list:
+            kol = t.get("kol_group")
+            if not kol:
+                continue
+            if kol not in stats:
+                stats[kol] = {"n": 0, "wins": 0, "wins50": 0, "pnl": 0.0}
+            pnl = float(t.get("pnl_usd") or 0)
+            pnl_pct = float(t.get("pnl_pct") or 0)
+            stats[kol]["n"] += 1
+            stats[kol]["pnl"] += pnl
+            if pnl > 0:
+                stats[kol]["wins"] += 1
+            if pnl_pct >= 0.50:
+                stats[kol]["wins50"] += 1
+        return stats
 
-    kol_lines = []
-    for kol in sorted(kol_pnl, key=lambda k: kol_pnl[k]["pnl"], reverse=True):
-        kd = kol_pnl[kol]
-        wr = round(kd["wins"] / kd["n"] * 100) if kd["n"] else 0
-        sign = "🟢" if kd["pnl"] >= 0 else "🔴"
-        kol_lines.append(
-            f"  {sign} {kol}: {kd['n']}t WR {wr}% ${kd['pnl']:+.0f}"
-        )
+    def _format_kol_lines(stats: dict) -> list[str]:
+        lines = []
+        for kol in sorted(stats, key=lambda k: stats[k]["pnl"], reverse=True):
+            kd = stats[kol]
+            wr = round(kd["wins"] / kd["n"] * 100) if kd["n"] else 0
+            wr50 = round(kd["wins50"] / kd["n"] * 100) if kd["n"] else 0
+            sign = "🟢" if kd["pnl"] >= 0 else "🔴"
+            lines.append(
+                f"  {sign} {kol}: {kd['n']}t WR {wr}% +50%:{wr50}% ${kd['pnl']:+.0f}"
+            )
+        return lines
+
+    rt_7d = [t for t in trades_7d if t.get("source") == "rt"]
+    batch_7d = [t for t in trades_7d if t.get("source") != "rt"]
+
+    rt_kol = _build_kol_stats(rt_7d)
+    batch_kol = _build_kol_stats(batch_7d)
+    all_kol = _build_kol_stats(trades_7d)
 
     kol_block = ""
-    if kol_lines:
-        kol_block = "\n\n<b>KOL Leaderboard 7j (RT):</b>\n" + "\n".join(kol_lines)
+    rt_lines = _format_kol_lines(rt_kol)
+    if rt_lines:
+        kol_block += "\n\n<b>KOL Leaderboard 7j (RT):</b>\n" + "\n".join(rt_lines)
+    batch_lines = _format_kol_lines(batch_kol)
+    if batch_lines:
+        kol_block += "\n\n<b>KOL Leaderboard 7j (Batch):</b>\n" + "\n".join(batch_lines)
+    if not rt_lines and not batch_lines:
+        all_lines = _format_kol_lines(all_kol)
+        if all_lines:
+            kol_block = "\n\n<b>KOL Leaderboard 7j:</b>\n" + "\n".join(all_lines)
 
     # ── Shadow Strategy Comparison (all strategies on same tokens) ──
     # Combine real + shadow trades for apples-to-apples comparison using pnl_pct

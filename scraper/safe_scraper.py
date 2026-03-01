@@ -715,14 +715,38 @@ def _rt_load_kol_whitelist(config: dict) -> dict:
             return _rt_kol_whitelist
 
         # Primary: read cached whitelist from scoring_config (updated by auto_backtest every 2h)
-        result = sb.table("scoring_config").select("kol_rt_whitelist").eq("id", 1).execute()
+        result = sb.table("scoring_config").select(
+            "kol_rt_whitelist,kol_manual_overrides"
+        ).eq("id", 1).execute()
         cached = None
-        if result.data and result.data[0].get("kol_rt_whitelist"):
-            cached = result.data[0]["kol_rt_whitelist"]
-            if isinstance(cached, str):
-                cached = json.loads(cached)
+        overrides = None
+        if result.data:
+            raw_wl = result.data[0].get("kol_rt_whitelist")
+            raw_ov = result.data[0].get("kol_manual_overrides")
+            if raw_wl:
+                cached = json.loads(raw_wl) if isinstance(raw_wl, str) else raw_wl
+            if raw_ov:
+                overrides = json.loads(raw_ov) if isinstance(raw_ov, str) else raw_ov
 
         if cached and len(cached) > 0:
+            # v83: Apply manual overrides — force approve/block regardless of stats
+            # Format: {"KolName": {"approved": true/false, "reason": "manual"}, ...}
+            if overrides:
+                for kol_name, ov in overrides.items():
+                    if kol_name in cached:
+                        cached[kol_name]["approved"] = ov.get("approved", False)
+                        cached[kol_name]["manual_override"] = True
+                    else:
+                        # KOL not in auto-whitelist — add as override-only entry
+                        cached[kol_name] = {
+                            "wr": 0, "total": 0, "hits": 0, "pnl": 0,
+                            "approved": ov.get("approved", False),
+                            "manual_override": True,
+                        }
+                n_overrides = len(overrides)
+                if n_overrides:
+                    logger.info("RT KOL whitelist: %d manual overrides applied", n_overrides)
+
             _rt_kol_whitelist = cached
             _rt_kol_whitelist_loaded_at = now
             approved_count = sum(1 for v in cached.values() if v.get("approved"))
