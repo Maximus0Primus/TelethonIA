@@ -1294,9 +1294,9 @@ def _apply_ml_scores(ranking: list[dict]) -> None:
         for token, ml_mult in zip(ranking, ml_multipliers):
             ml_mult = float(np.clip(ml_mult, ml_floor, ml_cap))
             token["ml_multiplier"] = round(ml_mult, 3)
-            token["score"] = int(token["score"] * ml_mult)
-            token["score_conviction"] = int(token["score_conviction"] * ml_mult)
-            token["score_momentum"] = int(token["score_momentum"] * ml_mult)
+            token["score"] = min(100, int(token["score"] * ml_mult))
+            token["score_conviction"] = min(100, int(token["score_conviction"] * ml_mult))
+            token["score_momentum"] = min(100, int(token["score_momentum"] * ml_mult))
 
         horizons = "+".join(e["horizon"] for e in ensemble)
         logger.info(

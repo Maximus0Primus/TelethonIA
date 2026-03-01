@@ -354,9 +354,9 @@ def upsert_tokens(
         rows = [
             _sanitize_row({
                 "symbol": t["symbol"],
-                "score": t["score"],
-                "score_conviction": t.get("score_conviction", t["score"]),
-                "score_momentum": t.get("score_momentum", t["score"]),
+                "score": min(100, max(0, t["score"])),
+                "score_conviction": min(100, max(0, t.get("score_conviction", t["score"]))),
+                "score_momentum": min(100, max(0, t.get("score_momentum", t["score"]))),
                 "mentions": t["mentions"],
                 "unique_kols": t["unique_kols"],
                 "sentiment": t["sentiment"],
@@ -368,9 +368,9 @@ def upsert_tokens(
                 "momentum": round(t.get("recency_score", 0), 3),
                 "breadth": round(t.get("breadth_score", 0), 3),
                 # v4: base scores for micro-refresh recalculation
-                "base_score": t["score"],
-                "base_score_conviction": t.get("score_conviction", t["score"]),
-                "base_score_momentum": t.get("score_momentum", t["score"]),
+                "base_score": min(100, max(0, t["score"])),
+                "base_score_conviction": min(100, max(0, t.get("score_conviction", t["score"]))),
+                "base_score_momentum": min(100, max(0, t.get("score_momentum", t["score"]))),
                 # v7: scoring improvements
                 "weakest_component": t.get("weakest_component"),
                 "score_interpretation": t.get("score_interpretation"),
