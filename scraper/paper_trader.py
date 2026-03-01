@@ -49,6 +49,13 @@ TOP_N = 5
 PORTFOLIO_BUDGET = 50.0  # USD per cycle, score-weighted across top N
 DEDUP_COOLDOWN_HOURS = 24  # v5: was 0 — re-trading same token across cycles was the #1 PnL killer
 CA_FILTER = True
+
+# Shadow trading: single-tranche strategies eligible for $0 shadow trades.
+# Excluded: multi-tranche (SCALE_OUT, MOONBAG, WIDE_RUNNER) and legacy deprecated.
+SHADOW_STRATEGIES = [
+    "TP30_SL50", "TP50_SL30", "TP100_SL30", "TP100_SL50",
+    "TP50_SL15", "TP30_SL30", "TP50_SL50", "FRESH_MICRO", "QUICK_SCALP",
+]
 # v73: Slippage simulation — realistic entry/exit price adjustments
 BUY_SLIPPAGE_BPS = 150   # 1.5% buy slippage
 SELL_SLIPPAGE_BPS = 300   # 3.0% sell slippage (memecoins have wide spreads)
@@ -413,10 +420,75 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
                         token.get("symbol"), strat_name, tranche["label"], e,
                     )
 
+    # ── Shadow trades: open $0 trades for ALL other single-tranche strategies ──
+    # This lets us compare strategies on the SAME tokens (apples-to-apples).
+    shadow_enabled = config.get("shadow_enabled", True)
+    shadow_opened = 0
+    if shadow_enabled:
+        for rank_idx, token in enumerate(candidates, 1):
+            addr = token["token_address"]
+            raw_price = float(token["price_usd"])
+            lds = float(token.get("liquidity_depth_score") or token.get("_rt_liquidity_depth_score") or 1.0)
+            lds = max(0.1, min(1.0, lds))
+            slip_mult = 1.0 + 2.0 * (1.0 - lds)
+            buy_slip_bps = int(buy_slip_bps_base * slip_mult)
+            entry_price = raw_price * (1 + buy_slip_bps / 10_000)
+
+            shadow_base = {
+                "cycle_ts": cycle_ts.isoformat(),
+                "symbol": token.get("symbol", "???"),
+                "token_address": addr,
+                "rank_in_cycle": rank_idx,
+                "entry_price": entry_price,
+                "entry_score": int(token.get("score", 0)),
+                "entry_mcap": float(token["market_cap"]) if token.get("market_cap") else None,
+                "status": "open",
+                "is_shadow": True,
+                "position_usd": 0,
+                "portfolio_budget": budget_usd,
+            }
+            if token.get("snapshot_id"):
+                shadow_base["snapshot_id"] = int(token["snapshot_id"])
+            # Propagate RT metadata to shadows too (for KOL attribution)
+            for src_key, db_col in _rt_col_map.items():
+                val = token.get(src_key)
+                if val is not None:
+                    shadow_base[db_col] = val
+
+            for strat_name in SHADOW_STRATEGIES:
+                if strat_name in active_strategies:
+                    continue  # already opened as real trade
+                if not _passes_strategy_filter(token, strat_name):
+                    continue
+                if (addr, strat_name) in open_combos:
+                    continue
+                if (addr, strat_name) in cooldown_combos:
+                    continue
+
+                tranche = STRATEGIES[strat_name][0]  # single-tranche only
+                tp_price = entry_price * tranche["tp_mult"] if tranche["tp_mult"] else None
+                sl_price = entry_price * tranche["sl_mult"]
+
+                row = {
+                    **shadow_base,
+                    "strategy": strat_name,
+                    "tp_price": tp_price,
+                    "sl_price": sl_price,
+                    "horizon_minutes": tranche["horizon_min"],
+                    "tranche_pct": 1.0,
+                    "tranche_label": "shadow",
+                }
+                try:
+                    client.table("paper_trades").insert(row).execute()
+                    shadow_opened += 1
+                except Exception as e:
+                    logger.error("paper_trader: shadow insert failed %s/%s: %s",
+                                 token.get("symbol"), strat_name, e)
+
     allocs = [f"{t.get('symbol','?')}=${t.get('_alloc_usd',0):.1f}" for t in candidates]
     logger.info(
-        "paper_trader: opened %d rows, $%.0f budget → %s (%d strategies, dedup=%dh)",
-        opened, budget_usd, ", ".join(allocs), len(active_strategies), dedup_cooldown_h,
+        "paper_trader: opened %d rows + %d shadow, $%.0f budget → %s (%d strategies, dedup=%dh)",
+        opened, shadow_opened, budget_usd, ", ".join(allocs), len(active_strategies), dedup_cooldown_h,
     )
     if _monitoring and opened > 0:
         _metrics.record_paper_trade_open(opened)

@@ -191,15 +191,21 @@ def send_summary():
     trades_raw: list[dict] = []
     try:
         r = client.table("paper_trades").select(
-            "pnl_usd,status,strategy,source,position_usd,created_at,exit_at,kol_group"
+            "pnl_usd,pnl_pct,status,strategy,source,position_usd,created_at,exit_at,kol_group,is_shadow"
         ).neq("status", "open").gte("created_at", d14_ago).execute()
         trades_raw = r.data or []
     except Exception as e:
         logger.warning("trades fetch failed: %s", e)
 
+    # Separate real vs shadow trades
+    real_raw = [t for t in trades_raw if not t.get("is_shadow")]
+    shadow_raw = [t for t in trades_raw if t.get("is_shadow")]
+
     # Filter by exit_at for consistent time windows (a trade counts in the period it CLOSED)
-    trades_7d = [t for t in trades_raw if t.get("exit_at") and t["exit_at"] >= d7_ago]
-    trades_24h = [t for t in trades_raw if t.get("exit_at") and t["exit_at"] >= h24_ago]
+    trades_7d = [t for t in real_raw if t.get("exit_at") and t["exit_at"] >= d7_ago]
+    trades_24h = [t for t in real_raw if t.get("exit_at") and t["exit_at"] >= h24_ago]
+    shadow_7d = [t for t in shadow_raw if t.get("exit_at") and t["exit_at"] >= d7_ago]
+    shadow_24h = [t for t in shadow_raw if t.get("exit_at") and t["exit_at"] >= h24_ago]
 
     strats_24h = _aggregate(trades_24h)
     strats_7d = _aggregate(trades_7d)
@@ -318,11 +324,52 @@ def send_summary():
     if kol_lines:
         kol_block = "\n\n<b>KOL Leaderboard 7j (RT):</b>\n" + "\n".join(kol_lines)
 
+    # ── Shadow Strategy Comparison (all strategies on same tokens) ──
+    # Combine real + shadow trades for apples-to-apples comparison using pnl_pct
+    VIRTUAL_POS = 15.0  # reference position for shadow PnL calc
+    all_closed_7d = trades_7d + shadow_7d
+    shadow_strats: dict = defaultdict(lambda: {"n": 0, "wins": 0, "pnl": 0.0, "tp": 0, "sl": 0, "to": 0})
+    for t in all_closed_7d:
+        s = t.get("strategy", "?")
+        pnl_pct = float(t.get("pnl_pct") or 0)
+        virtual_pnl = VIRTUAL_POS * pnl_pct
+        shadow_strats[s]["n"] += 1
+        shadow_strats[s]["pnl"] += virtual_pnl
+        if pnl_pct > 0:
+            shadow_strats[s]["wins"] += 1
+        st = t.get("status", "")
+        if st == "tp_hit":
+            shadow_strats[s]["tp"] += 1
+        elif st == "sl_hit":
+            shadow_strats[s]["sl"] += 1
+        elif st == "timeout":
+            shadow_strats[s]["to"] += 1
+
+    shadow_lines = []
+    for s in sorted(shadow_strats, key=lambda x: shadow_strats[x]["pnl"], reverse=True):
+        sd = shadow_strats[s]
+        n = sd["n"]
+        wr = round(sd["wins"] / n * 100) if n else 0
+        roi = round(sd["pnl"] / (VIRTUAL_POS * n) * 100, 1) if n else 0
+        sign = "📈" if sd["pnl"] >= 0 else "📉"
+        shadow_lines.append(
+            f"  {sign} {s}: {n}t WR {wr}% TP{sd['tp']}/SL{sd['sl']}/TO{sd['to']} "
+            f"ROI {roi:+.1f}%"
+        )
+    shadow_block = ""
+    if shadow_lines:
+        n_shadow = sum(1 for t in all_closed_7d if t.get("is_shadow"))
+        shadow_block = (
+            f"\n\n<b>🔬 Shadow Comparison 7j</b> (mêmes tokens, ${VIRTUAL_POS:.0f}/t virtuel, {n_shadow} shadow):\n"
+            + "\n".join(shadow_lines)
+        )
+
     msg2 = (
         f"<b>📅 SIMULATION 7 JOURS</b> — au {now.strftime('%Y-%m-%d')}"
         f"\n\n<b>Stratégies 7j:</b>\n"
         + "\n".join(strat_rows_7d)
         + kol_block
+        + shadow_block
         + f"\n\n<b>PnL journalier:</b>\n"
         + "\n".join(daily_lines)
         + f"\n\n<b>Total 7j:</b> {len(trades_7d)}t | "
