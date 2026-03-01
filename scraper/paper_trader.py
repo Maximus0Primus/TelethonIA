@@ -526,13 +526,6 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
             if (addr, strat_name) in cooldown_combos:
                 continue
 
-            # v83: Bot ML gate — reduce or skip position if model predicts loss
-            bot_mult = _bot_ml_gate(token, strat_name)
-            if bot_mult <= 0.0:
-                logger.info("paper_trader: BOT ML skip %s/%s (win_prob < 0.30)",
-                            token.get("symbol"), strat_name)
-                continue
-
             for tranche in tranches:
                 tp_price = entry_price * tranche["tp_mult"] if tranche["tp_mult"] else None
                 sl_price = entry_price * tranche["sl_mult"]
@@ -545,7 +538,7 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
                     "horizon_minutes": tranche["horizon_min"],
                     "tranche_pct": tranche["pct"],
                     "tranche_label": tranche["label"],
-                    "position_usd": round(alloc_usd * tranche["pct"] * bot_mult, 2),
+                    "position_usd": round(alloc_usd * tranche["pct"], 2),
                 }
 
                 try:
