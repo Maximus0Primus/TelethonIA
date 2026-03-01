@@ -30,6 +30,16 @@ interface RpcRowV2 {
   last_active: string | null;
 }
 
+interface RpcRowPaper {
+  kol_name: string;
+  rt_trades: number;
+  rt_wins: number;
+  rt_wins_50: number;
+  rt_pnl: number | null;
+  rt_wr: number | null;
+  rt_wr_50: number | null;
+}
+
 export interface KolLeaderboardEntry {
   name: string;
   tier: "S" | "A";
@@ -52,6 +62,11 @@ export interface KolLeaderboardEntry {
   winRate2xExact: number | null;
   avgMaxReturn: number | null;
   bestReturn: number | null;
+  // Paper trade (RT) metrics
+  rtTrades: number;
+  rtWr: number | null;
+  rtWr50: number | null;
+  rtPnl: number | null;
 }
 
 async function callRpc(caOnly: boolean): Promise<{
@@ -116,6 +131,37 @@ async function callRpcV2(): Promise<{
   return { data, error: null };
 }
 
+async function callRpcPaper(): Promise<{
+  data: RpcRowPaper[] | null;
+  error: string | null;
+}> {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+  if (!url || !key) {
+    return { data: null, error: "Missing Supabase configuration" };
+  }
+
+  const res = await fetch(`${url}/rest/v1/rpc/get_kol_paper_stats`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      apikey: key,
+      Authorization: `Bearer ${key}`,
+    },
+    body: "{}",
+    cache: "no-store",
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    return { data: null, error: errText };
+  }
+
+  const data: RpcRowPaper[] = await res.json();
+  return { data, error: null };
+}
+
 /**
  * Compute dynamic normalized scores from RPC data.
  * Uses per-horizon win rates so incomplete horizons don't deflate scores.
@@ -165,10 +211,11 @@ export async function GET(request: Request) {
     const { searchParams } = new URL(request.url);
     const caOnly = searchParams.get("ca_only") === "true";
 
-    // Fetch both v1 (snapshot-based) and v2 (call-price-based) leaderboards
-    const [v1Result, v2Result] = await Promise.all([
+    // Fetch v1 (snapshot-based), v2 (call-price-based), and paper trade leaderboards
+    const [v1Result, v2Result, paperResult] = await Promise.all([
       callRpc(caOnly),
       callRpcV2(),
+      callRpcPaper(),
     ]);
 
     if (v1Result.error || !v1Result.data) {
@@ -197,11 +244,19 @@ export async function GET(request: Request) {
       }
     }
 
+    const paperMap = new Map<string, RpcRowPaper>();
+    if (paperResult.data) {
+      for (const row of paperResult.data) {
+        paperMap.set(row.kol_name, row);
+      }
+    }
+
     // Merge all 62 KOLs (even those with no snapshots)
     const entries: KolLeaderboardEntry[] = Object.entries(KOL_TIERS).map(
       ([name, tierInfo]) => {
         const rpc = rpcMap.get(name);
         const v2 = v2Map.get(name);
+        const paper = paperMap.get(name);
         const labeledCalls = rpc ? Number(rpc.labeled_calls) : 0;
         const hitsAny = rpc ? Number(rpc.hits_any) : 0;
         const hits12h = rpc ? Number(rpc.hits_12h) : 0;
@@ -251,6 +306,11 @@ export async function GET(request: Request) {
           winRate2xExact,
           avgMaxReturn: v2?.avg_max_return != null ? Number(v2.avg_max_return) : null,
           bestReturn: v2?.best_return != null ? Number(v2.best_return) : null,
+          // Paper trade (RT) metrics
+          rtTrades: paper ? Number(paper.rt_trades) : 0,
+          rtWr: paper?.rt_wr != null ? Number(paper.rt_wr) : null,
+          rtWr50: paper?.rt_wr_50 != null ? Number(paper.rt_wr_50) : null,
+          rtPnl: paper?.rt_pnl != null ? Number(paper.rt_pnl) : null,
         };
       }
     );

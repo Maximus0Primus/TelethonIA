@@ -25,12 +25,20 @@ export interface KolRowData {
   winRate2xExact: number | null;
   avgMaxReturn: number | null;
   bestReturn: number | null;
+  // Paper trade (RT) metrics
+  rtTrades: number;
+  rtWr: number | null;
+  rtWr50: number | null;
+  rtPnl: number | null;
 }
+
+export type KolMode = "paper" | "kco";
 
 interface KolRowProps {
   kol: KolRowData;
   rank: number;
   index: number;
+  mode: KolMode;
 }
 
 function formatRelativeTime(iso: string | null): string {
@@ -58,12 +66,55 @@ const PODIUM_BORDER: Record<number, string> = {
   3: "border-l-[#cd7f32]",
 };
 
-export function KolRow({ kol, rank, index }: KolRowProps) {
+function PnlBadge({ pnl }: { pnl: number }) {
+  const positive = pnl >= 0;
+  return (
+    <span
+      className={cn(
+        "shrink-0 text-[10px] font-mono font-semibold px-1.5 py-0.5 rounded-sm",
+        positive
+          ? "text-[#22C55E] bg-[#22C55E]/10"
+          : "text-[#EF4444] bg-[#EF4444]/10"
+      )}
+    >
+      {positive ? "+" : ""}{pnl < 1000 && pnl > -1000 ? `$${pnl.toFixed(0)}` : `$${(pnl / 1000).toFixed(1)}k`}
+    </span>
+  );
+}
+
+function WinRateBar({ rate, label }: { rate: number; label?: string }) {
+  return (
+    <div className="flex items-center gap-1.5">
+      <div className="flex-1 h-1.5 bg-white/5 rounded-full overflow-hidden">
+        <div
+          className={cn(
+            "h-full rounded-full transition-all",
+            rate >= 0.3
+              ? "bg-[#22C55E]"
+              : rate >= 0.15
+                ? "bg-[#F97316]"
+                : "bg-[#EF4444]"
+          )}
+          style={{ width: `${Math.min(rate * 100, 100)}%` }}
+        />
+      </div>
+      <span className="text-xs text-white/50 tabular-nums font-mono text-right whitespace-nowrap">
+        {(rate * 100).toFixed(0)}%
+        {label && <span className="text-white/25 ml-0.5">{label}</span>}
+      </span>
+    </div>
+  );
+}
+
+export function KolRow({ kol, rank, index, mode }: KolRowProps) {
   const podiumBorder = PODIUM_BORDER[rank];
-  // v2 exact call-price winrate preferred, v1 snapshot-based fallback
-  const winRate = kol.winRate2xExact ?? kol.winRateAll;
-  const isV2 = kol.winRate2xExact !== null;
-  const callCount = isV2 ? kol.totalCalls : kol.labeledCalls;
+  const isPaper = mode === "paper";
+
+  // Paper mode: RT win rate. KCO mode: v2 exact preferred, v1 fallback
+  const winRate = isPaper ? kol.rtWr : (kol.winRate2xExact ?? kol.winRateAll);
+  const callCount = isPaper
+    ? kol.rtTrades
+    : (kol.winRate2xExact !== null ? kol.totalCalls : kol.labeledCalls);
 
   return (
     <motion.div
@@ -80,7 +131,7 @@ export function KolRow({ kol, rank, index }: KolRowProps) {
         {rank}
       </span>
 
-      {/* Name + Tier Badge */}
+      {/* Name + Tier Badge + PnL Badge (paper mode) */}
       <div className="flex items-center gap-2 min-w-0">
         <span
           className={cn(
@@ -95,6 +146,9 @@ export function KolRow({ kol, rank, index }: KolRowProps) {
         <span className="text-sm font-medium text-white truncate">
           {kol.name}
         </span>
+        {isPaper && kol.rtPnl !== null && kol.rtTrades > 0 && (
+          <PnlBadge pnl={kol.rtPnl} />
+        )}
       </div>
 
       {/* Score */}
@@ -108,28 +162,20 @@ export function KolRow({ kol, rank, index }: KolRowProps) {
       </span>
 
       {/* Win Rate */}
-      <div className="flex items-center gap-1.5">
-        {winRate !== null ? (
-          <>
-            <div className="flex-1 h-1.5 bg-white/5 rounded-full overflow-hidden">
-              <div
-                className={cn(
-                  "h-full rounded-full transition-all",
-                  winRate >= 0.3
-                    ? "bg-[#22C55E]"
-                    : winRate >= 0.15
-                      ? "bg-[#F97316]"
-                      : "bg-[#EF4444]"
-                )}
-                style={{ width: `${Math.min(winRate * 100, 100)}%` }}
-              />
-            </div>
-            <span className="text-xs text-white/50 tabular-nums font-mono text-right">
-              {(winRate * 100).toFixed(0)}%
-            </span>
-          </>
+      <div>
+        {isPaper && kol.rtTrades === 0 ? (
+          <span className="text-xs text-white/20 block text-right">No RT</span>
+        ) : winRate !== null ? (
+          <div className="space-y-0.5">
+            <WinRateBar rate={winRate} />
+            {isPaper && kol.rtWr50 !== null && (
+              <div className="text-[10px] text-white/30 font-mono text-right">
+                +50%: {(kol.rtWr50 * 100).toFixed(0)}%
+              </div>
+            )}
+          </div>
         ) : (
-          <span className="text-xs text-white/20 w-full text-right">
+          <span className="text-xs text-white/20 block text-right">
             {callCount > 0
               ? `${callCount} call${callCount > 1 ? "s" : ""}`
               : "\u2014"}

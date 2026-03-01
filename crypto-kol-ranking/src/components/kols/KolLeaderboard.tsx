@@ -2,10 +2,10 @@
 
 import { useState, useMemo, useEffect, useCallback } from "react";
 import { motion } from "framer-motion";
-import { ChevronUp, ChevronDown, FlaskConical } from "lucide-react";
+import { ChevronUp, ChevronDown, FlaskConical, BarChart3, TestTube2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { KolRow } from "./KolRow";
-import type { KolRowData } from "./KolRow";
+import type { KolRowData, KolMode } from "./KolRow";
 
 type SortKey =
   | "rank"
@@ -25,7 +25,17 @@ const COLUMNS: { key: SortKey; label: string; labelShort?: string; className: st
   { key: "lastActive", label: "Last Active", labelShort: "Active", className: "text-right w-[5rem] md:w-[6rem]" },
 ];
 
-function compare(a: KolRowData, b: KolRowData, key: SortKey, dir: "asc" | "desc"): number {
+function getWr(k: KolRowData, mode: KolMode): number {
+  if (mode === "paper") return k.rtWr ?? -1;
+  return (k.winRate2xExact ?? k.winRateAll) ?? -1;
+}
+
+function getCalls(k: KolRowData, mode: KolMode): number {
+  if (mode === "paper") return k.rtTrades;
+  return k.totalCalls || k.labeledCalls;
+}
+
+function compare(a: KolRowData, b: KolRowData, key: SortKey, dir: "asc" | "desc", mode: KolMode): number {
   const m = dir === "asc" ? 1 : -1;
   switch (key) {
     case "rank":
@@ -37,9 +47,9 @@ function compare(a: KolRowData, b: KolRowData, key: SortKey, dir: "asc" | "desc"
     case "score":
       return m * ((a.score ?? -1) - (b.score ?? -1));
     case "winRate":
-      return m * (((a.winRate2xExact ?? a.winRateAll) ?? -1) - ((b.winRate2xExact ?? b.winRateAll) ?? -1));
+      return m * (getWr(a, mode) - getWr(b, mode));
     case "calls":
-      return m * ((a.totalCalls || a.labeledCalls) - (b.totalCalls || b.labeledCalls));
+      return m * (getCalls(a, mode) - getCalls(b, mode));
     case "lastActive": {
       const ta = a.lastActive ? new Date(a.lastActive).getTime() : 0;
       const tb = b.lastActive ? new Date(b.lastActive).getTime() : 0;
@@ -54,6 +64,7 @@ export function KolLeaderboard() {
   const [kols, setKols] = useState<KolRowData[]>([]);
   const [loading, setLoading] = useState(true);
   const [caOnly, setCaOnly] = useState(false);
+  const [mode, setMode] = useState<KolMode>("paper");
   const [sortKey, setSortKey] = useState<SortKey>("score");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
 
@@ -77,9 +88,9 @@ export function KolLeaderboard() {
 
   const sorted = useMemo(() => {
     const arr = [...kols];
-    arr.sort((a, b) => compare(a, b, sortKey, sortDir));
+    arr.sort((a, b) => compare(a, b, sortKey, sortDir, mode));
     return arr;
-  }, [kols, sortKey, sortDir]);
+  }, [kols, sortKey, sortDir, mode]);
 
   const handleSort = (key: SortKey) => {
     if (key === sortKey) {
@@ -96,12 +107,21 @@ export function KolLeaderboard() {
     scoredKols.length > 0
       ? scoredKols.reduce((s, k) => s + (k.score ?? 0), 0) / scoredKols.length
       : 0;
-  const withWinRate = kols.filter((k) => (k.winRate2xExact ?? k.winRateAll) !== null);
+
+  // Mode-aware win rate stats
+  const withWinRate = mode === "paper"
+    ? kols.filter((k) => k.rtWr !== null && k.rtTrades > 0)
+    : kols.filter((k) => (k.winRate2xExact ?? k.winRateAll) !== null);
   const avgWinRate =
     withWinRate.length > 0
-      ? withWinRate.reduce((s, k) => s + (k.winRate2xExact ?? k.winRateAll ?? 0), 0) /
-        withWinRate.length
+      ? withWinRate.reduce((s, k) => {
+          const wr = mode === "paper" ? (k.rtWr ?? 0) : (k.winRate2xExact ?? k.winRateAll ?? 0);
+          return s + wr;
+        }, 0) / withWinRate.length
       : 0;
+  const totalRtPnl = mode === "paper"
+    ? kols.reduce((s, k) => s + (k.rtPnl ?? 0), 0)
+    : null;
 
   return (
     <div className="w-full max-w-4xl mx-auto">
@@ -119,13 +139,19 @@ export function KolLeaderboard() {
             value: sTierCount || 13,
             accent: "text-[#c9a962]",
           },
+          mode === "paper" && totalRtPnl !== null
+            ? {
+                label: "RT PnL (7d)",
+                value: `${totalRtPnl >= 0 ? "+" : ""}$${totalRtPnl.toFixed(0)}`,
+                accent: totalRtPnl >= 0 ? "text-[#22C55E]" : "text-[#EF4444]",
+              }
+            : {
+                label: "Avg Score",
+                value: avgScore > 0 ? avgScore.toFixed(2) : "--",
+                accent: "text-[#22D3EE]",
+              },
           {
-            label: "Avg Score",
-            value: avgScore > 0 ? avgScore.toFixed(2) : "--",
-            accent: "text-[#22D3EE]",
-          },
-          {
-            label: "Avg Win Rate 2x",
+            label: mode === "paper" ? "Avg Paper WR" : "Avg Win Rate 2x",
             value:
               withWinRate.length > 0
                 ? `${(avgWinRate * 100).toFixed(0)}%`
@@ -152,8 +178,35 @@ export function KolLeaderboard() {
         ))}
       </motion.div>
 
-      {/* CA-Only Toggle */}
+      {/* Toggles: Mode + CA-Only */}
       <div className="flex items-center justify-end gap-2 mb-3">
+        {/* Paper / KCO toggle */}
+        <div className="flex rounded-md border border-white/10 overflow-hidden">
+          <button
+            onClick={() => setMode("paper")}
+            className={cn(
+              "flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium transition-all",
+              mode === "paper"
+                ? "bg-[#22C55E]/10 text-[#22C55E]"
+                : "bg-white/5 text-white/40 hover:text-white/60"
+            )}
+          >
+            <BarChart3 className="w-3.5 h-3.5" />
+            Paper WR
+          </button>
+          <button
+            onClick={() => setMode("kco")}
+            className={cn(
+              "flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium transition-all border-l border-white/10",
+              mode === "kco"
+                ? "bg-[#22D3EE]/10 text-[#22D3EE]"
+                : "bg-white/5 text-white/40 hover:text-white/60"
+            )}
+          >
+            <TestTube2 className="w-3.5 h-3.5" />
+            KCO WR
+          </button>
+        </div>
         <button
           onClick={() => setCaOnly(!caOnly)}
           className={cn(
@@ -197,7 +250,7 @@ export function KolLeaderboard() {
         {/* Rows */}
         <div>
           {sorted.map((kol, i) => (
-            <KolRow key={kol.name} kol={kol} rank={i + 1} index={i} />
+            <KolRow key={kol.name} kol={kol} rank={i + 1} index={i} mode={mode} />
           ))}
         </div>
       </div>
