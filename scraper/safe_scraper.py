@@ -970,7 +970,7 @@ def _rt_load_config() -> dict:
     try:
         sb = _get_supabase()
         if sb:
-            result = sb.table("scoring_config").select("rt_trade_config").eq("id", 1).execute()
+            result = sb.table("scoring_config").select("rt_trade_config,rt_ml_weights").eq("id", 1).execute()
             if result.data and result.data[0].get("rt_trade_config"):
                 raw = result.data[0]["rt_trade_config"]
                 if isinstance(raw, str):
@@ -983,6 +983,12 @@ def _rt_load_config() -> dict:
                         defaults[k] = v
                 logger.info("RT: config loaded from DB (enabled=%s, budget=$%.0f, strategies=%s)",
                             defaults["enabled"], defaults["base_budget_usd"], defaults["rt_strategies"])
+            # Also load rt_ml_weights (blend weights for KCO + RT ML)
+            if result.data and result.data[0].get("rt_ml_weights"):
+                ml_w = result.data[0]["rt_ml_weights"]
+                if isinstance(ml_w, str):
+                    ml_w = json.loads(ml_w)
+                defaults["rt_ml_weights"] = ml_w
     except Exception as e:
         logger.warning("RT: failed to load rt_trade_config: %s (using defaults)", e)
     _rt_config = defaults
@@ -1222,7 +1228,7 @@ def _rt_ml_position_mult(
     cap   = float(config.get("rt_ml_mult_cap",   1.8))
 
     # Load blend weights (auto-updated by auto_backtest every 2h)
-    w = SCORING_PARAMS.get("rt_ml_weights") or {}
+    w = config.get("rt_ml_weights") or {}
     kco_w  = float(w.get("kco_w",  0.7))
     rtml_w = float(w.get("rtml_w", 0.3))
 
