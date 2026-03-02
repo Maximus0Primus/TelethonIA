@@ -943,6 +943,29 @@ def _load_ml_ensemble() -> list[dict]:
         if entry["xgb"] is None and entry["lgb"] is None:
             continue
 
+        # v84: Validate meta feature list against actual model feature count.
+        # Meta can list more features than the model was actually trained with
+        # (e.g. columns were all-NaN at training time and got dropped).
+        meta_feats = entry["features"]
+        actual_n = None
+        actual_names = None
+        if entry["lgb"] is not None:
+            actual_n = entry["lgb"].num_feature()
+            actual_names = entry["lgb"].feature_name()
+        elif entry["xgb"] is not None and hasattr(entry["xgb"], "n_features_in_"):
+            actual_n = entry["xgb"].n_features_in_
+
+        if actual_n is not None and len(meta_feats) != actual_n:
+            if actual_names and len(actual_names) == actual_n:
+                logger.warning("ML ensemble %s: meta has %d features but model has %d — using model feature names",
+                               horizon, len(meta_feats), actual_n)
+                entry["features"] = actual_names
+            else:
+                # Fallback: take first N features from meta list (order must match training)
+                logger.warning("ML ensemble %s: meta has %d features but model has %d — truncating to %d",
+                               horizon, len(meta_feats), actual_n, actual_n)
+                entry["features"] = meta_feats[:actual_n]
+
         if cal_path.exists():
             try:
                 from joblib import load as joblib_load
