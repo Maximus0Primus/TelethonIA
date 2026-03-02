@@ -2,7 +2,7 @@
 Paper Trading System v6 — Multi-strategy with tranche support + portfolio allocation.
 
 Strategies run in parallel per token:
-- TP30_SL50:    100% at 1.3x, -50% SL, 12h horizon (backtest best: +8.5% EV, 61% WR, PF 1.51)
+- TP30_SL10:    100% at 1.3x, -10% SL, 12h horizon (v86: replaces TP30_SL50, 3:1 R:R)
 - TP50_SL30:    100% at 1.5x, -30% SL, 24h horizon (RT best 7d: +8% ROI, 50% WR)
 - TP100_SL50:   100% at 2x,   -50% SL, 48h horizon (v6: wide SL to survive memecoin volatility)
 - FRESH_MICRO:  100% at 1.3x, -70% SL, 24h (score 10-49, fresh KOL, micro-cap)
@@ -12,6 +12,7 @@ Strategies run in parallel per token:
 - TP50_SL50:    100% at 1.5x, -50% SL, 24h horizon (symmetric risk/reward, room to recover)
 
 Deprecated (data shows negative EV — kept in code for backtesting, removed from active_strategies):
+- TP30_SL50:   -2.5% ROI, 49% WR. Asymmetric R:R — wins too small vs losses.
 - TP100_SL30:  -14% ROI live, 12% WR. Tight SL (-30%) too small for 2x target.
 - MOONBAG:     -45.6% ROI live, 8% WR.
 - WIDE_RUNNER: -70.4% ROI live, 0% WR in RT.
@@ -60,6 +61,7 @@ CA_FILTER = True
 SHADOW_STRATEGIES = [
     "TP30_SL50", "TP50_SL30", "TP100_SL30", "TP100_SL50",
     "TP50_SL15", "TP30_SL30", "TP50_SL50", "FRESH_MICRO", "QUICK_SCALP",
+    "TP30_SL10",
 ]
 # v73: Slippage simulation — realistic entry/exit price adjustments
 BUY_SLIPPAGE_BPS = 150   # 1.5% buy slippage
@@ -71,7 +73,14 @@ STRATEGIES = {
     "TP30_SL50": [
         # v5: backtest best — TP30_SL50_12h: +8.5% expectancy, 61% WR, PF 1.51 (report #602)
         # KCO sim: 63.2% hit 1.3x across all KOLs, 71.4% on top 10
+        # DEPRECATED v86: 49% WR but negative PnL (-2.5% ROI) — asymmetric R:R kills it
         {"pct": 1.0, "tp_mult": 1.30, "sl_mult": 0.50, "horizon_min": 720, "label": "main"},
+    ],
+    "TP30_SL10": [
+        # v86: replaces TP30_SL50. Tight -10% SL cuts losses fast. 12h horizon for 1.3x target.
+        # Rationale: TP30_SL50 had 49% WR but -2.5% ROI — wins too small vs losses.
+        # With -10% SL, 3:1 R:R means breakeven at 25% WR.
+        {"pct": 1.0, "tp_mult": 1.30, "sl_mult": 0.90, "horizon_min": 720, "label": "main"},
     ],
     "TP50_SL30": [
         # v68: horizon 12h→24h (decoupled from TP level — analysis showed TP100 edge was from horizon, not TP)
