@@ -1,5 +1,5 @@
 """
-v66: Unified RT Strategy ML Model — The brain of the real-time trading system.
+v87: Unified RT Strategy ML Model — The brain of the real-time trading system.
 
 Learns:  f(kol_features, token_features, strategy) → expected_pnl
 Decides: which strategies to open, how much to bet
@@ -16,8 +16,12 @@ Phases:
   N >= 100:                  Model trained, guides strategy selection + sizing
   Ongoing:                   Retrained every outcomes.yml run, gets smarter
 
+v87: Deprecated strategies removed (MOONBAG, WIDE_RUNNER, SCALE_OUT, TP100_SL30, TP30_SL50).
+     Active: TP50_SL30, TP30_SL10, TP50_SL50, TP30_SL30, TP50_SL15, TP100_SL50, FRESH_MICRO, QUICK_SCALP.
+     select_strategies() now filters against config active_strategies.
+
 Model: LightGBM regressor, target = pnl_pct per trade row.
-       At inference: predict PnL for each of 7 strategies → pick positive ones.
+       At inference: predict PnL for each strategy → pick positive ones.
 """
 
 import os
@@ -40,22 +44,25 @@ RT_FEATURES = [
     "entry_mcap",
     "rt_score",
     "n_confirmations",        # how many other KOLs traded same token within 1h
-    "strategy_encoded",       # 0-6 categorical
+    "strategy_encoded",       # 0-7 categorical (8 active strategies)
     "hour_of_day",            # 0-23, market regime proxy
 ]
 
-# Strategy encoding (deterministic order)
+# v87: Active strategies only — deprecated removed (MOONBAG, WIDE_RUNNER, SCALE_OUT, TP100_SL30, TP30_SL50)
 STRATEGY_MAP = {
-    "TP30_SL50": 0,
-    "TP50_SL30": 1,
-    "TP100_SL30": 2,
-    "SCALE_OUT": 3,
-    "MOONBAG": 4,
-    "FRESH_MICRO": 5,
-    "QUICK_SCALP": 6,
-    "WIDE_RUNNER": 7,
+    "TP50_SL30": 0,
+    "TP30_SL10": 1,
+    "TP50_SL50": 2,
+    "TP30_SL30": 3,
+    "TP50_SL15": 4,
+    "TP100_SL50": 5,
+    "FRESH_MICRO": 6,
+    "QUICK_SCALP": 7,
 }
 STRATEGY_NAMES = {v: k for k, v in STRATEGY_MAP.items()}
+
+# Deprecated strategies — excluded from training data
+_DEPRECATED_STRATEGIES = {"MOONBAG", "WIDE_RUNNER", "SCALE_OUT", "TP100_SL30", "TP30_SL50"}
 
 MIN_TRAINING_SAMPLES = 100
 
@@ -70,7 +77,8 @@ def _get_client():
 
 
 def _fetch_closed_rt_trades(client) -> list[dict]:
-    """Fetch all closed RT trades with features needed for training."""
+    """Fetch all closed RT trades with features needed for training.
+    v87: Excludes deprecated strategies from training data."""
     try:
         result = (
             client.table("paper_trades")
@@ -86,7 +94,10 @@ def _fetch_closed_rt_trades(client) -> list[dict]:
             .eq("is_shadow", False)
             .execute()
         )
-        return result.data or []
+        trades = result.data or []
+        # v87: Filter out deprecated strategies
+        trades = [t for t in trades if t.get("strategy") not in _DEPRECATED_STRATEGIES]
+        return trades
     except Exception as e:
         logger.error("rt_model: fetch failed: %s", e)
         return []
@@ -348,7 +359,7 @@ def train_rt_model(client=None, min_samples: int = MIN_TRAINING_SAMPLES) -> dict
     meta = {
         "status": "deployed",
         "trained_at": datetime.now(timezone.utc).isoformat(),
-        "version": "v66",
+        "version": "v87",
         **metrics,
     }
 
@@ -356,7 +367,7 @@ def train_rt_model(client=None, min_samples: int = MIN_TRAINING_SAMPLES) -> dict
         client.table("scoring_config").update({
             "rt_ml_model": model_text,
             "rt_ml_meta": json.dumps(meta),
-            "updated_by": "rt_model_v66",
+            "updated_by": "rt_model_v87",
         }).eq("id", 1).execute()
         logger.info("rt_model: DEPLOYED to scoring_config (edge=+%.2f%%)", model_edge * 100)
     except Exception as e:
@@ -436,7 +447,7 @@ def predict_strategy_pnl(
     hour: int = 12,
 ) -> dict[str, float]:
     """
-    Predict expected PnL for each of the 7 strategies.
+    Predict expected PnL for each of the 8 active strategies.
     Returns {strategy_name: predicted_pnl_pct}.
     """
     import numpy as np
@@ -476,15 +487,20 @@ def select_strategies(
     Select which strategies to trade and compute position multiplier for each.
     Returns [(strategy_name, size_multiplier), ...] sorted by predicted PnL.
 
+    - Only considers strategies in config's active_strategies (v87)
     - Strategies with predicted PnL > 0 → trade, size proportional to PnL
     - Strategies with predicted PnL <= 0 → skip (or micro-explore)
     - Optuna strategy_multipliers applied on top if available
     """
     strat_mults = config.get("strategy_multipliers", {})
     min_explore_pct = 0.1  # 10% of position for "bad" strategies (keep exploring)
+    # v87: Only allow strategies that are in config's active list
+    active = set(config.get("active_strategies", list(STRATEGY_MAP.keys())))
 
     selected = []
     for strat, pred_pnl in sorted(predictions.items(), key=lambda x: -x[1]):
+        if strat not in active:
+            continue  # v87: skip strategies not in active config
         optuna_mult = float(strat_mults.get(strat, 1.0))
 
         if pred_pnl > 0:

@@ -535,6 +535,14 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
             if (addr, strat_name) in cooldown_combos:
                 continue
 
+            # v87: Bot ML gate — position sizing or skip
+            bot_ml_mult = _bot_ml_gate(token, strat_name)
+            if bot_ml_mult <= 0.0:
+                logger.info("bot_ml_gate: SKIP %s/%s (win_prob < 0.30)", token.get("symbol"), strat_name)
+                continue
+            if bot_ml_mult < 1.0:
+                logger.info("bot_ml_gate: HALF %s/%s (mult=%.1f)", token.get("symbol"), strat_name, bot_ml_mult)
+
             for tranche in tranches:
                 tp_price = entry_price * tranche["tp_mult"] if tranche["tp_mult"] else None
                 sl_price = entry_price * tranche["sl_mult"]
@@ -547,7 +555,7 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
                     "horizon_minutes": tranche["horizon_min"],
                     "tranche_pct": tranche["pct"],
                     "tranche_label": tranche["label"],
-                    "position_usd": round(alloc_usd * tranche["pct"], 2),
+                    "position_usd": round(alloc_usd * tranche["pct"] * bot_ml_mult, 2),
                 }
 
                 try:

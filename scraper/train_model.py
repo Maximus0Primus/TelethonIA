@@ -2458,8 +2458,8 @@ def load_kco_training_data(threshold: float = 1.5) -> pd.DataFrame:
         nearest_idx = time_diffs.idxmin()
         gap_hours = time_diffs[nearest_idx].total_seconds() / 3600.0
 
-        if gap_hours > 2.0:
-            # Too far — skip
+        if gap_hours > 4.0:
+            # v87: widened 2h→4h — scraping cycles are 15min, KCO calls can fall between
             stats["calls"].append(call_ts)
             stats["returns"].append(mr)
             stats["last_call"] = call_ts
@@ -2559,9 +2559,10 @@ def train_kco_model(
     df["target"] = np.log1p(df["max_return"].clip(lower=0) - 1)
 
     # Feature selection — only KCO features present in data
+    # v87: lowered min_features 5→3 so KOL-identity features alone suffice when snap_* are sparse
     available_features = [f for f in KCO_FEATURES if f in df.columns and df[f].notna().mean() >= 0.05]
-    if len(available_features) < 5:
-        logger.warning("KCO model: only %d usable features. Skipping.", len(available_features))
+    if len(available_features) < 3:
+        logger.warning("KCO model: only %d usable features (need 3). Skipping.", len(available_features))
         return None
 
     logger.info("KCO model: %d features available (from %d)", len(available_features), len(KCO_FEATURES))
@@ -2980,56 +2981,8 @@ def auto_train(
     else:
         logger.info("auto_train bot: no bot model passed quality gate")
 
-    # ═══ Phase 3: risk_reward regression (adaptive SL data) ═══
-    logger.info("=== AUTO-TRAIN Phase 3: risk_reward regression ===")
-    best_rr_result = None
-    best_rr_horizon = None
-
-    for rr_hz in ["12h", "24h"]:
-        try:
-            df_rr = load_risk_reward_data(rr_hz)
-        except Exception as e:
-            logger.debug("auto_train rr: %s load failed: %s", rr_hz, e)
-            continue
-
-        if df_rr.empty:
-            logger.info("auto_train rr: %s — no DD data, skipping", rr_hz)
-            continue
-
-        df_rr = deduplicate_snapshots(df_rr)
-        if len(df_rr) < 30:
-            logger.info("auto_train rr: %s — only %d unique tokens (need 30), skipping",
-                        rr_hz, len(df_rr))
-            continue
-
-        try:
-            rr_meta = train_risk_reward(df_rr, rr_hz, n_trials=trials, min_samples=30)
-        except Exception as e:
-            logger.warning("auto_train rr: %s training failed: %s", rr_hz, e)
-            continue
-
-        if not rr_meta or rr_meta.get("quality_gate") != "PASSED":
-            continue
-
-        rr_p5 = rr_meta.get("metrics", {}).get("precision_at_5", 0)
-        logger.info("auto_train rr: %s passed gate (p@5=%.3f)", rr_hz, rr_p5)
-
-        if best_rr_result is None or rr_p5 > best_rr_result.get("metrics", {}).get("precision_at_5", 0):
-            best_rr_result = rr_meta
-            best_rr_horizon = rr_hz
-
-    if best_rr_result:
-        rr_p5 = best_rr_result.get("metrics", {}).get("precision_at_5", 0)
-        logger.info("auto_train rr: BEST = %s p@5=%.3f — deployed!", best_rr_horizon, rr_p5)
-
-        # Save rr meta with auto-train info
-        rr_meta_path = MODEL_DIR / f"model_{best_rr_horizon}_rr_meta.json"
-        best_rr_result["auto_trained"] = True
-        best_rr_result["auto_trained_at"] = datetime.utcnow().isoformat()
-        with open(rr_meta_path, "w") as f:
-            json.dump(best_rr_result, f, indent=2)
-    else:
-        logger.info("auto_train rr: no rr model passed quality gate")
+    # ═══ Phase 3: risk_reward — SKIPPED (v87: no inference consumer) ═══
+    logger.info("=== AUTO-TRAIN Phase 3: risk_reward — SKIPPED (no inference consumer) ===")
 
     # ═══ Phase 4: KCO model for RT trading (v70) ═══
     logger.info("=== AUTO-TRAIN Phase 4: KCO model ===")
