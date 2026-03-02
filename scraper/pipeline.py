@@ -1181,6 +1181,22 @@ def _build_feature_row(token: dict, features: list[str]) -> dict:
             if val is None:
                 val = token.get(feat)  # fallback to unprefixed (DB row)
             row[feat] = float(val) if val is not None else np.nan
+        elif feat == "momentum_direction":
+            # v27 parity: train_model.py encodes momentum_direction string → ordinal
+            # Must apply same encoding at inference time
+            _MOMENTUM_ENCODING = {
+                "freefall": -3, "dying": -2, "bleeding": -1,
+                "neutral": 0, "plateau": 1,
+                "bouncing": 2, "strong_bounce": 3,
+                "pumping": 4, "hard_pumping": 5,
+            }
+            val = token.get("momentum_direction")
+            if isinstance(val, str):
+                row[feat] = float(_MOMENTUM_ENCODING.get(val, 0))
+            elif val is not None:
+                row[feat] = float(val)
+            else:
+                row[feat] = np.nan
         else:
             val = token.get(feat)
             row[feat] = float(val) if val is not None else np.nan
