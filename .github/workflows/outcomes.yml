@@ -151,6 +151,39 @@ jobs:
           _update_kol_whitelist(c)
           "
 
+      # v88: Refresh bot ML predictions with latest snapshots
+      - name: Refresh bot ML predictions
+        id: refresh_bot_pred
+        continue-on-error: true
+        timeout-minutes: 5
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        working-directory: scraper
+        run: |
+          python -c "
+          from train_model import batch_predict_bot_gate
+          import json, glob
+          best, best_path = None, None
+          for meta_path in glob.glob('model_*_bot_meta.json'):
+              with open(meta_path) as f:
+                  meta = json.load(f)
+              if meta.get('quality_gate') != 'PASSED':
+                  continue
+              if meta.get('auto_trained'):
+                  best, best_path = meta, meta_path
+                  break
+              if best is None:
+                  best, best_path = meta, meta_path
+          if best:
+              h = best.get('horizon', '24h')
+              s = best.get('strategy', 'TP50_SL30')
+              n = batch_predict_bot_gate(h, s)
+              print(f'Predicted {n} rows for {h}/{s} (from {best_path})')
+          else:
+              print('No valid bot model found on disk')
+          "
+
       # Report
       - name: Report step results
         if: always()
@@ -161,3 +194,4 @@ jobs:
           echo "| Train KOL ML | ${{ steps.train_kol.outcome }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Optuna + Backtest | ${{ steps.optuna_backtest.outcome }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Update KOL Whitelist | ${{ steps.update_whitelist.outcome }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Refresh Bot Predictions | ${{ steps.refresh_bot_pred.outcome }} |" >> $GITHUB_STEP_SUMMARY

@@ -100,6 +100,41 @@ jobs:
             echo "Model files committed and pushed"
           fi
 
+      # v88: Batch predict bot ML gate for recent snapshots → Supabase
+      # Runs after model commit so it uses the freshest model on disk.
+      # Safe to run even if auto_train already called it (upsert = idempotent).
+      - name: Batch predict bot ML gate
+        continue-on-error: true
+        timeout-minutes: 5
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        working-directory: scraper
+        run: |
+          python -c "
+          from train_model import batch_predict_bot_gate
+          import json, glob
+          # Prefer auto_trained model (selected by auto_train), fallback to any passing model
+          best, best_path = None, None
+          for meta_path in glob.glob('model_*_bot_meta.json'):
+              with open(meta_path) as f:
+                  meta = json.load(f)
+              if meta.get('quality_gate') != 'PASSED':
+                  continue
+              if meta.get('auto_trained'):
+                  best, best_path = meta, meta_path
+                  break  # auto_trained is the definitive choice
+              if best is None:
+                  best, best_path = meta, meta_path
+          if best:
+              h = best.get('horizon', '24h')
+              s = best.get('strategy', 'TP50_SL30')
+              n = batch_predict_bot_gate(h, s)
+              print(f'Predicted {n} rows for {h}/{s} (from {best_path})')
+          else:
+              print('No valid bot model found on disk')
+          "
+
       # v74: Telegram alert on training failure
       - name: Alert on failure
         if: failure()

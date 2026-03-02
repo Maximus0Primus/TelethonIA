@@ -2293,6 +2293,182 @@ def _update_scoring_config_bot(strategy: str) -> None:
         logger.warning("Failed to update scoring_config bot_strategy: %s", e)
 
 
+def batch_predict_bot_gate(horizon: str = "24h", strategy: str = "TP50_SL30") -> int:
+    """
+    v88: Batch-predict bot ML gate for recent snapshots and upsert to bot_ml_predictions.
+    Called from GH Actions (has xgboost/lightgbm) so VPS can read a simple float.
+    Returns number of rows upserted.
+    """
+    from pipeline import _build_feature_row
+
+    client = _get_client()
+    model_dir = Path(__file__).parent
+
+    # ── Load bot model from disk ──
+    meta_path = model_dir / f"model_{horizon}_bot_meta.json"
+    if not meta_path.exists():
+        logger.warning("batch_predict_bot_gate: no meta at %s", meta_path)
+        return 0
+
+    with open(meta_path) as f:
+        meta = json.load(f)
+
+    if meta.get("quality_gate") != "PASSED":
+        logger.info("batch_predict_bot_gate: model didn't pass quality gate")
+        return 0
+
+    features = meta.get("features", [])
+    if not features:
+        logger.warning("batch_predict_bot_gate: no features in meta")
+        return 0
+
+    ew = meta.get("ensemble_weights", {"xgboost": 0.5, "lightgbm": 0.5})
+    xgb_w = ew.get("xgboost", 0.5)
+    lgb_w = ew.get("lightgbm", 0.5)
+
+    xgb_model, lgb_model = None, None
+    xgb_path = model_dir / f"model_{horizon}_bot.json"
+    lgb_path = model_dir / f"model_{horizon}_bot_lgb.txt"
+
+    if xgb_path.exists():
+        try:
+            m = xgb.XGBClassifier()
+            m.load_model(str(xgb_path))
+            xgb_model = m
+        except Exception as e:
+            logger.warning("batch_predict_bot_gate: XGB load failed: %s", e)
+
+    if lgb_path.exists():
+        try:
+            lgb_model = lgb.Booster(model_file=str(lgb_path))
+        except Exception as e:
+            logger.warning("batch_predict_bot_gate: LGB load failed: %s", e)
+
+    if xgb_model is None and lgb_model is None:
+        logger.warning("batch_predict_bot_gate: no models loaded")
+        return 0
+
+    # ── Resolve active strategies (fan out predictions to all) ──
+    try:
+        cfg_result = client.table("scoring_config").select("paper_trade_config").eq("id", 1).execute()
+        if cfg_result.data and cfg_result.data[0].get("paper_trade_config"):
+            ptc = cfg_result.data[0]["paper_trade_config"]
+            if isinstance(ptc, str):
+                ptc = json.loads(ptc)
+            active_strategies = ptc.get("active_strategies", [strategy])
+        else:
+            active_strategies = [strategy]
+    except Exception:
+        active_strategies = [strategy]
+    if not active_strategies:
+        active_strategies = [strategy]
+    logger.info("batch_predict_bot_gate: fan-out to %d strategies: %s",
+                len(active_strategies), active_strategies)
+
+    # ── Fetch recent snapshots (last 24h, deduplicate by token_address) ──
+    cutoff = (datetime.utcnow() - pd.Timedelta(hours=24)).isoformat()
+    all_snaps = []
+    page_size = 1000
+    offset = 0
+    while True:
+        result = (
+            client.table("token_snapshots")
+            .select("*")
+            .gte("snapshot_at", cutoff)
+            .not_.is_("price_at_snapshot", "null")
+            .order("snapshot_at", desc=True)
+            .range(offset, offset + page_size - 1)
+            .execute()
+        )
+        if not result.data:
+            break
+        all_snaps.extend(result.data)
+        if len(result.data) < page_size:
+            break
+        offset += page_size
+
+    if not all_snaps:
+        logger.info("batch_predict_bot_gate: no recent snapshots")
+        return 0
+
+    # Deduplicate: keep latest per token_address
+    seen = {}
+    for snap in all_snaps:
+        addr = snap.get("token_address")
+        if addr and addr not in seen:
+            seen[addr] = snap
+    snaps = list(seen.values())
+    logger.info("batch_predict_bot_gate: %d unique tokens from %d snapshots", len(snaps), len(all_snaps))
+
+    # ── Build features and predict ──
+    rows_to_upsert = []
+    for snap in snaps:
+        try:
+            row = _build_feature_row(snap, features)
+            X = pd.DataFrame([row], columns=features)
+
+            xgb_proba = None
+            if xgb_model is not None:
+                xgb_proba = float(xgb_model.predict_proba(X)[:, 1][0])
+            lgb_proba = None
+            if lgb_model is not None:
+                raw = lgb_model.predict(X.values)
+                lgb_proba = float(raw[0])
+
+            if xgb_proba is not None and lgb_proba is not None:
+                win_prob = xgb_w * xgb_proba + lgb_w * lgb_proba
+            elif xgb_proba is not None:
+                win_prob = xgb_proba
+            elif lgb_proba is not None:
+                win_prob = lgb_proba
+            else:
+                continue
+
+            # Gate thresholds (same as paper_trader._bot_ml_gate)
+            if win_prob < 0.30:
+                gate_mult = 0.0
+            elif win_prob < 0.45:
+                gate_mult = 0.5
+            else:
+                gate_mult = 1.0
+
+            addr = snap.get("token_address")
+            snap_id = snap.get("id")
+            # Fan out: one row per (token_address × active_strategy)
+            # Same win_prob/gate_mult for all strategies (model is strategy-agnostic at inference)
+            for strat_key in active_strategies:
+                rows_to_upsert.append({
+                    "token_address": addr,
+                    "strategy": strat_key,
+                    "win_prob": round(float(win_prob), 4),
+                    "gate_mult": gate_mult,
+                    "model_horizon": horizon,
+                    "snapshot_id": int(snap_id) if snap_id else None,
+                })
+        except Exception as e:
+            logger.debug("batch_predict_bot_gate: skip %s: %s", snap.get("symbol", "?"), e)
+
+    if not rows_to_upsert:
+        logger.info("batch_predict_bot_gate: no predictions generated")
+        return 0
+
+    # ── Upsert in batches of 50 ──
+    upserted = 0
+    for i in range(0, len(rows_to_upsert), 50):
+        batch = rows_to_upsert[i:i + 50]
+        try:
+            client.table("bot_ml_predictions").upsert(
+                batch, on_conflict="token_address,strategy"
+            ).execute()
+            upserted += len(batch)
+        except Exception as e:
+            logger.warning("batch_predict_bot_gate: upsert batch %d failed: %s", i // 50, e)
+
+    logger.info("batch_predict_bot_gate: upserted %d/%d predictions for %s/%s",
+                upserted, len(rows_to_upsert), horizon, strategy)
+    return upserted
+
+
 # ═══ v70: KCO-BASED MODEL FOR RT TRADING ═══
 
 # 25 features for KCO model — combines KOL identity, token state, and context
@@ -2978,6 +3154,13 @@ def auto_train(
 
         # Update scoring_config with bot_strategy (does not touch ml_horizon/ml_threshold)
         _update_scoring_config_bot(best_bot_strategy)
+
+        # v88: Batch predict bot ML gate for recent snapshots → Supabase
+        try:
+            n = batch_predict_bot_gate(best_bot_horizon, best_bot_strategy)
+            logger.info("auto_train bot: batch predicted %d rows", n)
+        except Exception as e:
+            logger.warning("auto_train bot: batch prediction failed: %s", e)
     else:
         logger.info("auto_train bot: no bot model passed quality gate")
 
