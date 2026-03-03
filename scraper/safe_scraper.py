@@ -832,7 +832,8 @@ def _rt_load_kol_whitelist_live(config: dict) -> dict:
             wr = stats["wins"] / stats["total"] if stats["total"] > 0 else 0
             has_enough = stats["total"] >= min_calls
             # v92: PnL-based approval — profitable KOLs with low WR still approved
-            approved = has_enough and (stats["pnl"] > 0 or wr >= 0.50)
+            # WR path requires pnl > -20 to block false positives (e.g. PowsGemCalls: 60% WR but -$83)
+            approved = has_enough and (stats["pnl"] > 0 or (wr >= 0.50 and stats["pnl"] > -20))
             whitelist[kol] = {
                 "wr": round(wr, 4),
                 "total": stats["total"],
