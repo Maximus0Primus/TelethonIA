@@ -119,8 +119,8 @@ STRATEGIES = {
         {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.50, "horizon_min": 1440, "label": "main"},
     ],
     "FRESH_MICRO": [
-        # TP30/SL70/24h — data-driven: score 10-49 + fresh KOL + momentum > 1 + mcap < 5M
-        {"pct": 1.0, "tp_mult": 1.30, "sl_mult": 0.30, "horizon_min": 1440, "label": "main"},
+        # v90: TP30/SL30/24h — symmetric R:R. Was SL70 (-70%) which killed PnL despite 50% WR.
+        {"pct": 1.0, "tp_mult": 1.30, "sl_mult": 0.70, "horizon_min": 1440, "label": "main"},
     ],
     "QUICK_SCALP": [
         # v81: TP30/SL15/6h — tight SL for fast scalps. Was TP50/SL95 (no real SL = dumb).
@@ -180,13 +180,26 @@ def _load_bot_predictions(client) -> None:
 
 
 def _bot_ml_gate(token: dict, strategy_name: str, config: dict | None = None) -> float:
-    """v89: Disabled by default — shadow data shows model is anti-predictive
-    (blocked trades = 75% WR vs full_size = 22.5% WR). Config toggle to re-enable."""
-    if config and not config.get("ml_gate_enabled", False):
+    """v90: ML gate with inversion support. Model is anti-predictive (7d data N=189):
+    blocked=60% WR, full=35% WR. Modes: disabled/normal/inverted."""
+    mode = (config or {}).get("ml_gate_mode", "disabled")
+    if mode == "disabled":
         return 1.0
-    return _BOT_PREDICTIONS.get(
+
+    raw = _BOT_PREDICTIONS.get(
         (token.get("token_address"), strategy_name), 1.0
     )
+
+    if mode == "inverted":
+        # Anti-predictive model: what it blocks performs best. Flip the signal.
+        if raw <= 0.0:
+            return 1.5   # model said SKIP → BOOST 50%
+        elif raw < 1.0:
+            return 1.3   # model said HALF → BOOST 30%
+        else:
+            return 0.7   # model said FULL → REDUCE 30%
+
+    return raw  # normal mode
 
 
 def _passes_strategy_filter(token: dict, strategy_name: str) -> bool:
@@ -263,7 +276,7 @@ def _load_paper_trade_config(client) -> dict:
         "ca_filter": CA_FILTER,
         "buy_slippage_bps": BUY_SLIPPAGE_BPS,
         "sell_slippage_bps": SELL_SLIPPAGE_BPS,
-        "ml_gate_enabled": False,  # v89: disabled — model is anti-predictive
+        "ml_gate_mode": "disabled",  # v90: "disabled" | "normal" | "inverted"
     }
     try:
         result = client.table("scoring_config").select("paper_trade_config").eq("id", 1).execute()
