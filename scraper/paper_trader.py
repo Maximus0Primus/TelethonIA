@@ -179,8 +179,11 @@ def _load_bot_predictions(client) -> None:
         _BOT_PREDICTIONS = {}
 
 
-def _bot_ml_gate(token: dict, strategy_name: str) -> float:
-    """v88: Simple DB lookup. Returns 1.0 if no prediction (fail-open)."""
+def _bot_ml_gate(token: dict, strategy_name: str, config: dict | None = None) -> float:
+    """v89: Disabled by default — shadow data shows model is anti-predictive
+    (blocked trades = 75% WR vs full_size = 22.5% WR). Config toggle to re-enable."""
+    if config and not config.get("ml_gate_enabled", False):
+        return 1.0
     return _BOT_PREDICTIONS.get(
         (token.get("token_address"), strategy_name), 1.0
     )
@@ -260,6 +263,7 @@ def _load_paper_trade_config(client) -> dict:
         "ca_filter": CA_FILTER,
         "buy_slippage_bps": BUY_SLIPPAGE_BPS,
         "sell_slippage_bps": SELL_SLIPPAGE_BPS,
+        "ml_gate_enabled": False,  # v89: disabled — model is anti-predictive
     }
     try:
         result = client.table("scoring_config").select("paper_trade_config").eq("id", 1).execute()
@@ -441,8 +445,8 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
             if (addr, strat_name) in cooldown_combos:
                 continue
 
-            # v87: Bot ML gate — position sizing or skip
-            bot_ml_mult = _bot_ml_gate(token, strat_name)
+            # v87: Bot ML gate — position sizing or skip (v89: disabled by default)
+            bot_ml_mult = _bot_ml_gate(token, strat_name, config)
             if bot_ml_mult <= 0.0:
                 logger.info("bot_ml_gate: SKIP %s/%s (win_prob < 0.30)", token.get("symbol"), strat_name)
                 continue
