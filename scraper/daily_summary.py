@@ -192,12 +192,12 @@ def send_summary():
     except Exception:
         pass
 
-    # ── Fetch closed trades (14d window to catch long-running MOONBAG/WIDE_RUNNER) ──
+    # ── Fetch closed trades by exit_at (not created_at — catches long-running trades correctly) ──
     trades_raw: list[dict] = []
     try:
         r = client.table("paper_trades").select(
             "pnl_usd,pnl_pct,status,strategy,source,position_usd,created_at,exit_at,kol_group,is_shadow"
-        ).neq("status", "open").gte("created_at", d14_ago).execute()
+        ).neq("status", "open").gte("exit_at", d7_ago).execute()
         trades_raw = r.data or []
     except Exception as e:
         logger.warning("trades fetch failed: %s", e)
@@ -207,10 +207,16 @@ def send_summary():
     shadow_raw = [t for t in trades_raw if t.get("is_shadow")]
 
     # Filter by exit_at for consistent time windows (a trade counts in the period it CLOSED)
-    trades_7d = [t for t in real_raw if t.get("exit_at") and t["exit_at"] >= d7_ago]
-    trades_24h = [t for t in real_raw if t.get("exit_at") and t["exit_at"] >= h24_ago]
+    trades_7d_all = [t for t in real_raw if t.get("exit_at") and t["exit_at"] >= d7_ago]
+    trades_24h_all = [t for t in real_raw if t.get("exit_at") and t["exit_at"] >= h24_ago]
     shadow_7d = [t for t in shadow_raw if t.get("exit_at") and t["exit_at"] >= d7_ago]
     shadow_24h = [t for t in shadow_raw if t.get("exit_at") and t["exit_at"] >= h24_ago]
+
+    # v92: Split active vs legacy — deprecated strategies pollute totals
+    trades_24h = [t for t in trades_24h_all if t.get("strategy") not in LEGACY_STRATEGIES]
+    trades_7d = [t for t in trades_7d_all if t.get("strategy") not in LEGACY_STRATEGIES]
+    legacy_24h = [t for t in trades_24h_all if t.get("strategy") in LEGACY_STRATEGIES]
+    legacy_7d = [t for t in trades_7d_all if t.get("strategy") in LEGACY_STRATEGIES]
 
     strats_24h = _aggregate(trades_24h)
     strats_7d = _aggregate(trades_7d)
@@ -252,13 +258,20 @@ def send_summary():
     rt_line = _source_line("rt", trades_24h)
     batch_line = _source_line("batch", trades_24h)  # "batch" → filters source != "rt"
 
+    # v92: Legacy summary line (compact, only if there are legacy trades closing)
+    legacy_block = ""
+    if legacy_24h:
+        leg_pnl = sum(float(t.get("pnl_usd") or 0) for t in legacy_24h)
+        leg_n = len(legacy_24h)
+        legacy_block = f"\n\n<i>Legacy ({leg_n}t fermés): ${leg_pnl:+.0f} (non inclus ci-dessus)</i>"
+
     msg1 = (
         f"<b>📊 DAILY SUMMARY</b> — {now.strftime('%Y-%m-%d %H:%M UTC')}"
         f"\n{alert_block}"
         f"\n<b>Data Quality:</b>"
         f"\n  Snapshots: {n_snapshots} | Mentions: {n_mentions}"
         f"\n  Score moy: {avg_score}/100 | Whale: {whale_fill_pct}% | Holder: {helius_fill_pct}%"
-        f"\n\n<b>Trades 24h:</b>"
+        f"\n\n<b>Trades 24h (active strats only):</b>"
         f"\n  Ouvert: {n_opened} | Fermé: {n_closed} | Open: {n_open}"
         f"\n  TP: {tp_24h} | SL: {sl_24h} | Timeout: {to_24h}"
         f"\n  WR: {wr_24h}% | {pnl_emoji} PnL: ${pnl_24h:+.2f}/${invested_24h:.0f} (ROI {roi_24h:+.1f}%)"
@@ -266,6 +279,7 @@ def send_summary():
         + (f"\n{batch_line}" if batch_line else "")
         + "\n\n<b>Stratégies 24h:</b>\n"
         + "\n".join(strat_rows_24h)
+        + legacy_block
         + f"\n\n<b>ML:</b> {ml_status}"
     )
 
@@ -352,10 +366,19 @@ def send_summary():
         if all_lines:
             kol_block = "\n\n<b>KOL Leaderboard 7j:</b>\n" + "\n".join(all_lines)
 
+    # v92: Legacy summary for msg2
+    legacy_block_7d = ""
+    if legacy_7d:
+        leg7_pnl = sum(float(t.get("pnl_usd") or 0) for t in legacy_7d)
+        leg7_n = len(legacy_7d)
+        legacy_block_7d = f"\n\n<i>Legacy ({leg7_n}t): ${leg7_pnl:+.0f} (non inclus ci-dessus)</i>"
+
     # ── Shadow Strategy Comparison (all strategies on same tokens) ──
     # Combine real + shadow trades for apples-to-apples comparison using pnl_pct
+    # v92: Filter deprecated from shadow too for clean comparison
     VIRTUAL_POS = 15.0  # reference position for shadow PnL calc
-    all_closed_7d = trades_7d + shadow_7d
+    shadow_7d_active = [t for t in shadow_7d if t.get("strategy") not in LEGACY_STRATEGIES]
+    all_closed_7d = trades_7d + shadow_7d_active
     shadow_strats: dict = defaultdict(lambda: {"n": 0, "wins": 0, "pnl": 0.0, "tp": 0, "sl": 0, "to": 0})
     for t in all_closed_7d:
         s = t.get("strategy", "?")
@@ -400,6 +423,7 @@ def send_summary():
         + shadow_block
         + f"\n\n<b>PnL journalier:</b>\n"
         + "\n".join(daily_lines)
+        + legacy_block_7d
         + f"\n\n<b>Total 7j:</b> {len(trades_7d)}t | "
         + f"{emoji_7d} ${total_7d_pnl:+.0f}/${total_7d_inv:.0f} (ROI {total_7d_roi:+.1f}%)"
     )
