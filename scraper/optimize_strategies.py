@@ -607,7 +607,9 @@ def backtest_per_kol(days: int = 14) -> dict:
     sb = create_client(SUPABASE_URL, SUPABASE_KEY)
     from datetime import timedelta
 
-    deprecated = {"MOONBAG", "WIDE_RUNNER", "SCALE_OUT", "TP100_SL30"}
+    # v92: dynamic deprecated from DB config
+    from paper_trader import get_deprecated_strategies
+    deprecated = get_deprecated_strategies(sb)
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
 
     # Fetch all closed RT trades

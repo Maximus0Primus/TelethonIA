@@ -15,8 +15,9 @@ from supabase import create_client
 
 logger = logging.getLogger(__name__)
 
-# Strategies known to be deprecated (legacy positions still closing)
-LEGACY_STRATEGIES = {"MOONBAG", "WIDE_RUNNER", "SCALE_OUT"}
+# v92: dynamic deprecated — fallback to hardcoded when no DB client
+from paper_trader import _DEFAULT_DEPRECATED
+LEGACY_STRATEGIES = _DEFAULT_DEPRECATED
 
 
 def _send_telegram(bot_token: str, chat_id: str, text: str) -> bool:
@@ -120,6 +121,10 @@ def send_summary():
         return
 
     client = create_client(url, key)
+    # v92: refresh deprecated strategies from DB
+    from paper_trader import get_deprecated_strategies
+    global LEGACY_STRATEGIES
+    LEGACY_STRATEGIES = get_deprecated_strategies(client)
     now = datetime.now(timezone.utc)
     h24_ago = (now - timedelta(hours=24)).isoformat()
     d7_ago = (now - timedelta(days=7)).isoformat()

@@ -54,6 +54,9 @@ PORTFOLIO_BUDGET = 50.0  # USD per cycle, score-weighted across top N
 DEDUP_COOLDOWN_HOURS = 24  # v5: was 0 — re-trading same token across cycles was the #1 PnL killer
 CA_FILTER = True
 
+# v92: Default deprecated strategies — overridable via paper_trade_config JSONB
+_DEFAULT_DEPRECATED = {"MOONBAG", "WIDE_RUNNER", "SCALE_OUT", "TP100_SL30"}
+
 # Shadow trading: single-tranche strategies eligible for $0 shadow trades.
 # Excluded: multi-tranche (SCALE_OUT, MOONBAG, WIDE_RUNNER) and legacy deprecated.
 SHADOW_STRATEGIES = [
@@ -277,6 +280,9 @@ def _load_paper_trade_config(client) -> dict:
         "buy_slippage_bps": BUY_SLIPPAGE_BPS,
         "sell_slippage_bps": SELL_SLIPPAGE_BPS,
         "ml_gate_mode": "disabled",  # v90: "disabled" | "normal" | "inverted"
+        "experiment_id": None,       # v92: A/B testing
+        "variant_id": None,          # v92: A/B testing
+        "deprecated_strategies": list(_DEFAULT_DEPRECATED),  # v92: dynamic deprecated
     }
     try:
         result = client.table("scoring_config").select("paper_trade_config").eq("id", 1).execute()
@@ -297,6 +303,10 @@ def _load_paper_trade_config(client) -> dict:
             ]
             if not config["active_strategies"]:
                 config["active_strategies"] = defaults["active_strategies"]
+            # v92: pass through A/B testing keys from raw config
+            for extra_key in ("experiment_id", "variant_id"):
+                if raw.get(extra_key):
+                    config[extra_key] = raw[extra_key]
             logger.info("paper_trader: loaded config from DB: top_n=%d, budget=$%.0f, strategies=%s, dedup=%dh, ca_filter=%s",
                         config["top_n"], config["budget_usd"], config["active_strategies"],
                         config["dedup_cooldown_hours"], config["ca_filter"])
@@ -304,6 +314,24 @@ def _load_paper_trade_config(client) -> dict:
     except Exception as e:
         logger.warning("paper_trader: failed to load config from scoring_config: %s", e)
     return defaults
+
+
+def get_deprecated_strategies(client=None, config=None) -> set:
+    """v92: Load deprecated_strategies from paper_trade_config. Fallback to hardcoded."""
+    if config and config.get("deprecated_strategies"):
+        return set(config["deprecated_strategies"])
+    if client:
+        try:
+            r = client.table("scoring_config").select("paper_trade_config").eq("id", 1).execute()
+            if r.data and r.data[0].get("paper_trade_config"):
+                ptc = r.data[0]["paper_trade_config"]
+                if isinstance(ptc, str):
+                    import json
+                    ptc = json.loads(ptc)
+                return set(ptc.get("deprecated_strategies", _DEFAULT_DEPRECATED))
+        except Exception:
+            pass
+    return set(_DEFAULT_DEPRECATED)
 
 
 def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: dict | None = None) -> int:
@@ -423,6 +451,11 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
             "momentum_mult": float(token["momentum_mult"]) if token.get("momentum_mult") else None,
             "portfolio_budget": budget_usd,
         }
+        # v92: A/B testing — thread experiment/variant into trade rows
+        if config.get("experiment_id"):
+            base_row["experiment_id"] = config["experiment_id"]
+        if config.get("variant_id"):
+            base_row["variant_id"] = config["variant_id"]
         if token.get("snapshot_id"):
             base_row["snapshot_id"] = int(token["snapshot_id"])
 
@@ -442,6 +475,8 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
             "_rt_ml_pred": "ml_pred",        # v77: ML predicted avg PnL — enables A/B analysis
             "_rt_kol_ml_pred": "kol_ml_pred", # v78: KOL ML predicted return — enables KCO A/B
             "_rt_n_kol_confirmations": "n_kol_confirmations",  # v80: multi-KOL confirmation count
+            "_rt_experiment_id": "experiment_id",    # v92: A/B testing
+            "_rt_variant_id": "variant_id",          # v92: A/B testing
         }
         for src_key, db_col in _rt_col_map.items():
             val = token.get(src_key)
@@ -517,6 +552,11 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
                 "position_usd": 0,
                 "portfolio_budget": budget_usd,
             }
+            # v92: A/B testing — thread experiment/variant into shadow rows
+            if config.get("experiment_id"):
+                shadow_base["experiment_id"] = config["experiment_id"]
+            if config.get("variant_id"):
+                shadow_base["variant_id"] = config["variant_id"]
             if token.get("snapshot_id"):
                 shadow_base["snapshot_id"] = int(token["snapshot_id"])
             # Propagate RT metadata to shadows too (for KOL attribution)

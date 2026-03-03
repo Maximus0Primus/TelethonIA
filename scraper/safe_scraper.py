@@ -770,7 +770,26 @@ def _rt_load_kol_whitelist_live(config: dict) -> dict:
     wr_threshold = float(kf.get("wr_threshold", 0.40))
     min_calls = int(kf.get("min_calls", 3))
     lookback_days = int(kf.get("lookback_days", 7))
-    deprecated = {"MOONBAG", "WIDE_RUNNER", "SCALE_OUT", "TP100_SL30"}
+    # v91: fetch active strategies to filter to current config only
+    active_strats = None
+    ptc = None
+    try:
+        sb = _get_supabase()
+        if sb:
+            cfg_r = sb.table("scoring_config").select("paper_trade_config").eq("id", 1).execute()
+            if cfg_r.data and cfg_r.data[0].get("paper_trade_config"):
+                ptc = cfg_r.data[0]["paper_trade_config"]
+                if isinstance(ptc, str):
+                    import json as _json
+                    ptc = _json.loads(ptc)
+                active_strats = set(ptc.get("active_strategies", []))
+    except Exception:
+        pass
+
+    # v92: dynamic deprecated from DB config
+    deprecated = set(ptc.get("deprecated_strategies", [])) if ptc else set()
+    if not deprecated:
+        deprecated = {"MOONBAG", "WIDE_RUNNER", "SCALE_OUT", "TP100_SL30"}
 
     try:
         sb = _get_supabase()
@@ -778,11 +797,10 @@ def _rt_load_kol_whitelist_live(config: dict) -> dict:
             return _rt_kol_whitelist
         cutoff = (datetime.now(timezone.utc) - timedelta(days=lookback_days)).isoformat()
 
+        # v91: include shadow trades, add pnl_pct for win condition
         result = sb.table("paper_trades").select(
-            "kol_group, pnl_usd, strategy"
-        ).neq("status", "open").eq(
-            "is_shadow", False
-        ).filter(
+            "kol_group, pnl_usd, pnl_pct, strategy, is_shadow"
+        ).neq("status", "open").filter(
             "kol_group", "not.is", "null"
         ).gte("exit_at", cutoff).execute()
         rows = result.data or []
@@ -791,17 +809,21 @@ def _rt_load_kol_whitelist_live(config: dict) -> dict:
             return _rt_kol_whitelist
 
         rows = [r for r in rows if r.get("strategy") not in deprecated]
+        if active_strats:
+            rows = [r for r in rows if r.get("strategy") in active_strats]
         if not rows:
             return _rt_kol_whitelist
 
         from collections import defaultdict
+        # v91: win condition = pnl_pct > 0 (works for real + shadow)
         agg = defaultdict(lambda: {"total": 0, "wins": 0, "pnl": 0.0})
         for r in rows:
             kol = r["kol_group"]
-            pnl = float(r.get("pnl_usd") or 0)
+            pnl_pct = float(r.get("pnl_pct") or 0)
+            pnl_usd = float(r.get("pnl_usd") or 0)
             agg[kol]["total"] += 1
-            agg[kol]["pnl"] += pnl
-            if pnl > 0:
+            agg[kol]["pnl"] += pnl_usd
+            if pnl_pct > 0:
                 agg[kol]["wins"] += 1
 
         whitelist = {}
@@ -809,7 +831,8 @@ def _rt_load_kol_whitelist_live(config: dict) -> dict:
         for kol, stats in agg.items():
             wr = stats["wins"] / stats["total"] if stats["total"] > 0 else 0
             has_enough = stats["total"] >= min_calls
-            approved = wr >= wr_threshold and has_enough
+            # v92: PnL-based approval — profitable KOLs with low WR still approved
+            approved = has_enough and (stats["pnl"] > 0 or wr >= 0.50)
             whitelist[kol] = {
                 "wr": round(wr, 4),
                 "total": stats["total"],
@@ -820,18 +843,17 @@ def _rt_load_kol_whitelist_live(config: dict) -> dict:
             if approved:
                 approved_count += 1
 
-        # Fallback: relax to 30% if < 3 KOLs pass
+        # Fallback: relax if < 3 KOLs pass — accept mildly negative PnL
         if approved_count < 3:
             for kol, stats in agg.items():
-                wr = stats["wins"] / stats["total"] if stats["total"] > 0 else 0
-                if not whitelist[kol]["approved"] and wr >= 0.30 and stats["total"] >= min_calls:
+                if not whitelist[kol]["approved"] and stats["pnl"] > -5.0 and stats["total"] >= min_calls:
                     whitelist[kol]["approved"] = True
                     approved_count += 1
 
         _rt_kol_whitelist = whitelist
         _rt_kol_whitelist_loaded_at = time.time()
-        logger.info("RT KOL whitelist (live): %d/%d approved (wr>=%.0f%%, trades>=%d, last %dd)",
-                     approved_count, len(whitelist), wr_threshold * 100, min_calls, lookback_days)
+        logger.info("RT KOL whitelist (live): %d/%d approved (pnl>0 or wr>=50%%, trades>=%d, last %dd)",
+                     approved_count, len(whitelist), min_calls, lookback_days)
     except Exception as e:
         logger.warning("RT KOL whitelist live query failed: %s", e)
     return _rt_kol_whitelist
@@ -1384,6 +1406,12 @@ def _rt_open_trades(ca: str, symbol: str, price: float, mcap: float,
             # Only first call opens shadows (others would dedup anyway)
             if i > 0:
                 strat_config["shadow_enabled"] = False
+
+            # v92: A/B variant tagging — track KOL boost effect
+            kol_boost_applied = (kol_best and strat_name == kol_best
+                                 and allocations.get(kol_best, 0) > 0.50)
+            token_entry["_rt_experiment_id"] = pt_config.get("experiment_id")
+            token_entry["_rt_variant_id"] = "hybrid_kol_boost" if kol_boost_applied else "hybrid_default"
 
             opened = open_paper_trades(sb, [token_entry], cycle_ts=now, config=strat_config)
             total_opened += opened

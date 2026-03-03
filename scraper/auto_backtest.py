@@ -5525,16 +5525,32 @@ def _update_kol_whitelist(client) -> dict | None:
     """
     from collections import defaultdict
 
-    deprecated = {"MOONBAG", "WIDE_RUNNER", "SCALE_OUT", "TP100_SL30"}
     lookback_days = 7
+
+    # v91: fetch active strategies to filter (shadows + real) to current config only
+    active_strats = None
+    ptc = None
+    try:
+        cfg_r = client.table("scoring_config").select("paper_trade_config").eq("id", 1).execute()
+        if cfg_r.data and cfg_r.data[0].get("paper_trade_config"):
+            ptc = cfg_r.data[0]["paper_trade_config"]
+            if isinstance(ptc, str):
+                ptc = json.loads(ptc)
+            active_strats = set(ptc.get("active_strategies", []))
+    except Exception:
+        pass
+
+    # v92: dynamic deprecated from DB config
+    deprecated = set(ptc.get("deprecated_strategies", [])) if ptc else set()
+    if not deprecated:
+        deprecated = {"MOONBAG", "WIDE_RUNNER", "SCALE_OUT", "TP100_SL30"}
 
     try:
         cutoff = (datetime.now(timezone.utc) - timedelta(days=lookback_days)).isoformat()
+        # v91: include shadow trades, add pnl_pct for win condition
         result = client.table("paper_trades").select(
-            "kol_group, pnl_usd, strategy"
-        ).neq("status", "open").eq(
-            "is_shadow", False
-        ).filter(
+            "kol_group, pnl_usd, pnl_pct, strategy, is_shadow"
+        ).neq("status", "open").filter(
             "kol_group", "not.is", "null"
         ).gte("exit_at", cutoff).execute()
         rows = result.data or []
@@ -5543,18 +5559,25 @@ def _update_kol_whitelist(client) -> dict | None:
         return None
 
     rows = [r for r in rows if r.get("strategy") not in deprecated]
+    if active_strats:
+        rows = [r for r in rows if r.get("strategy") in active_strats]
     if not rows:
         logger.info("KOL whitelist update: no non-deprecated RT trades in last %dd", lookback_days)
         return None
 
-    # Aggregate per KOL
+    n_shadow = sum(1 for r in rows if r.get("is_shadow"))
+    logger.info("KOL whitelist update: %d trades (%d real + %d shadow) across strategies %s",
+                len(rows), len(rows) - n_shadow, n_shadow, active_strats or "all non-deprecated")
+
+    # Aggregate per KOL — v91: win condition = pnl_pct > 0 (works for real + shadow)
     agg = defaultdict(lambda: {"total": 0, "wins": 0, "pnl": 0.0})
     for r in rows:
         kol = r["kol_group"]
-        pnl = float(r.get("pnl_usd") or 0)
+        pnl_pct = float(r.get("pnl_pct") or 0)
+        pnl_usd = float(r.get("pnl_usd") or 0)
         agg[kol]["total"] += 1
-        agg[kol]["pnl"] += pnl
-        if pnl > 0:
+        agg[kol]["pnl"] += pnl_usd
+        if pnl_pct > 0:
             agg[kol]["wins"] += 1
 
     # Also compute per-KOL per-strategy breakdown
@@ -5562,13 +5585,13 @@ def _update_kol_whitelist(client) -> dict | None:
     for r in rows:
         kol = r["kol_group"]
         strat = r.get("strategy", "?")
-        pnl = float(r.get("pnl_usd") or 0)
+        pnl_pct = float(r.get("pnl_pct") or 0)
+        pnl_usd = float(r.get("pnl_usd") or 0)
         strat_agg[kol][strat]["n"] += 1
-        strat_agg[kol][strat]["pnl"] += pnl
-        if pnl > 0:
+        strat_agg[kol][strat]["pnl"] += pnl_usd
+        if pnl_pct > 0:
             strat_agg[kol][strat]["wins"] += 1
 
-    wr_threshold = 0.40
     min_calls = 3
     whitelist = {}
     approved = 0
@@ -5576,7 +5599,8 @@ def _update_kol_whitelist(client) -> dict | None:
     for kol, stats in sorted(agg.items(), key=lambda x: x[1]["pnl"], reverse=True):
         wr = stats["wins"] / stats["total"] if stats["total"] > 0 else 0
         has_enough = stats["total"] >= min_calls
-        is_approved = wr >= wr_threshold and has_enough
+        # v92: PnL-based approval — profitable KOLs with low WR still approved
+        is_approved = has_enough and (stats["pnl"] > 0 or wr >= 0.50)
 
         # Per-strategy breakdown
         best_strat = None
@@ -5603,16 +5627,15 @@ def _update_kol_whitelist(client) -> dict | None:
         if is_approved:
             approved += 1
 
-    # Fallback: relax to 30% if < 3 KOLs pass
+    # Fallback: relax if < 3 KOLs pass — accept mildly negative PnL
     if approved < 3:
         for kol, stats in agg.items():
-            wr = stats["wins"] / stats["total"] if stats["total"] > 0 else 0
-            if not whitelist[kol]["approved"] and wr >= 0.30 and stats["total"] >= min_calls:
+            if not whitelist[kol]["approved"] and stats["pnl"] > -5.0 and stats["total"] >= min_calls:
                 whitelist[kol]["approved"] = True
                 approved += 1
 
-    logger.info("KOL whitelist update: %d/%d approved (wr>=%.0f%%, trades>=%d, last %dd)",
-                approved, len(whitelist), wr_threshold * 100, min_calls, lookback_days)
+    logger.info("KOL whitelist update: %d/%d approved (pnl>0 or wr>=50%%, trades>=%d, last %dd)",
+                approved, len(whitelist), min_calls, lookback_days)
     for kol, wl in whitelist.items():
         tag = "OK" if wl["approved"] else "NO"
         logger.info("  %s %-24s %dt WR %.0f%% PnL $%+.1f best=%s",

@@ -61,8 +61,9 @@ STRATEGY_MAP = {
 }
 STRATEGY_NAMES = {v: k for k, v in STRATEGY_MAP.items()}
 
-# Deprecated strategies — excluded from training data
-_DEPRECATED_STRATEGIES = {"MOONBAG", "WIDE_RUNNER", "SCALE_OUT", "TP100_SL30", "TP30_SL50"}
+# v92: dynamic deprecated — loaded from DB via paper_trader helper
+from paper_trader import get_deprecated_strategies, _DEFAULT_DEPRECATED
+_DEPRECATED_STRATEGIES = _DEFAULT_DEPRECATED | {"TP30_SL50"}  # module-level fallback
 
 MIN_TRAINING_SAMPLES = 100
 
@@ -95,8 +96,9 @@ def _fetch_closed_rt_trades(client) -> list[dict]:
             .execute()
         )
         trades = result.data or []
-        # v87: Filter out deprecated strategies
-        trades = [t for t in trades if t.get("strategy") not in _DEPRECATED_STRATEGIES]
+        # v92: dynamic deprecated from DB config
+        deprecated = get_deprecated_strategies(client) | {"TP30_SL50"}
+        trades = [t for t in trades if t.get("strategy") not in deprecated]
         return trades
     except Exception as e:
         logger.error("rt_model: fetch failed: %s", e)
