@@ -5635,6 +5635,49 @@ def _update_kol_whitelist(client) -> dict | None:
                 whitelist[kol]["approved"] = True
                 approved += 1
 
+    # v92: KCO bootstrap — seed whitelist for KOLs without paper trade history
+    kco_seeded = 0
+    try:
+        known_kols = set(whitelist.keys())
+        kco_result = client.table("kol_call_outcomes").select(
+            "kol_group, did_2x"
+        ).filter("kol_group", "not.is", "null").execute()
+        kco_rows = kco_result.data or []
+        # Aggregate KCO stats per KOL
+        kco_agg = defaultdict(lambda: {"total": 0, "hits": 0})
+        for r in kco_rows:
+            kol = r["kol_group"]
+            if kol in known_kols:
+                continue  # already has paper trade data
+            kco_agg[kol]["total"] += 1
+            if r.get("did_2x"):
+                kco_agg[kol]["hits"] += 1
+        for kol, kco in kco_agg.items():
+            if kco["total"] < 5:
+                continue  # not enough KCO data
+            kco_wr = kco["hits"] / kco["total"]
+            if kco_wr >= 0.50:
+                whitelist[kol] = {
+                    "wr": round(kco_wr, 4), "total": 0, "hits": 0, "pnl": 0,
+                    "approved": True, "source": "kco_bootstrap",
+                    "kco_total": kco["total"], "kco_wr": round(kco_wr, 4),
+                }
+                approved += 1
+                kco_seeded += 1
+                logger.info("  KCO_BOOTSTRAP approve: %s (%d calls, %.0f%% WR)", kol, kco["total"], kco_wr * 100)
+            elif kco_wr < 0.30:
+                whitelist[kol] = {
+                    "wr": round(kco_wr, 4), "total": 0, "hits": 0, "pnl": 0,
+                    "approved": False, "source": "kco_bootstrap",
+                    "kco_total": kco["total"], "kco_wr": round(kco_wr, 4),
+                }
+                kco_seeded += 1
+                logger.info("  KCO_BOOTSTRAP deny: %s (%d calls, %.0f%% WR)", kol, kco["total"], kco_wr * 100)
+    except Exception as e:
+        logger.warning("KCO bootstrap failed: %s", e)
+    if kco_seeded > 0:
+        logger.info("KCO bootstrap: seeded %d KOLs into whitelist", kco_seeded)
+
     logger.info("KOL whitelist update: %d/%d approved (pnl>0 or wr>=50%%, trades>=%d, last %dd)",
                 approved, len(whitelist), min_calls, lookback_days)
     for kol, wl in whitelist.items():

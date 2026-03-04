@@ -682,6 +682,7 @@ _rt_ca_cache: dict = {}
 _rt_ml_model = None  # LightGBM Booster, loaded from Supabase
 _rt_trade_cooldown: dict[str, float] = {}  # (kol, ca) -> last_trade_timestamp
 _rt_in_flight: set = set()  # (kol, ca) tuples currently being processed
+_rt_probation_daily: dict[str, dict[str, int]] = {}  # v92: {date_str: {kol: count}}
 _rt_group_id_to_username: dict[int, str] = {}
 _rt_kol_scores: dict = {}
 _rt_kol_scores_loaded_at: float = 0.0
@@ -1565,11 +1566,25 @@ async def _rt_on_new_message(event: events.NewMessage.Event):
                 return
             else:
                 # Not enough data — PROBATION MODE (reduced position to gather data)
-                probation_pct = float(kol_filter_cfg.get("probation_mult", 0.30))
+                # v92: Daily cap — max 1 probation trade per KOL per day
+                today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                daily_cap = int(kol_filter_cfg.get("probation_daily_cap", 1))
+                today_counts = _rt_probation_daily.get(today_str, {})
+                kol_today = today_counts.get(username, 0)
+                if kol_today >= daily_cap:
+                    logger.info("RT SKIP (probation_daily_cap): %s already %d/%d today", username, kol_today, daily_cap)
+                    return
+                # Increment counter (will be confirmed after trade opens)
+                _rt_probation_daily.setdefault(today_str, {})[username] = kol_today + 1
+                # Clean old days (keep only today)
+                for old_day in [d for d in _rt_probation_daily if d != today_str]:
+                    del _rt_probation_daily[old_day]
+
+                probation_pct = float(kol_filter_cfg.get("probation_mult", 0.10))
                 _rt_probation_mult = probation_pct
                 n_trades = kol_wl["total"] if kol_wl else 0
-                logger.info("RT PROBATION: %s (%d/%d trades, pos=%.0f%%) — gathering data",
-                            username, n_trades, min_calls, probation_pct * 100)
+                logger.info("RT PROBATION: %s (%d/%d trades, pos=%.0f%%, %d/%d today) — gathering data",
+                            username, n_trades, min_calls, probation_pct * 100, kol_today + 1, daily_cap)
 
     for symbol, source, ca in tokens:
         if not ca:
@@ -2061,12 +2076,36 @@ async def main():
             except Exception as e:
                 logger.error("live_trade_monitor error: %s", e)
 
+    # v92: Fast paper trade check for recent RT trades (30s interval)
+    PAPER_FAST_CHECK_INTERVAL = 30  # seconds
+
+    async def paper_fast_check_loop():
+        """Fast check loop for recently opened paper trades (last 30 min). 30s polling."""
+        while True:
+            await asyncio.sleep(PAPER_FAST_CHECK_INTERVAL)
+            try:
+                from paper_trader import check_paper_trades_fast
+                sb_pf = _get_supabase()
+                if not sb_pf:
+                    continue
+                result = await asyncio.get_event_loop().run_in_executor(
+                    None, check_paper_trades_fast, sb_pf
+                )
+                closed = result.get("closed", 0)
+                if closed > 0:
+                    logger.info("paper_fast_check: closed %d/%d recent trades",
+                                closed, result.get("checked", 0))
+            except Exception as e:
+                logger.error("paper_fast_check error: %s", e)
+
     # Start the price refresh loop as a background task
     refresh_task = asyncio.create_task(price_refresh_loop())
     # v67: Start monitor loop
     monitor_task = asyncio.create_task(monitor_loop()) if _monitoring else None
     # v72: Start live trade fast-poll loop
     live_monitor_task = asyncio.create_task(live_trade_monitor_loop())
+    # v92: Start paper fast-check loop
+    paper_fast_task = asyncio.create_task(paper_fast_check_loop())
 
     try:
         while True:

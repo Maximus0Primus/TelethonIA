@@ -17,6 +17,10 @@ Deprecated (data shows negative EV — kept in code for backtesting, removed fro
 - MOONBAG:     -45.6% ROI live, 8% WR.
 - WIDE_RUNNER: -70.4% ROI live, 0% WR in RT.
 - SCALE_OUT:   -29% ROI live, 6% WR.
+- QUICK_SCALP: v92 deprecated — 33% WR, negative PnL. 6h too short for TP30.
+- TP30_SL10:   v92 deprecated — tight SL (-10%) stops out too fast.
+- TP50_SL15:   v92 deprecated — tight SL (-15%) kills trades that would recover.
+- TP30_SL30:   v92 deprecated — TP30 too small to overcome slippage.
 
 Each tranche = 1 row in paper_trades. SL triggers close ALL open tranches
 for the same token+strategy. Moonbag tranches (tp_price=NULL) only close
@@ -55,7 +59,7 @@ DEDUP_COOLDOWN_HOURS = 24  # v5: was 0 — re-trading same token across cycles w
 CA_FILTER = True
 
 # v92: Default deprecated strategies — overridable via paper_trade_config JSONB
-_DEFAULT_DEPRECATED = {"MOONBAG", "WIDE_RUNNER", "SCALE_OUT", "TP100_SL30"}
+_DEFAULT_DEPRECATED = {"MOONBAG", "WIDE_RUNNER", "SCALE_OUT", "TP100_SL30", "QUICK_SCALP", "TP30_SL10", "TP50_SL15", "TP30_SL30"}
 
 # Shadow trading: single-tranche strategies eligible for $0 shadow trades.
 # Excluded: multi-tranche (SCALE_OUT, MOONBAG, WIDE_RUNNER) and legacy deprecated.
@@ -65,8 +69,8 @@ SHADOW_STRATEGIES = [
     "TP30_SL10",
 ]
 # v73: Slippage simulation — realistic entry/exit price adjustments
-BUY_SLIPPAGE_BPS = 150   # 1.5% buy slippage
-SELL_SLIPPAGE_BPS = 300   # 3.0% sell slippage (memecoins have wide spreads)
+BUY_SLIPPAGE_BPS = 100   # 1.0% buy slippage (v92: was 150 — too aggressive)
+SELL_SLIPPAGE_BPS = 200   # 2.0% sell slippage (v92: was 300 — TP needed +54% raw move)
 
 # --- Strategy Definitions ---
 # Each strategy has a list of tranches. Moonbag tranches have tp_mult=None.
@@ -608,11 +612,91 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
     return opened
 
 
+def _evaluate_trade_exit(trade: dict, current_price: float | None,
+                         now: datetime, sell_slip_factor: float,
+                         sl_cascade: bool = False) -> dict | None:
+    """v92: Shared exit logic for check_paper_trades + check_paper_trades_fast.
+
+    Checks in order: SL → TP → trailing stop → timeout.
+    Updates high_price_seen on every call (even when no exit).
+
+    Returns dict with keys {status, exit_price, pnl_pct, pnl_usd, exit_minutes,
+    high_price_seen} or None if no action. Caller handles DB update.
+    """
+    entry_price = float(trade["entry_price"])
+    sl_price = float(trade["sl_price"])
+    tp_price = float(trade["tp_price"]) if trade.get("tp_price") is not None else None
+    pos_usd = float(trade.get("position_usd") or 0)
+
+    created_str = trade["created_at"]
+    try:
+        created_at = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+    elapsed_minutes = (now - created_at).total_seconds() / 60
+    horizon = trade.get("horizon_minutes", 720)
+
+    # Track high_price_seen for trailing stop
+    high_seen = float(trade.get("high_price_seen") or 0)
+    if current_price is not None and current_price > high_seen:
+        high_seen = current_price
+
+    new_status = None
+    exit_price = None
+
+    # 1) SL cascade from sibling tranche
+    if sl_cascade:
+        new_status = "sl_hit"
+        exit_price = sl_price * sell_slip_factor
+
+    elif current_price is not None:
+        # 2) SL check
+        if current_price <= sl_price:
+            new_status = "sl_hit"
+            exit_price = sl_price * sell_slip_factor
+        # 3) TP check (only tranches with TP target)
+        elif tp_price is not None and current_price >= tp_price:
+            new_status = "tp_hit"
+            exit_price = tp_price * sell_slip_factor
+        # 4) Trailing stop: activate at +20%, trail at 85% of peak
+        elif high_seen >= entry_price * 1.20:
+            trail_price = high_seen * 0.85
+            if current_price <= trail_price:
+                new_status = "trail_stop"
+                exit_price = current_price * sell_slip_factor
+
+    # 5) Timeout
+    if new_status is None and elapsed_minutes >= horizon:
+        new_status = "timeout"
+        exit_price = (current_price if current_price else entry_price) * sell_slip_factor
+
+    # Always return high_price_seen update (even without exit)
+    result = {"high_price_seen": high_seen}
+
+    if new_status is None:
+        return result  # no exit, but may need to update high_price_seen
+
+    pnl_pct = round((exit_price / entry_price) - 1, 4) if exit_price and entry_price else 0
+    pnl_usd = round(pos_usd * pnl_pct, 2) if pos_usd else None
+
+    result.update({
+        "status": new_status,
+        "exit_price": exit_price,
+        "exit_at": now.isoformat(),
+        "pnl_pct": pnl_pct,
+        "pnl_usd": pnl_usd,
+        "exit_minutes": int(elapsed_minutes),
+    })
+    return result
+
+
 def check_paper_trades(client) -> dict:
     """
     Check all open paper trades against current prices.
-    Closes trades that hit TP, SL, or timeout.
+    Closes trades that hit TP, SL, trailing stop, or timeout.
     v73: Exit prices include sell slippage simulation.
+    v92: Uses _evaluate_trade_exit() helper with trailing stop support.
 
     SL cascade: when SL triggers, ALL open tranches for the same
     (token_address, strategy, cycle_ts) close at -SL%.
@@ -620,7 +704,7 @@ def check_paper_trades(client) -> dict:
     Moonbag tranches (tp_price=NULL) only close on SL or timeout.
 
     Returns {"checked": N, "closed": M, "tp": X, "sl": Y, "timeout": Z,
-            "pnl_usd": total, "rt_pnl_usd": RT-only}.
+            "trail_stop": W, "pnl_usd": total, "rt_pnl_usd": RT-only}.
     """
     now = datetime.now(timezone.utc)
 
@@ -649,19 +733,16 @@ def check_paper_trades(client) -> dict:
         pass
     _sell_slip_factor = 1 - _sell_slip_bps / 10_000
 
-    counts = {"checked": len(open_trades), "closed": 0, "tp": 0, "sl": 0, "timeout": 0}
-    _total_pnl_usd = 0.0  # v67: accumulate for monitoring
-    _rt_pnl_usd = 0.0     # v71: RT-only PnL for bankroll tracking
-    _rt_closed = 0         # v71: RT-only closed count for bankroll tracking
+    counts = {"checked": len(open_trades), "closed": 0, "tp": 0, "sl": 0, "timeout": 0, "trail_stop": 0}
+    _total_pnl_usd = 0.0
+    _rt_pnl_usd = 0.0
+    _rt_closed = 0
 
     # Track SL-triggered groups so we can cascade
-    # Key: (token_address, strategy, cycle_ts) -> True if SL was hit
     sl_triggered = set()
 
-    # First pass: detect SL triggers (check non-moonbag trades first for SL detection)
-    # Sort so main/tp tranches come before moonbag
+    # Sort so main/tp tranches come before moonbag (SL detection first)
     sorted_trades = sorted(open_trades, key=lambda t: (t.get("tranche_label", "") == "moonbag"))
-
     closed_ids = set()
 
     for trade in sorted_trades:
@@ -670,60 +751,35 @@ def check_paper_trades(client) -> dict:
 
         addr = trade["token_address"]
         current_price = prices.get(addr)
-
-        created_str = trade["created_at"]
-        try:
-            created_at = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
-        except Exception:
-            continue
-
-        elapsed_minutes = (now - created_at).total_seconds() / 60
-        horizon = trade.get("horizon_minutes", 720)
-        entry_price = float(trade["entry_price"])
-        sl_price = float(trade["sl_price"])
-        tp_price = float(trade["tp_price"]) if trade.get("tp_price") is not None else None
-
         group_key = (addr, trade["strategy"], trade["cycle_ts"])
 
-        new_status = None
-        exit_price = None
-
-        # Check if this group already had SL triggered by a sibling tranche
-        if group_key in sl_triggered:
-            new_status = "sl_hit"
-            exit_price = sl_price * _sell_slip_factor  # v73: + sell slippage
-
-        elif current_price is not None:
-            # SL check (applies to all tranches including moonbag)
-            if current_price <= sl_price:
-                new_status = "sl_hit"
-                exit_price = sl_price * _sell_slip_factor  # v73: + sell slippage
-                sl_triggered.add(group_key)
-            # TP check (only for tranches with a TP target)
-            elif tp_price is not None and current_price >= tp_price:
-                new_status = "tp_hit"
-                exit_price = tp_price * _sell_slip_factor  # v73: + sell slippage
-
-        # Timeout check
-        if new_status is None and elapsed_minutes >= horizon:
-            new_status = "timeout"
-            exit_price = (current_price if current_price else entry_price) * _sell_slip_factor  # v73
-
-        if new_status is None:
+        is_cascade = group_key in sl_triggered
+        ev = _evaluate_trade_exit(trade, current_price, now, _sell_slip_factor, sl_cascade=is_cascade)
+        if ev is None:
             continue
 
-        pnl_pct = round((exit_price / entry_price) - 1, 4) if exit_price and entry_price else 0
-        pos_usd = float(trade.get("position_usd") or 0)
-        pnl_usd = round(pos_usd * pnl_pct, 2) if pos_usd else None
+        # Always update high_price_seen (even without exit)
+        if ev.get("high_price_seen") is not None and ev["high_price_seen"] > float(trade.get("high_price_seen") or 0):
+            try:
+                client.table("paper_trades").update(
+                    {"high_price_seen": ev["high_price_seen"]}
+                ).eq("id", trade["id"]).execute()
+            except Exception:
+                pass
 
-        update = {
-            "status": new_status,
-            "exit_price": exit_price,
-            "exit_at": now.isoformat(),
-            "pnl_pct": pnl_pct,
-            "pnl_usd": pnl_usd,
-            "exit_minutes": int(elapsed_minutes),
-        }
+        if "status" not in ev:
+            continue  # no exit
+
+        new_status = ev["status"]
+        pnl_usd = ev.get("pnl_usd")
+
+        # Track SL cascade
+        if new_status == "sl_hit" and not is_cascade:
+            sl_triggered.add(group_key)
+
+        update = {k: ev[k] for k in ("status", "exit_price", "exit_at", "pnl_pct", "pnl_usd", "exit_minutes") if k in ev}
+        if ev.get("high_price_seen") is not None:
+            update["high_price_seen"] = ev["high_price_seen"]
 
         try:
             client.table("paper_trades").update(update).eq("id", trade["id"]).execute()
@@ -739,7 +795,7 @@ def check_paper_trades(client) -> dict:
             logger.info(
                 "paper_trader: CLOSED %s %s/%s/%s — %s pnl=%.1f%%%s after %dmin",
                 trade["symbol"], trade["strategy"], trade.get("tranche_label", "main"),
-                addr[:8], new_status, pnl_pct * 100, usd_str, int(elapsed_minutes),
+                addr[:8], new_status, ev.get("pnl_pct", 0) * 100, usd_str, ev.get("exit_minutes", 0),
             )
         except Exception as e:
             logger.error("paper_trader: update failed for trade %s: %s", trade["id"], e)
@@ -754,29 +810,15 @@ def check_paper_trades(client) -> dict:
 
         addr = trade["token_address"]
         current_price = prices.get(addr)
-        entry_price = float(trade["entry_price"])
-        sl_price = float(trade["sl_price"])
 
-        created_str = trade["created_at"]
-        try:
-            created_at = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
-        except Exception:
+        ev = _evaluate_trade_exit(trade, current_price, now, _sell_slip_factor, sl_cascade=True)
+        if ev is None or "status" not in ev:
             continue
-        elapsed_minutes = (now - created_at).total_seconds() / 60
 
-        exit_price = sl_price * _sell_slip_factor  # v73: + sell slippage
-        pnl_pct = round((exit_price / entry_price) - 1, 4) if exit_price and entry_price else 0
-        pos_usd = float(trade.get("position_usd") or 0)
-        pnl_usd = round(pos_usd * pnl_pct, 2) if pos_usd else None
-
-        update = {
-            "status": "sl_hit",
-            "exit_price": exit_price,
-            "exit_at": now.isoformat(),
-            "pnl_pct": pnl_pct,
-            "pnl_usd": pnl_usd,
-            "exit_minutes": int(elapsed_minutes),
-        }
+        pnl_usd = ev.get("pnl_usd")
+        update = {k: ev[k] for k in ("status", "exit_price", "exit_at", "pnl_pct", "pnl_usd", "exit_minutes") if k in ev}
+        if ev.get("high_price_seen") is not None:
+            update["high_price_seen"] = ev["high_price_seen"]
 
         try:
             client.table("paper_trades").update(update).eq("id", trade["id"]).execute()
@@ -791,23 +833,101 @@ def check_paper_trades(client) -> dict:
             logger.info(
                 "paper_trader: CLOSED (SL cascade) %s %s/%s — pnl=%.1f%%%s",
                 trade["symbol"], trade["strategy"], trade.get("tranche_label", ""),
-                pnl_pct * 100, usd_str,
+                ev.get("pnl_pct", 0) * 100, usd_str,
             )
         except Exception as e:
             logger.error("paper_trader: update failed for trade %s: %s", trade["id"], e)
 
     if counts["closed"] > 0:
         logger.info(
-            "paper_trader: checked %d open, closed %d (TP=%d SL=%d timeout=%d)",
-            counts["checked"], counts["closed"], counts["tp"], counts["sl"], counts["timeout"],
+            "paper_trader: checked %d open, closed %d (TP=%d SL=%d trail=%d timeout=%d)",
+            counts["checked"], counts["closed"], counts["tp"], counts["sl"],
+            counts["trail_stop"], counts["timeout"],
         )
-        # v67: Track paper trade closures
         if _monitoring:
             _metrics.record_paper_trade_close(counts["closed"], _total_pnl_usd)
     counts["pnl_usd"] = round(_total_pnl_usd, 2)
     counts["rt_pnl_usd"] = round(_rt_pnl_usd, 2)
     counts["rt_closed"] = _rt_closed
     return counts
+
+
+def check_paper_trades_fast(client) -> dict:
+    """v92: Fast 30s check for recent RT trades only (opened in last 30 min).
+    Catches fast spikes that the 3-min full check would miss.
+    Only checks SL/TP/trailing — no timeout (too young). No SL cascade (single-tranche RT).
+    """
+    now = datetime.now(timezone.utc)
+    cutoff = (now - timedelta(minutes=30)).isoformat()
+
+    try:
+        result = (
+            client.table("paper_trades")
+            .select("*")
+            .eq("status", "open")
+            .gte("created_at", cutoff)
+            .execute()
+        )
+        recent_trades = result.data or []
+    except Exception as e:
+        logger.warning("paper_fast: fetch failed: %s", e)
+        return {"checked": 0, "closed": 0}
+
+    if not recent_trades:
+        return {"checked": 0, "closed": 0}
+
+    addresses = list({t["token_address"] for t in recent_trades})
+    prices = _fetch_prices_batch(addresses)
+
+    _sell_slip_bps = SELL_SLIPPAGE_BPS
+    try:
+        _cfg = _load_paper_trade_config(client)
+        _sell_slip_bps = int(_cfg.get("sell_slippage_bps", SELL_SLIPPAGE_BPS))
+    except Exception:
+        pass
+    _sell_slip_factor = 1 - _sell_slip_bps / 10_000
+
+    closed = 0
+    for trade in recent_trades:
+        addr = trade["token_address"]
+        current_price = prices.get(addr)
+
+        ev = _evaluate_trade_exit(trade, current_price, now, _sell_slip_factor)
+        if ev is None:
+            continue
+
+        # Update high_price_seen even without exit
+        if ev.get("high_price_seen") is not None and ev["high_price_seen"] > float(trade.get("high_price_seen") or 0):
+            try:
+                client.table("paper_trades").update(
+                    {"high_price_seen": ev["high_price_seen"]}
+                ).eq("id", trade["id"]).execute()
+            except Exception:
+                pass
+
+        if "status" not in ev:
+            continue
+
+        update = {k: ev[k] for k in ("status", "exit_price", "exit_at", "pnl_pct", "pnl_usd", "exit_minutes") if k in ev}
+        if ev.get("high_price_seen") is not None:
+            update["high_price_seen"] = ev["high_price_seen"]
+
+        try:
+            client.table("paper_trades").update(update).eq("id", trade["id"]).execute()
+            closed += 1
+            pnl_usd = ev.get("pnl_usd")
+            usd_str = f" ${pnl_usd:+.2f}" if pnl_usd is not None else ""
+            logger.info(
+                "paper_fast: CLOSED %s %s/%s — %s pnl=%.1f%%%s after %dmin",
+                trade["symbol"], trade["strategy"], addr[:8],
+                ev["status"], ev.get("pnl_pct", 0) * 100, usd_str, ev.get("exit_minutes", 0),
+            )
+        except Exception as e:
+            logger.error("paper_fast: update failed for trade %s: %s", trade["id"], e)
+
+    if closed > 0:
+        logger.info("paper_fast: checked %d recent, closed %d", len(recent_trades), closed)
+    return {"checked": len(recent_trades), "closed": closed}
 
 
 def paper_trade_summary(client) -> dict | None:
@@ -957,7 +1077,7 @@ def paper_trade_summary(client) -> dict | None:
 
     def _source_stats(src_trades, label):
         # Only count closed trades (already filtered by neq("status","open") above)
-        closed = [t for t in src_trades if t.get("status") in ("tp_hit", "sl_hit", "timeout")]
+        closed = [t for t in src_trades if t.get("status") in ("tp_hit", "sl_hit", "timeout", "trail_stop")]
         if not closed:
             return None
         n = len(closed)
