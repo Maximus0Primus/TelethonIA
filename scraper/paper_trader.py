@@ -617,7 +617,7 @@ def _evaluate_trade_exit(trade: dict, current_price: float | None,
                          sl_cascade: bool = False) -> dict | None:
     """v92: Shared exit logic for check_paper_trades + check_paper_trades_fast.
 
-    Checks in order: SL → TP → trailing stop → timeout.
+    Checks in order: SL → TP → timeout.
     Updates high_price_seen on every call (even when no exit).
 
     Returns dict with keys {status, exit_price, pnl_pct, pnl_usd, exit_minutes,
@@ -637,7 +637,7 @@ def _evaluate_trade_exit(trade: dict, current_price: float | None,
     elapsed_minutes = (now - created_at).total_seconds() / 60
     horizon = trade.get("horizon_minutes", 720)
 
-    # Track high_price_seen for trailing stop
+    # Track high_price_seen
     high_seen = float(trade.get("high_price_seen") or 0)
     if current_price is not None and current_price > high_seen:
         high_seen = current_price
@@ -659,14 +659,7 @@ def _evaluate_trade_exit(trade: dict, current_price: float | None,
         elif tp_price is not None and current_price >= tp_price:
             new_status = "tp_hit"
             exit_price = tp_price * sell_slip_factor
-        # 4) Trailing stop: activate at +20%, trail at 85% of peak
-        elif high_seen >= entry_price * 1.20:
-            trail_price = high_seen * 0.85
-            if current_price <= trail_price:
-                new_status = "trail_stop"
-                exit_price = current_price * sell_slip_factor
-
-    # 5) Timeout
+    # 4) Timeout
     if new_status is None and elapsed_minutes >= horizon:
         new_status = "timeout"
         exit_price = (current_price if current_price else entry_price) * sell_slip_factor
@@ -704,7 +697,7 @@ def check_paper_trades(client) -> dict:
     Moonbag tranches (tp_price=NULL) only close on SL or timeout.
 
     Returns {"checked": N, "closed": M, "tp": X, "sl": Y, "timeout": Z,
-            "trail_stop": W, "pnl_usd": total, "rt_pnl_usd": RT-only}.
+            "pnl_usd": total, "rt_pnl_usd": RT-only}.
     """
     now = datetime.now(timezone.utc)
 
@@ -733,7 +726,7 @@ def check_paper_trades(client) -> dict:
         pass
     _sell_slip_factor = 1 - _sell_slip_bps / 10_000
 
-    counts = {"checked": len(open_trades), "closed": 0, "tp": 0, "sl": 0, "timeout": 0, "trail_stop": 0}
+    counts = {"checked": len(open_trades), "closed": 0, "tp": 0, "sl": 0, "timeout": 0}
     _total_pnl_usd = 0.0
     _rt_pnl_usd = 0.0
     _rt_closed = 0
@@ -840,9 +833,9 @@ def check_paper_trades(client) -> dict:
 
     if counts["closed"] > 0:
         logger.info(
-            "paper_trader: checked %d open, closed %d (TP=%d SL=%d trail=%d timeout=%d)",
+            "paper_trader: checked %d open, closed %d (TP=%d SL=%d timeout=%d)",
             counts["checked"], counts["closed"], counts["tp"], counts["sl"],
-            counts["trail_stop"], counts["timeout"],
+            counts["timeout"],
         )
         if _monitoring:
             _metrics.record_paper_trade_close(counts["closed"], _total_pnl_usd)
@@ -855,7 +848,7 @@ def check_paper_trades(client) -> dict:
 def check_paper_trades_fast(client) -> dict:
     """v92: Fast 30s check for recent RT trades only (opened in last 30 min).
     Catches fast spikes that the 3-min full check would miss.
-    Only checks SL/TP/trailing — no timeout (too young). No SL cascade (single-tranche RT).
+    Only checks SL/TP — no timeout (too young). No SL cascade (single-tranche RT).
     """
     now = datetime.now(timezone.utc)
     cutoff = (now - timedelta(minutes=30)).isoformat()
