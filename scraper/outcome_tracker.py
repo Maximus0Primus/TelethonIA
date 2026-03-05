@@ -233,7 +233,10 @@ def _is_sol_base_pool(pool_addr: str, pool_cache: dict) -> bool:
 # === GeckoTerminal API ===
 
 def _get_pool_address(token_address: str, pool_cache: dict) -> str | None:
-    """Get the top Solana pool address for a token. Falls back: GeckoTerminal → DexPaprika."""
+    """Get the top Solana pool address for a token.
+    v93: DexScreener first (highest-volume pair, matches RT/paper trading).
+    Falls back: DexScreener → GeckoTerminal → DexPaprika.
+    """
     global _gecko_consecutive_429s, _gecko_disabled
     if not token_address:
         return None
@@ -244,29 +247,43 @@ def _get_pool_address(token_address: str, pool_cache: dict) -> str | None:
 
     pool_address = None
 
-    # 1. Try GeckoTerminal (unless circuit-breaker disabled)
-    with _gecko_lock:
-        gecko_ok = not _gecko_disabled
-    if gecko_ok:
-        try:
-            resp = requests.get(
-                GECKOTERMINAL_POOLS_URL.format(token_address=token_address),
-                timeout=10,
-            )
-            if resp.status_code == 429:
-                with _gecko_lock:
-                    _gecko_consecutive_429s += 1
-                    if _gecko_consecutive_429s >= _GECKO_429_THRESHOLD:
-                        _gecko_disabled = True
-                        logger.warning("GeckoTerminal disabled (pool lookup 429s)")
-            elif resp.status_code == 200:
-                pools = resp.json().get("data") or []
-                if pools:
-                    pool_address = pools[0].get("attributes", {}).get("address")
-        except requests.RequestException as e:
-            logger.debug("GeckoTerminal pool lookup failed for %s: %s", token_address[:8], e)
+    # 1. v93: DexScreener first — picks highest-volume pair (matches RT entry price source)
+    try:
+        resp = requests.get(
+            f"https://api.dexscreener.com/tokens/v1/solana/{token_address}",
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            pairs = resp.json()
+            if isinstance(pairs, list) and pairs:
+                pool_address = pairs[0].get("pairAddress")
+    except requests.RequestException as e:
+        logger.debug("DexScreener pool lookup failed for %s: %s", token_address[:8], e)
 
-    # 2. v34 fallback: DexPaprika token→pool lookup (no API key needed, 10K req/day)
+    # 2. Try GeckoTerminal (unless circuit-breaker disabled)
+    if not pool_address:
+        with _gecko_lock:
+            gecko_ok = not _gecko_disabled
+        if gecko_ok:
+            try:
+                resp = requests.get(
+                    GECKOTERMINAL_POOLS_URL.format(token_address=token_address),
+                    timeout=10,
+                )
+                if resp.status_code == 429:
+                    with _gecko_lock:
+                        _gecko_consecutive_429s += 1
+                        if _gecko_consecutive_429s >= _GECKO_429_THRESHOLD:
+                            _gecko_disabled = True
+                            logger.warning("GeckoTerminal disabled (pool lookup 429s)")
+                elif resp.status_code == 200:
+                    pools = resp.json().get("data") or []
+                    if pools:
+                        pool_address = pools[0].get("attributes", {}).get("address")
+            except requests.RequestException as e:
+                logger.debug("GeckoTerminal pool lookup failed for %s: %s", token_address[:8], e)
+
+    # 3. v34 fallback: DexPaprika token→pool lookup (no API key needed, 10K req/day)
     if not pool_address:
         try:
             resp = requests.get(
@@ -1844,27 +1861,9 @@ def _kco_phase_a_sync(client: Client, stats: dict) -> None:
         logger.warning("KCO Phase A: no tokens with addresses found")
         return
 
-    # Step 1b: Build token_address → pair_address lookup from token_snapshots
-    # v34: Without pair_address, Phase B can't fetch OHLCV → entry_price never fills
-    pair_map = {}  # token_address → pair_address
-    try:
-        pair_result = (
-            client.table("token_snapshots")
-            .select("token_address, pair_address")
-            .not_.is_("pair_address", "null")
-            .not_.is_("token_address", "null")
-            .order("snapshot_at", desc=True)
-            .limit(1000)
-            .execute()
-        )
-        for row in (pair_result.data or []):
-            ta = row.get("token_address")
-            pa = row.get("pair_address")
-            if ta and pa and ta not in pair_map:
-                pair_map[ta] = pa
-        logger.info("KCO Phase A: loaded %d pair_address mappings", len(pair_map))
-    except Exception as e:
-        logger.warning("KCO Phase A: failed to load pair_addresses: %s", e)
+    # Step 1b: pair_address will be resolved by Phase B via _get_pool_address()
+    # v93: Removed stale token_snapshots lookup — was returning wrong pools.
+    # Phase B now uses DexScreener (highest-volume pair) for accurate pool resolution.
 
     # Step 2: Get ALL kol_mentions (paginated)
     try:
@@ -1881,15 +1880,16 @@ def _kco_phase_a_sync(client: Client, stats: dict) -> None:
         logger.info("KCO Phase A: no mentions found")
         return
 
-    # Step 3: Find first mention per (kol_group, token_address)
-    first_calls = {}
+    # Step 3: v93: Track EVERY mention (not just first per kol+token)
+    # Each mention is a separate call with its own entry price and outcome.
+    all_calls = {}  # mention_id → call data
     for m in mentions:
         sym = (m.get("symbol") or "").upper().strip()
         kol = m.get("kol_group") or ""
         msg_date = m.get("message_date")
         mention_id = m.get("id")
 
-        if not sym or not kol or not msg_date:
+        if not sym or not kol or not msg_date or not mention_id:
             continue
 
         # v40: Prefer resolved_ca (exact CA from KOL's message), then symbol match, then extracted_cas
@@ -1909,35 +1909,32 @@ def _kco_phase_a_sync(client: Client, stats: dict) -> None:
         if not token_addr:
             continue
 
-        key = (kol, token_addr)
-        if key not in first_calls:
-            first_calls[key] = {
-                "mention_id": mention_id,
-                "call_timestamp": msg_date,
-                "symbol": sym,
-                "token_address": token_addr,
-                "kol_group": kol,
-            }
-        # Already sorted by message_date ASC, so first occurrence wins
+        all_calls[mention_id] = {
+            "mention_id": mention_id,
+            "call_timestamp": msg_date,
+            "symbol": sym,
+            "token_address": token_addr,
+            "kol_group": kol,
+        }
 
-    logger.info("KCO Phase A: found %d unique (kol, token) pairs from %d mentions",
-                len(first_calls), len(mentions))
+    logger.info("KCO Phase A: found %d calls from %d mentions",
+                len(all_calls), len(mentions))
 
-    # Step 4: Get existing kol_call_outcomes to skip duplicates
+    # Step 4: Get existing kol_call_outcomes to skip already-synced mentions
     try:
         existing = _kco_paginate_query(
-            client, "kol_call_outcomes", "kol_group, token_address",
+            client, "kol_call_outcomes", "mention_id",
         )
     except Exception as e:
         logger.error("KCO Phase A: failed to query existing outcomes: %s", e)
         return
 
-    existing_keys = {(r["kol_group"], r["token_address"]) for r in existing}
+    existing_mention_ids = {r["mention_id"] for r in existing}
 
-    # Step 5: Insert new rows (with pair_address from snapshots)
+    # Step 5: Insert new rows (pair_address resolved later by Phase B)
     new_rows = []
-    for key, call in first_calls.items():
-        if key in existing_keys:
+    for mention_id, call in all_calls.items():
+        if mention_id in existing_mention_ids:
             continue
         row = {
             "mention_id": call["mention_id"],
@@ -1946,9 +1943,6 @@ def _kco_phase_a_sync(client: Client, stats: dict) -> None:
             "kol_group": call["kol_group"],
             "call_timestamp": call["call_timestamp"],
         }
-        pa = pair_map.get(call["token_address"])
-        if pa:
-            row["pair_address"] = pa
         new_rows.append(row)
 
     if not new_rows:
@@ -2184,15 +2178,10 @@ def _kco_phase_b_entry_prices(client: Client, pool_cache: dict, stats: dict, sta
             logger.warning("KCO Phase B: time budget exceeded after %d tokens", filled)
             break
 
-        # Resolve pool address from any row in the group
-        pool_addr = None
-        for row in group:
-            if row.get("pair_address"):
-                pool_addr = row["pair_address"]
-                break
-        if not pool_addr:
-            pool_addr = _get_pool_address(token_addr, pool_cache)
-            stats["api_calls"] += 1
+        # v93: Always resolve pool via DexScreener (highest-volume pair)
+        # Old pair_address from snapshots may point to wrong/low-liquidity pool
+        pool_addr = _get_pool_address(token_addr, pool_cache)
+        stats["api_calls"] += 1
 
         # Parse all call timestamps for this token
         call_entries = []
@@ -2313,16 +2302,9 @@ def _kco_phase_c_update_ath(client: Client, pool_cache: dict, stats: dict, start
             logger.warning("KCO Phase C: time budget exceeded")
             break
 
-        # Resolve pool address
-        pool_addr = None
-        for row in group:
-            if row.get("pair_address"):
-                pool_addr = row["pair_address"]
-                break
-        if not pool_addr:
-            _gecko_limiter.wait()
-            pool_addr = _get_pool_address(token_addr, pool_cache)
-            stats["api_calls"] += 1
+        # v93: Always resolve pool via DexScreener (highest-volume pair)
+        pool_addr = _get_pool_address(token_addr, pool_cache)
+        stats["api_calls"] += 1
 
         if not pool_addr:
             # v37: Mark old calls as dead if no pool can be found
