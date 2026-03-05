@@ -68,6 +68,7 @@ SHADOW_STRATEGIES = [
     "TP50_SL15", "TP30_SL30", "TP50_SL50", "FRESH_MICRO", "QUICK_SCALP",
     "TP30_SL10",
 ]
+
 # v73: Slippage simulation — realistic entry/exit price adjustments
 BUY_SLIPPAGE_BPS = 100   # 1.0% buy slippage (v92: was 150 — too aggressive)
 SELL_SLIPPAGE_BPS = 200   # 2.0% sell slippage (v92: was 300 — TP needed +54% raw move)
@@ -162,6 +163,28 @@ STRATEGY_FILTERS = {
         "max_mcap": 5_000_000,
     },
 }
+
+# v93: Grid search — all TP/SL combos for shadow trading optimization
+# TP 40-100 (step 10) × SL 30-70 (step 10) = 35 combos + 2 no-SL baselines
+_GRID_STRATEGIES = {}
+for _tp in range(40, 110, 10):    # 40, 50, 60, 70, 80, 90, 100
+    for _sl in range(30, 80, 10):  # 30, 40, 50, 60, 70
+        _name = f"TP{_tp}_SL{_sl}"
+        if _name not in STRATEGIES:
+            _GRID_STRATEGIES[_name] = [
+                {"pct": 1.0, "tp_mult": 1 + _tp / 100, "sl_mult": 1 - _sl / 100,
+                 "horizon_min": 1440, "label": "main"},
+            ]
+# No-SL baseline: only exits via TP or timeout (SL at -80% = nearly unreachable)
+_GRID_STRATEGIES["TP50_NOSL"] = [
+    {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.20, "horizon_min": 1440, "label": "main"},
+]
+_GRID_STRATEGIES["TP100_NOSL"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.20, "horizon_min": 1440, "label": "main"},
+]
+
+STRATEGIES.update(_GRID_STRATEGIES)
+SHADOW_STRATEGIES.extend(_GRID_STRATEGIES.keys())
 
 
 def _load_bot_predictions(client) -> None:
