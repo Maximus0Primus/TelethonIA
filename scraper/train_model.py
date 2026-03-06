@@ -63,6 +63,10 @@ MIN_PRECISION_AT_5 = 0.30  # fallback default
 # v58: Overridden by scoring_config.pipeline_config.ml.min_n_test
 MIN_N_TEST = 200
 
+# Shadow labels (from paper_trades) are higher quality than OHLCV-simulated labels,
+# so we accept a smaller test set.
+MIN_N_TEST_SHADOW = 80
+
 
 def _backup_model_files(horizon: str) -> None:
     """v73: Backup existing model files before overwriting."""
@@ -658,6 +662,169 @@ def load_bot_labeled_data(horizon: str = "12h", strategy: str = "TP50_SL30") -> 
     n_won = int(df["_bot_won"].sum())
     logger.info("Bot labeling %s/%s: %d samples, %d wins (%.1f%% win rate)",
                 horizon, strategy, len(df), n_won, 100 * n_won / max(1, len(df)))
+
+    return df
+
+
+def load_shadow_labeled_data(strategy: str = "TP50_SL30") -> pd.DataFrame:
+    """
+    Load shadow trade outcomes as ML training labels.
+
+    Shadow trades (is_shadow=true) have real exit outcomes with slippage + timeout
+    from paper_trader.py logic — higher quality than OHLCV-simulated TP/SL timing.
+
+    Joins paper_trades → token_snapshots via snapshot_id (preferred) or
+    token_address + closest snapshot_at within 30 min of cycle_ts.
+
+    Returns DataFrame with CORE_FEATURES columns + _bot_won label.
+    """
+    client = _get_client()
+
+    # Fetch closed shadow trades for this strategy with pagination
+    all_trades = []
+    page_size = 1000
+    offset = 0
+
+    while True:
+        result = (
+            client.table("paper_trades")
+            .select("id, token_address, symbol, cycle_ts, entry_price, status, "
+                    "high_price_seen, snapshot_id")
+            .eq("is_shadow", True)
+            .eq("strategy", strategy)
+            .neq("status", "open")
+            .order("cycle_ts")
+            .range(offset, offset + page_size - 1)
+            .execute()
+        )
+        if not result.data:
+            break
+        all_trades.extend(result.data)
+        if len(result.data) < page_size:
+            break
+        offset += page_size
+
+    if not all_trades:
+        logger.info("Shadow loader: no closed trades for strategy %s", strategy)
+        return pd.DataFrame()
+
+    trades_df = pd.DataFrame(all_trades)
+    logger.info("Shadow loader: %d closed trades for %s", len(trades_df), strategy)
+
+    # Label: bot_won = 1 if TP hit
+    trades_df["_bot_won"] = (trades_df["status"] == "tp_hit").astype(int)
+
+    # Compute max_return for dedup compatibility
+    trades_df["entry_price"] = pd.to_numeric(trades_df["entry_price"], errors="coerce")
+    trades_df["high_price_seen"] = pd.to_numeric(trades_df["high_price_seen"], errors="coerce")
+    valid_prices = (
+        trades_df["entry_price"].notna()
+        & trades_df["high_price_seen"].notna()
+        & (trades_df["entry_price"] > 0)
+    )
+    trades_df.loc[valid_prices, "max_return"] = (
+        trades_df.loc[valid_prices, "high_price_seen"]
+        / trades_df.loc[valid_prices, "entry_price"]
+    )
+
+    # Deduplicate trades: keep first per token_address (earliest = least biased)
+    trades_df = trades_df.sort_values("cycle_ts").drop_duplicates(
+        subset=["token_address"], keep="first"
+    ).reset_index(drop=True)
+
+    # ── Join to token_snapshots for features ──
+    # Strategy 1: Use snapshot_id directly (fast, exact)
+    has_snap_id = trades_df["snapshot_id"].notna()
+    snap_ids = trades_df.loc[has_snap_id, "snapshot_id"].astype(int).tolist()
+
+    # Strategy 2: For trades without snapshot_id, match by token_address + time
+    no_snap_id = trades_df[~has_snap_id]
+
+    # Fetch snapshots by ID
+    snap_by_id = {}
+    if snap_ids:
+        for batch_start in range(0, len(snap_ids), 50):
+            batch = snap_ids[batch_start:batch_start + 50]
+            try:
+                res = (
+                    client.table("token_snapshots")
+                    .select("*")
+                    .in_("id", batch)
+                    .execute()
+                )
+                for row in (res.data or []):
+                    snap_by_id[row["id"]] = row
+            except Exception as e:
+                logger.warning("Shadow loader: snapshot fetch by ID failed: %s", e)
+
+    # Fetch snapshots by token_address + time proximity for trades missing snapshot_id
+    snap_by_addr_time = {}
+    if not no_snap_id.empty:
+        addrs = no_snap_id["token_address"].unique().tolist()
+        all_snaps = []
+        for batch_start in range(0, len(addrs), 20):
+            batch = addrs[batch_start:batch_start + 20]
+            try:
+                res = (
+                    client.table("token_snapshots")
+                    .select("*")
+                    .in_("token_address", batch)
+                    .gte("snapshot_at", "2026-02-14T00:00:00Z")
+                    .order("snapshot_at")
+                    .execute()
+                )
+                all_snaps.extend(res.data or [])
+            except Exception as e:
+                logger.warning("Shadow loader: snapshot fetch by addr failed: %s", e)
+
+        # Build lookup: (token_address) → list of (snapshot_at, row)
+        from collections import defaultdict
+        addr_snaps = defaultdict(list)
+        for s in all_snaps:
+            ts = pd.Timestamp(s["snapshot_at"])
+            addr_snaps[s["token_address"]].append((ts, s))
+
+        for _, trade in no_snap_id.iterrows():
+            trade_ts = pd.Timestamp(trade["cycle_ts"])
+            candidates = addr_snaps.get(trade["token_address"], [])
+            best = None
+            best_diff = pd.Timedelta(minutes=30)  # max 30 min window
+            for snap_ts, snap_row in candidates:
+                diff = abs(snap_ts - trade_ts)
+                if diff < best_diff:
+                    best_diff = diff
+                    best = snap_row
+            if best:
+                key = (trade["token_address"], str(trade["cycle_ts"]))
+                snap_by_addr_time[key] = best
+
+    # Merge: build final DataFrame with snapshot features + trade labels
+    merged_rows = []
+    for _, trade in trades_df.iterrows():
+        snap = None
+        if pd.notna(trade.get("snapshot_id")):
+            snap = snap_by_id.get(int(trade["snapshot_id"]))
+        if snap is None:
+            key = (trade["token_address"], str(trade["cycle_ts"]))
+            snap = snap_by_addr_time.get(key)
+
+        if snap is None:
+            continue  # no matching snapshot — skip
+
+        row = dict(snap)  # all snapshot columns
+        row["_bot_won"] = trade["_bot_won"]
+        row["max_return"] = trade.get("max_return")
+        merged_rows.append(row)
+
+    if not merged_rows:
+        logger.warning("Shadow loader: no trades matched to snapshots for %s", strategy)
+        return pd.DataFrame()
+
+    df = pd.DataFrame(merged_rows)
+
+    n_won = int(df["_bot_won"].sum())
+    logger.info("Shadow loader: %d samples joined, %d wins (%.1f%% win rate) for %s",
+                len(df), n_won, 100 * n_won / max(1, len(df)), strategy)
 
     return df
 
@@ -1723,6 +1890,7 @@ def train_bot_won(
     strategy: str = "TP50_SL30",
     n_trials: int = 100,
     min_samples: int = 100,
+    min_n_test_override: int | None = None,
 ) -> dict | None:
     """
     ML v3: Train binary classification — predict bot_won (TP before SL).
@@ -1731,6 +1899,9 @@ def train_bot_won(
     Uses the same feature set and XGBoost+LightGBM ensemble as classification,
     but with bot_won labels computed from TP/SL chronological ordering.
     Models saved with _bot suffix to coexist with regression/LTR models.
+
+    min_n_test_override: if set, use this instead of MIN_N_TEST for quality gate
+                         (e.g. MIN_N_TEST_SHADOW=80 for shadow labels).
     """
     if len(df) < min_samples:
         logger.warning("Bot training: only %d samples (need %d). Skipping.", len(df), min_samples)
@@ -1821,13 +1992,14 @@ def train_bot_won(
     logger.info("Precision@10: %.3f, AUC: %.3f, F1: %.3f", p_at_10, auc, f1)
 
     # Quality gate
-    if len(y_test) < MIN_N_TEST:
+    gate_n_test = min_n_test_override if min_n_test_override is not None else MIN_N_TEST
+    if len(y_test) < gate_n_test:
         logger.warning(
             "BOT QUALITY GATE FAILED: test set too small (%d < %d minimum).",
-            len(y_test), MIN_N_TEST,
+            len(y_test), gate_n_test,
         )
         return {"quality_gate": "FAILED", "reason": "insufficient_test_data",
-                "n_test": len(y_test), "min_required": MIN_N_TEST, "mode": "bot_won"}
+                "n_test": len(y_test), "min_required": gate_n_test, "mode": "bot_won"}
 
     if p_at_5 < MIN_PRECISION_AT_5:
         logger.warning(
@@ -3098,7 +3270,7 @@ def auto_train(
     # Update scoring_config so pipeline + backtest use the same horizon/threshold
     _update_scoring_config_ml(best_horizon, best_threshold)
 
-    # ═══ Phase 2: bot_won training (if bot TP/SL data available) ═══
+    # ═══ Phase 2: bot_won training (shadow labels preferred, OHLCV fallback) ═══
     logger.info("=== AUTO-TRAIN Phase 2: bot_won training ===")
     BOT_STRATEGY_POOL = ["TP30_SL20", "TP50_SL30", "TP100_SL50"]
 
@@ -3106,44 +3278,92 @@ def auto_train(
     best_bot_horizon = None
     best_bot_strategy = None
 
-    for bot_hz in ["12h", "24h"]:  # Only 12h/24h have bot columns
-        for bot_strat in BOT_STRATEGY_POOL:
-            try:
-                df_bot = load_bot_labeled_data(bot_hz, bot_strat)
-            except Exception as e:
-                logger.debug("auto_train bot: %s/%s load failed: %s", bot_hz, bot_strat, e)
-                continue
+    for bot_strat in BOT_STRATEGY_POOL:
+        # Try shadow labels first (higher quality: real exits with slippage)
+        label_source = None
+        df_bot = pd.DataFrame()
+        effective_min_n_test = MIN_N_TEST
 
-            if df_bot.empty or len(df_bot) < min_samples:
-                logger.info("auto_train bot: %s/%s — %d samples (need %d), skipping",
-                            bot_hz, bot_strat, len(df_bot) if not df_bot.empty else 0, min_samples)
-                continue
+        try:
+            df_shadow = load_shadow_labeled_data(bot_strat)
+        except Exception as e:
+            logger.debug("auto_train bot: shadow %s load failed: %s", bot_strat, e)
+            df_shadow = pd.DataFrame()
 
-            df_bot = deduplicate_snapshots(df_bot)
-            if len(df_bot) < min_samples:
-                continue
+        if not df_shadow.empty and len(df_shadow) >= min_samples:
+            df_bot = df_shadow
+            label_source = "shadow"
+            effective_min_n_test = MIN_N_TEST_SHADOW
+            logger.info("auto_train bot: using SHADOW labels for %s (%d samples, min_n_test=%d)",
+                        bot_strat, len(df_bot), effective_min_n_test)
+        else:
+            if not df_shadow.empty:
+                logger.info("auto_train bot: shadow %s has %d samples (need %d), falling back to OHLCV",
+                            bot_strat, len(df_shadow), min_samples)
 
-            try:
-                bot_meta = train_bot_won(df_bot, bot_hz, bot_strat, n_trials=trials, min_samples=min_samples)
-            except Exception as e:
-                logger.warning("auto_train bot: %s/%s training failed: %s", bot_hz, bot_strat, e)
-                continue
+        # Fallback to OHLCV-simulated labels (try both horizons)
+        if label_source is None:
+            for bot_hz in ["12h", "24h"]:
+                try:
+                    df_ohlcv = load_bot_labeled_data(bot_hz, bot_strat)
+                except Exception as e:
+                    logger.debug("auto_train bot: %s/%s load failed: %s", bot_hz, bot_strat, e)
+                    continue
 
-            if not bot_meta or bot_meta.get("quality_gate") != "PASSED":
-                continue
+                if df_ohlcv.empty or len(df_ohlcv) < min_samples:
+                    logger.info("auto_train bot: %s/%s — %d samples (need %d), skipping",
+                                bot_hz, bot_strat, len(df_ohlcv) if not df_ohlcv.empty else 0, min_samples)
+                    continue
 
-            bot_p5 = bot_meta.get("metrics", {}).get("precision_at_5", 0)
-            logger.info("auto_train bot: %s/%s passed gate (p@5=%.3f)", bot_hz, bot_strat, bot_p5)
+                df_ohlcv = deduplicate_snapshots(df_ohlcv)
+                if len(df_ohlcv) < min_samples:
+                    continue
 
-            if best_bot_result is None or bot_p5 > best_bot_result.get("metrics", {}).get("precision_at_5", 0):
-                best_bot_result = bot_meta
-                best_bot_horizon = bot_hz
-                best_bot_strategy = bot_strat
+                # Pick the horizon with more data
+                if len(df_ohlcv) > len(df_bot):
+                    df_bot = df_ohlcv
+                    label_source = f"ohlcv_{bot_hz}"
+
+        if df_bot.empty or label_source is None:
+            continue
+
+        # Shadow data is already deduped by token_address in load_shadow_labeled_data
+        if label_source.startswith("ohlcv"):
+            bot_hz_used = label_source.split("_")[1]  # "12h" or "24h"
+        else:
+            bot_hz_used = "24h"  # shadow trades don't have a horizon — use 24h for model naming
+
+        n_test_override = effective_min_n_test if label_source == "shadow" else None
+        try:
+            bot_meta = train_bot_won(
+                df_bot, bot_hz_used, bot_strat,
+                n_trials=trials, min_samples=min_samples,
+                min_n_test_override=n_test_override,
+            )
+        except Exception as e:
+            logger.warning("auto_train bot: %s/%s training failed: %s", bot_hz_used, bot_strat, e)
+            continue
+
+        if not bot_meta or bot_meta.get("quality_gate") != "PASSED":
+            continue
+
+        # Tag label source in metadata
+        bot_meta["label_source"] = label_source
+
+        bot_p5 = bot_meta.get("metrics", {}).get("precision_at_5", 0)
+        logger.info("auto_train bot: %s/%s passed gate (p@5=%.3f, source=%s)",
+                    bot_hz_used, bot_strat, bot_p5, label_source)
+
+        if best_bot_result is None or bot_p5 > best_bot_result.get("metrics", {}).get("precision_at_5", 0):
+            best_bot_result = bot_meta
+            best_bot_horizon = bot_hz_used
+            best_bot_strategy = bot_strat
 
     if best_bot_result:
         bot_p5 = best_bot_result.get("metrics", {}).get("precision_at_5", 0)
-        logger.info("auto_train bot: BEST = %s/%s p@5=%.3f — deployed!",
-                    best_bot_horizon, best_bot_strategy, bot_p5)
+        logger.info("auto_train bot: BEST = %s/%s p@5=%.3f (source=%s) — deployed!",
+                    best_bot_horizon, best_bot_strategy, bot_p5,
+                    best_bot_result.get("label_source", "unknown"))
 
         # Save bot meta with auto-train info
         bot_meta_path = MODEL_DIR / f"model_{best_bot_horizon}_bot_meta.json"

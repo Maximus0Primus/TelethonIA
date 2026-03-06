@@ -54,7 +54,7 @@ _BOT_PREDICTIONS: dict = {}  # {(token_address, strategy): gate_mult}
 
 # --- Defaults (overridden by scoring_config.paper_trade_config) ---
 TOP_N = 5
-PORTFOLIO_BUDGET = 50.0  # USD per cycle, score-weighted across top N
+PORTFOLIO_BUDGET = 200.0  # v94: USD per cycle, score-weighted across top N (was 50)
 DEDUP_COOLDOWN_HOURS = 24  # v5: was 0 — re-trading same token across cycles was the #1 PnL killer
 CA_FILTER = True
 
@@ -72,6 +72,10 @@ SHADOW_STRATEGIES = [
 # v73: Slippage simulation — realistic entry/exit price adjustments
 BUY_SLIPPAGE_BPS = 100   # 1.0% buy slippage (v92: was 150 — too aggressive)
 SELL_SLIPPAGE_BPS = 200   # 2.0% sell slippage (v92: was 300 — TP needed +54% raw move)
+
+# v94: Fee simulation — Jupiter priority fees on buy + sell
+BUY_FEE_BPS = 50    # 0.5% Jupiter priority fee on buy
+SELL_FEE_BPS = 50   # 0.5% Jupiter priority fee on sell
 
 # --- Strategy Definitions ---
 # Each strategy has a list of tranches. Moonbag tranches have tp_mult=None.
@@ -306,6 +310,8 @@ def _load_paper_trade_config(client) -> dict:
         "ca_filter": CA_FILTER,
         "buy_slippage_bps": BUY_SLIPPAGE_BPS,
         "sell_slippage_bps": SELL_SLIPPAGE_BPS,
+        "buy_fee_bps": BUY_FEE_BPS,
+        "sell_fee_bps": SELL_FEE_BPS,
         "ml_gate_mode": "disabled",  # v90: "disabled" | "normal" | "inverted"
         "experiment_id": None,       # v92: A/B testing
         "variant_id": None,          # v92: A/B testing
@@ -388,6 +394,7 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
     ca_filter = config.get("ca_filter", True)
     buy_slip_bps_base = int(config.get("buy_slippage_bps", BUY_SLIPPAGE_BPS))
     sell_slip_bps = int(config.get("sell_slippage_bps", SELL_SLIPPAGE_BPS))
+    buy_fee_bps = int(config.get("buy_fee_bps", BUY_FEE_BPS))
 
     # Filter candidates
     base_filter = [
@@ -449,18 +456,51 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
         except Exception as e:
             logger.warning("paper_trader: cooldown dedup query failed: %s", e)
 
+    # Lookup snapshot_id for candidates missing it (batch query)
+    need_snap = [t for t in candidates if not t.get("snapshot_id") and t.get("token_address")]
+    if need_snap:
+        snap_addrs = [t["token_address"] for t in need_snap]
+        try:
+            snap_res = (
+                client.table("token_snapshots")
+                .select("id, token_address, snapshot_at")
+                .in_("token_address", snap_addrs)
+                .gte("snapshot_at", (cycle_ts - timedelta(minutes=10)).isoformat())
+                .lte("snapshot_at", (cycle_ts + timedelta(minutes=10)).isoformat())
+                .order("snapshot_at", desc=True)
+                .execute()
+            )
+            # Keep closest snapshot per token_address
+            snap_map = {}
+            for s in (snap_res.data or []):
+                addr = s["token_address"]
+                if addr not in snap_map:
+                    snap_map[addr] = s["id"]
+            for t in need_snap:
+                sid = snap_map.get(t["token_address"])
+                if sid:
+                    t["snapshot_id"] = sid
+        except Exception as e:
+            logger.debug("paper_trader: snapshot_id lookup failed: %s", e)
+
     opened = 0
     for rank_idx, token in enumerate(candidates, 1):
         addr = token["token_address"]
         raw_price = float(token["price_usd"])
         # v74: Dynamic slippage — scale with liquidity depth score
         # liquidity_depth_score: 1.0 = deep liquidity, 0.1 = shallow
-        lds = float(token.get("liquidity_depth_score") or token.get("_rt_liquidity_depth_score") or 1.0)
-        lds = max(0.1, min(1.0, lds))
+        lds = float(token.get("liquidity_depth_score") or token.get("_rt_liquidity_depth_score") or 0)
+        # v94: RT fallback — derive LDS proxy from rt_liquidity_usd when Jupiter LDS unavailable
+        if not lds and token.get("_rt_liquidity_usd"):
+            rt_liq = float(token["_rt_liquidity_usd"])
+            # $50K+ = 1.0, $10K = 0.5, $5K = 0.25, $1K = 0.05
+            lds = min(1.0, rt_liq / 50_000) if rt_liq > 0 else 0.1
+        lds = max(0.1, min(1.0, lds)) if lds else 1.0
         # Shallow liquidity → up to 3x base slippage; deep → 1x
         slip_mult = 1.0 + 2.0 * (1.0 - lds)  # 1.0 for lds=1.0, 3.0 for lds=0.0
         buy_slip_bps = int(buy_slip_bps_base * slip_mult)
-        entry_price = raw_price * (1 + buy_slip_bps / 10_000)
+        # v94: entry_price includes slippage + Jupiter priority fee
+        entry_price = raw_price * (1 + (buy_slip_bps + buy_fee_bps) / 10_000)
         alloc_usd = token.get("_alloc_usd", budget_usd / top_n)
 
         # Common fields for all tranches of this token
@@ -560,11 +600,14 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
         for rank_idx, token in enumerate(candidates, 1):
             addr = token["token_address"]
             raw_price = float(token["price_usd"])
-            lds = float(token.get("liquidity_depth_score") or token.get("_rt_liquidity_depth_score") or 1.0)
-            lds = max(0.1, min(1.0, lds))
+            lds = float(token.get("liquidity_depth_score") or token.get("_rt_liquidity_depth_score") or 0)
+            if not lds and token.get("_rt_liquidity_usd"):
+                rt_liq = float(token["_rt_liquidity_usd"])
+                lds = min(1.0, rt_liq / 50_000) if rt_liq > 0 else 0.1
+            lds = max(0.1, min(1.0, lds)) if lds else 1.0
             slip_mult = 1.0 + 2.0 * (1.0 - lds)
             buy_slip_bps = int(buy_slip_bps_base * slip_mult)
-            entry_price = raw_price * (1 + buy_slip_bps / 10_000)
+            entry_price = raw_price * (1 + (buy_slip_bps + buy_fee_bps) / 10_000)
 
             shadow_base = {
                 "cycle_ts": cycle_ts.isoformat(),
@@ -635,13 +678,36 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
     return opened
 
 
+def _dynamic_sell_slip_factor(trade: dict, exit_type: str, base_bps: int = 200,
+                              fee_bps: int = SELL_FEE_BPS) -> float:
+    """v94: Dynamic sell slippage + fee based on liquidity and exit type.
+    SL hits during dumps = worse slippage. TP hits during pumps = near-base.
+    fee_bps = Jupiter priority fee (flat, added on top of slippage).
+    Batch trades (no rt_liquidity_usd) fall back to 50K default = 2% base."""
+    liq_usd = float(trade.get("rt_liquidity_usd") or 50_000)
+
+    # Liquidity multiplier: $50K+ = 1x, $5K = 2x, $1K = 4x
+    liq_mult = max(1.0, min(4.0, 50_000 / max(liq_usd, 1_000)))
+
+    # Exit type multiplier: SL = 1.5x (selling into dump), TP = 1.0x (selling into pump)
+    exit_mult = 1.5 if exit_type == "sl_hit" else 1.0
+
+    adjusted_bps = int(base_bps * liq_mult * exit_mult) + fee_bps
+    # Cap at 15% to avoid absurd numbers
+    adjusted_bps = min(adjusted_bps, 1500)
+
+    return 1 - adjusted_bps / 10_000
+
+
 def _evaluate_trade_exit(trade: dict, current_price: float | None,
                          now: datetime, sell_slip_factor: float,
-                         sl_cascade: bool = False) -> dict | None:
-    """v92: Shared exit logic for check_paper_trades + check_paper_trades_fast.
+                         sl_cascade: bool = False,
+                         sell_fee_bps: int = SELL_FEE_BPS) -> dict | None:
+    """v94: Shared exit logic for check_paper_trades + check_paper_trades_fast.
 
     Checks in order: SL → TP → timeout.
     Updates high_price_seen on every call (even when no exit).
+    sell_slip_factor is used as base_bps source; dynamic slippage + fee applied per exit type.
 
     Returns dict with keys {status, exit_price, pnl_pct, pnl_usd, exit_minutes,
     high_price_seen} or None if no action. Caller handles DB update.
@@ -650,6 +716,9 @@ def _evaluate_trade_exit(trade: dict, current_price: float | None,
     sl_price = float(trade["sl_price"])
     tp_price = float(trade["tp_price"]) if trade.get("tp_price") is not None else None
     pos_usd = float(trade.get("position_usd") or 0)
+
+    # Derive base_bps from the flat sell_slip_factor passed by caller
+    base_bps = int(round((1 - sell_slip_factor) * 10_000))
 
     created_str = trade["created_at"]
     try:
@@ -671,21 +740,21 @@ def _evaluate_trade_exit(trade: dict, current_price: float | None,
     # 1) SL cascade from sibling tranche
     if sl_cascade:
         new_status = "sl_hit"
-        exit_price = sl_price * sell_slip_factor
+        exit_price = sl_price * _dynamic_sell_slip_factor(trade, "sl_hit", base_bps, sell_fee_bps)
 
     elif current_price is not None:
         # 2) SL check
         if current_price <= sl_price:
             new_status = "sl_hit"
-            exit_price = sl_price * sell_slip_factor
+            exit_price = sl_price * _dynamic_sell_slip_factor(trade, "sl_hit", base_bps, sell_fee_bps)
         # 3) TP check (only tranches with TP target)
         elif tp_price is not None and current_price >= tp_price:
             new_status = "tp_hit"
-            exit_price = tp_price * sell_slip_factor
+            exit_price = tp_price * _dynamic_sell_slip_factor(trade, "tp_hit", base_bps, sell_fee_bps)
     # 4) Timeout
     if new_status is None and elapsed_minutes >= horizon:
         new_status = "timeout"
-        exit_price = (current_price if current_price else entry_price) * sell_slip_factor
+        exit_price = (current_price if current_price else entry_price) * _dynamic_sell_slip_factor(trade, "timeout", base_bps, sell_fee_bps)
 
     # Always return high_price_seen update (even without exit)
     result = {"high_price_seen": high_seen}
@@ -740,11 +809,13 @@ def check_paper_trades(client) -> dict:
     addresses = list({t["token_address"] for t in open_trades})
     prices = _fetch_prices_batch(addresses)
 
-    # v73: Load sell slippage config for exit price simulation
+    # v73: Load sell slippage + fee config for exit price simulation
     _sell_slip_bps = SELL_SLIPPAGE_BPS
+    _sell_fee_bps = SELL_FEE_BPS
     try:
         _cfg = _load_paper_trade_config(client)
         _sell_slip_bps = int(_cfg.get("sell_slippage_bps", SELL_SLIPPAGE_BPS))
+        _sell_fee_bps = int(_cfg.get("sell_fee_bps", SELL_FEE_BPS))
     except Exception:
         pass
     _sell_slip_factor = 1 - _sell_slip_bps / 10_000
@@ -770,7 +841,7 @@ def check_paper_trades(client) -> dict:
         group_key = (addr, trade["strategy"], trade["cycle_ts"])
 
         is_cascade = group_key in sl_triggered
-        ev = _evaluate_trade_exit(trade, current_price, now, _sell_slip_factor, sl_cascade=is_cascade)
+        ev = _evaluate_trade_exit(trade, current_price, now, _sell_slip_factor, sl_cascade=is_cascade, sell_fee_bps=_sell_fee_bps)
         if ev is None:
             continue
 
@@ -827,7 +898,7 @@ def check_paper_trades(client) -> dict:
         addr = trade["token_address"]
         current_price = prices.get(addr)
 
-        ev = _evaluate_trade_exit(trade, current_price, now, _sell_slip_factor, sl_cascade=True)
+        ev = _evaluate_trade_exit(trade, current_price, now, _sell_slip_factor, sl_cascade=True, sell_fee_bps=_sell_fee_bps)
         if ev is None or "status" not in ev:
             continue
 
@@ -896,9 +967,11 @@ def check_paper_trades_fast(client) -> dict:
     prices = _fetch_prices_batch(addresses)
 
     _sell_slip_bps = SELL_SLIPPAGE_BPS
+    _sell_fee_bps = SELL_FEE_BPS
     try:
         _cfg = _load_paper_trade_config(client)
         _sell_slip_bps = int(_cfg.get("sell_slippage_bps", SELL_SLIPPAGE_BPS))
+        _sell_fee_bps = int(_cfg.get("sell_fee_bps", SELL_FEE_BPS))
     except Exception:
         pass
     _sell_slip_factor = 1 - _sell_slip_bps / 10_000
@@ -908,7 +981,7 @@ def check_paper_trades_fast(client) -> dict:
         addr = trade["token_address"]
         current_price = prices.get(addr)
 
-        ev = _evaluate_trade_exit(trade, current_price, now, _sell_slip_factor)
+        ev = _evaluate_trade_exit(trade, current_price, now, _sell_slip_factor, sell_fee_bps=_sell_fee_bps)
         if ev is None:
             continue
 
