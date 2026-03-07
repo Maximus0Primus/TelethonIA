@@ -265,6 +265,16 @@ def send_summary():
         leg_n = len(legacy_24h)
         legacy_block = f"\n\n<i>Legacy ({leg_n}t fermés): ${leg_pnl:+.0f} (non inclus ci-dessus)</i>"
 
+    # v94: Fee + slippage estimation (fees are baked into PnL via entry/exit prices)
+    # Estimate: buy_fee(0.5%) + sell_fee(0.5%) + buy_slip(~1.5%) + sell_slip(~2.5%) ≈ 4.5% round-trip
+    buy_fee_pct = 0.005   # 0.5% Jupiter priority fee
+    sell_fee_pct = 0.005  # 0.5% Jupiter priority fee
+    avg_slip_pct = 0.035  # ~1.5% buy + ~2% sell avg (dynamic, varies with liq)
+    est_fees_24h = invested_24h * (buy_fee_pct + sell_fee_pct)
+    est_slip_24h = invested_24h * avg_slip_pct
+    est_cost_24h = est_fees_24h + est_slip_24h
+    avg_pos_24h = round(invested_24h / n_closed) if n_closed else 0
+
     msg1 = (
         f"<b>📊 DAILY SUMMARY</b> — {now.strftime('%Y-%m-%d %H:%M UTC')}"
         f"\n{alert_block}"
@@ -275,6 +285,7 @@ def send_summary():
         f"\n  Ouvert: {n_opened} | Fermé: {n_closed} | Open: {n_open}"
         f"\n  TP: {tp_24h} | SL: {sl_24h} | Timeout: {to_24h}"
         f"\n  WR: {wr_24h}% | {pnl_emoji} PnL: ${pnl_24h:+.2f}/${invested_24h:.0f} (ROI {roi_24h:+.1f}%)"
+        f"\n  Avg pos: ${avg_pos_24h} | Fees: ~${est_fees_24h:.0f} | Slip: ~${est_slip_24h:.0f} (total ~${est_cost_24h:.0f})"
         + (f"\n{rt_line}" if rt_line else "")
         + (f"\n{batch_line}" if batch_line else "")
         + "\n\n<b>Stratégies 24h:</b>\n"
@@ -426,6 +437,7 @@ def send_summary():
         + legacy_block_7d
         + f"\n\n<b>Total 7j:</b> {len(trades_7d)}t | "
         + f"{emoji_7d} ${total_7d_pnl:+.0f}/${total_7d_inv:.0f} (ROI {total_7d_roi:+.1f}%)"
+        + f"\n  Fees+slip inclus dans PnL (~{(buy_fee_pct + sell_fee_pct + avg_slip_pct)*100:.1f}%/trade)"
     )
 
     ok1 = _send_telegram(bot_token, chat_id, msg1)

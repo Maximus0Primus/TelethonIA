@@ -116,14 +116,24 @@ export function KolRow({ kol, rank, index, mode, wrThreshold }: KolRowProps) {
   const podiumBorder = PODIUM_BORDER[rank];
   const isPaper = mode === "paper";
 
-  // Paper: toggle WR / WR+50%. KCO: toggle +50% / 2x.
+  // Paper: toggle WR / +50% / 2x. KCO: toggle +50% / 2x.
   let winRate: number | null;
   let altWr: number | null;
   let altLabel: string;
   if (isPaper) {
-    winRate = wrThreshold === "50" ? kol.rtWr50 : kol.rtWr;
-    altWr = wrThreshold === "50" ? kol.rtWr : kol.rtWr50;
-    altLabel = wrThreshold === "50" ? ">0%" : "+50%";
+    if (wrThreshold === "2x") {
+      winRate = kol.rtWr2x;
+      altWr = kol.rtWr;
+      altLabel = ">0%";
+    } else if (wrThreshold === "50") {
+      winRate = kol.rtWr50;
+      altWr = kol.rtWr;
+      altLabel = ">0%";
+    } else {
+      winRate = kol.rtWr;
+      altWr = kol.rtWr50;
+      altLabel = "+50%";
+    }
   } else {
     winRate = wrThreshold === "2x" ? (kol.winRate2xExact ?? kol.winRateAll) : kol.winRate1_5xExact;
     altWr = wrThreshold === "2x" ? kol.winRate1_5xExact : (kol.winRate2xExact ?? kol.winRateAll);

@@ -2,10 +2,19 @@
 
 import { useState, useMemo, useEffect, useCallback } from "react";
 import { motion } from "framer-motion";
-import { ChevronUp, ChevronDown, FlaskConical, BarChart3, TestTube2 } from "lucide-react";
+import { ChevronUp, ChevronDown, FlaskConical, BarChart3, TestTube2, Calendar } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { KolRow } from "./KolRow";
 import type { KolRowData, KolMode, WrThreshold } from "./KolRow";
+
+const TIME_RANGES = [
+  { label: "1d", days: 1 },
+  { label: "3d", days: 3 },
+  { label: "7d", days: 7 },
+  { label: "14d", days: 14 },
+  { label: "30d", days: 30 },
+  { label: "All", days: 0 },
+] as const;
 
 type SortKey =
   | "rank"
@@ -27,7 +36,9 @@ const COLUMNS: { key: SortKey; label: string; labelShort?: string; className: st
 
 function getWr(k: KolRowData, mode: KolMode, wrThreshold: WrThreshold): number {
   if (mode === "paper") {
-    return (wrThreshold === "50" ? k.rtWr50 : k.rtWr) ?? -1;
+    if (wrThreshold === "2x") return k.rtWr2x ?? -1;
+    if (wrThreshold === "50") return k.rtWr50 ?? -1;
+    return k.rtWr ?? -1;
   }
   return (wrThreshold === "2x" ? (k.winRate2xExact ?? k.winRateAll) : k.winRate1_5xExact) ?? -1;
 }
@@ -66,15 +77,19 @@ export function KolLeaderboard() {
   const [kols, setKols] = useState<KolRowData[]>([]);
   const [loading, setLoading] = useState(true);
   const [caOnly, setCaOnly] = useState(false);
+  const [days, setDays] = useState(7);
   const [mode, setMode] = useState<KolMode>("paper");
   const [wrThreshold, setWrThreshold] = useState<WrThreshold>("wr");
   const [sortKey, setSortKey] = useState<SortKey>("score");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
 
-  const fetchData = useCallback(async (ca: boolean) => {
+  const fetchData = useCallback(async (ca: boolean, d: number) => {
     setLoading(true);
     try {
-      const res = await fetch(`/api/kols${ca ? "?ca_only=true" : ""}`);
+      const params = new URLSearchParams();
+      if (ca) params.set("ca_only", "true");
+      params.set("days", String(d));
+      const res = await fetch(`/api/kols?${params}`);
       if (!res.ok) throw new Error("Failed to fetch");
       const json = await res.json();
       setKols(json.data ?? []);
@@ -86,8 +101,8 @@ export function KolLeaderboard() {
   }, []);
 
   useEffect(() => {
-    fetchData(caOnly);
-  }, [caOnly, fetchData]);
+    fetchData(caOnly, days);
+  }, [caOnly, days, fetchData]);
 
   const sorted = useMemo(() => {
     const arr = [...kols];
@@ -142,7 +157,7 @@ export function KolLeaderboard() {
           },
           mode === "paper" && totalRtPnl !== null
             ? {
-                label: "RT PnL (7d)",
+                label: `RT PnL (${days === 0 ? "All" : days + "d"})`,
                 value: `${totalRtPnl >= 0 ? "+" : ""}$${totalRtPnl.toFixed(0)}`,
                 accent: totalRtPnl >= 0 ? "text-[#22C55E]" : "text-[#EF4444]",
               }
@@ -154,7 +169,7 @@ export function KolLeaderboard() {
           {
             label: wrThreshold === "2x" ? "Avg WR 2x"
               : wrThreshold === "50" ? "Avg WR +50%"
-              : "Avg WR > 0%",
+              : "Avg WR >0%",
             value:
               withWinRate.length > 0
                 ? `${(avgWinRate * 100).toFixed(0)}%`
@@ -181,8 +196,29 @@ export function KolLeaderboard() {
         ))}
       </motion.div>
 
-      {/* Toggles: Mode + CA-Only */}
-      <div className="flex items-center justify-end gap-2 mb-3">
+      {/* Toggles: Time Range + Mode + Thresholds + CA-Only */}
+      <div className="flex flex-wrap items-center justify-end gap-2 mb-3">
+        {/* Time range selector */}
+        <div className="flex items-center gap-1.5">
+          <Calendar className="w-3.5 h-3.5 text-white/30" />
+          <div className="flex rounded-md border border-white/10 overflow-hidden">
+            {TIME_RANGES.map((tr) => (
+              <button
+                key={tr.days}
+                onClick={() => setDays(tr.days)}
+                className={cn(
+                  "px-2 py-1.5 text-xs font-medium transition-all border-l border-white/10 first:border-l-0",
+                  days === tr.days
+                    ? "bg-[#A78BFA]/10 text-[#A78BFA]"
+                    : "bg-white/5 text-white/40 hover:text-white/60"
+                )}
+              >
+                {tr.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
         {/* Paper / KCO toggle */}
         <div className="flex rounded-md border border-white/10 overflow-hidden">
           <button
@@ -210,7 +246,7 @@ export function KolLeaderboard() {
             KCO WR
           </button>
         </div>
-        {/* WR threshold toggle — Paper: WR / +50%, KCO: +50% / 2x */}
+        {/* WR threshold toggle — Paper: WR / +50% / 2x, KCO: +50% / 2x */}
         <div className="flex rounded-md border border-white/10 overflow-hidden">
           {mode === "paper" ? (
             <>
@@ -235,6 +271,17 @@ export function KolLeaderboard() {
                 )}
               >
                 +50%
+              </button>
+              <button
+                onClick={() => setWrThreshold("2x")}
+                className={cn(
+                  "px-2.5 py-1.5 text-xs font-medium transition-all border-l border-white/10",
+                  wrThreshold === "2x"
+                    ? "bg-[#F97316]/10 text-[#F97316]"
+                    : "bg-white/5 text-white/40 hover:text-white/60"
+                )}
+              >
+                2x
               </button>
             </>
           ) : (

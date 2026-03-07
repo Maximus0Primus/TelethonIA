@@ -102,3 +102,19 @@
 **Root cause:** Verified via API: `$CONNECTED` pool `8i3o...` has `tokens[0].address = So111...` (SOL) as base. `$BLOODNUT` pool `GkG5...` (PumpSwap) has memecoin as base → correct.
 **Fix:** (1) `_is_sol_base_pool()` queries pool metadata (`/networks/solana/pools/{pool}`) and caches `tokens[0].address == SOL_MINT`. (2) `_fetch_ohlcv_candles()` and `_fetch_ohlcv_candles_kco()` skip DexPaprika for inverted pools → fall through to Birdeye (uses mint address, always correct). (3) `enrich_dexpaprika_ohlcv.py` adds `median_close > 50` heuristic as safety net.
 **Rule:** When using pool-based OHLCV APIs, ALWAYS check which token is the base. Pool token ordering varies by DEX protocol (PumpSwap: memecoin=base, some Pump.fun: SOL=base). The safest approach is to query pool metadata once and cache the result. Mint-address-based APIs (Birdeye) are immune to this issue.
+
+## 2026-03-02: Never reference cross-module globals without importing them
+**Mistake:** `safe_scraper.py:_rt_ml_position_mult()` referenced `SCORING_PARAMS` (a global dict defined only in `pipeline.py`), but never imported it. Every RT token detection (96 since March 1) crashed with `NameError: name 'SCORING_PARAMS' is not defined`, silently killing all RT trades for 2+ days. Batch trades continued working because they use a different code path.
+**Root cause:** Copy-paste from pipeline.py logic into safe_scraper.py without adapting the data source. The RT handler already had its own config dict (`_rt_config` via `_rt_load_config()`) but the new ML function used the pipeline global instead.
+**Fix:** (1) Extended `_rt_load_config()` to also fetch `rt_ml_weights` from `scoring_config` (same DB query, just added column). (2) Changed `SCORING_PARAMS.get("rt_ml_weights")` to `config.get("rt_ml_weights")` to use the already-passed config dict.
+**Rule:** When moving logic between modules, ALWAYS check that every referenced name is either imported or locally defined. A `NameError` in an async event handler (Telethon callback) doesn't crash the service -- it silently kills that handler invocation while everything else keeps running, making it hard to detect. Add a startup smoke test for critical paths.
+
+## 2026-03-03: Asymmetric R:R kills PnL even with high WR
+**Mistake:** FRESH_MICRO had TP +30% / SL -70% (R:R = 0.43). Despite 50% WR on RT, it lost -$28.88 over 7 days. Each win = +30% but each loss = -70%, so you need 70% WR just to break even.
+**Fix:** Changed SL from -70% to -30% (sl_mult 0.30→0.70). Now R:R = 1.0 (symmetric). At 50% WR, should break even; any WR edge becomes profit.
+**Rule:** Always check R:R ratio when designing strategies. WR alone means nothing — a 90% WR strategy loses money if each loss is 20x each win. Formula: breakeven WR = SL% / (TP% + SL%). For FRESH_MICRO old: 70/(30+70) = 70%. New: 30/(30+30) = 50%.
+
+## 2026-03-03: Anti-predictive ML models have inverted value
+**Observation:** Bot ML gate (7d, N=189): SKIP trades = 60% WR, FULL trades = 35% WR. Model is consistently anti-predictive — its "bad" signals are actually good.
+**Approach:** Instead of disabling, invert: SKIP→1.5x boost, HALF→1.3x boost, FULL→0.7x reduce. Config-driven via `ml_gate_mode: "inverted"` to easily switch back.
+**Rule:** An anti-predictive model has signal — just inverted. Before discarding a model, check if flipping its output adds value. This only works if the anti-correlation is stable over time (not just noise).

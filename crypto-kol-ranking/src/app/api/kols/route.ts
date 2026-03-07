@@ -75,7 +75,7 @@ export interface KolLeaderboardEntry {
   rtPnl: number | null;
 }
 
-async function callRpc(caOnly: boolean): Promise<{
+async function callRpc(caOnly: boolean, days: number = 0): Promise<{
   data: RpcRowV1[] | null;
   error: string | null;
 }> {
@@ -93,7 +93,7 @@ async function callRpc(caOnly: boolean): Promise<{
       apikey: key,
       Authorization: `Bearer ${key}`,
     },
-    body: JSON.stringify({ p_ca_only: caOnly }),
+    body: JSON.stringify({ p_ca_only: caOnly, p_days: days }),
     cache: "no-store",
   });
 
@@ -106,7 +106,7 @@ async function callRpc(caOnly: boolean): Promise<{
   return { data, error: null };
 }
 
-async function callRpcV2(): Promise<{
+async function callRpcV2(days: number = 0): Promise<{
   data: RpcRowV2[] | null;
   error: string | null;
 }> {
@@ -124,7 +124,7 @@ async function callRpcV2(): Promise<{
       apikey: key,
       Authorization: `Bearer ${key}`,
     },
-    body: "{}",
+    body: JSON.stringify({ p_days: days }),
     cache: "no-store",
   });
 
@@ -137,7 +137,7 @@ async function callRpcV2(): Promise<{
   return { data, error: null };
 }
 
-async function callRpcPaper(): Promise<{
+async function callRpcPaper(days: number = 7): Promise<{
   data: RpcRowPaper[] | null;
   error: string | null;
 }> {
@@ -148,14 +148,14 @@ async function callRpcPaper(): Promise<{
     return { data: null, error: "Missing Supabase configuration" };
   }
 
-  const res = await fetch(`${url}/rest/v1/rpc/get_kol_paper_stats`, {
+  const res = await fetch(`${url}/rest/v1/rpc/get_kol_paper_stats_v2`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       apikey: key,
       Authorization: `Bearer ${key}`,
     },
-    body: "{}",
+    body: JSON.stringify({ p_days: days }),
     cache: "no-store",
   });
 
@@ -216,12 +216,13 @@ export async function GET(request: Request) {
   try {
     const { searchParams } = new URL(request.url);
     const caOnly = searchParams.get("ca_only") === "true";
+    const days = Math.min(Math.max(parseInt(searchParams.get("days") ?? "7", 10) || 7, 0), 365);
 
     // Fetch v1 (snapshot-based), v2 (call-price-based), and paper trade leaderboards
     const [v1Result, v2Result, paperResult] = await Promise.all([
-      callRpc(caOnly),
-      callRpcV2(),
-      callRpcPaper(),
+      callRpc(caOnly, days),
+      callRpcV2(days),
+      callRpcPaper(days),
     ]);
 
     if (v1Result.error || !v1Result.data) {
