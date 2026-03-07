@@ -389,7 +389,8 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
 
     top_n = config["top_n"]
     budget_usd = config["budget_usd"]
-    active_strategies = [s for s in config["active_strategies"] if s in STRATEGIES]
+    deprecated = set(config.get("deprecated_strategies", _DEFAULT_DEPRECATED))
+    active_strategies = [s for s in config["active_strategies"] if s in STRATEGIES and s not in deprecated]
     dedup_cooldown_h = config.get("dedup_cooldown_hours", DEDUP_COOLDOWN_HOURS)
     ca_filter = config.get("ca_filter", True)
     buy_slip_bps_base = int(config.get("buy_slippage_bps", BUY_SLIPPAGE_BPS))

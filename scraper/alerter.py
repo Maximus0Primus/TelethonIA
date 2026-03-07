@@ -178,7 +178,7 @@ def send_daily_summary(snapshot: dict):
     api_text = "\n".join(api_lines) if api_lines else "  (no data)"
 
     text = (
-        "<b>DAILY SUMMARY</b>\n"
+        "<b>📡 HEALTH CHECK</b>\n"
         f"Uptime: {uptime:.1f}h\n"
         f"\n<b>Cycles:</b> {completed} completed, {errors} errors\n"
         f"\n<b>RT:</b> {rt.get('events', 0)} events, "
@@ -186,10 +186,10 @@ def send_daily_summary(snapshot: dict):
         f"{rt.get('unique_kols', 0)} KOLs\n"
         f"\n<b>APIs (24h):</b>\n{api_text}\n"
         f"\n<b>Egress:</b> {egress.get('total_mb', 0):.1f} MB today\n"
-        f"\n<b>Paper trades:</b> "
+        f"\n<b>Paper trades (incl. shadow):</b> "
         f"+{paper.get('opens_today', 0)} opened, "
         f"-{paper.get('closes_today', 0)} closed, "
-        f"PnL ${paper.get('pnl_today', 0):+.2f}"
+        f"PnL ${paper.get('pnl_today', 0):+.2f} (real only)"
     )
     _send(text, "daily_summary")
 
