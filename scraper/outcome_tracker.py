@@ -1056,13 +1056,18 @@ def _label_snapshot(
                 source, symbol, hours, price_at, max_price, max_price / price_at,
             )
 
-    # Single DB update for ALL horizons of this snapshot
+    # Single DB update for ALL horizons of this snapshot (v95: 1-retry on disconnect)
     if update_data:
-        try:
-            client.table("token_snapshots").update(update_data).eq("id", snap_id).execute()
-            stats["updated"] += 1
-        except Exception as e:
-            logger.error("Failed to update %d (%s): %s", snap_id, symbol, e)
+        for attempt in range(2):
+            try:
+                client.table("token_snapshots").update(update_data).eq("id", snap_id).execute()
+                stats["updated"] += 1
+                break
+            except Exception as e:
+                if attempt == 0 and "disconnected" in str(e).lower():
+                    time.sleep(1)
+                    continue
+                logger.error("Failed to update %d (%s): %s", snap_id, symbol, e)
 
 
 def fill_outcomes() -> None:

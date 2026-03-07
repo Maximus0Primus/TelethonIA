@@ -2492,11 +2492,11 @@ _DEFAULT_SCORING_PARAMS = {
         "cascade_factor_2plus": 1.08,
         "early_factor_30min": 1.20,
         "early_factor_60min": 1.10,
-        "late_penalty_360min": 0.85,
-        "pvfc_penalty_3x": 0.60,
-        "pvfc_penalty_2x": 0.75,
-        "pvfc_penalty_1_5x": 0.90,
-        "floor": 0.70,
+        "late_penalty_360min": 0.90,
+        "pvfc_penalty_3x": 0.75,
+        "pvfc_penalty_2x": 0.85,
+        "pvfc_penalty_1_5x": 0.95,
+        "floor": 0.65,
         "cap": 1.40,
     },
     "breadth_pen_config": {
@@ -4172,10 +4172,27 @@ def aggregate_ranking(
         token["_breadth_val"] = _get_component_value(token, "breadth")
         token["_price_action_val"] = _get_component_value(token, "price_action")
 
-        # v73: hype_pen DISABLED — contradicts breadth (55% weight).
-        # More KOLs = higher breadth but lower hype_pen = they cancel out.
-        # Kept as 1.0 so the multiplier chain is unaffected.
-        hype_pen = 1.0
+        # v95: hype_pen RE-ENABLED — Optuna optimizes this, must match prod.
+        hp_cfg = SCORING_PARAMS.get("hype_pen_config", {
+            "thresholds": [2, 4, 7],
+            "penalties": [1.0, 0.85, 0.65, 0.50],
+            "cooc_config": {"threshold": 0.5, "penalty": 0.85},
+        })
+        uk_count = int(token.get("unique_kols") or 0)
+        hp_t = hp_cfg.get("thresholds", [2, 4, 7])
+        hp_p = hp_cfg.get("penalties", [1.0, 0.85, 0.65, 0.50])
+        if uk_count <= hp_t[0]:
+            hype_pen = hp_p[0]
+        elif uk_count <= hp_t[1]:
+            hype_pen = hp_p[1]
+        elif uk_count <= hp_t[2]:
+            hype_pen = hp_p[2]
+        else:
+            hype_pen = hp_p[3]
+        cooc_cfg = hp_cfg.get("cooc_config", {"threshold": 0.5, "penalty": 0.85})
+        cooc_avg = token.get("kol_cooccurrence_avg")
+        if cooc_avg is not None and float(cooc_avg) > cooc_cfg.get("threshold", 0.5):
+            hype_pen *= cooc_cfg.get("penalty", 0.85)
         token["hype_pen"] = hype_pen
 
         # v21: gate_mult — soft safety penalties (top10, risk, liquidity, holders, single_a_tier)

@@ -4028,7 +4028,7 @@ def _compute_score_with_params(
     else:
         entry_premium_mult = _safe_mult(row, "entry_premium_mult")
 
-    # --- v45: Recompute lifecycle_mult from snapshot values ---
+    # --- v45/v95: Recompute lifecycle_mult from snapshot values ---
     lc_cfg = params.get("lifecycle_config", {})
     if lc_cfg and pd.notna(row.get("price_change_24h")):
         pc24_lc = float(row.get("price_change_24h"))
@@ -4036,10 +4036,22 @@ def _compute_score_with_params(
         va_lc = float(row.get("volume_acceleration")) if pd.notna(row.get("volume_acceleration")) else None
         sent_lc = float(row.get("sentiment") or 0) if pd.notna(row.get("sentiment")) else 0
         mcap_lc = float(row.get("market_cap") or 0) if pd.notna(row.get("market_cap")) else 0
+        age_lc = float(row.get("token_age_hours")) if pd.notna(row.get("token_age_hours")) else None
         # Panic
         if pc24_lc < lc_cfg.get("panic_pc24", -30):
             if va_lc is not None and va_lc < lc_cfg.get("panic_va", 0.5):
                 lifecycle_mult = lc_cfg.get("panic_penalty", 0.25)
+            else:
+                lifecycle_mult = 1.0
+        # Profit-taking (v95)
+        elif pc24_lc > lc_cfg.get("profit_taking_pc24", 100):
+            vol_proxy_lc = float(row.get("volatility_proxy")) if pd.notna(row.get("volatility_proxy")) else None
+            whale_dir_lc = row.get("whale_direction") if pd.notna(row.get("whale_direction")) else None
+            ma_lc = float(row.get("mention_velocity") or 0) if pd.notna(row.get("mention_velocity")) else 0
+            vol_spike = vol_proxy_lc is not None and vol_proxy_lc > lc_cfg.get("profit_taking_vol_proxy", 40)
+            whale_exit = whale_dir_lc in ("distributing", "dumping")
+            if (vol_spike or whale_exit) and ma_lc < 0:
+                lifecycle_mult = lc_cfg.get("profit_taking_penalty", 0.35)
             else:
                 lifecycle_mult = 1.0
         # Euphoria
@@ -4047,13 +4059,28 @@ def _compute_score_with_params(
               and pc24_lc > lc_cfg.get("euphoria_pc24", 100)
               and sent_lc > lc_cfg.get("euphoria_sent", 0.2)):
             lifecycle_mult = lc_cfg.get("euphoria_penalty", 0.5)
-        # Boom
+        # Boom (v95: with vol/social gate)
         elif (uk_lc >= lc_cfg.get("boom_uk", 2)
               and lc_cfg.get("boom_pc24_low", 10) < pc24_lc <= lc_cfg.get("boom_pc24_high", 200)):
-            if mcap_lc > lc_cfg.get("boom_large_cap_mcap", 50000000):
-                lifecycle_mult = lc_cfg.get("boom_large_cap_penalty", 0.85)
+            va_lc_val = float(row.get("volume_acceleration")) if pd.notna(row.get("volume_acceleration")) else None
+            sv_lc = float(row.get("social_velocity") or 0) if pd.notna(row.get("social_velocity")) else 0
+            mv_lc = float(row.get("mention_velocity") or 0) if pd.notna(row.get("mention_velocity")) else 0
+            has_vol = va_lc_val is not None and va_lc_val > lc_cfg.get("boom_va", 1.0)
+            has_social = sv_lc > 0.3 or mv_lc > 0.2
+            if has_vol and has_social:
+                if mcap_lc > lc_cfg.get("boom_large_cap_mcap", 50000000):
+                    lifecycle_mult = lc_cfg.get("boom_large_cap_penalty", 0.85)
+                else:
+                    lifecycle_mult = lc_cfg.get("boom_bonus", 1.1)
             else:
-                lifecycle_mult = lc_cfg.get("boom_bonus", 1.1)
+                lifecycle_mult = 1.0
+        # Displacement (v95)
+        elif (age_lc is not None and age_lc < lc_cfg.get("displacement_age", 6)
+              and uk_lc <= lc_cfg.get("displacement_uk", 1)):
+            if pc24_lc < lc_cfg.get("displacement_pc24", 50):
+                lifecycle_mult = lc_cfg.get("displacement_penalty", 0.9)
+            else:
+                lifecycle_mult = 1.0
         else:
             lifecycle_mult = 1.0
     else:

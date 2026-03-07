@@ -8,7 +8,7 @@ import json
 import math
 import logging
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from supabase import create_client, Client
 
@@ -409,6 +409,19 @@ def upsert_tokens(
 
     logger.info("Updated scrape_metadata with stats: %s", stats)
 
+    # v95: Insert cycle history (append-only log)
+    try:
+        client.table("scrape_history").insert({
+            "cycle_ts": datetime.now(timezone.utc).isoformat(),
+            "duration_seconds": stats.get("duration_seconds"),
+            "tokens_scored": stats.get("totalTokens"),
+            "total_kols": stats.get("totalKols"),
+            "total_mentions": stats.get("totalMentions"),
+            "avg_sentiment": stats.get("avgSentiment"),
+        }).execute()
+    except Exception as e:
+        logger.warning("scrape_history insert failed: %s", e)
+
 
 def _fetch_previous_snapshots(client: Client, symbols: list[str]) -> dict[str, dict]:
     """
@@ -714,9 +727,31 @@ def insert_snapshots(ranking: list[dict]) -> None:
     symbols = [t["symbol"] for t in ranking if t.get("symbol")]
     prev_snapshots = _fetch_previous_snapshots(client, symbols)
 
+    # v95: 24h dedup — skip tokens already snapshotted in the last 24h
+    _24h_ago = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+    try:
+        dedup_result = client.table("token_snapshots") \
+            .select("symbol, token_address") \
+            .gte("snapshot_at", _24h_ago) \
+            .execute()
+        recent_keys = set()
+        for r in (dedup_result.data or []):
+            key = r.get("token_address") or r.get("symbol")
+            if key:
+                recent_keys.add(key.lower())
+    except Exception as e:
+        logger.warning("Dedup query failed, proceeding without: %s", e)
+        recent_keys = set()
+
     rows = []
     skipped_stale = 0
+    skipped_dedup = 0
     for t in ranking:
+        # v95: 24h dedup check
+        dedup_key = (t.get("token_address") or t.get("symbol", "")).lower()
+        if dedup_key and dedup_key in recent_keys:
+            skipped_dedup += 1
+            continue
         # v19: Skip zombie tokens — stale mentions produce noise snapshots
         # v20: threshold from SCORING_PARAMS (dynamic)
         freshest_h = t.get("freshest_mention_hours") or 0
@@ -1030,6 +1065,8 @@ def insert_snapshots(ranking: list[dict]) -> None:
 
     if skipped_stale:
         logger.info("Skipped %d zombie snapshots (freshest_mention > 48h)", skipped_stale)
+    if skipped_dedup:
+        logger.info("Dedup: skipped %d tokens (already snapshotted in 24h)", skipped_dedup)
 
     if not rows:
         logger.info("No snapshots to insert (all filtered)")

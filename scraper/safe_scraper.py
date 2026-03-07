@@ -477,6 +477,7 @@ def process_and_push(messages_data: dict[str, list[dict]], dump: bool = False,
         "totalMentions": total_mentions,
         "avgSentiment": avg_sentiment,
         "totalKols": len(GROUPS_CONVICTION),
+        "duration_seconds": int(time.time() - _cycle_start),
     }
 
     upsert_tokens(ranking_by_window, stats)
@@ -971,8 +972,8 @@ def _rt_load_config() -> dict:
         "enabled": True,
         "cooldown_seconds": 1800,
         "base_budget_usd": 20,
-        "min_position_usd": 1.0,
-        "max_position_usd": 30.0,
+        "min_position_usd": 10.0,
+        "max_position_usd": 100.0,
         "rt_strategies": "all",  # "all" = all 7 strategies
         "score_weights": {
             "kol_quality": 0.35,
@@ -1022,11 +1023,27 @@ def _rt_load_config() -> dict:
 
 
 def _rt_should_trade(kol: str, ca: str) -> bool:
-    """Cooldown per (KOL × token). Does NOT consume — call _rt_mark_traded() on success."""
+    """Cooldown per (KOL × token). Does NOT consume — call _rt_mark_traded() on success.
+    v94: DB fallback — survives restarts."""
     now = time.time()
     key = (kol, ca)
     last = _rt_trade_cooldown.get(key, 0)
-    return now - last >= RT_COOLDOWN_SECONDS
+    if now - last < RT_COOLDOWN_SECONDS:
+        return False
+    # DB fallback: check if recent trade exists (survives restarts)
+    try:
+        sb = _get_supabase()
+        if sb:
+            cutoff = (datetime.now(timezone.utc) - timedelta(seconds=RT_COOLDOWN_SECONDS)).isoformat()
+            res = sb.table("paper_trades").select("id", count="exact") \
+                .eq("kol_group", kol).eq("token_address", ca) \
+                .eq("source", "rt").gte("created_at", cutoff).execute()
+            if res.count and res.count > 0:
+                _rt_trade_cooldown[key] = now  # warm cache
+                return False
+    except Exception:
+        pass
+    return True
 
 
 def _rt_mark_traded(kol: str, ca: str) -> None:
@@ -1199,7 +1216,7 @@ def _rt_position_size(rt_score: float, kol_info: dict, token_info: dict,
 
         size = base_bet * wr_mult * score_mult
 
-        min_pos = float(config.get("min_position_usd", sizing.get("min_position_usd", 1.0)))
+        min_pos = float(config.get("min_position_usd", sizing.get("min_position_usd", 10.0)))
         max_pos = float(config.get("max_position_usd", sizing.get("max_position_usd", 200.0)))
         return round(max(min_pos, min(max_pos, size)), 2)
 
@@ -1229,8 +1246,8 @@ def _rt_position_size(rt_score: float, kol_info: dict, token_info: dict,
     combined = (kol_mult * safety_mult * mom_mult) ** (1 / 3)
     size = budget * combined
 
-    min_pos = float(config.get("min_position_usd", 1.0))
-    max_pos = float(config.get("max_position_usd", 30.0))
+    min_pos = float(config.get("min_position_usd", 10.0))
+    max_pos = float(config.get("max_position_usd", 100.0))
     return round(max(min_pos, min(max_pos, size)), 2)
 
 
@@ -1331,6 +1348,18 @@ def _rt_open_trades(ca: str, symbol: str, price: float, mcap: float,
     sb = _get_supabase()
     if not sb:
         return 0
+
+    # v94: Max positions per token (concentration limit)
+    max_per_token = int(config.get("max_positions_per_token", 2))
+    try:
+        open_on_token = sb.table("paper_trades").select("id", count="exact") \
+            .eq("token_address", ca).eq("status", "open") \
+            .eq("is_shadow", False).execute()
+        if open_on_token.count and open_on_token.count >= max_per_token:
+            logger.info("RT SKIP: %s — %d open positions (max %d)", symbol, open_on_token.count, max_per_token)
+            return 0
+    except Exception as e:
+        logger.warning("RT: token concentration check failed: %s", e)
 
     pt_config = _load_paper_trade_config(sb)
 
@@ -1620,6 +1649,13 @@ async def _rt_on_new_message(event: events.NewMessage.Event):
             mcap = float(raw.get("mcap") or 0)
             token_info = _rt_extract_token_info(raw)
 
+            # v94: Hard liquidity gate (RT only)
+            min_liq = float(config.get("min_liquidity_rt", 5000))
+            liq_usd = token_info.get("liquidity_usd", 0)
+            if liq_usd < min_liq:
+                logger.info("RT SKIP: %s — liq $%.0f < $%.0f min", symbol, liq_usd, min_liq)
+                continue
+
             # Compute RT score (drives sizing, never blocks)
             rt_score = _rt_compute_score(username, ca, kol_info, token_info, tier, config)
 
@@ -1629,9 +1665,9 @@ async def _rt_on_new_message(event: events.NewMessage.Event):
             # v80: Multi-KOL confirmation position boost
             n_confs = _rt_count_confirmations(username, ca)
             if n_confs >= 2:
-                pos_size = min(pos_size * 1.5, float(config.get("max_position_usd", 30)))
+                pos_size = min(pos_size * 1.5, float(config.get("max_position_usd", 100)))
             elif n_confs == 1:
-                pos_size = min(pos_size * 1.3, float(config.get("max_position_usd", 30)))
+                pos_size = min(pos_size * 1.3, float(config.get("max_position_usd", 100)))
             if n_confs > 0:
                 token_info["_rt_n_kol_confirmations"] = n_confs
 
@@ -1641,13 +1677,13 @@ async def _rt_on_new_message(event: events.NewMessage.Event):
             )
             if ml_mult != 1.0:
                 pos_size = max(
-                    float(config.get("min_position_usd", 1)),
-                    min(pos_size * ml_mult, float(config.get("max_position_usd", 30))),
+                    float(config.get("min_position_usd", 10)),
+                    min(pos_size * ml_mult, float(config.get("max_position_usd", 100))),
                 )
 
             # v82: Probation mode — reduce position for unproven KOLs
             if _rt_probation_mult < 1.0:
-                pos_size = max(float(config.get("min_position_usd", 1)),
+                pos_size = max(float(config.get("min_position_usd", 10)),
                                pos_size * _rt_probation_mult)
 
             logger.info(
