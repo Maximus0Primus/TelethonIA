@@ -1,0 +1,107 @@
+- generic [ref=e1]:
+  - banner:
+    - generic:
+      - link "Cryptosensus" [ref=e2] [cursor=pointer]:
+        - /url: /
+        - heading "Cryptosensus" [level=1] [ref=e3]
+      - generic:
+        - button "sound [off]" [ref=e4]
+        - button "Let's Talk" [ref=e5]
+  - generic [ref=e6]:
+    - generic [ref=e7]:
+      - heading "Join the most advanced crypto buy score prediction" [level=1] [ref=e8]:
+        - text: Join the most advanced
+        - text: crypto buy score prediction
+      - paragraph [ref=e9]:
+        - text: Stop wasting your time trading. Know what to buy before the crowd does.
+        - text: Become an insider
+      - generic [ref=e10]:
+        - generic [ref=e12]:
+          - generic [ref=e13]: E
+          - generic [ref=e14]: a
+          - generic [ref=e15]: r
+          - generic [ref=e16]: l
+          - generic [ref=e17]: "y"
+          - generic [ref=e19]: A
+          - generic [ref=e20]: c
+          - generic [ref=e21]: c
+          - generic [ref=e22]: e
+          - generic [ref=e23]: s
+          - generic [ref=e24]: s
+        - textbox "........" [active] [ref=e27]
+        - button "Contact me for access" [ref=e28] [cursor=pointer]
+      - generic [ref=e30]:
+        - generic [ref=e31]:
+          - paragraph [ref=e32]: Clarity From Noise
+          - paragraph [ref=e33]: We track what the smartest degens are talking about
+        - generic [ref=e34]:
+          - paragraph [ref=e35]: Data-Driven Insights
+          - paragraph [ref=e36]: Not hype. Not shills. Just data that matters
+        - generic [ref=e37]:
+          - paragraph [ref=e38]: Real Traction Detection
+          - paragraph [ref=e39]: Our algorithm detects which tokens are gaining momentum
+        - generic [ref=e40]:
+          - paragraph [ref=e41]: Conviction Scoring
+          - paragraph [ref=e42]: Each token gets a score from 0 to 100
+        - generic [ref=e43]:
+          - paragraph [ref=e44]: Safety Analysis
+          - paragraph [ref=e45]: Rug detection, holder distribution, on-chain checks
+        - generic [ref=e46]:
+          - paragraph [ref=e47]: Always Up To Date
+          - paragraph [ref=e48]: Fully automated, updated around the clock
+    - generic [ref=e50]:
+      - heading "Get High Rewards With Minimal Risk" [level=2] [ref=e51]
+      - paragraph [ref=e52]: Real-time AI-powered analysis
+      - paragraph [ref=e53]: Predict which lowcaps will give you Xs before the crowd buys
+    - generic [ref=e55]:
+      - paragraph [ref=e56]: Live Preview
+      - generic [ref=e59]:
+        - generic [ref=e60]:
+          - generic [ref=e61]: "#1"
+          - generic [ref=e62]: $TESLA
+          - generic [ref=e64]: "40"
+        - generic [ref=e65]:
+          - generic [ref=e66]: "#2"
+          - generic [ref=e67]: $YEE
+          - generic [ref=e69]: "39"
+        - generic [ref=e70]:
+          - generic [ref=e71]: "#3"
+          - generic [ref=e72]: $PETAH
+          - generic [ref=e74]: "37"
+        - generic [ref=e75]:
+          - generic [ref=e76]: $PENGUIN
+          - generic [ref=e78]: "36"
+        - generic [ref=e79]:
+          - generic [ref=e80]: $WAR
+          - generic [ref=e82]: "35"
+        - generic [ref=e83]:
+          - generic [ref=e84]: $BIGTROUT
+          - generic [ref=e86]: "35"
+        - generic [ref=e87]:
+          - generic [ref=e88]: $SHARK
+          - generic [ref=e90]: "34"
+        - generic [ref=e91]:
+          - generic [ref=e92]: $WHITEWHALE
+          - generic [ref=e94]: "34"
+    - generic [ref=e97]:
+      - generic [ref=e100]: Get In Touch
+      - generic [ref=e102]:
+        - generic [ref=e103]:
+          - heading "Want early access?" [level=3] [ref=e104]
+          - paragraph [ref=e105]: Cryptosensus is currently invite-only. Reach out to me.
+        - generic [ref=e106]:
+          - link "𝕏 @S£igneur" [ref=e107] [cursor=pointer]:
+            - /url: https://x.com/Maximus0Primus
+            - generic [ref=e108]: 𝕏
+            - generic [ref=e109]: "@S£igneur"
+          - link "Telegram @S£igneur" [ref=e110] [cursor=pointer]:
+            - /url: https://t.me/Maximus0Primus
+            - img "Telegram" [ref=e111]
+            - generic [ref=e113]: "@S£igneur"
+        - generic [ref=e114]:
+          - paragraph [ref=e115]: Or send a message
+          - generic [ref=e116]:
+            - textbox "your@email.com (optional)" [ref=e117]
+            - textbox "Your message..." [ref=e118]
+            - button "Send Message" [ref=e119]
+  - alert [ref=e122]
