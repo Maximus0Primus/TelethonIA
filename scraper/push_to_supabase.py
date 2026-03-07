@@ -68,7 +68,7 @@ def retry_failed_writes() -> dict:
         try:
             if table == "tokens":
                 for row in rows:
-                    client.table("tokens").upsert(row, on_conflict="symbol").execute()
+                    client.table("tokens").upsert(row, on_conflict="symbol,time_window,token_address").execute()
             elif table == "token_snapshots":
                 for batch in _chunked(rows, 50):
                     client.table("token_snapshots").insert(batch).execute()
@@ -300,29 +300,43 @@ def _get_client() -> Client:
     return create_client(url, key)
 
 
-def _purge_absent_tokens(client: Client, time_window: str, current_symbols: set[str]) -> int:
+def _purge_absent_tokens(client: Client, time_window: str, current_symbols: set[str],
+                         current_keys: set[tuple[str, str]] | None = None) -> int:
     """
-    v11: Delete tokens not present in the current scrape cycle.
-    Prevents zombie tokens from accumulating forever via UPSERT.
+    v11/v95: Delete tokens not present in the current scrape cycle.
+    v95: Uses (symbol, token_address) pairs to avoid purging different CAs of same ticker.
     """
     try:
-        existing = client.table("tokens").select("symbol").eq("time_window", time_window).execute()
-        existing_symbols = {r["symbol"] for r in (existing.data or [])}
+        existing = client.table("tokens").select("id, symbol, token_address").eq("time_window", time_window).execute()
     except Exception as e:
         logger.warning("Failed to fetch existing tokens for purge: %s", e)
         return 0
 
-    to_delete = existing_symbols - current_symbols
-    if not to_delete:
+    if not existing.data:
+        return 0
+
+    # v95: If we have (symbol, ca) pairs, use precise matching
+    if current_keys:
+        to_delete_ids = []
+        for r in existing.data:
+            key = (r["symbol"], r.get("token_address") or "")
+            if key not in current_keys and r["symbol"] not in current_symbols:
+                to_delete_ids.append(r["id"])
+    else:
+        existing_symbols = {r["symbol"] for r in existing.data}
+        to_delete_symbols = existing_symbols - current_symbols
+        to_delete_ids = [r["id"] for r in existing.data if r["symbol"] in to_delete_symbols]
+
+    if not to_delete_ids:
         return 0
 
     deleted = 0
-    for sym in to_delete:
+    for row_id in to_delete_ids:
         try:
-            client.table("tokens").delete().eq("symbol", sym).eq("time_window", time_window).execute()
+            client.table("tokens").delete().eq("id", row_id).execute()
             deleted += 1
         except Exception as e:
-            logger.warning("Failed to purge token %s/%s: %s", sym, time_window, e)
+            logger.warning("Failed to purge token id=%s/%s: %s", row_id, time_window, e)
 
     logger.info("v11 purge: removed %d stale tokens from window %s", deleted, time_window)
     return deleted
@@ -347,9 +361,10 @@ def upsert_tokens(
         if not tokens:
             continue
 
-        # v11: Purge tokens not in current batch (removes zombies)
+        # v11/v95: Purge tokens not in current batch (removes zombies)
         current_symbols = {t["symbol"] for t in tokens}
-        _purge_absent_tokens(client, time_window, current_symbols)
+        current_keys = {(t["symbol"], t.get("token_address") or "") for t in tokens}
+        _purge_absent_tokens(client, time_window, current_symbols, current_keys)
 
         rows = [
             _sanitize_row({
@@ -378,7 +393,7 @@ def upsert_tokens(
                 # v11: freshest_mention_hours for price_refresh social decay
                 "freshest_mention_hours": t.get("freshest_mention_hours"),
                 # v21: token_address for frontend DexScreener links + price_refresh simplification
-                "token_address": t.get("token_address"),
+                "token_address": t.get("token_address") or "",
                 # v27: market_cap for frontend display
                 "market_cap": t.get("market_cap"),
                 # v40: Track CA provenance (kol=from KOL message, dexscreener=from search)
@@ -387,10 +402,10 @@ def upsert_tokens(
             for t in tokens
         ]
 
-        # Upsert on (symbol, time_window) unique constraint
+        # v95: Upsert on (symbol, time_window, token_address) — different CAs coexist
         result = (
             client.table("tokens")
-            .upsert(rows, on_conflict="symbol,time_window")
+            .upsert(rows, on_conflict="symbol,time_window,token_address")
             .execute()
         )
         logger.info(
