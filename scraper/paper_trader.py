@@ -169,7 +169,7 @@ STRATEGY_FILTERS = {
 }
 
 # v93: Grid search — all TP/SL combos for shadow trading optimization
-# TP 40-100 (step 10) × SL 30-70 (step 10) = 35 combos + 2 no-SL baselines
+# TP 40-100 (step 10) × SL 30-70 (step 10) = 35 combos + 6 no-SL baselines (TP50-100)
 _GRID_STRATEGIES = {}
 for _tp in range(40, 110, 10):    # 40, 50, 60, 70, 80, 90, 100
     for _sl in range(30, 80, 10):  # 30, 40, 50, 60, 70
@@ -180,12 +180,11 @@ for _tp in range(40, 110, 10):    # 40, 50, 60, 70, 80, 90, 100
                  "horizon_min": 1440, "label": "main"},
             ]
 # No-SL baseline: only exits via TP or timeout (SL at -80% = nearly unreachable)
-_GRID_STRATEGIES["TP50_NOSL"] = [
-    {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.20, "horizon_min": 1440, "label": "main"},
-]
-_GRID_STRATEGIES["TP100_NOSL"] = [
-    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.20, "horizon_min": 1440, "label": "main"},
-]
+for _tp_nosl in [50, 60, 70, 80, 90, 100]:
+    _GRID_STRATEGIES[f"TP{_tp_nosl}_NOSL"] = [
+        {"pct": 1.0, "tp_mult": 1 + _tp_nosl / 100, "sl_mult": 0.20,
+         "horizon_min": 1440, "label": "main"},
+    ]
 
 STRATEGIES.update(_GRID_STRATEGIES)
 SHADOW_STRATEGIES.extend(_GRID_STRATEGIES.keys())
