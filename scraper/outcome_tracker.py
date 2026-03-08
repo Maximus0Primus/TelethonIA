@@ -1093,38 +1093,63 @@ def fill_outcomes() -> None:
     # and hit Supabase statement_timeout on 20K+ pending snapshots.
     # Now: 7 small queries (1 per horizon), each with a simple 2-column filter.
     # Dedup by snapshot ID since one snapshot may appear in multiple horizons.
+    #
+    # v95b: Recent-first priority — process newest snapshots first to unblock
+    # ML training faster. Split budget: 70% recent (last 3d), 30% older backlog.
     SELECT_COLS = ("id, symbol, price_at_snapshot, snapshot_at, token_address, pair_address, "
                    "max_price_1h, max_price_6h, max_price_12h, max_price_24h, max_price_48h, max_price_72h, max_price_7d, "
                    "did_2x_1h, did_2x_6h, did_2x_12h, did_2x_24h, did_2x_48h, did_2x_72h, did_2x_7d")
     seen_ids: set[int] = set()
     snapshots: list[dict] = []
-    per_hz_limit = max(200, BATCH_LIMIT // len(HORIZONS))
 
-    for hz in HORIZONS:
-        if len(snapshots) >= BATCH_LIMIT:
-            break
-        cutoff = (now - timedelta(hours=hz["hours"])).strftime("%Y-%m-%dT%H:%M:%SZ")
-        try:
-            result = (
-                client.table("token_snapshots")
-                .select(SELECT_COLS)
-                .is_(hz["flag_col"], "null")
-                .is_(hz["max_col"], "null")
-                .lt("snapshot_at", cutoff)
-                .order("snapshot_at", desc=False)
-                .limit(per_hz_limit)
-                .execute()
-            )
-            for snap in (result.data or []):
-                if snap["id"] not in seen_ids:
-                    seen_ids.add(snap["id"])
-                    snapshots.append(snap)
-        except Exception as e:
-            logger.warning("Failed to query horizon %dh: %s", hz["hours"], e)
-            continue
+    # Two passes: recent first (last 3 days, DESC = newest first), then older backlog (ASC)
+    recent_cutoff = (now - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    passes = [
+        {"label": "recent", "limit": int(BATCH_LIMIT * 0.7), "order_desc": True, "age_filter": ("gte", recent_cutoff)},
+        {"label": "backlog", "limit": int(BATCH_LIMIT * 0.3), "order_desc": False, "age_filter": ("lt", recent_cutoff)},
+    ]
 
-    # Sort combined results FIFO
-    snapshots.sort(key=lambda s: s.get("snapshot_at", ""))
+    for pass_info in passes:
+        pass_budget = pass_info["limit"]
+        pass_collected = 0
+        per_hz_limit = max(100, pass_budget // len(HORIZONS))
+
+        for hz in HORIZONS:
+            if pass_collected >= pass_budget:
+                break
+            cutoff = (now - timedelta(hours=hz["hours"])).strftime("%Y-%m-%dT%H:%M:%SZ")
+            try:
+                q = (
+                    client.table("token_snapshots")
+                    .select(SELECT_COLS)
+                    .is_(hz["flag_col"], "null")
+                    .is_(hz["max_col"], "null")
+                    .lt("snapshot_at", cutoff)
+                )
+                # Apply age filter for this pass
+                age_op, age_val = pass_info["age_filter"]
+                if age_op == "gte":
+                    q = q.gte("snapshot_at", age_val)
+                else:
+                    q = q.lt("snapshot_at", age_val)
+                result = (
+                    q.order("snapshot_at", desc=pass_info["order_desc"])
+                    .limit(per_hz_limit)
+                    .execute()
+                )
+                for snap in (result.data or []):
+                    if snap["id"] not in seen_ids:
+                        seen_ids.add(snap["id"])
+                        snapshots.append(snap)
+                        pass_collected += 1
+            except Exception as e:
+                logger.warning("Failed to query horizon %dh (%s): %s", hz["hours"], pass_info["label"], e)
+                continue
+
+        logger.info("fill_outcomes %s pass: %d snapshots collected", pass_info["label"], pass_collected)
+
+    # Sort: recent first (DESC), then older (ASC) — ensures newest get OHLCV budget priority
+    snapshots.sort(key=lambda s: s.get("snapshot_at", ""), reverse=True)
     snapshots = snapshots[:BATCH_LIMIT]
     if not snapshots:
         logger.info("No pending snapshots to label")
