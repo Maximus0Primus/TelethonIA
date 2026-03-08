@@ -344,20 +344,21 @@ def refresh_top_tokens(n: int = REFRESH_TOP_N) -> int:
         except Exception:
             pass
 
-    # Pre-fetch which symbols exist in which windows (avoid upserting to windows that don't have the token)
-    existing_by_window: dict[str, set[str]] = {}
+    # Pre-fetch which (symbol, token_address) combos exist per window
+    # v95: include token_address — unique constraint is (symbol, time_window, token_address)
+    existing_by_window: dict[str, dict[str, str]] = {}  # window -> {symbol: token_address}
     for window in ALL_WINDOWS:
         try:
             wr = (
                 client.table("tokens")
-                .select("symbol")
+                .select("symbol, token_address")
                 .eq("time_window", window)
                 .in_("symbol", symbols)
                 .execute()
             )
-            existing_by_window[window] = {r["symbol"] for r in (wr.data or [])}
+            existing_by_window[window] = {r["symbol"]: r.get("token_address", "") for r in (wr.data or [])}
         except Exception:
-            existing_by_window[window] = set()
+            existing_by_window[window] = {}
 
     for token in tokens:
         symbol = token["symbol"]
@@ -394,10 +395,12 @@ def refresh_top_tokens(n: int = REFRESH_TOP_N) -> int:
 
         # Update ALL time windows that have this symbol (not just 7d)
         for window in ALL_WINDOWS:
-            if symbol in existing_by_window.get(window, set()):
+            window_map = existing_by_window.get(window, {})
+            if symbol in window_map:
                 update_rows.append({
                     "symbol": symbol,
                     "time_window": window,
+                    "token_address": window_map[symbol] or address_map.get(symbol, ""),
                     "score": new_score,
                     "score_conviction": new_conv,
                     "score_momentum": new_mom,
@@ -409,7 +412,7 @@ def refresh_top_tokens(n: int = REFRESH_TOP_N) -> int:
     # Batch upsert updates
     if update_rows:
         client.table("tokens").upsert(
-            update_rows, on_conflict="symbol,time_window"
+            update_rows, on_conflict="symbol,time_window,token_address"
         ).execute()
 
         # Bump scrape_metadata.updated_at to trigger frontend refresh

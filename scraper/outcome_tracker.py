@@ -1088,38 +1088,44 @@ def fill_outcomes() -> None:
     stats = {"updated": 0, "api_calls": 0, "skipped": 0, "no_price": 0, "consistent": 0, "tokens_processed": 0}
     start_time = time.time()
 
-    # Find snapshots with fillable unlabeled horizons.
-    # v29 fix: each horizon is only included when the snapshot is old enough to fill it.
-    # Without this, snapshots with only did_2x_7d=NULL (but <7 days old) clog the batch
-    # and block newer snapshots from being labeled — the root cause of the labeling backlog.
-    # v30: Order by score DESC so high-score tokens get labeled first (most useful for backtesting).
-    # v36-fix: Add max_price.is.null to filter — zombies with max_price=0 (sentinel for
-    # "checked all OHLCV sources, no data") are excluded. Without this, _mark_ohlcv_failed
-    # snapshots re-enter the batch forever, wasting 4,274+ API calls per run.
-    or_parts = []
+    # v95: Per-horizon queries to avoid statement timeout.
+    # The old single OR query with 7 AND conditions caused full-table scans
+    # and hit Supabase statement_timeout on 20K+ pending snapshots.
+    # Now: 7 small queries (1 per horizon), each with a simple 2-column filter.
+    # Dedup by snapshot ID since one snapshot may appear in multiple horizons.
+    SELECT_COLS = ("id, symbol, price_at_snapshot, snapshot_at, token_address, pair_address, "
+                   "max_price_1h, max_price_6h, max_price_12h, max_price_24h, max_price_48h, max_price_72h, max_price_7d, "
+                   "did_2x_1h, did_2x_6h, did_2x_12h, did_2x_24h, did_2x_48h, did_2x_72h, did_2x_7d")
+    seen_ids: set[int] = set()
+    snapshots: list[dict] = []
+    per_hz_limit = max(200, BATCH_LIMIT // len(HORIZONS))
+
     for hz in HORIZONS:
+        if len(snapshots) >= BATCH_LIMIT:
+            break
         cutoff = (now - timedelta(hours=hz["hours"])).strftime("%Y-%m-%dT%H:%M:%SZ")
-        or_parts.append(f'and({hz["flag_col"]}.is.null,{hz["max_col"]}.is.null,snapshot_at.lt.{cutoff})')
-    filter_str = ",".join(or_parts)
+        try:
+            result = (
+                client.table("token_snapshots")
+                .select(SELECT_COLS)
+                .is_(hz["flag_col"], "null")
+                .is_(hz["max_col"], "null")
+                .lt("snapshot_at", cutoff)
+                .order("snapshot_at", desc=False)
+                .limit(per_hz_limit)
+                .execute()
+            )
+            for snap in (result.data or []):
+                if snap["id"] not in seen_ids:
+                    seen_ids.add(snap["id"])
+                    snapshots.append(snap)
+        except Exception as e:
+            logger.warning("Failed to query horizon %dh: %s", hz["hours"], e)
+            continue
 
-    try:
-        result = (
-            client.table("token_snapshots")
-            .select("id, symbol, price_at_snapshot, snapshot_at, token_address, pair_address, "
-                    "max_price_1h, max_price_6h, max_price_12h, max_price_24h, max_price_48h, max_price_72h, max_price_7d, "
-                    "did_2x_1h, did_2x_6h, did_2x_12h, did_2x_24h, did_2x_48h, did_2x_72h, did_2x_7d")
-            .or_(filter_str)
-            # v36-fix: FIFO ordering (oldest first) instead of score-DESC.
-            # Score-DESC caused zombies to starve fresh snapshots.
-            .order("snapshot_at", desc=False)
-            .limit(BATCH_LIMIT)
-            .execute()
-        )
-    except Exception as e:
-        logger.error("Failed to query pending snapshots: %s", e)
-        return
-
-    snapshots = result.data or []
+    # Sort combined results FIFO
+    snapshots.sort(key=lambda s: s.get("snapshot_at", ""))
+    snapshots = snapshots[:BATCH_LIMIT]
     if not snapshots:
         logger.info("No pending snapshots to label")
         _save_pool_cache(pool_cache)
@@ -2054,6 +2060,19 @@ def _fetch_ohlcv_candles_kco(
     # v39: reject SOL quote price leak (same as _fetch_ohlcv_candles)
     if sorted_candles and ref_price > 0 and not _check_candle_sanity(sorted_candles, ref_price, symbol, source):
         sorted_candles = None
+
+    # v95: Absolute SOL price leak check — no ref_price needed.
+    # Memecoins are always < $1 (even large-caps rarely exceed $50).
+    # If DexPaprika median candle > $50, it's returning SOL price (~$85-$140).
+    # Fall through to Birdeye which uses token MINT (no pool inversion issue).
+    if sorted_candles and source == "dexpaprika_ohlcv":
+        median_close = sorted_candles[len(sorted_candles) // 2][4]
+        if median_close > 50.0:
+            logger.warning(
+                "KCO %s: DexPaprika median=%.2f (likely SOL price) — falling back to Birdeye",
+                symbol, median_close,
+            )
+            sorted_candles = None
 
     # 2. Birdeye fallback (uses token MINT address — no pool needed, recovers deindexed tokens)
     if sorted_candles is None and token_addr:
