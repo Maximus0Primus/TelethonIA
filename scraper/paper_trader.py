@@ -518,6 +518,12 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
             "momentum_mult": float(token["momentum_mult"]) if token.get("momentum_mult") else None,
             "portfolio_budget": budget_usd,
         }
+        # v96: Batch KOL attribution — propagate top_kol as kol_group + source="batch"
+        if not token.get("_rt_source"):
+            top_kols = token.get("top_kols") or []
+            if isinstance(top_kols, list) and top_kols:
+                base_row["kol_group"] = top_kols[0]
+            base_row["source"] = "batch"
         # v92: A/B testing — thread experiment/variant into trade rows
         if config.get("experiment_id"):
             base_row["experiment_id"] = config["experiment_id"]

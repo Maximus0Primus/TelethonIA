@@ -683,7 +683,6 @@ _rt_ca_cache: dict = {}
 _rt_ml_model = None  # LightGBM Booster, loaded from Supabase
 _rt_trade_cooldown: dict[str, float] = {}  # (kol, ca) -> last_trade_timestamp
 _rt_in_flight: set = set()  # (kol, ca) tuples currently being processed
-_rt_probation_daily: dict[str, dict[str, int]] = {}  # v92: {date_str: {kol: count}}
 _rt_group_id_to_username: dict[int, str] = {}
 _rt_kol_scores: dict = {}
 _rt_kol_scores_loaded_at: float = 0.0
@@ -1024,20 +1023,23 @@ def _rt_load_config() -> dict:
 
 def _rt_should_trade(kol: str, ca: str) -> bool:
     """Cooldown per (KOL × token). Does NOT consume — call _rt_mark_traded() on success.
-    v94: DB fallback — survives restarts."""
+    v94: DB fallback — survives restarts.
+    v96: Also checks batch trades to prevent RT+batch double-trading same token."""
     now = time.time()
     key = (kol, ca)
     last = _rt_trade_cooldown.get(key, 0)
     if now - last < RT_COOLDOWN_SECONDS:
         return False
-    # DB fallback: check if recent trade exists (survives restarts)
+    # DB fallback: check if THIS KOL already traded this CA recently (any source)
     try:
         sb = _get_supabase()
         if sb:
             cutoff = (datetime.now(timezone.utc) - timedelta(seconds=RT_COOLDOWN_SECONDS)).isoformat()
+            # v96: Check RT trades (same kol+ca) — different KOL = new signal, so keep per-KOL
             res = sb.table("paper_trades").select("id", count="exact") \
                 .eq("kol_group", kol).eq("token_address", ca) \
-                .eq("source", "rt").gte("created_at", cutoff).execute()
+                .eq("is_shadow", False) \
+                .gte("created_at", cutoff).execute()
             if res.count and res.count > 0:
                 _rt_trade_cooldown[key] = now  # warm cache
                 return False
@@ -1394,30 +1396,10 @@ def _rt_open_trades(ca: str, symbol: str, price: float, mcap: float,
     now = datetime.now(timezone.utc)
     total_opened = 0
 
-    # v82: Hybrid strategy — split position across configured allocations
-    # KOL-adaptive: if whitelist has per-KOL strategy data, boost best strategy
+    # v96: Hybrid strategy — split position across configured allocations (no KOL gate)
     hybrid_cfg = config.get("hybrid_strategy", {})
     if hybrid_cfg.get("enabled", False):
         allocations = dict(hybrid_cfg.get("allocations", {"TP50_SL30": 0.50, "TP30_SL50": 0.30, "TP50_SL50": 0.20}))
-
-        # v82: KOL-adaptive strategy selection — boost KOL's best-performing strategy
-        whitelist = _rt_load_kol_whitelist(config)
-        kol_wl = whitelist.get(kol_username, {}) if whitelist else {}
-        kol_strats = kol_wl.get("strategies", {})
-        kol_best = kol_wl.get("best_strategy")
-        if kol_best and kol_best in allocations and kol_strats:
-            # Only override if KOL has >= 3 trades in best strategy AND it's profitable
-            best_stats = kol_strats.get(kol_best, {})
-            if best_stats.get("n", 0) >= 3 and best_stats.get("pnl", 0) > 0:
-                # Boost best strategy to 60%, distribute rest evenly
-                others = {s: a for s, a in allocations.items() if s != kol_best}
-                remaining = 0.40
-                allocations = {kol_best: 0.60}
-                for s in others:
-                    allocations[s] = round(remaining / len(others), 2) if others else remaining
-                logger.info("RT KOL-adaptive: %s → boost %s to 60%% (n=%d, wr=%.0f%%, pnl=$%.1f)",
-                            kol_username, kol_best, best_stats["n"],
-                            best_stats.get("wr", 0) * 100, best_stats.get("pnl", 0))
 
         all_hybrid_strats = [s for s in allocations if s in STRATEGIES]
         for i, (strat_name, alloc_pct) in enumerate(allocations.items()):
@@ -1438,11 +1420,8 @@ def _rt_open_trades(ca: str, symbol: str, price: float, mcap: float,
             if i > 0:
                 strat_config["shadow_enabled"] = False
 
-            # v92: A/B variant tagging — track KOL boost effect
-            kol_boost_applied = (kol_best and strat_name == kol_best
-                                 and allocations.get(kol_best, 0) > 0.50)
             token_entry["_rt_experiment_id"] = pt_config.get("experiment_id")
-            token_entry["_rt_variant_id"] = "hybrid_kol_boost" if kol_boost_applied else "hybrid_default"
+            token_entry["_rt_variant_id"] = "hybrid_default"
 
             opened = open_paper_trades(sb, [token_entry], cycle_ts=now, config=strat_config)
             total_opened += opened
@@ -1573,47 +1552,9 @@ async def _rt_on_new_message(event: events.NewMessage.Event):
     tier = GROUPS_TIER.get(username, "A")
     kol_info = kol_scores.get(username, {"score": 0.0, "win_rate": 0.0, "total_calls": 0})
 
-    # v82: KOL WR gate — probation mode for new KOLs, block proven losers
-    kol_filter_cfg = config.get("kol_filter", {})
-    _rt_probation_mult = 1.0  # position size multiplier (reduced for probation KOLs)
-    if kol_filter_cfg.get("enabled", False):
-        whitelist = _rt_load_kol_whitelist(config)
-        if whitelist:  # only apply gate when whitelist is actually populated
-            kol_wl = whitelist.get(username)
-            min_calls = int(kol_filter_cfg.get("min_calls", 3))
-            wr_threshold = float(kol_filter_cfg.get("wr_threshold", 0.40))
-
-            if kol_wl and kol_wl.get("approved"):
-                # Approved KOL — full position, enrich with real WR
-                kol_info = dict(kol_info)
-                kol_info["win_rate"] = kol_wl["wr"]
-                kol_info["total_calls"] = kol_wl["total"]
-            elif kol_wl and kol_wl.get("total", 0) >= min_calls:
-                # Enough data but bad WR — BLOCK
-                wr_str = f" wr={kol_wl['wr']:.0%}/{kol_wl['total']}trades pnl=${kol_wl.get('pnl', 0):.0f}"
-                logger.info("RT SKIP (KOL blacklisted): %s%s", username, wr_str)
-                return
-            else:
-                # Not enough data — PROBATION MODE (reduced position to gather data)
-                # v92: Daily cap — max 1 probation trade per KOL per day
-                today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-                daily_cap = int(kol_filter_cfg.get("probation_daily_cap", 1))
-                today_counts = _rt_probation_daily.get(today_str, {})
-                kol_today = today_counts.get(username, 0)
-                if kol_today >= daily_cap:
-                    logger.info("RT SKIP (probation_daily_cap): %s already %d/%d today", username, kol_today, daily_cap)
-                    return
-                # Increment counter (will be confirmed after trade opens)
-                _rt_probation_daily.setdefault(today_str, {})[username] = kol_today + 1
-                # Clean old days (keep only today)
-                for old_day in [d for d in _rt_probation_daily if d != today_str]:
-                    del _rt_probation_daily[old_day]
-
-                probation_pct = float(kol_filter_cfg.get("probation_mult", 0.10))
-                _rt_probation_mult = probation_pct
-                n_trades = kol_wl["total"] if kol_wl else 0
-                logger.info("RT PROBATION: %s (%d/%d trades, pos=%.0f%%, %d/%d today) — gathering data",
-                            username, n_trades, min_calls, probation_pct * 100, kol_today + 1, daily_cap)
+    # v96: No KOL gates — paper trade ALL calls to build unbiased leaderboard.
+    # Gates (whitelist, probation, blacklist) removed. Only hard blocks: CA + liquidity.
+    # KOL filtering should happen AFTER leaderboard data is collected, not before.
 
     for symbol, source, ca in tokens:
         if not ca:
@@ -1681,20 +1622,14 @@ async def _rt_on_new_message(event: events.NewMessage.Event):
                     min(pos_size * ml_mult, float(config.get("max_position_usd", 100))),
                 )
 
-            # v82: Probation mode — reduce position for unproven KOLs
-            if _rt_probation_mult < 1.0:
-                pos_size = max(float(config.get("min_position_usd", 10)),
-                               pos_size * _rt_probation_mult)
-
             logger.info(
-                "RT score: %s rt_score=%.0f → pos=$%.2f | kol=%s(%.2f/%.0f%%) liq=$%.0fK bsr=%.2f%s%s%s",
+                "RT score: %s rt_score=%.0f → pos=$%.2f | kol=%s(%.2f/%.0f%%) liq=$%.0fK bsr=%.2f%s%s",
                 symbol, rt_score, pos_size, username,
                 kol_info.get("score", 0), kol_info.get("win_rate", 0) * 100,
                 token_info.get("liquidity_usd", 0) / 1000,
                 token_info.get("buy_sell_ratio", 0),
                 f" confs={n_confs}" if n_confs else "",
                 f" {ml_label}" if ml_label else "",
-                f" PROBATION({_rt_probation_mult:.0%})" if _rt_probation_mult < 1.0 else "",
             )
 
             # Open trades across all strategies
