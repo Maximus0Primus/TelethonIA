@@ -121,7 +121,7 @@ HORIZONS = [
 # Max snapshots to process per cycle
 # v34: increased to 2000 — token-grouping means ~1 API call per unique token, not per snapshot
 # v58: Overridden by scoring_config.pipeline_config.labeling.batch_limit
-BATCH_LIMIT = 2000
+BATCH_LIMIT = 4000  # v98: doubled to clear backlog faster (was 2000)
 
 # Time budget in seconds — exit gracefully before GH Action timeout
 # v58: Overridden by scoring_config.pipeline_config.labeling.time_budget_seconds
@@ -1108,11 +1108,32 @@ def fill_outcomes() -> None:
     seen_ids: set[int] = set()
     snapshots: list[dict] = []
 
-    # Two passes: recent first (last 3 days, DESC = newest first), then older backlog (ASC)
+    # Two passes: recent (last 3 days, DESC) + older backlog (ASC).
+    # v98-fix: Dynamic split — when backlog is large, give it more budget.
+    # Quick count of backlog to decide split ratio.
     recent_cutoff = (now - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        backlog_count_q = (
+            client.table("token_snapshots")
+            .select("id", count="exact")
+            .is_("max_price_24h", "null")
+            .is_("did_2x_24h", "null")
+            .lt("snapshot_at", recent_cutoff)
+            .gt("snapshot_at", "2026-03-03T00:00:00Z")
+            .execute()
+        )
+        backlog_size = backlog_count_q.count or 0
+    except Exception:
+        backlog_size = 0
+    # Dynamic split: if backlog > 2000, flip to 70/30 backlog-first
+    if backlog_size > 2000:
+        backlog_pct, recent_pct = 0.7, 0.3
+        logger.info("Large backlog detected (%d), using 70/30 backlog-first split", backlog_size)
+    else:
+        backlog_pct, recent_pct = 0.3, 0.7
     passes = [
-        {"label": "recent", "limit": int(BATCH_LIMIT * 0.7), "order_desc": True, "age_filter": ("gte", recent_cutoff)},
-        {"label": "backlog", "limit": int(BATCH_LIMIT * 0.3), "order_desc": False, "age_filter": ("lt", recent_cutoff)},
+        {"label": "recent", "limit": int(BATCH_LIMIT * recent_pct), "order_desc": True, "age_filter": ("gte", recent_cutoff)},
+        {"label": "backlog", "limit": int(BATCH_LIMIT * backlog_pct), "order_desc": False, "age_filter": ("lt", recent_cutoff)},
     ]
 
     for pass_info in passes:
@@ -1268,13 +1289,16 @@ def fill_outcomes() -> None:
         with _stats_lock:
             _stats["tokens_processed"] += 1
 
-    # v97-fix: Two-phase processing with reserved time budgets.
-    # Phase 1: Backlog (40% time) — old tokens get zombie-marked fast (no API needed for age>36h)
-    # Phase 2: Recent (60% time) — needs actual OHLCV data, rate-limiter bounded
+    # v98-fix: Dynamic time budget matching the query split.
+    # When backlog is large, it gets 70% time + 70% batch. When small, 30/30.
     stats_lock = threading.Lock()
     _MAX_WORKERS = 4
-    backlog_budget = int(TIME_BUDGET_SECONDS * 0.4)
-    recent_budget = int(TIME_BUDGET_SECONDS * 0.6)
+    if backlog_size > 2000:
+        backlog_budget = int(TIME_BUDGET_SECONDS * 0.7)
+        recent_budget = int(TIME_BUDGET_SECONDS * 0.3)
+    else:
+        backlog_budget = int(TIME_BUDGET_SECONDS * 0.4)
+        recent_budget = int(TIME_BUDGET_SECONDS * 0.6)
 
     def _run_phase(phase_name, groups, phase_budget_seconds):
         phase_start = time.time()
