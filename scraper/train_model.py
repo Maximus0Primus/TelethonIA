@@ -2691,7 +2691,7 @@ def load_kco_training_data(threshold: float = 1.5) -> pd.DataFrame:
     while True:
         result = (
             client.table("kol_call_outcomes")
-            .select("id, kol_group, token_address, symbol, call_timestamp, entry_price, ath_after_call, max_return, kol_tier")
+            .select("id, kol_group, token_address, symbol, call_timestamp, entry_price, ath_after_call, max_return")
             .not_.is_("entry_price", "null")
             .not_.is_("max_return", "null")
             .gt("max_return", 0)
@@ -2822,7 +2822,7 @@ def load_kco_training_data(threshold: float = 1.5) -> pd.DataFrame:
         # Build feature row
         row = {
             # KOL identity
-            "kol_tier_encoded": _tier_map.get(kco_row.get("kol_tier", "B"), 1),
+            "kol_tier_encoded": _tier_map.get(kco_row.get("kol_tier") or "B", 1),
             "kol_conviction": 0.5,  # Default — we don't have per-KOL conviction in KCO table
             "kol_historical_hit_rate": round(kol_hit_rate, 3),
             "kol_total_prior_calls": kol_total_prior,

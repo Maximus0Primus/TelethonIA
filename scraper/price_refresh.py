@@ -345,8 +345,9 @@ def refresh_top_tokens(n: int = REFRESH_TOP_N) -> int:
             pass
 
     # Pre-fetch which (symbol, token_address) combos exist per window
-    # v95: include token_address — unique constraint is (symbol, time_window, token_address)
-    existing_by_window: dict[str, dict[str, str]] = {}  # window -> {symbol: token_address}
+    # v97-fix: use set of (symbol, token_address) tuples to handle multi-CA symbols correctly
+    # Old code used {symbol: token_address} which overwrote when same symbol had multiple CAs
+    existing_by_window: dict[str, set[tuple[str, str]]] = {}  # window -> {(symbol, token_address)}
     for window in ALL_WINDOWS:
         try:
             wr = (
@@ -356,9 +357,9 @@ def refresh_top_tokens(n: int = REFRESH_TOP_N) -> int:
                 .in_("symbol", symbols)
                 .execute()
             )
-            existing_by_window[window] = {r["symbol"]: r.get("token_address", "") for r in (wr.data or [])}
+            existing_by_window[window] = {(r["symbol"], r.get("token_address", "")) for r in (wr.data or [])}
         except Exception:
-            existing_by_window[window] = {}
+            existing_by_window[window] = set()
 
     for token in tokens:
         symbol = token["symbol"]
@@ -366,7 +367,8 @@ def refresh_top_tokens(n: int = REFRESH_TOP_N) -> int:
         base_conv = token.get("base_score_conviction") or token["score"]
         base_mom = token.get("base_score_momentum") or token["score"]
 
-        address = address_map.get(symbol)
+        # v97-fix: use token's own address, not address_map (which overwrites multi-CA symbols)
+        address = token.get("token_address") or address_map.get(symbol)
         if not address:
             continue
 
@@ -393,14 +395,14 @@ def refresh_top_tokens(n: int = REFRESH_TOP_N) -> int:
         new_mom = min(100, max(0, int(base_mom * refresh_mult * social_decay)))
         new_change = market_data.get("price_change_24h") or token.get("change_24h", 0)
 
-        # Update ALL time windows that have this symbol (not just 7d)
+        # Update ALL time windows that have this token (not just 7d)
         for window in ALL_WINDOWS:
-            window_map = existing_by_window.get(window, {})
-            if symbol in window_map:
+            window_combos = existing_by_window.get(window, set())
+            if (symbol, address) in window_combos:
                 update_rows.append({
                     "symbol": symbol,
                     "time_window": window,
-                    "token_address": window_map[symbol] or address_map.get(symbol, ""),
+                    "token_address": address,
                     "score": new_score,
                     "score_conviction": new_conv,
                     "score_momentum": new_mom,
@@ -408,6 +410,18 @@ def refresh_top_tokens(n: int = REFRESH_TOP_N) -> int:
                 })
 
         updated += 1
+
+    # v97-fix: deduplicate by unique constraint before upsert to prevent
+    # ON CONFLICT DO UPDATE affecting same row twice (Postgres error 21000)
+    if update_rows:
+        seen_keys: set[tuple[str, str, str]] = set()
+        deduped_rows = []
+        for row in update_rows:
+            key = (row["symbol"], row["time_window"], row["token_address"])
+            if key not in seen_keys:
+                seen_keys.add(key)
+                deduped_rows.append(row)
+        update_rows = deduped_rows
 
     # Batch upsert updates
     if update_rows:

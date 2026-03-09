@@ -32,6 +32,10 @@ import requests
 from supabase import create_client, Client
 
 logger = logging.getLogger(__name__)
+# v97-fix: Ensure logs are visible when run via `python -c` in GH Actions
+# (no basicConfig → default WARNING level → all info/warning messages dropped)
+if not logging.root.handlers:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 
 class _RateLimiter:
@@ -750,52 +754,54 @@ def _fetch_ohlcv_candles(
         num_candles_15m = int(window_seconds / 900) + 10
         try:
             if not _dexpaprika_budget_ok():
-                logger.info("DexPaprika daily budget exhausted (%d/%d) — skipping",
+                logger.info("DexPaprika daily budget exhausted (%d/%d) — skipping to fallbacks",
                             _dexpaprika_daily_count, _DEXPAPRIKA_DAILY_LIMIT)
-                return []
-            _dexpaprika_limiter.wait()
-            _dexpaprika_track()
-            resp = requests.get(
-                f"{DEXPAPRIKA_BASE}/networks/solana/pools/{pool_addr}/ohlcv",
-                params={
-                    "start": start_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                    "end": end_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                    "limit": min(1000, num_candles_15m),
-                    "interval": "15m",
-                },
-                timeout=15,
-            )
-            stats["api_calls"] += 1
+                # v97-fix: was `return []` which crashes caller expecting (candles, source) tuple.
+                # Now: skip DexPaprika entirely, fall through to GeckoTerminal/Birdeye.
+            else:
+                _dexpaprika_limiter.wait()
+                _dexpaprika_track()
+                resp = requests.get(
+                    f"{DEXPAPRIKA_BASE}/networks/solana/pools/{pool_addr}/ohlcv",
+                    params={
+                        "start": start_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        "end": end_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        "limit": min(1000, num_candles_15m),
+                        "interval": "15m",
+                    },
+                    timeout=15,
+                )
+                stats["api_calls"] += 1
 
-            if resp.status_code == 200:
-                candles_raw = resp.json()
-                if isinstance(candles_raw, list) and candles_raw:
-                    sorted_candles = []
-                    for c in candles_raw:
-                        try:
-                            # v36-fix: DexPaprika uses time_open/time_close, NOT time/timestamp
-                            ts_str = c.get("time_open") or c.get("time_close") or c.get("time") or c.get("timestamp", "")
-                            if not ts_str:
+                if resp.status_code == 200:
+                    candles_raw = resp.json()
+                    if isinstance(candles_raw, list) and candles_raw:
+                        sorted_candles = []
+                        for c in candles_raw:
+                            try:
+                                # v36-fix: DexPaprika uses time_open/time_close, NOT time/timestamp
+                                ts_str = c.get("time_open") or c.get("time_close") or c.get("time") or c.get("timestamp", "")
+                                if not ts_str:
+                                    continue
+                                if ts_str.endswith("Z"):
+                                    ts_dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                                else:
+                                    ts_dt = datetime.fromisoformat(ts_str)
+                                sorted_candles.append([
+                                    int(ts_dt.timestamp()),
+                                    float(c.get("open", 0)),
+                                    float(c.get("high", 0)),
+                                    float(c.get("low", 0)),
+                                    float(c.get("close", 0)),
+                                    float(c.get("volume", 0)),
+                                ])
+                            except (ValueError, TypeError):
                                 continue
-                            if ts_str.endswith("Z"):
-                                ts_dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-                            else:
-                                ts_dt = datetime.fromisoformat(ts_str)
-                            sorted_candles.append([
-                                int(ts_dt.timestamp()),
-                                float(c.get("open", 0)),
-                                float(c.get("high", 0)),
-                                float(c.get("low", 0)),
-                                float(c.get("close", 0)),
-                                float(c.get("volume", 0)),
-                            ])
-                        except (ValueError, TypeError):
-                            continue
-                    sorted_candles.sort(key=lambda x: x[0])
-                    if sorted_candles:
-                        source = "dexpaprika_ohlcv"
-                    else:
-                        sorted_candles = None
+                        sorted_candles.sort(key=lambda x: x[0])
+                        if sorted_candles:
+                            source = "dexpaprika_ohlcv"
+                        else:
+                            sorted_candles = None
         except requests.RequestException as e:
             logger.debug("DexPaprika OHLCV failed for %s: %s", symbol, e)
 
@@ -1148,23 +1154,36 @@ def fill_outcomes() -> None:
 
         logger.info("fill_outcomes %s pass: %d snapshots collected", pass_info["label"], pass_collected)
 
-    # Sort: recent first (DESC), then older (ASC) — ensures newest get OHLCV budget priority
-    snapshots.sort(key=lambda s: s.get("snapshot_at", ""), reverse=True)
-    snapshots = snapshots[:BATCH_LIMIT]
     if not snapshots:
         logger.info("No pending snapshots to label")
         _save_pool_cache(pool_cache)
         return
 
-    # v34: Group snapshots by token_address — 1 OHLCV fetch per unique token
-    token_groups = defaultdict(list)
-    for snap in snapshots:
-        key = snap.get("token_address") or str(snap["id"])
-        token_groups[key].append(snap)
+    # v97-fix: Split snapshots into recent vs backlog BEFORE grouping.
+    # Old approach merged all into one token_groups dict sorted recent-first,
+    # then processed sequentially. Time budget exhausted on recent tokens →
+    # backlog NEVER processed (Mar 3-5: 9,638 snapshots with 0 labels, 0 zombies).
+    # New approach: two separate processing phases with reserved time budgets.
+    # Backlog goes FIRST because old tokens (age>36h) get zombie-marked instantly
+    # (no API call needed), clearing the queue fast.
+    recent_snaps = [s for s in snapshots if s.get("snapshot_at", "") >= recent_cutoff]
+    backlog_snaps = [s for s in snapshots if s.get("snapshot_at", "") < recent_cutoff]
+
+    # Build separate token groups for each phase
+    def _build_token_groups(snap_list):
+        groups = defaultdict(list)
+        for snap in snap_list:
+            key = snap.get("token_address") or str(snap["id"])
+            groups[key].append(snap)
+        return groups
+
+    backlog_groups = _build_token_groups(backlog_snaps)
+    recent_groups = _build_token_groups(recent_snaps)
 
     logger.info(
-        "Processing %d snapshots across %d unique tokens (token-grouped)",
-        len(snapshots), len(token_groups),
+        "Processing %d snapshots: %d recent (%d tokens) + %d backlog (%d tokens)",
+        len(snapshots), len(recent_snaps), len(recent_groups),
+        len(backlog_snaps), len(backlog_groups),
     )
 
     def _process_token_group(token_key, group, _client, _now_ts, _pool_cache, _stats, _stats_lock):
@@ -1249,27 +1268,41 @@ def fill_outcomes() -> None:
         with _stats_lock:
             _stats["tokens_processed"] += 1
 
-    # v54: Parallel processing with ThreadPoolExecutor (4 workers, rate-limiter bounded)
+    # v97-fix: Two-phase processing with reserved time budgets.
+    # Phase 1: Backlog (40% time) — old tokens get zombie-marked fast (no API needed for age>36h)
+    # Phase 2: Recent (60% time) — needs actual OHLCV data, rate-limiter bounded
     stats_lock = threading.Lock()
     _MAX_WORKERS = 4
+    backlog_budget = int(TIME_BUDGET_SECONDS * 0.4)
+    recent_budget = int(TIME_BUDGET_SECONDS * 0.6)
 
-    with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as executor:
-        futures = {}
-        for token_key, group in token_groups.items():
-            if time.time() - start_time > TIME_BUDGET_SECONDS:
-                logger.warning("Time budget exceeded (%.0fs), stopping submission", time.time() - start_time)
-                break
-            fut = executor.submit(
-                _process_token_group, token_key, group, client, now_ts,
-                pool_cache, stats, stats_lock,
-            )
-            futures[fut] = token_key
+    def _run_phase(phase_name, groups, phase_budget_seconds):
+        phase_start = time.time()
+        with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as executor:
+            futures = {}
+            for token_key, group in groups.items():
+                if time.time() - phase_start > phase_budget_seconds:
+                    logger.warning("%s: time budget exceeded (%.0fs/%.0fs), stopping",
+                                   phase_name, time.time() - phase_start, phase_budget_seconds)
+                    break
+                fut = executor.submit(
+                    _process_token_group, token_key, group, client, now_ts,
+                    pool_cache, stats, stats_lock,
+                )
+                futures[fut] = token_key
 
-        for fut in as_completed(futures):
-            try:
-                fut.result()
-            except Exception as e:
-                logger.error("Token group %s failed: %s", futures[fut], e)
+            for fut in as_completed(futures):
+                try:
+                    fut.result()
+                except Exception as e:
+                    logger.error("%s token %s failed: %s", phase_name, futures[fut], e)
+        elapsed = time.time() - phase_start
+        logger.info("%s phase: %.0fs elapsed, %d tokens submitted", phase_name, elapsed, len(futures))
+
+    if backlog_groups:
+        _run_phase("backlog", backlog_groups, backlog_budget)
+    if recent_groups:
+        _run_phase("recent", recent_groups, recent_budget)
 
     _save_pool_cache(pool_cache)
 

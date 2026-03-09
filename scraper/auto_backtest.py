@@ -269,6 +269,7 @@ def _fetch_paper_trade_snapshots(client) -> pd.DataFrame:
     v63: Fetch ALL snapshots but with minimal columns for paper_trade simulation.
     Uses RPC get_paper_trade_snapshots → ~55 cols instead of ~170+ (70% less data).
     Paper trade needs all rows (no dedup) because same token re-trades across cycles.
+    Falls back to direct table query if RPC times out.
     """
     try:
         all_rows = []
@@ -297,7 +298,43 @@ def _fetch_paper_trade_snapshots(client) -> pd.DataFrame:
         logger.info("Fetched %d paper-trade snapshots via RPC (%d cols)", len(df), len(df.columns))
         return df
     except Exception as e:
-        logger.error("RPC get_paper_trade_snapshots failed: %s", e)
+        logger.error("RPC get_paper_trade_snapshots failed, falling back to direct query: %s", e)
+        return _fetch_paper_trade_snapshots_fallback(client)
+
+
+def _fetch_paper_trade_snapshots_fallback(client) -> pd.DataFrame:
+    """Fallback: fetch paper-trade snapshots directly from token_snapshots table."""
+    try:
+        all_rows = []
+        page_size = 1000
+        offset = 0
+        while True:
+            result = (
+                client.table("token_snapshots")
+                .select(SNAPSHOT_COLUMNS)
+                .gte("snapshot_at", "2026-02-14T00:00:00Z")
+                .order("snapshot_at", desc=True)
+                .range(offset, offset + page_size - 1)
+                .execute()
+            )
+            if not result.data:
+                break
+            all_rows.extend(result.data)
+            if len(result.data) < page_size:
+                break
+            offset += page_size
+            if offset >= 50000:
+                break
+
+        if not all_rows:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(all_rows)
+        df["snapshot_at"] = pd.to_datetime(df["snapshot_at"])
+        logger.info("Fetched %d paper-trade snapshots via fallback (%d cols)", len(df), len(df.columns))
+        return df
+    except Exception as e:
+        logger.error("Paper-trade snapshot fallback also failed: %s", e)
         return pd.DataFrame()
 
 
@@ -4693,8 +4730,8 @@ def _optuna_optimize_params(
             "min_calls": bp["wr_min_calls"],
         },
         # v49: conviction normalization params
-        "conviction_offset": bp["conviction_offset"],
-        "conviction_divisor": bp["conviction_divisor"],
+        "conviction_offset": bp.get("conviction_offset", 9.0),
+        "conviction_divisor": bp.get("conviction_divisor", 2.0),
         "breadth_pen_config": {
             "thresholds": [bp["bp_t0"], bp["bp_t1"], bp["bp_t2"]],
             "penalties": [bp["bp_p0"], bp["bp_p1"], bp["bp_p2"]],
@@ -6085,6 +6122,10 @@ def _optimize_rt_scoring(client, n_trials: int = 100) -> dict | None:
     try:
         current = client.table("scoring_config").select("rt_trade_config").eq("id", 1).execute()
         current_config = (current.data[0].get("rt_trade_config") or {}) if current.data else {}
+        # Handle case where rt_trade_config is stored as JSON string
+        if isinstance(current_config, str):
+            import json as _json_parse
+            current_config = _json_parse.loads(current_config) if current_config else {}
     except Exception:
         current_config = {}
 
@@ -6105,9 +6146,8 @@ def _optimize_rt_scoring(client, n_trials: int = 100) -> dict | None:
     updated_config["strategy_multipliers"] = best_strat_mults
 
     try:
-        import json as _json
         client.table("scoring_config").update({
-            "rt_trade_config": _json.dumps(updated_config),
+            "rt_trade_config": updated_config,
             "updated_by": "optuna_rt_v66_exploration",
         }).eq("id", 1).execute()
         logger.info("RT Optuna: deployed new scoring+sizing config to scoring_config")
