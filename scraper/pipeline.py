@@ -411,10 +411,11 @@ def _load_kol_win_rates() -> dict[str, dict]:
             f"{url}/rest/v1/kol_call_outcomes",
             headers={"apikey": key, "Authorization": f"Bearer {key}"},
             params={
-                "select": "kol_group,did_2x",
+                "select": "kol_group,token_address,did_2x,call_timestamp",
                 "entry_price": "not.is.null",
                 "max_return": "not.is.null",
                 "call_timestamp": f"gte.{cutoff}",
+                "order": "call_timestamp.asc",
             },
             timeout=10,
         )
@@ -425,11 +426,19 @@ def _load_kol_win_rates() -> dict[str, dict]:
         if not rows:
             return {}
         from collections import defaultdict
+        # v100: Dedup — only count FIRST call per (kol_group, token_address).
+        # Re-mentions of the same token should not inflate win rates.
+        seen_combos: set[tuple[str, str]] = set()
         stats: dict[str, dict] = defaultdict(lambda: {"wins": 0, "total": 0})
         for r in rows:
             g = r.get("kol_group")
-            if not g:
+            ta = r.get("token_address")
+            if not g or not ta:
                 continue
+            combo = (g, ta)
+            if combo in seen_combos:
+                continue
+            seen_combos.add(combo)
             stats[g]["total"] += 1
             if r.get("did_2x"):
                 stats[g]["wins"] += 1
@@ -437,7 +446,8 @@ def _load_kol_win_rates() -> dict[str, dict]:
         for g, s in stats.items():
             if s["total"] > 0:
                 result[g] = {"wr": round(s["wins"] / s["total"], 3), "total": s["total"]}
-        logger.info("kol_win_rates: loaded %d KOLs from %d outcomes", len(result), len(rows))
+        logger.info("kol_win_rates: loaded %d KOLs from %d deduped outcomes (raw: %d)",
+                     len(result), len(seen_combos), len(rows))
         return result
     except Exception as e:
         logger.warning("kol_win_rates: failed (%s)", e)

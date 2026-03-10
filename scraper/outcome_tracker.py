@@ -1973,9 +1973,11 @@ def _kco_phase_a_sync(client: Client, stats: dict) -> None:
         logger.info("KCO Phase A: no mentions found")
         return
 
-    # Step 3: v93: Track EVERY mention (not just first per kol+token)
-    # Each mention is a separate call with its own entry price and outcome.
+    # Step 3: v100: Dedup — only FIRST mention per (kol_group, token_address).
+    # Re-mentions (updates, brags, re-shills) should NOT create separate KCO rows,
+    # otherwise KOL win rates get artificially inflated.
     all_calls = {}  # mention_id → call data
+    seen_kol_token = {}  # (kol, token_addr) → earliest mention_id
     for m in mentions:
         sym = (m.get("symbol") or "").upper().strip()
         kol = m.get("kol_group") or ""
@@ -2001,6 +2003,12 @@ def _kco_phase_a_sync(client: Client, stats: dict) -> None:
                     break
         if not token_addr:
             continue
+
+        # v100: Only keep the first mention per (kol_group, token_address)
+        combo_key = (kol, token_addr)
+        if combo_key in seen_kol_token:
+            continue
+        seen_kol_token[combo_key] = mention_id
 
         all_calls[mention_id] = {
             "mention_id": mention_id,
