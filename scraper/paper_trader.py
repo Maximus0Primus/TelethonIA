@@ -769,7 +769,9 @@ def _evaluate_trade_exit(trade: dict, current_price: float | None,
         return result  # no exit, but may need to update high_price_seen
 
     pnl_pct = round((exit_price / entry_price) - 1, 4) if exit_price and entry_price else 0
-    pnl_usd = round(pos_usd * pnl_pct, 2) if pos_usd else None
+    # v99: Shadow trades (pos_usd=0) get simulated $10 pnl_usd so stats aren't NULL
+    effective_usd = pos_usd if pos_usd else 10.0
+    pnl_usd = round(effective_usd * pnl_pct, 2)
 
     result.update({
         "status": new_status,
