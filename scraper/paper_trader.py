@@ -84,64 +84,49 @@ STRATEGIES = {
         # v5: backtest best — TP30_SL50_12h: +8.5% expectancy, 61% WR, PF 1.51 (report #602)
         # KCO sim: 63.2% hit 1.3x across all KOLs, 71.4% on top 10
         # DEPRECATED v86: 49% WR but negative PnL (-2.5% ROI) — asymmetric R:R kills it
-        {"pct": 1.0, "tp_mult": 1.30, "sl_mult": 0.50, "horizon_min": 720, "label": "main"},
+        # v101: ALL horizons → 2h (120min). Data proof: <2h trades = +$1,432 (48% WR), >2h = -$6,273 (15% WR)
+        {"pct": 1.0, "tp_mult": 1.30, "sl_mult": 0.50, "horizon_min": 120, "label": "main"},
     ],
     "TP30_SL10": [
-        # v86: replaces TP30_SL50. Tight -10% SL cuts losses fast. 12h horizon for 1.3x target.
-        # Rationale: TP30_SL50 had 49% WR but -2.5% ROI — wins too small vs losses.
-        # With -10% SL, 3:1 R:R means breakeven at 25% WR.
-        {"pct": 1.0, "tp_mult": 1.30, "sl_mult": 0.90, "horizon_min": 720, "label": "main"},
+        {"pct": 1.0, "tp_mult": 1.30, "sl_mult": 0.90, "horizon_min": 120, "label": "main"},
     ],
     "TP50_SL30": [
-        # v68: horizon 12h→24h (decoupled from TP level — analysis showed TP100 edge was from horizon, not TP)
-        {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.70, "horizon_min": 1440, "label": "main"},
+        {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.70, "horizon_min": 120, "label": "main"},
     ],
     "TP100_SL30": [
-        # Deprecated: 12% WR, -14% ROI. SL -30% too tight for 2x target. Kept for backtesting.
-        {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.70, "horizon_min": 1440, "label": "main"},
+        {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.70, "horizon_min": 120, "label": "main"},
     ],
     "TP100_SL50": [
-        # v6: TP at 2x, SL at -50%, 48h horizon. Wide SL gives room for memecoin volatility.
-        # TP50_SL30 sibling but targets bigger gains with more patience.
-        {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.50, "horizon_min": 2880, "label": "main"},
+        {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.50, "horizon_min": 120, "label": "main"},
     ],
     "SCALE_OUT": [
-        # v68: SL widened 0.70→0.50 (-50% SL). Was 82% SL hit rate at -30% — too tight for 48h hold.
-        {"pct": 0.25, "tp_mult": 2.00, "sl_mult": 0.50, "horizon_min": 2880, "label": "tp_2x"},
-        {"pct": 0.25, "tp_mult": 3.00, "sl_mult": 0.50, "horizon_min": 2880, "label": "tp_3x"},
-        {"pct": 0.25, "tp_mult": 5.00, "sl_mult": 0.50, "horizon_min": 2880, "label": "tp_5x"},
-        {"pct": 0.25, "tp_mult": None, "sl_mult": 0.50, "horizon_min": 2880, "label": "moonbag"},
+        {"pct": 0.25, "tp_mult": 2.00, "sl_mult": 0.50, "horizon_min": 120, "label": "tp_2x"},
+        {"pct": 0.25, "tp_mult": 3.00, "sl_mult": 0.50, "horizon_min": 120, "label": "tp_3x"},
+        {"pct": 0.25, "tp_mult": 5.00, "sl_mult": 0.50, "horizon_min": 120, "label": "tp_5x"},
+        {"pct": 0.25, "tp_mult": None, "sl_mult": 0.50, "horizon_min": 120, "label": "moonbag"},
     ],
     "MOONBAG": [
-        # v68: SL widened 0.50→0.30 (-70% SL). 7d hold needs room to breathe — memecoins drop 50%+ intraday.
-        {"pct": 0.80, "tp_mult": 2.00, "sl_mult": 0.30, "horizon_min": 10080, "label": "main"},
-        {"pct": 0.20, "tp_mult": None, "sl_mult": 0.30, "horizon_min": 10080, "label": "moonbag"},
+        {"pct": 0.80, "tp_mult": 2.00, "sl_mult": 0.30, "horizon_min": 120, "label": "main"},
+        {"pct": 0.20, "tp_mult": None, "sl_mult": 0.30, "horizon_min": 120, "label": "moonbag"},
     ],
     "TP50_SL15": [
-        # v82: tight SL for KOL-filtered tokens. Feb 28 sim: +$10.50 vs SL30 +$6.00 on 4 trades.
-        # Limits losses to -$2.25 on dumps vs -$4.50 with SL30. TP50 still hits on pumps.
-        {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.85, "horizon_min": 1440, "label": "main"},
+        {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.85, "horizon_min": 120, "label": "main"},
     ],
     "TP30_SL30": [
-        # v81: symmetric 30/30, 12h. Sim Feb 28: 50% WR, +$12.20. Cuts losses early vs TP30_SL50.
-        {"pct": 1.0, "tp_mult": 1.30, "sl_mult": 0.70, "horizon_min": 720, "label": "main"},
+        {"pct": 1.0, "tp_mult": 1.30, "sl_mult": 0.70, "horizon_min": 120, "label": "main"},
     ],
     "TP50_SL50": [
-        # v81: symmetric 50/50, 24h. Sim Feb 28: 40% WR, +$14.13. Room to recover vs TP50_SL30.
-        {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.50, "horizon_min": 1440, "label": "main"},
+        {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.50, "horizon_min": 120, "label": "main"},
     ],
     "FRESH_MICRO": [
-        # v90: TP30/SL30/24h — symmetric R:R. Was SL70 (-70%) which killed PnL despite 50% WR.
-        {"pct": 1.0, "tp_mult": 1.30, "sl_mult": 0.70, "horizon_min": 1440, "label": "main"},
+        {"pct": 1.0, "tp_mult": 1.30, "sl_mult": 0.70, "horizon_min": 120, "label": "main"},
     ],
     "QUICK_SCALP": [
-        # v81: TP30/SL15/6h — tight SL for fast scalps. Was TP50/SL95 (no real SL = dumb).
-        {"pct": 1.0, "tp_mult": 1.30, "sl_mult": 0.85, "horizon_min": 360, "label": "main"},
+        {"pct": 1.0, "tp_mult": 1.30, "sl_mult": 0.85, "horizon_min": 120, "label": "main"},
     ],
     "WIDE_RUNNER": [
-        # TP100/SL70/48h — patient 2x with wide SL
-        {"pct": 0.60, "tp_mult": 2.00, "sl_mult": 0.30, "horizon_min": 2880, "label": "main"},
-        {"pct": 0.40, "tp_mult": 3.00, "sl_mult": 0.30, "horizon_min": 2880, "label": "runner"},
+        {"pct": 0.60, "tp_mult": 2.00, "sl_mult": 0.30, "horizon_min": 120, "label": "main"},
+        {"pct": 0.40, "tp_mult": 3.00, "sl_mult": 0.30, "horizon_min": 120, "label": "runner"},
     ],
 }
 
@@ -177,13 +162,13 @@ for _tp in range(40, 110, 10):    # 40, 50, 60, 70, 80, 90, 100
         if _name not in STRATEGIES:
             _GRID_STRATEGIES[_name] = [
                 {"pct": 1.0, "tp_mult": 1 + _tp / 100, "sl_mult": 1 - _sl / 100,
-                 "horizon_min": 1440, "label": "main"},
+                 "horizon_min": 120, "label": "main"},
             ]
 # No-SL baseline: only exits via TP or timeout (SL at -80% = nearly unreachable)
 for _tp_nosl in [50, 60, 70, 80, 90, 100]:
     _GRID_STRATEGIES[f"TP{_tp_nosl}_NOSL"] = [
         {"pct": 1.0, "tp_mult": 1 + _tp_nosl / 100, "sl_mult": 0.20,
-         "horizon_min": 1440, "label": "main"},
+         "horizon_min": 120, "label": "main"},
     ]
 
 STRATEGIES.update(_GRID_STRATEGIES)
@@ -733,7 +718,7 @@ def _evaluate_trade_exit(trade: dict, current_price: float | None,
         return None
 
     elapsed_minutes = (now - created_at).total_seconds() / 60
-    horizon = trade.get("horizon_minutes", 720)
+    horizon = trade.get("horizon_minutes", 120)
 
     # Track high_price_seen
     high_seen = float(trade.get("high_price_seen") or 0)

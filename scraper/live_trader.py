@@ -428,7 +428,7 @@ def open_live_trade(client_sb, token_entry: dict, strategy: str,
 
     # Insert into paper_trades with source='rt_live'
     from paper_trader import STRATEGIES
-    tranches = STRATEGIES.get(strategy, [{"tp_mult": 2.0, "sl_mult": 0.70, "horizon_min": 1440}])
+    tranches = STRATEGIES.get(strategy, [{"tp_mult": 2.0, "sl_mult": 0.70, "horizon_min": 120}])
     tranche = tranches[0]  # Live trades always use first tranche
 
     tp_price = execution_price * tranche["tp_mult"] if tranche.get("tp_mult") else None
@@ -446,7 +446,7 @@ def open_live_trade(client_sb, token_entry: dict, strategy: str,
         "strategy": strategy,
         "tp_price": tp_price,
         "sl_price": sl_price,
-        "horizon_minutes": tranche.get("horizon_min", 1440),
+        "horizon_minutes": tranche.get("horizon_min", 120),
         "tranche_pct": 1.0,
         "tranche_label": "main",
         "position_usd": round(position_usd, 2),
@@ -526,7 +526,7 @@ def check_live_trades(client_sb) -> dict:
         entry_price = float(trade["entry_price"])
         sl_price = float(trade["sl_price"])
         tp_price = float(trade["tp_price"]) if trade.get("tp_price") is not None else None
-        horizon = trade.get("horizon_minutes", 1440)
+        horizon = trade.get("horizon_minutes", 120)
 
         created_str = trade["created_at"]
         try:
