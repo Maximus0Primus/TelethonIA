@@ -1396,7 +1396,26 @@ def _rt_open_trades(ca: str, symbol: str, price: float, mcap: float,
     now = datetime.now(timezone.utc)
     total_opened = 0
 
-    # v96: Hybrid strategy — split position across configured allocations (no KOL gate)
+    # v102: KOL whitelist gate — rejected KOLs get shadow-only trades (no main trades).
+    # Shadow trades ALWAYS open for ALL KOLs (unbiased data collection).
+    kol_wl = _rt_load_kol_whitelist(config)
+    kol_entry = kol_wl.get(kol_username, {})
+    kol_approved = kol_entry.get("approved", True)  # default=True if KOL not in whitelist yet
+    if not kol_approved:
+        logger.info("RT KOL REJECTED (shadow-only): %s — opening shadows but no main trades", kol_username)
+        # Open shadow trades only (no main trades, no live trades)
+        shadow_config = dict(pt_config)
+        shadow_config["budget_usd"] = pos_size
+        shadow_config["active_strategies"] = []  # no main strategies → 0 main trades
+        shadow_config["top_n"] = 1
+        shadow_config["ca_filter"] = False
+        shadow_config["shadow_enabled"] = True
+        token_entry["_rt_experiment_id"] = pt_config.get("experiment_id")
+        token_entry["_rt_variant_id"] = "shadow_only_rejected_kol"
+        open_paper_trades(sb, [token_entry], cycle_ts=now, config=shadow_config)
+        return 0  # 0 main trades opened
+
+    # v96: Hybrid strategy — split position across configured allocations
     hybrid_cfg = config.get("hybrid_strategy", {})
     if hybrid_cfg.get("enabled", False):
         allocations = dict(hybrid_cfg.get("allocations", {"TP50_SL30": 0.50, "TP30_SL50": 0.30, "TP50_SL50": 0.20}))
