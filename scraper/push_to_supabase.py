@@ -742,15 +742,15 @@ def insert_snapshots(ranking: list[dict]) -> None:
     symbols = [t["symbol"] for t in ranking if t.get("symbol")]
     prev_snapshots = _fetch_previous_snapshots(client, symbols)
 
-    # v99: 1h dedup — skip tokens already snapshotted in the last hour
-    # (was 24h in v95, which blocked ALL tokens after the first cycle)
+    # v103: 35min dedup — skip tokens snapshotted in the last 35min (just over 1 cycle).
+    # v99 used 1h which was too aggressive for 30min cycles (blocked 2-3 cycles).
     # The DB unique constraint idx_snapshots_token_cycle prevents exact dupes;
-    # this 1h window just avoids redundant API calls for back-to-back cycles.
-    _1h_ago = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    # this window just avoids redundant inserts for back-to-back cycles.
+    _dedup_ago = (datetime.now(timezone.utc) - timedelta(minutes=35)).isoformat()
     try:
         dedup_result = client.table("token_snapshots") \
             .select("symbol, token_address") \
-            .gte("snapshot_at", _1h_ago) \
+            .gte("snapshot_at", _dedup_ago) \
             .execute()
         recent_keys = set()
         for r in (dedup_result.data or []):
@@ -765,7 +765,7 @@ def insert_snapshots(ranking: list[dict]) -> None:
     skipped_stale = 0
     skipped_dedup = 0
     for t in ranking:
-        # v99: 1h dedup check (was 24h in v95 — too aggressive)
+        # v103: 35min dedup check (was 1h in v99 — too aggressive for 30min cycles)
         dedup_key = (t.get("token_address") or t.get("symbol", "")).lower()
         if dedup_key and dedup_key in recent_keys:
             skipped_dedup += 1
@@ -1084,7 +1084,7 @@ def insert_snapshots(ranking: list[dict]) -> None:
     if skipped_stale:
         logger.info("Skipped %d zombie snapshots (freshest_mention > 48h)", skipped_stale)
     if skipped_dedup:
-        logger.info("Dedup: skipped %d tokens (already snapshotted in last 1h)", skipped_dedup)
+        logger.info("Dedup: skipped %d tokens (already snapshotted in last 35min)", skipped_dedup)
 
     if not rows:
         logger.info("No snapshots to insert (all filtered)")

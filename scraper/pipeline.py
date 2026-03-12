@@ -3353,7 +3353,9 @@ def aggregate_ranking(
                         # v14: Weighted mentions — updates/brags count 0.3x, short msgs 0.5x
                         token_data[token]["mentions"] += mention_weight
                         # v35b: Bot messages excluded from breadth/conviction/kol_counts
-                        if not is_forwarded and not is_bot_msg:
+                        # v103: Forwarded msgs now count for groups (KOL attribution).
+                        # They're legitimate reposts — excluding them broke batch kol_group (0.9% fill).
+                        if not is_bot_msg:
                             token_data[token]["groups"].add(group_name)
                         if not is_bot_msg:
                             token_data[token]["convictions"].append(conviction)

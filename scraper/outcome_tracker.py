@@ -916,6 +916,7 @@ def _mark_no_price(client: "Client", snap: dict, stats: dict) -> None:
     for hz in HORIZONS:
         if snap.get(hz["flag_col"]) is None:
             update_data[hz["max_col"]] = 0  # sentinel
+            update_data[hz["flag_col"]] = False  # v103: exit labeling queue
     if update_data:
         try:
             client.table("token_snapshots").update(update_data).eq("id", snap["id"]).execute()
@@ -939,6 +940,7 @@ def _mark_dead_pool(client: "Client", snap: dict, now_ts: float, stats: dict) ->
         for hz in HORIZONS:
             if snap.get(hz["flag_col"]) is None:
                 update_data[hz["max_col"]] = 0  # sentinel
+                update_data[hz["flag_col"]] = False  # v103: exit labeling queue
         if update_data:
             try:
                 client.table("token_snapshots").update(update_data).eq("id", snap["id"]).execute()
@@ -1005,9 +1007,11 @@ def _label_snapshot(
         if max_price is None:
             # v39: If snapshot is old enough (2x horizon), mark with sentinel to prevent
             # infinite retry. Candles exist but don't cover this horizon = permanently unfillable.
+            # v103: Also set flag_col=False so snapshot exits the labeling queue.
             age_h = (time.time() - snapshot_ts) / 3600
             if age_h > hours * 2:
                 update_data[hz["max_col"]] = 0  # sentinel: checked, no data
+                update_data[hz["flag_col"]] = False  # done (unknown outcome)
             continue
 
         # Sanity check
