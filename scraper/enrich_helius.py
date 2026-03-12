@@ -35,11 +35,11 @@ except ImportError:
     _monitoring = False
 
 CACHE_FILE = Path(__file__).parent / "helius_cache.json"
-CACHE_TTL_SECONDS = 4 * 3600  # v56: 4h (was 30min). Budget: 200×20CU×6/day×30 = 720K CU/month (fits 1M free tier)
+CACHE_TTL_SECONDS = 8 * 3600  # v103: 8h (was 4h). Saves ~50% credits. Holder distributions are slow-moving.
 
 # How many tokens to enrich per cycle
-# v58: 200 → 100. Free tier = 1M CU/month. At 200 + 4h TTL + 15min cron,
-# budget was exhausted by Feb 22. 100 tokens × 20CU × 6/day = 360K CU/month (safe).
+# v58: 200 → 100. Free tier = 1M CU/month.
+# v103: With 8h TTL → ~3 refreshes/day. 100×20CU×3/day×30 = 180K CU/month (safe).
 HELIUS_TOP_N = 100         # getTokenAccounts (holder analysis + bundles)
 HELIUS_SMART_MONEY_N = 5   # getSignaturesForAddress (transaction analysis)
 
@@ -714,10 +714,11 @@ def enrich_token_helius(
         whale_data = _analyze_whales(accounts, cache, mint)
         result.update(whale_data)
 
-        # On-chain BSR
-        # Always fetch signatures for Jito bundle detection (10 credits, negligible)
-        _helius_rate_limit()
-        signatures = _fetch_recent_signatures(mint, api_key)
+        # On-chain BSR + Jito bundle detection (10 credits/call)
+        signatures = None
+        if fetch_signatures:
+            _helius_rate_limit()
+            signatures = _fetch_recent_signatures(mint, api_key)
 
         if signatures:
             tx_metrics = _analyze_transactions(signatures)
