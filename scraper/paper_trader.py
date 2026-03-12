@@ -1268,7 +1268,8 @@ def kol_attribution(client, days: int = 7) -> dict:
                          kol, stats["tier"], stats["total"], stats["wr"]*100, stats["pnl_usd"])
 
     # v82 P2-2: Closed-loop — feed attribution back into kol_rt_whitelist
-    _update_whitelist_from_attribution(client, attribution, by_kol, days)
+    # v103: Disabled auto-update — whitelist is now manually managed
+    # _update_whitelist_from_attribution(client, attribution, by_kol, days)
 
     return attribution
 
