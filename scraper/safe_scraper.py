@@ -515,12 +515,18 @@ def process_and_push(messages_data: dict[str, list[dict]], dump: bool = False,
             logger.info("Inserted %d extra snapshots from 7d window", len(extra_7d))
 
     # Paper trading: open new positions (config-driven)
+    # v104: batch_trading_enabled flag — when False, batch cycles only collect data (snapshots/scoring)
+    # and skip opening paper trades. RT trades are unaffected.
     try:
         from paper_trader import open_paper_trades, _load_paper_trade_config
         if data_24h:
             sb_pt = _get_supabase()
             pt_config = _load_paper_trade_config(sb_pt)
-            open_paper_trades(sb_pt, data_24h, cycle_ts=datetime.now(timezone.utc), config=pt_config)
+            batch_enabled = pt_config.get("batch_trading_enabled", True)
+            if batch_enabled:
+                open_paper_trades(sb_pt, data_24h, cycle_ts=datetime.now(timezone.utc), config=pt_config)
+            else:
+                logger.info("Batch paper trading disabled (batch_trading_enabled=false) — data collection only")
     except Exception as e:
         logger.error("Paper trading (open) failed: %s", e)
 
