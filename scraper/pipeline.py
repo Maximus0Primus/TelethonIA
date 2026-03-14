@@ -398,6 +398,8 @@ _CA_CACHE_TTL = 24 * 3600  # 24h — symbols don't change
 def _load_kol_win_rates() -> dict[str, dict]:
     """
     v56: Load per-KOL win rates from kol_call_outcomes (last 14 days).
+    v105: Use did_50pct_2h (50% gain within 2h) instead of did_2x (ATH-based, misleading).
+          Falls back to did_2x for rows where windowed data hasn't been filled yet.
     Returns {kol_group: {"wr": float, "total": int}}.
     """
     try:
@@ -411,9 +413,8 @@ def _load_kol_win_rates() -> dict[str, dict]:
             f"{url}/rest/v1/kol_call_outcomes",
             headers={"apikey": key, "Authorization": f"Bearer {key}"},
             params={
-                "select": "kol_group,token_address,did_2x,call_timestamp",
+                "select": "kol_group,token_address,did_2x,did_50pct_2h,return_2h,call_timestamp",
                 "entry_price": "not.is.null",
-                "max_return": "not.is.null",
                 "call_timestamp": f"gte.{cutoff}",
                 "order": "call_timestamp.asc",
             },
@@ -440,7 +441,14 @@ def _load_kol_win_rates() -> dict[str, dict]:
                 continue
             seen_combos.add(combo)
             stats[g]["total"] += 1
-            if r.get("did_2x"):
+            # v105: Prefer did_50pct_2h (windowed, comparable to PT TP50/2h timeout).
+            # Fall back to did_2x only if windowed data not yet available.
+            did_win_2h = r.get("did_50pct_2h")
+            if did_win_2h is not None:
+                if did_win_2h:
+                    stats[g]["wins"] += 1
+            elif r.get("did_2x"):
+                # Fallback: old ATH-based metric (will phase out as windowed data fills)
                 stats[g]["wins"] += 1
         result = {}
         for g, s in stats.items():

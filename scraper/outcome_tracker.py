@@ -2388,7 +2388,7 @@ def _kco_phase_c_update_ath(client: Client, pool_cache: dict, stats: dict, start
     try:
         result = (
             client.table("kol_call_outcomes")
-            .select("id, token_address, symbol, call_timestamp, pair_address, entry_price, ath_after_call")
+            .select("id, token_address, symbol, call_timestamp, pair_address, entry_price, ath_after_call, max_price_1h, max_price_2h, max_price_6h, max_price_24h")
             .not_.is_("entry_price", "null")
             # v51: include dead_no_ohlcv — Phase B may have found entry_price
             # but Phase C never ran. Give them a chance to compute ATH.
@@ -2489,6 +2489,9 @@ def _kco_phase_c_update_ath(client: Client, pool_cache: dict, stats: dict, start
             continue
 
         # For each row, find max high AFTER its call_timestamp
+        # v105: Also compute windowed max prices (1h, 2h, 6h, 24h) for fair KCO comparison with PT
+        WINDOW_SECS = {"1h": 3600, "2h": 7200, "6h": 21600, "24h": 86400}
+
         for row, call_ts in call_timestamps:
             current_ath = float(row.get("ath_after_call") or 0)
 
@@ -2497,12 +2500,19 @@ def _kco_phase_c_update_ath(client: Client, pool_cache: dict, stats: dict, start
             max_high = 0.0
             ath_ts = None
             post_call_candles = []
+            # v105: windowed max prices
+            windowed_max = {w: 0.0 for w in WINDOW_SECS}
             for candle in candles:
                 if candle[0] >= call_ts:  # candle timestamp >= call time
                     post_call_candles.append(candle)
                     if candle[2] > max_high:  # candle high
                         max_high = candle[2]
                         ath_ts = candle[0]
+                    # v105: check each time window
+                    elapsed = candle[0] - call_ts
+                    for w_name, w_secs in WINDOW_SECS.items():
+                        if elapsed <= w_secs and candle[2] > windowed_max[w_name]:
+                            windowed_max[w_name] = candle[2]
 
             # v82: Track min price BEFORE ATH for drawdown computation
             min_low_before_ath = float("inf")
@@ -2549,6 +2559,18 @@ def _kco_phase_c_update_ath(client: Client, pool_cache: dict, stats: dict, start
             # Update ATH and max_return (did_2x is a GENERATED column — never set it!)
             update_data = {"last_checked_at": datetime.now(timezone.utc).isoformat()}
             entry = float(row["entry_price"])
+
+            # v105: Store windowed max prices (only if we have data for that window)
+            call_age_secs = now_ts - call_ts
+            for w_name, w_secs in WINDOW_SECS.items():
+                col = f"max_price_{w_name}"
+                existing_val = row.get(col)
+                if existing_val:
+                    # Already filled in a previous cycle — don't overwrite
+                    continue
+                if windowed_max[w_name] > 0 and call_age_secs >= w_secs:
+                    # Window fully elapsed — data is final, write it
+                    update_data[col] = float(windowed_max[w_name])
 
             if max_high > current_ath:
                 update_data["ath_after_call"] = float(max_high)

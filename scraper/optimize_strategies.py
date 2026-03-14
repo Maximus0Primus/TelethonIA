@@ -80,8 +80,9 @@ def _build_kol_whitelist(sb, wr_threshold: float = 0.55,
     while True:
         resp = (
             sb.table("kol_call_outcomes")
-            .select("kol_group,max_return")
-            .not_.is_("max_return", "null")
+            # v105: fetch return_2h (windowed) alongside max_return (ATH fallback)
+            .select("kol_group,max_return,return_2h")
+            .not_.is_("entry_price", "null")
             .range(offset, offset + page_size - 1)
             .execute()
         )
@@ -94,11 +95,17 @@ def _build_kol_whitelist(sb, wr_threshold: float = 0.55,
             break
 
     # Group by kol_group and compute WR
+    # v105: prefer return_2h (comparable to PT 2h timeout), fall back to max_return (ATH)
     kol_stats = defaultdict(lambda: {"total": 0, "hits": 0})
     for row in all_outcomes:
         g = row["kol_group"]
+        ret_2h = row.get("return_2h")
+        ret_ath = row.get("max_return")
+        ret = float(ret_2h) if ret_2h is not None else (float(ret_ath) if ret_ath is not None else 0)
+        if ret == 0:
+            continue
         kol_stats[g]["total"] += 1
-        if float(row["max_return"]) >= return_threshold:
+        if ret >= return_threshold:
             kol_stats[g]["hits"] += 1
 
     approved = set()
