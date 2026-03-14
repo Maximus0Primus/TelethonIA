@@ -40,8 +40,10 @@ BIRDEYE_TOKEN_OVERVIEW_URL = "https://public-api.birdeye.so/defi/token_overview"
 BIRDEYE_TOKEN_SECURITY_URL = "https://public-api.birdeye.so/defi/token_security"
 
 # Max tokens to enrich via Birdeye per cycle (free tier = 30K CUs/month)
-# Raised from 5 → 20: ~600 CU/cycle × 96 cycles/day = ~18K CU/month (within 30K limit)
-BIRDEYE_TOP_N = 20
+# v105: Lowered 20 → 5. At 20, actual cost was ~57K CU/day (1.7M/month) → silent 429s.
+# 5 tokens × 30 CU × 96 cycles/day × 30 days = ~432K CU/month — still tight, but cache
+# TTL (1h) means most calls are cache hits. Effective new calls ≈ 5 × 30 × 24 = 3.6K/day.
+BIRDEYE_TOP_N = 5
 
 
 def load_enrichment_config(client) -> None:
