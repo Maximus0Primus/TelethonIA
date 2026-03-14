@@ -427,23 +427,58 @@ def send_summary():
         elif st == "timeout":
             shadow_strats[s]["to"] += 1
 
-    shadow_lines = []
-    for s in sorted(shadow_strats, key=lambda x: shadow_strats[x]["pnl"], reverse=True):
-        sd = shadow_strats[s]
-        n = sd["n"]
-        wr = round(sd["wins"] / n * 100) if n else 0
-        roi = round(sd["pnl"] / (VIRTUAL_POS * n) * 100, 1) if n else 0
-        sign = "📈" if sd["pnl"] >= 0 else "📉"
-        shadow_lines.append(
-            f"  {sign} {s}: {n}t WR {wr}% TP{sd['tp']}/SL{sd['sl']}/TO{sd['to']} "
-            f"ROI {roi:+.1f}%"
-        )
+    # v105: Split standard vs scalp strategies, show top/bottom to avoid Telegram length limit
+    standard_strats = {}
+    scalp_strats_summary = {}
+    for s, sd in shadow_strats.items():
+        if s.startswith("SCALP_"):
+            scalp_strats_summary[s] = sd
+        else:
+            standard_strats[s] = sd
+
+    def _format_shadow_lines(strats_dict, max_lines=10):
+        lines = []
+        sorted_s = sorted(strats_dict, key=lambda x: strats_dict[x]["pnl"], reverse=True)
+        # Show top 5 + bottom 3 if too many
+        if len(sorted_s) > max_lines:
+            show = sorted_s[:5] + ["..."] + sorted_s[-3:]
+        else:
+            show = sorted_s
+        for s in show:
+            if s == "...":
+                hidden = len(sorted_s) - 8
+                lines.append(f"  ... {hidden} autres strategies ...")
+                continue
+            sd = strats_dict[s]
+            n = sd["n"]
+            wr = round(sd["wins"] / n * 100) if n else 0
+            roi = round(sd["pnl"] / (VIRTUAL_POS * n) * 100, 1) if n else 0
+            sign = "📈" if sd["pnl"] >= 0 else "📉"
+            lines.append(
+                f"  {sign} {s}: {n}t WR {wr}% TP{sd['tp']}/SL{sd['sl']}/TO{sd['to']} "
+                f"ROI {roi:+.1f}%"
+            )
+        return lines
+
     shadow_block = ""
-    if shadow_lines:
-        n_shadow = sum(1 for t in all_closed_7d if t.get("is_shadow"))
-        shadow_block = (
-            f"\n\n<b>🔬 Shadow Comparison 7j</b> (mêmes tokens, ${VIRTUAL_POS:.0f}/t virtuel, {n_shadow} shadow):\n"
-            + "\n".join(shadow_lines)
+    n_shadow = sum(1 for t in all_closed_7d if t.get("is_shadow"))
+    if standard_strats:
+        std_lines = _format_shadow_lines(standard_strats)
+        shadow_block += (
+            f"\n\n<b>🔬 Shadow 7j</b> (${VIRTUAL_POS:.0f}/t, {n_shadow} trades):\n"
+            + "\n".join(std_lines)
+        )
+    if scalp_strats_summary:
+        scalp_lines = _format_shadow_lines(scalp_strats_summary, max_lines=8)
+        total_scalp_n = sum(sd["n"] for sd in scalp_strats_summary.values())
+        total_scalp_wins = sum(sd["wins"] for sd in scalp_strats_summary.values())
+        total_scalp_pnl = sum(sd["pnl"] for sd in scalp_strats_summary.values())
+        scalp_wr = round(total_scalp_wins / total_scalp_n * 100) if total_scalp_n else 0
+        scalp_emoji = "📈" if total_scalp_pnl >= 0 else "📉"
+        shadow_block += (
+            f"\n\n<b>⚡ Scalp 7j</b> ({total_scalp_n}t, WR {scalp_wr}%, "
+            f"{scalp_emoji} ${total_scalp_pnl:+.0f}):\n"
+            + "\n".join(scalp_lines)
         )
 
     msg2 = (
