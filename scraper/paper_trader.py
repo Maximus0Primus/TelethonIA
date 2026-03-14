@@ -174,6 +174,30 @@ for _tp_nosl in [50, 60, 70, 80, 90, 100]:
 STRATEGIES.update(_GRID_STRATEGIES)
 SHADOW_STRATEGIES.extend(_GRID_STRATEGIES.keys())
 
+# v105: Scalp grid — small TP with fast timeouts (shadow-only, test volume strategy)
+# Hypothesis: catch the initial 10-20% pump within 15-30min of KOL call, exit fast.
+# TP10-20 × SL10-30 + NOSL, with 15min and 30min timeouts.
+_SCALP_STRATEGIES = {}
+for _tp_s in [10, 15, 20]:
+    for _sl_s in [10, 15, 20, 30]:
+        if _sl_s > _tp_s * 2:
+            continue  # skip nonsensical combos like TP10_SL30
+        _timeout = 15 if _tp_s <= 15 else 30
+        _sname = f"SCALP_TP{_tp_s}_SL{_sl_s}_{_timeout}m"
+        _SCALP_STRATEGIES[_sname] = [
+            {"pct": 1.0, "tp_mult": 1 + _tp_s / 100, "sl_mult": 1 - _sl_s / 100,
+             "horizon_min": _timeout, "label": "main"},
+        ]
+    # NOSL variant
+    _timeout_nosl = 15 if _tp_s <= 15 else 30
+    _SCALP_STRATEGIES[f"SCALP_TP{_tp_s}_NOSL_{_timeout_nosl}m"] = [
+        {"pct": 1.0, "tp_mult": 1 + _tp_s / 100, "sl_mult": 0.20,
+         "horizon_min": _timeout_nosl, "label": "main"},
+    ]
+
+STRATEGIES.update(_SCALP_STRATEGIES)
+SHADOW_STRATEGIES.extend(_SCALP_STRATEGIES.keys())
+
 
 def _load_bot_predictions(client) -> None:
     """v88: Load precomputed bot ML predictions from Supabase (one query per cycle)."""
