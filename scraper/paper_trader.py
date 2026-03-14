@@ -421,7 +421,9 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
         logger.error("paper_trader: failed to check open trades: %s", e)
         open_combos = set()
 
-    # Cooldown dedup: check recently closed trades
+    # Cooldown dedup: check recently closed trades (main + shadow)
+    # v105: Apply cooldown to ALL trades (not just main). Shadow re-entries on the same
+    # token pollute data — a KOL re-calling a dead token generates 47 losing shadow trades.
     cooldown_combos = set()
     if dedup_cooldown_h > 0:
         cooldown_since = (cycle_ts - timedelta(hours=dedup_cooldown_h)).isoformat()
@@ -430,7 +432,6 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
                 client.table("paper_trades")
                 .select("token_address, strategy")
                 .neq("status", "open")
-                .eq("is_shadow", False)
                 .gte("exit_at", cooldown_since)
                 .in_("token_address", addrs)
                 .execute()
