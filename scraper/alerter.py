@@ -39,6 +39,12 @@ _COOLDOWNS = {
     "api_health_warning":  3600,   # v80: 1h between warnings (degraded 70-50%)
     "api_health_critical": 1800,   # v80: 30min between critiques (<50%)
     "api_health_ok":       7200,   # v80: 2h between "recovered" alerts
+    # v105: Live trading alerts
+    "live_trade_failed":   60,     # 1 min (alert every failure, backoff if chained)
+    "wallet_low":          1800,   # 30 min
+    "loss_limit_hit":      3600,   # 1 hour per period
+    "slippage_deviation":  300,    # 5 min
+    "score_anomaly":       3600,   # 1 hour
 }
 
 # Max consecutive alerts before going silent (0 = unlimited)
@@ -266,6 +272,67 @@ def alert_gh_actions_failure(workflow: str, step: str, error: str):
         f"<code>{_truncate(error, 200)}</code>"
     )
     _send(text, "gh_actions_failure")
+
+
+def alert_live_trade_failed(symbol: str, action: str, error: str):
+    """v105: Alert when a live buy/sell transaction fails."""
+    text = (
+        f"<b>LIVE {action} FAILED: ${symbol}</b>\n"
+        f"<code>{_truncate(error, 300)}</code>"
+    )
+    _send(text, "live_trade_failed")
+
+
+def alert_wallet_low(balance_sol: float):
+    """v105: Alert when wallet SOL balance is critically low."""
+    text = (
+        f"<b>WALLET LOW: {balance_sol:.4f} SOL</b>\n"
+        "Refill wallet to continue trading."
+    )
+    _send(text, "wallet_low")
+
+
+def alert_loss_limit_hit(period: str, pnl_sol: float, limit_sol: float):
+    """v105: Alert when daily/weekly/monthly loss limit is breached."""
+    text = (
+        f"<b>LOSS LIMIT HIT ({period.upper()})</b>\n"
+        f"PnL: {pnl_sol:+.4f} SOL (limit: -{limit_sol:.1f} SOL)\n"
+        "Live buying halted until period reset."
+    )
+    _send(text, "loss_limit_hit")
+
+
+def alert_slippage_deviation(symbol: str, expected_bps: int, actual_bps: int):
+    """v105: Alert when execution slippage exceeds tolerance."""
+    text = (
+        f"<b>SLIPPAGE ALERT: ${symbol}</b>\n"
+        f"Expected: {expected_bps} bps | Actual: {actual_bps} bps\n"
+        f"Deviation: {actual_bps - expected_bps:+d} bps"
+    )
+    _send(text, "slippage_deviation")
+
+
+def alert_score_anomaly(old_avg: float, new_avg: float):
+    """v105: Alert when average score drops significantly between cycles."""
+    drop_pct = round((1 - new_avg / old_avg) * 100, 0) if old_avg > 0 else 0
+    text = (
+        f"<b>SCORE ANOMALY</b>\n"
+        f"Avg score dropped {drop_pct:.0f}%: {old_avg:.1f} → {new_avg:.1f}\n"
+        "Possible cause: API failures, data pipeline issue."
+    )
+    _send(text, "score_anomaly")
+
+
+def alert_kol_silence(kol_name: str, hours_silent: float):
+    """v105: Alert when a whitelisted KOL has been silent too long."""
+    cat = f"kol_silence_{kol_name}"
+    if cat not in _COOLDOWNS:
+        _COOLDOWNS[cat] = 86400  # once per day per KOL
+    text = (
+        f"<b>KOL SILENT: {kol_name}</b>\n"
+        f"No mentions for {hours_silent:.0f}h (threshold: 48h)"
+    )
+    _send(text, cat)
 
 
 def _truncate(s: str, max_len: int) -> str:

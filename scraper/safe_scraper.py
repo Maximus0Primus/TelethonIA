@@ -1947,8 +1947,11 @@ async def main():
     async def monitor_loop():
         """v67: Health check loop — every 5 minutes, evaluate scraper health."""
         _last_daily_hour = -1
+        _monitor_iteration = 0
+        _last_avg_score = 0.0
         while True:
             await asyncio.sleep(300)  # 5 minutes
+            _monitor_iteration += 1
             try:
                 # Check cycle health
                 cs = _metrics.get_cycle_stats(5)
@@ -1982,6 +1985,42 @@ async def main():
                 total_mb = egress.get("total_mb", 0)
                 if total_mb >= 500:
                     alert_egress_warning(total_mb, egress.get("by_module", {}), 500)
+
+                # v105: Wallet balance check (every 30min = 6 iterations)
+                if _monitor_iteration % 6 == 0:
+                    try:
+                        from live_trader import get_wallet_balance
+                        from alerter import alert_wallet_low
+                        bal = await asyncio.get_event_loop().run_in_executor(
+                            None, get_wallet_balance
+                        )
+                        if bal and bal["sol_balance"] < 0.1:
+                            alert_wallet_low(bal["sol_balance"])
+                    except Exception:
+                        pass
+
+                # v105: KOL silence check (every 30min)
+                if _monitor_iteration % 6 == 0:
+                    try:
+                        from alerter import alert_kol_silence
+                        sb_kol = _get_supabase()
+                        if sb_kol:
+                            wl_kols = ["Luca_Apes", "PowsGemCalls", "degenncabal",
+                                       "donniesdegen", "darkocalls", "lollycalls"]
+                            cutoff = (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()
+                            for kol in wl_kols:
+                                res = await asyncio.get_event_loop().run_in_executor(
+                                    None,
+                                    lambda k=kol: sb_kol.table("kol_mentions")
+                                        .select("id", count="exact")
+                                        .eq("kol_group", k)
+                                        .gte("message_date", cutoff)
+                                        .execute()
+                                )
+                                if res.count is not None and res.count == 0:
+                                    alert_kol_silence(kol, 48)
+                    except Exception:
+                        pass
 
                 # Daily summary at 8h UTC
                 now_utc = datetime.now(timezone.utc)

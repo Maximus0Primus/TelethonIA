@@ -18,3 +18,7 @@ pandas-ta==0.4.71b0
 # torch>=2.2.0
 # Optional: Semantic narrative classification (22MB model, CPU only)
 # sentence-transformers>=3.0.0
+# Dev / testing
+pytest>=8.0.0
+pytest-mock>=3.14.0
+pytest-cov>=6.0.0

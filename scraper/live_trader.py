@@ -51,8 +51,10 @@ _daily_pnl_reset_date: str = ""
 _daily_halted: bool = False
 _weekly_pnl_sol: float = 0.0
 _weekly_pnl_reset_week: str = ""
+_weekly_halted: bool = False
 _monthly_pnl_sol: float = 0.0
 _monthly_pnl_reset_month: str = ""
+_monthly_halted: bool = False
 
 
 def _get_ultra_client():
@@ -325,10 +327,11 @@ def _check_loss_limits(config: dict) -> bool:
     """
     v73: Check daily + weekly + monthly loss limits.
     Returns True if trading should be halted.
+    v105: Now sends Telegram alert when limit is hit.
     """
     global _daily_pnl_sol, _daily_pnl_reset_date, _daily_halted
-    global _weekly_pnl_sol, _weekly_pnl_reset_week
-    global _monthly_pnl_sol, _monthly_pnl_reset_month
+    global _weekly_pnl_sol, _weekly_pnl_reset_week, _weekly_halted
+    global _monthly_pnl_sol, _monthly_pnl_reset_month, _monthly_halted
 
     now = datetime.now(timezone.utc)
     today = now.strftime("%Y-%m-%d")
@@ -343,9 +346,11 @@ def _check_loss_limits(config: dict) -> bool:
     if _weekly_pnl_reset_week != week:
         _weekly_pnl_sol = 0.0
         _weekly_pnl_reset_week = week
+        _weekly_halted = False
     if _monthly_pnl_reset_month != month:
         _monthly_pnl_sol = 0.0
         _monthly_pnl_reset_month = month
+        _monthly_halted = False
 
     daily_limit = float(config.get("daily_loss_limit_sol", 2.0))
     weekly_limit = float(config.get("weekly_loss_limit_sol", 5.0))
@@ -356,14 +361,33 @@ def _check_loss_limits(config: dict) -> bool:
             logger.warning("LIVE TRADING HALTED: daily loss %.4f SOL exceeds limit %.1f SOL",
                            _daily_pnl_sol, daily_limit)
             _daily_halted = True
+            try:
+                from alerter import alert_loss_limit_hit
+                alert_loss_limit_hit("daily", _daily_pnl_sol, daily_limit)
+            except Exception:
+                pass
         return True
     if _weekly_pnl_sol < -weekly_limit:
-        logger.warning("LIVE TRADING HALTED: weekly loss %.4f SOL exceeds limit %.1f SOL",
-                       _weekly_pnl_sol, weekly_limit)
+        if not _weekly_halted:
+            logger.warning("LIVE TRADING HALTED: weekly loss %.4f SOL exceeds limit %.1f SOL",
+                           _weekly_pnl_sol, weekly_limit)
+            _weekly_halted = True
+            try:
+                from alerter import alert_loss_limit_hit
+                alert_loss_limit_hit("weekly", _weekly_pnl_sol, weekly_limit)
+            except Exception:
+                pass
         return True
     if _monthly_pnl_sol < -monthly_limit:
-        logger.warning("LIVE TRADING HALTED: monthly loss %.4f SOL exceeds limit %.1f SOL",
-                       _monthly_pnl_sol, monthly_limit)
+        if not _monthly_halted:
+            logger.warning("LIVE TRADING HALTED: monthly loss %.4f SOL exceeds limit %.1f SOL",
+                           _monthly_pnl_sol, monthly_limit)
+            _monthly_halted = True
+            try:
+                from alerter import alert_loss_limit_hit
+                alert_loss_limit_hit("monthly", _monthly_pnl_sol, monthly_limit)
+            except Exception:
+                pass
         return True
     return False
 
@@ -444,6 +468,11 @@ def open_live_trade(client_sb, token_entry: dict, strategy: str,
     result = execute_buy(ca, lamports, slippage)
     if not result["success"]:
         logger.warning("live_trader: buy failed for %s: %s", symbol, result.get("error"))
+        try:
+            from alerter import alert_live_trade_failed
+            alert_live_trade_failed(symbol, "BUY", result.get("error", "unknown"))
+        except Exception:
+            pass
         return False
 
     # v74: Compute actual fill price from Jupiter response
@@ -477,6 +506,23 @@ def open_live_trade(client_sb, token_entry: dict, strategy: str,
     actual_slippage_bps = 0
     if execution_price > 0 and entry_price > 0:
         actual_slippage_bps = round((execution_price / entry_price - 1) * 10000)
+
+    # v105: Alert on high slippage
+    if abs(actual_slippage_bps) > 500:
+        try:
+            from alerter import alert_slippage_deviation
+            alert_slippage_deviation(symbol, slippage, actual_slippage_bps)
+        except Exception:
+            pass
+
+    # v105: Alert if wallet balance is low after buy
+    post_buy_balance = get_wallet_balance()
+    if post_buy_balance and post_buy_balance["sol_balance"] < 0.1:
+        try:
+            from alerter import alert_wallet_low
+            alert_wallet_low(post_buy_balance["sol_balance"])
+        except Exception:
+            pass
 
     row = {
         "cycle_ts": datetime.now(timezone.utc).isoformat(),
@@ -609,6 +655,11 @@ def check_live_trades(client_sb) -> dict:
                 "live_trader: sell failed for %s (%s) — keeping trade open (retry next cycle): %s",
                 trade["symbol"], new_status, sell_result.get("error"),
             )
+            try:
+                from alerter import alert_live_trade_failed
+                alert_live_trade_failed(trade["symbol"], "SELL", sell_result.get("error", "unknown"))
+            except Exception:
+                pass
             continue
 
         # v74: Use actual SOL received from Jupiter to compute real exit price
@@ -639,6 +690,14 @@ def check_live_trades(client_sb) -> dict:
             expected_usd = pos_usd * (1 + pnl_pct)  # what we'd get at exit_price
             if expected_usd > 0:
                 sell_slippage_bps = round((1 - usd_received_actual / expected_usd) * 10000)
+
+        # v105: Alert on high sell slippage
+        if abs(sell_slippage_bps) > 500:
+            try:
+                from alerter import alert_slippage_deviation
+                alert_slippage_deviation(trade["symbol"], 500, sell_slippage_bps)
+            except Exception:
+                pass
 
         update = {
             "status": new_status,
