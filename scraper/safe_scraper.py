@@ -2104,8 +2104,25 @@ async def main():
     paper_fast_task = asyncio.create_task(paper_fast_check_loop())
 
     try:
+        _recon_last_run = 0  # v105: track last reconciliation time
         while True:
             cycle_start = time.time()
+
+            # v105: Run reconciliation every 4 hours (not just on startup)
+            if time.time() - _recon_last_run > 14400:  # 4h
+                try:
+                    from live_trader import reconcile_positions
+                    sb_recon2 = _get_supabase()
+                    if sb_recon2:
+                        recon2 = await asyncio.get_event_loop().run_in_executor(
+                            None, reconcile_positions, sb_recon2
+                        )
+                        if recon2["mismatches"] > 0:
+                            logger.warning("Periodic reconciliation: %d mismatches", recon2["mismatches"])
+                    _recon_last_run = time.time()
+                except Exception as e:
+                    logger.debug("Periodic reconciliation skipped: %s", e)
+
             try:
                 await run_one_cycle(client)
             except Exception as e:

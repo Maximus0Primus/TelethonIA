@@ -10,6 +10,13 @@ Safety guards:
 - max_open_positions: max concurrent live trades
 - min_sol_reserve: always keep SOL for fees
 - daily_loss_limit_sol: auto-disable buying for the day
+
+MEV/Slippage (v105):
+  Jupiter Ultra API uses RFQ (Request for Quote) — market makers give guaranteed
+  fill prices, NOT routed through AMMs. This provides inherent MEV protection:
+  - No sandwich attack surface (order goes directly to market maker)
+  - Fill price is fixed at quote time (no AMM price impact)
+  - slippageBps is optional tolerance on quoted price (default 300 buy, 500 sell)
 """
 
 import os
@@ -129,11 +136,39 @@ def get_wallet_balance() -> dict | None:
         return None
 
 
+def _order_with_slippage(client, order_request, slippage_bps: int):
+    """
+    v105: Call Jupiter Ultra /order with slippageBps param.
+    The SDK's UltraOrderRequest doesn't include slippageBps, so we inject it
+    into the query params manually. Then sign + execute as usual.
+    """
+    from jup_python_sdk.models.ultra_api.ultra_execute_request_model import UltraExecuteRequest
+
+    params = order_request.to_dict()
+    params["slippageBps"] = slippage_bps
+
+    url = f"{client.base_url}/ultra/v1/order"
+    response = client.client.get(url, params=params, headers=client._get_headers())
+    response.raise_for_status()
+    order_response = response.json()
+
+    request_id = order_response["requestId"]
+    signed_transaction = client._sign_base64_transaction(order_response["transaction"])
+
+    execute_request = UltraExecuteRequest(
+        request_id=request_id,
+        signed_transaction=client._serialize_versioned_transaction(signed_transaction),
+    )
+    return client.execute(execute_request)
+
+
 def execute_buy(ca: str, amount_sol_lamports: int, slippage_bps: int = 300) -> dict:
     """
     Execute a buy swap: SOL → token via Jupiter Ultra.
+    v105: Now passes slippageBps to the Ultra /order endpoint for price tolerance.
     Returns {"success": bool, "signature": str, "status": str, "error": str|None,
-             "input_amount": int|None, "output_amount": int|None}
+             "input_amount": int|None, "output_amount": int|None,
+             "slippage_bps": int}
     """
     client = _get_ultra_client()
     if not client:
@@ -149,7 +184,7 @@ def execute_buy(ca: str, amount_sol_lamports: int, slippage_bps: int = 300) -> d
             taker=client._get_public_key(),
         )
 
-        response = client.order_and_execute(order)
+        response = _order_with_slippage(client, order, slippage_bps)
         status = response.get("status", "Unknown")
         signature = str(response.get("signature", ""))
         success = status == "Success"
@@ -160,9 +195,9 @@ def execute_buy(ca: str, amount_sol_lamports: int, slippage_bps: int = 300) -> d
 
         if success:
             logger.info(
-                "LIVE BUY: %s | %s SOL → %s tokens (sig: %s...)",
+                "LIVE BUY: %s | %s SOL → %s tokens | slip=%dbps (sig: %s...)",
                 ca[:12], amount_sol_lamports / LAMPORTS_PER_SOL,
-                output_amount or "?", signature[:16],
+                output_amount or "?", slippage_bps, signature[:16],
             )
         else:
             logger.warning(
@@ -177,6 +212,7 @@ def execute_buy(ca: str, amount_sol_lamports: int, slippage_bps: int = 300) -> d
             "error": response.get("error") if not success else None,
             "input_amount": input_amount,
             "output_amount": output_amount,
+            "slippage_bps": slippage_bps,
         }
     except Exception as e:
         logger.error("LIVE BUY ERROR: %s | %s", ca[:12], e)
@@ -187,8 +223,10 @@ def execute_sell(ca: str, amount_tokens: int | None = None, slippage_bps: int = 
     """
     Execute a sell swap: token → SOL via Jupiter Ultra.
     If amount_tokens is None, sells entire balance of that token.
+    v105: Now passes slippageBps to the Ultra /order endpoint.
     Returns {"success": bool, "signature": str, "status": str, "error": str|None,
-             "input_amount": int|None, "output_amount": int|None}
+             "input_amount": int|None, "output_amount": int|None,
+             "slippage_bps": int}
     """
     client = _get_ultra_client()
     if not client:
@@ -214,7 +252,7 @@ def execute_sell(ca: str, amount_tokens: int | None = None, slippage_bps: int = 
             taker=client._get_public_key(),
         )
 
-        response = client.order_and_execute(order)
+        response = _order_with_slippage(client, order, slippage_bps)
         status = response.get("status", "Unknown")
         signature = str(response.get("signature", ""))
         success = status == "Success"
@@ -226,8 +264,8 @@ def execute_sell(ca: str, amount_tokens: int | None = None, slippage_bps: int = 
         if success:
             sol_received = output_amount / LAMPORTS_PER_SOL if output_amount else "?"
             logger.info(
-                "LIVE SELL: %s | %d tokens → %s SOL (sig: %s...)",
-                ca[:12], amount_tokens, sol_received, signature[:16],
+                "LIVE SELL: %s | %d tokens → %s SOL | slip=%dbps (sig: %s...)",
+                ca[:12], amount_tokens, sol_received, slippage_bps, signature[:16],
             )
         else:
             logger.warning(
@@ -242,6 +280,7 @@ def execute_sell(ca: str, amount_tokens: int | None = None, slippage_bps: int = 
             "error": response.get("error") if not success else None,
             "input_amount": input_amount,
             "output_amount": output_amount,
+            "slippage_bps": slippage_bps,
         }
     except Exception as e:
         logger.error("LIVE SELL ERROR: %s | %s", ca[:12], e)
@@ -434,6 +473,11 @@ def open_live_trade(client_sb, token_entry: dict, strategy: str,
     tp_price = execution_price * tranche["tp_mult"] if tranche.get("tp_mult") else None
     sl_price = execution_price * tranche["sl_mult"]
 
+    # v105: Compute actual slippage from fill vs estimated price
+    actual_slippage_bps = 0
+    if execution_price > 0 and entry_price > 0:
+        actual_slippage_bps = round((execution_price / entry_price - 1) * 10000)
+
     row = {
         "cycle_ts": datetime.now(timezone.utc).isoformat(),
         "symbol": symbol,
@@ -463,6 +507,11 @@ def open_live_trade(client_sb, token_entry: dict, strategy: str,
         "rt_buy_sell_ratio": token_entry.get("_rt_buy_sell_ratio"),
         "rt_token_age_hours": token_entry.get("_rt_token_age_hours"),
         "rt_is_pump_fun": token_entry.get("_rt_is_pump_fun"),
+        # v105: Fee tracking — actual execution metrics
+        "buy_slippage_bps": actual_slippage_bps,
+        "buy_fee_bps": slippage,  # configured tolerance
+        "sol_price_at_entry": sol_price,
+        "position_sol": round(position_sol, 6),
     }
 
     try:
@@ -581,6 +630,16 @@ def check_live_trades(client_sb) -> dict:
         pnl_sol = pnl_usd / sol_price if sol_price > 0 else 0
         _track_pnl(pnl_sol)
 
+        # v105: Compute sell slippage (actual SOL received vs expected)
+        sell_slippage_bps = 0
+        sol_price_at_exit = _get_sol_price_usd()
+        if sell_output and sell_output > 0 and pos_usd > 0:
+            sol_received = sell_output / LAMPORTS_PER_SOL
+            usd_received_actual = sol_received * sol_price_at_exit
+            expected_usd = pos_usd * (1 + pnl_pct)  # what we'd get at exit_price
+            if expected_usd > 0:
+                sell_slippage_bps = round((1 - usd_received_actual / expected_usd) * 10000)
+
         update = {
             "status": new_status,
             "exit_price": exit_price,
@@ -589,6 +648,9 @@ def check_live_trades(client_sb) -> dict:
             "pnl_usd": pnl_usd,
             "exit_minutes": int(elapsed_minutes),
             "tx_signature_exit": sell_result["signature"],
+            # v105: Fee tracking
+            "sell_slippage_bps": sell_slippage_bps,
+            "sol_price_at_exit": sol_price_at_exit,
         }
 
         # DB update with retry — sell already executed, must not leave trade as 'open'
