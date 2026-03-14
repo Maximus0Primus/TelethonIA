@@ -258,12 +258,22 @@ def send_summary():
     rt_line = _source_line("rt", trades_24h)
     batch_line = _source_line("batch", trades_24h)  # "batch" → filters source != "rt"
 
-    # v92: Legacy summary line (compact, only if there are legacy trades closing)
+    # v105: Show ALL trades total (active + legacy) so the summary never hides losses
     legacy_block = ""
     if legacy_24h:
         leg_pnl = sum(float(t.get("pnl_usd") or 0) for t in legacy_24h)
+        leg_inv = sum(float(t.get("position_usd") or 0) for t in legacy_24h)
         leg_n = len(legacy_24h)
-        legacy_block = f"\n\n<i>Legacy ({leg_n}t fermés): ${leg_pnl:+.0f} (non inclus ci-dessus)</i>"
+        all_pnl = pnl_24h + leg_pnl
+        all_inv = invested_24h + leg_inv
+        all_n = n_closed + leg_n
+        all_roi = round(all_pnl / all_inv * 100, 1) if all_inv > 0 else 0
+        all_emoji = "📈" if all_pnl >= 0 else "📉"
+        legacy_block = (
+            f"\n\n<b>Bilan TOTAL 24h (legacy inclus):</b>"
+            f"\n  {all_emoji} {all_n}t | ${all_pnl:+.2f}/${all_inv:.0f} (ROI {all_roi:+.1f}%)"
+            f"\n  <i>dont legacy: {leg_n}t ${leg_pnl:+.0f}</i>"
+        )
 
     # v94: Fee + slippage estimation (fees are baked into PnL via entry/exit prices)
     # Estimate: buy_fee(0.5%) + sell_fee(0.5%) + buy_slip(~1.5%) + sell_slip(~2.5%) ≈ 4.5% round-trip
@@ -377,12 +387,22 @@ def send_summary():
         if all_lines:
             kol_block = "\n\n<b>KOL Leaderboard 7j:</b>\n" + "\n".join(all_lines)
 
-    # v92: Legacy summary for msg2
+    # v105: Show ALL trades total (active + legacy) for 7d too
     legacy_block_7d = ""
     if legacy_7d:
         leg7_pnl = sum(float(t.get("pnl_usd") or 0) for t in legacy_7d)
+        leg7_inv = sum(float(t.get("position_usd") or 0) for t in legacy_7d)
         leg7_n = len(legacy_7d)
-        legacy_block_7d = f"\n\n<i>Legacy ({leg7_n}t): ${leg7_pnl:+.0f} (non inclus ci-dessus)</i>"
+        all7_pnl = total_7d_pnl + leg7_pnl
+        all7_inv = total_7d_inv + leg7_inv
+        all7_n = len(trades_7d) + leg7_n
+        all7_roi = round(all7_pnl / all7_inv * 100, 1) if all7_inv > 0 else 0
+        all7_emoji = "📈" if all7_pnl >= 0 else "📉"
+        legacy_block_7d = (
+            f"\n\n<b>Bilan TOTAL 7j (legacy inclus):</b>"
+            f"\n  {all7_emoji} {all7_n}t | ${all7_pnl:+.0f}/${all7_inv:.0f} (ROI {all7_roi:+.1f}%)"
+            f"\n  <i>dont legacy: {leg7_n}t ${leg7_pnl:+.0f}</i>"
+        )
 
     # ── Shadow Strategy Comparison (all strategies on same tokens) ──
     # Combine real + shadow trades for apples-to-apples comparison using pnl_pct
