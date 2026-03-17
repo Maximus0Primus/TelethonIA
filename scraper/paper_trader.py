@@ -196,6 +196,30 @@ for _tp_s in [10, 15, 20]:
 STRATEGIES.update(_SCALP_STRATEGIES)
 SHADOW_STRATEGIES.extend(_SCALP_STRATEGIES.keys())
 
+# v106: Time-decay TP grid — shadow-only A/B test.
+# Concept: TP threshold decays linearly from tp_mult to tp_decay_end over the
+# second half of the horizon. Captures "wasted pumps" that spike then fade.
+# Field `tp_decay_end` on a tranche activates this; absence = normal TP.
+_DECAY_STRATEGIES = {}
+for _tp_d, _sl_d, _end_d in [
+    (100, 50, 20),   # TP100 decay→20%, SL50
+    (100, 50, 15),   # TP100 decay→15%, SL50
+    (100, 50, 30),   # TP100 decay→30%, SL50
+    (70,  50, 15),   # TP70 decay→15%, SL50
+    (50,  30, 15),   # TP50 decay→15%, SL30
+    (50,  50, 15),   # TP50 decay→15%, SL50
+]:
+    _dname = f"DECAY_TP{_tp_d}_SL{_sl_d}_E{_end_d}"
+    _DECAY_STRATEGIES[_dname] = [
+        {"pct": 1.0, "tp_mult": 1 + _tp_d / 100,
+         "sl_mult": 1 - _sl_d / 100, "horizon_min": 120,
+         "tp_decay_end": 1 + _end_d / 100,   # e.g., 1.20 for +20%
+         "label": "main"},
+    ]
+
+STRATEGIES.update(_DECAY_STRATEGIES)
+SHADOW_STRATEGIES.extend(_DECAY_STRATEGIES.keys())
+
 
 def _load_bot_predictions(client) -> None:
     """v88: Load precomputed bot ML predictions from Supabase (one query per cycle)."""
@@ -713,6 +737,18 @@ def _dynamic_sell_slip_factor(trade: dict, exit_type: str, base_bps: int = 200,
     return 1 - adjusted_bps / 10_000
 
 
+# v106: Parse tp_decay_end from DECAY strategy names
+import re as _re
+_DECAY_RE = _re.compile(r"^DECAY_TP\d+_SL\d+_E(\d+)$")
+
+def _get_decay_end(strategy_name: str) -> float | None:
+    """Extract tp_decay_end multiplier from strategy name, or None if not a decay strategy."""
+    m = _DECAY_RE.match(strategy_name)
+    if m:
+        return 1 + int(m.group(1)) / 100  # e.g., E20 → 1.20
+    return None
+
+
 def _evaluate_trade_exit(trade: dict, current_price: float | None,
                          now: datetime, sell_slip_factor: float,
                          sl_cascade: bool = False,
@@ -765,6 +801,22 @@ def _evaluate_trade_exit(trade: dict, current_price: float | None,
         elif tp_price is not None and current_price >= tp_price:
             new_status = "tp_hit"
             exit_price = tp_price * _dynamic_sell_slip_factor(trade, "tp_hit", base_bps, sell_fee_bps)
+        # 3b) v106: Time-decay TP — threshold decreases in second half of horizon
+        #     Derive tp_decay_end from strategy name (DECAY_TPxx_SLyy_Ezz → 1 + zz/100)
+        elif tp_price is not None and _get_decay_end(trade.get("strategy", "")) is not None:
+            tp_decay_end = _get_decay_end(trade["strategy"])
+            tp_mult = tp_price / entry_price if entry_price > 0 else 1
+            activation_frac = 0.5  # decay starts at 50% of horizon
+            if elapsed_minutes > horizon * activation_frac:
+                decay_progress = (elapsed_minutes - horizon * activation_frac) / (horizon * (1 - activation_frac))
+                decay_progress = min(decay_progress, 1.0)
+                # Linear interpolation: tp_mult → tp_decay_end
+                decayed_mult = tp_mult - (tp_mult - tp_decay_end) * decay_progress
+                decayed_price = entry_price * decayed_mult
+                if current_price >= decayed_price:
+                    new_status = "tp_hit"
+                    # Exit at the decayed threshold, not the peak
+                    exit_price = decayed_price * _dynamic_sell_slip_factor(trade, "tp_hit", base_bps, sell_fee_bps)
     # 4) Timeout
     if new_status is None and elapsed_minutes >= horizon:
         new_status = "timeout"
