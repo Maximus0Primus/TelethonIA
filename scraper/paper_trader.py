@@ -220,6 +220,26 @@ for _tp_d, _sl_d, _end_d in [
 STRATEGIES.update(_DECAY_STRATEGIES)
 SHADOW_STRATEGIES.extend(_DECAY_STRATEGIES.keys())
 
+# v106: Fast timeout grid — 30min horizon A/B test vs standard 2h.
+# Hypothesis: 81% of TP hits happen in first 30min. Shorter timeout cuts losses.
+_FAST_STRATEGIES = {}
+for _tp_f, _sl_f in [
+    (100, 50),  # FAST_TP100_SL50
+    (50,  30),  # FAST_TP50_SL30
+    (50,  50),  # FAST_TP50_SL50
+    (70,  50),  # FAST_TP70_SL50
+    (40,  30),  # FAST_TP40_SL30
+]:
+    _fname = f"FAST_TP{_tp_f}_SL{_sl_f}"
+    _FAST_STRATEGIES[_fname] = [
+        {"pct": 1.0, "tp_mult": 1 + _tp_f / 100,
+         "sl_mult": 1 - _sl_f / 100, "horizon_min": 30,
+         "label": "main"},
+    ]
+
+STRATEGIES.update(_FAST_STRATEGIES)
+SHADOW_STRATEGIES.extend(_FAST_STRATEGIES.keys())
+
 
 def _load_bot_predictions(client) -> None:
     """v88: Load precomputed bot ML predictions from Supabase (one query per cycle)."""
