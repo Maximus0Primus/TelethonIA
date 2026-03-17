@@ -255,6 +255,39 @@ for _tp_f6, _sl_f6 in [
 STRATEGIES.update(_FAST60_STRATEGIES)
 SHADOW_STRATEGIES.extend(_FAST60_STRATEGIES.keys())
 
+# v106: 45min timeout grid — fills gap between 30min and 60min.
+_FAST45_STRATEGIES = {}
+for _tp_f45, _sl_f45 in [
+    (100, 50), (50, 30), (50, 50), (70, 50), (40, 30),
+]:
+    _f45name = f"FAST45_TP{_tp_f45}_SL{_sl_f45}"
+    _FAST45_STRATEGIES[_f45name] = [
+        {"pct": 1.0, "tp_mult": 1 + _tp_f45 / 100,
+         "sl_mult": 1 - _sl_f45 / 100, "horizon_min": 45,
+         "label": "main"},
+    ]
+
+STRATEGIES.update(_FAST45_STRATEGIES)
+SHADOW_STRATEGIES.extend(_FAST45_STRATEGIES.keys())
+
+# v106: Breakeven stop grid — once price exceeds entry*(1+be_activation),
+# the SL is moved UP to entry price (breakeven). You can't lose anymore.
+# Encoded in strategy name: BE{activation}_TP{tp}_SL{sl}
+# be_activation = minimum gain before breakeven activates (e.g., 20 = +20%)
+_BE_STRATEGIES = {}
+for _be_act in [15, 20, 30]:
+    for _tp_be, _sl_be in [(100, 50), (50, 30), (50, 50), (70, 50)]:
+        _bename = f"BE{_be_act}_TP{_tp_be}_SL{_sl_be}"
+        _BE_STRATEGIES[_bename] = [
+            {"pct": 1.0, "tp_mult": 1 + _tp_be / 100,
+             "sl_mult": 1 - _sl_be / 100, "horizon_min": 120,
+             "be_activation": _be_act / 100,  # e.g., 0.20
+             "label": "main"},
+        ]
+
+STRATEGIES.update(_BE_STRATEGIES)
+SHADOW_STRATEGIES.extend(_BE_STRATEGIES.keys())
+
 # v106: Trailing stop grid — exit when price drops X% from high_price_seen.
 # Activates only after price is above entry * (1 + trail_pct) to avoid
 # triggering on the initial dip right after entry.
@@ -818,6 +851,7 @@ def _dynamic_sell_slip_factor(trade: dict, exit_type: str, base_bps: int = 200,
 import re as _re
 _DECAY_RE = _re.compile(r"^DECAY_TP\d+_SL\d+_E(\d+)$")
 _TRAIL_RE = _re.compile(r"^TRAIL(\d+)_TP\d+_SL\d+$")
+_BE_RE = _re.compile(r"^BE(\d+)_TP\d+_SL\d+$")
 
 def _get_decay_end(strategy_name: str) -> float | None:
     """Extract tp_decay_end multiplier from strategy name, or None if not a decay strategy."""
@@ -886,10 +920,19 @@ def _evaluate_trade_exit(trade: dict, current_price: float | None,
         exit_price = sl_price * _dynamic_sell_slip_factor(trade, "sl_hit", base_bps, sell_fee_bps)
 
     elif current_price is not None:
-        # 2) SL check
-        if current_price <= sl_price:
+        # 2) SL check — with breakeven stop override
+        #    BE strategies: once peak exceeded entry*(1+be_act), SL moves to entry price
+        effective_sl = sl_price
+        be_match = _BE_RE.match(trade.get("strategy", ""))
+        if be_match and entry_price > 0 and high_seen > 0:
+            be_act = int(be_match.group(1)) / 100  # e.g., BE20 → 0.20
+            if high_seen >= entry_price * (1 + be_act):
+                # Breakeven activated — SL is now entry price
+                effective_sl = entry_price
+
+        if current_price <= effective_sl:
             new_status = "sl_hit"
-            exit_price = sl_price * _dynamic_sell_slip_factor(trade, "sl_hit", base_bps, sell_fee_bps)
+            exit_price = effective_sl * _dynamic_sell_slip_factor(trade, "sl_hit", base_bps, sell_fee_bps)
         # 3) TP check (only tranches with TP target)
         elif tp_price is not None and current_price >= tp_price:
             new_status = "tp_hit"
