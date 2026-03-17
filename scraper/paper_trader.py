@@ -240,6 +240,62 @@ for _tp_f, _sl_f in [
 STRATEGIES.update(_FAST_STRATEGIES)
 SHADOW_STRATEGIES.extend(_FAST_STRATEGIES.keys())
 
+# v106: 1h timeout grid — between 30min (FAST) and 2h (standard).
+_FAST60_STRATEGIES = {}
+for _tp_f6, _sl_f6 in [
+    (100, 50), (50, 30), (50, 50), (70, 50), (40, 30),
+]:
+    _f6name = f"FAST60_TP{_tp_f6}_SL{_sl_f6}"
+    _FAST60_STRATEGIES[_f6name] = [
+        {"pct": 1.0, "tp_mult": 1 + _tp_f6 / 100,
+         "sl_mult": 1 - _sl_f6 / 100, "horizon_min": 60,
+         "label": "main"},
+    ]
+
+STRATEGIES.update(_FAST60_STRATEGIES)
+SHADOW_STRATEGIES.extend(_FAST60_STRATEGIES.keys())
+
+# v106: Trailing stop grid — exit when price drops X% from high_price_seen.
+# Activates only after price is above entry * (1 + trail_pct) to avoid
+# triggering on the initial dip right after entry.
+# Encoded in strategy name: TRAIL{pct}_TP{tp}_SL{sl}
+_TRAIL_STRATEGIES = {}
+for _trail_pct in [10, 15, 20, 25]:
+    for _tp_tr, _sl_tr in [(100, 50), (50, 30), (50, 50), (70, 50)]:
+        _tname = f"TRAIL{_trail_pct}_TP{_tp_tr}_SL{_sl_tr}"
+        _TRAIL_STRATEGIES[_tname] = [
+            {"pct": 1.0, "tp_mult": 1 + _tp_tr / 100,
+             "sl_mult": 1 - _sl_tr / 100, "horizon_min": 120,
+             "trail_pct": _trail_pct / 100,  # e.g., 0.20 for -20% from peak
+             "label": "main"},
+        ]
+
+STRATEGIES.update(_TRAIL_STRATEGIES)
+SHADOW_STRATEGIES.extend(_TRAIL_STRATEGIES.keys())
+
+# v106: Split exit — 50% at TP50, 50% runner (TP100 or trailing stop).
+# Simpler version of SCALE_OUT (which had 4 tranches and -29% ROI).
+# Multi-tranche shadow support added in shadow insertion code.
+_SPLIT_STRATEGIES = {}
+for _sl_sp in [30, 50]:
+    # SPLIT_50_100: 50% at TP50, 50% at TP100
+    _SPLIT_STRATEGIES[f"SPLIT_50_100_SL{_sl_sp}"] = [
+        {"pct": 0.5, "tp_mult": 1.50, "sl_mult": 1 - _sl_sp / 100,
+         "horizon_min": 120, "label": "tp50_half"},
+        {"pct": 0.5, "tp_mult": 2.00, "sl_mult": 1 - _sl_sp / 100,
+         "horizon_min": 120, "label": "runner_half"},
+    ]
+    # SPLIT_50_TRAIL: 50% at TP50, 50% runner with trailing -20%
+    _SPLIT_STRATEGIES[f"SPLIT_50_TRAIL_SL{_sl_sp}"] = [
+        {"pct": 0.5, "tp_mult": 1.50, "sl_mult": 1 - _sl_sp / 100,
+         "horizon_min": 120, "label": "tp50_half"},
+        {"pct": 0.5, "tp_mult": None, "sl_mult": 1 - _sl_sp / 100,
+         "horizon_min": 120, "trail_pct": 0.20, "label": "trail_half"},
+    ]
+
+STRATEGIES.update(_SPLIT_STRATEGIES)
+SHADOW_STRATEGIES.extend(_SPLIT_STRATEGIES.keys())
+
 
 def _load_bot_predictions(client) -> None:
     """v88: Load precomputed bot ML predictions from Supabase (one query per cycle)."""
@@ -706,25 +762,26 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
                 if (addr, strat_name) in cooldown_combos:
                     continue
 
-                tranche = STRATEGIES[strat_name][0]  # single-tranche only
-                tp_price = entry_price * tranche["tp_mult"] if tranche["tp_mult"] else None
-                sl_price = entry_price * tranche["sl_mult"]
+                tranches = STRATEGIES[strat_name]
+                for tranche in tranches:
+                    tp_price = entry_price * tranche["tp_mult"] if tranche.get("tp_mult") else None
+                    sl_price = entry_price * tranche["sl_mult"]
 
-                row = {
-                    **shadow_base,
-                    "strategy": strat_name,
-                    "tp_price": tp_price,
-                    "sl_price": sl_price,
-                    "horizon_minutes": tranche["horizon_min"],
-                    "tranche_pct": 1.0,
-                    "tranche_label": "shadow",
-                }
-                try:
-                    client.table("paper_trades").insert(row).execute()
-                    shadow_opened += 1
-                except Exception as e:
-                    logger.error("paper_trader: shadow insert failed %s/%s: %s",
-                                 token.get("symbol"), strat_name, e)
+                    row = {
+                        **shadow_base,
+                        "strategy": strat_name,
+                        "tp_price": tp_price,
+                        "sl_price": sl_price,
+                        "horizon_minutes": tranche["horizon_min"],
+                        "tranche_pct": tranche["pct"],
+                        "tranche_label": tranche["label"],
+                    }
+                    try:
+                        client.table("paper_trades").insert(row).execute()
+                        shadow_opened += 1
+                    except Exception as e:
+                        logger.error("paper_trader: shadow insert failed %s/%s/%s: %s",
+                                     token.get("symbol"), strat_name, tranche["label"], e)
 
     allocs = [f"{t.get('symbol','?')}=${t.get('_alloc_usd',0):.1f}" for t in candidates]
     logger.info(
@@ -760,12 +817,28 @@ def _dynamic_sell_slip_factor(trade: dict, exit_type: str, base_bps: int = 200,
 # v106: Parse tp_decay_end from DECAY strategy names
 import re as _re
 _DECAY_RE = _re.compile(r"^DECAY_TP\d+_SL\d+_E(\d+)$")
+_TRAIL_RE = _re.compile(r"^TRAIL(\d+)_TP\d+_SL\d+$")
 
 def _get_decay_end(strategy_name: str) -> float | None:
     """Extract tp_decay_end multiplier from strategy name, or None if not a decay strategy."""
     m = _DECAY_RE.match(strategy_name)
     if m:
         return 1 + int(m.group(1)) / 100  # e.g., E20 → 1.20
+    return None
+
+def _get_trail_pct(trade: dict) -> float | None:
+    """Get trailing stop % from strategy name (TRAIL20_... → 0.20) or tranche config."""
+    # Check strategy name first
+    strat = trade.get("strategy", "")
+    m = _TRAIL_RE.match(strat)
+    if m:
+        return int(m.group(1)) / 100
+    # Check if SPLIT strategy runner tranche has trail_pct
+    # (stored in tranche config, matched by label containing 'trail')
+    label = trade.get("tranche_label", "")
+    if "trail" in label:
+        # For SPLIT_50_TRAIL strategies, the trail_pct is 0.20
+        return 0.20
     return None
 
 
@@ -837,6 +910,19 @@ def _evaluate_trade_exit(trade: dict, current_price: float | None,
                     new_status = "tp_hit"
                     # Exit at the decayed threshold, not the peak
                     exit_price = decayed_price * _dynamic_sell_slip_factor(trade, "tp_hit", base_bps, sell_fee_bps)
+    # 3c) v106: Trailing stop — exit when price drops trail_pct% from peak
+    #     Only activates once peak > entry * (1 + trail_pct) to avoid noise.
+    if new_status is None and current_price is not None:
+        trail_pct = _get_trail_pct(trade)
+        if trail_pct is not None and high_seen > 0 and entry_price > 0:
+            # Activation: peak must have exceeded entry by at least trail_pct
+            activation_price = entry_price * (1 + trail_pct)
+            if high_seen >= activation_price:
+                trail_trigger = high_seen * (1 - trail_pct)
+                if current_price <= trail_trigger and trail_trigger > entry_price:
+                    # Trailing stop triggered — exit at trigger price
+                    new_status = "tp_hit"
+                    exit_price = trail_trigger * _dynamic_sell_slip_factor(trade, "tp_hit", base_bps, sell_fee_bps)
     # 4) Timeout
     if new_status is None and elapsed_minutes >= horizon:
         new_status = "timeout"
