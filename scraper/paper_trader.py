@@ -428,8 +428,27 @@ def _passes_strategy_filter(token: dict, strategy_name: str) -> bool:
     return True
 
 
+def _fetch_price_fallback(address: str) -> float | None:
+    """Fallback: fetch price from GeckoTerminal (no API key needed, on-chain data).
+    Catches pool migrations and tokens DexScreener hasn't indexed yet."""
+    try:
+        resp = requests.get(
+            f"https://api.geckoterminal.com/api/v2/networks/solana/tokens/{address}",
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            return None
+        price = resp.json().get("data", {}).get("attributes", {}).get("price_usd")
+        if price:
+            return float(price)
+    except Exception:
+        pass
+    return None
+
+
 def _fetch_prices_batch(addresses: list[str]) -> dict[str, float]:
-    """Batch fetch current USD prices from DexScreener. Returns {address: price}."""
+    """Batch fetch current USD prices. DexScreener primary, Jupiter fallback.
+    v107: Jupiter fallback catches pool migrations that DexScreener misses."""
     if not addresses:
         return {}
     prices = {}
@@ -464,6 +483,19 @@ def _fetch_prices_batch(addresses: list[str]) -> dict[str, float]:
                         pass
         except requests.RequestException as e:
             logger.warning("paper_trader: DexScreener batch error: %s", e)
+
+    # v107: GeckoTerminal fallback for tokens DexScreener missed (pool migration, deindexing)
+    missing = [a for a in addresses if a not in prices]
+    if missing:
+        gecko_recovered = 0
+        for addr in missing:
+            fallback_price = _fetch_price_fallback(addr)
+            if fallback_price and fallback_price > 0:
+                prices[addr] = fallback_price
+                gecko_recovered += 1
+        if gecko_recovered:
+            logger.info("paper_trader: GeckoTerminal fallback recovered %d/%d missing prices", gecko_recovered, len(missing))
+
     return prices
 
 
