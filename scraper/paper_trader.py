@@ -270,6 +270,38 @@ for _tp_f45, _sl_f45 in [
 STRATEGIES.update(_FAST45_STRATEGIES)
 SHADOW_STRATEGIES.extend(_FAST45_STRATEGIES.keys())
 
+# v107: Slow timeout grid — 4h horizon A/B test vs standard 2h.
+# Hypothesis: some tokens need more time to pump. Test if longer timeout recovers value.
+_SLOW4H_STRATEGIES = {}
+for _tp_s4, _sl_s4 in [
+    (100, 50), (50, 30), (50, 50), (70, 50), (40, 30),
+]:
+    _s4name = f"SLOW4H_TP{_tp_s4}_SL{_sl_s4}"
+    _SLOW4H_STRATEGIES[_s4name] = [
+        {"pct": 1.0, "tp_mult": 1 + _tp_s4 / 100,
+         "sl_mult": 1 - _sl_s4 / 100, "horizon_min": 240,
+         "label": "main"},
+    ]
+
+STRATEGIES.update(_SLOW4H_STRATEGIES)
+SHADOW_STRATEGIES.extend(_SLOW4H_STRATEGIES.keys())
+
+# v107: Slow timeout grid — 6h horizon A/B test vs standard 2h.
+# If 6h is significantly better than 2h, we're leaving money on the table with early timeouts.
+_SLOW6H_STRATEGIES = {}
+for _tp_s6, _sl_s6 in [
+    (100, 50), (50, 30), (50, 50), (70, 50), (40, 30),
+]:
+    _s6name = f"SLOW6H_TP{_tp_s6}_SL{_sl_s6}"
+    _SLOW6H_STRATEGIES[_s6name] = [
+        {"pct": 1.0, "tp_mult": 1 + _tp_s6 / 100,
+         "sl_mult": 1 - _sl_s6 / 100, "horizon_min": 360,
+         "label": "main"},
+    ]
+
+STRATEGIES.update(_SLOW6H_STRATEGIES)
+SHADOW_STRATEGIES.extend(_SLOW6H_STRATEGIES.keys())
+
 # v106: Breakeven stop grid — once price exceeds entry*(1+be_activation),
 # the SL is moved UP to entry price (breakeven). You can't lose anymore.
 # Encoded in strategy name: BE{activation}_TP{tp}_SL{sl}
