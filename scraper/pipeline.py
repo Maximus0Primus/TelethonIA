@@ -1336,6 +1336,17 @@ def _apply_ml_scores(ranking: list[dict]) -> None:
         ranks = rankdata(combined) / len(combined)
         ml_multipliers = ml_floor + ranks * (ml_cap - ml_floor)
 
+        # v107: Standalone ml_score — percentile rank of combined prediction (0-100)
+        # Independent of formula score; used for ML-primary ranking in frontend.
+        ml_score_ranks = rankdata(combined) / len(combined)  # 0..1 percentile
+        for token, pct in zip(ranking, ml_score_ranks):
+            token["ml_score"] = int(round(pct * 100))
+
+        logger.info("ml_score assigned: min=%d, max=%d, median=%d",
+                     int(ml_score_ranks.min() * 100),
+                     int(ml_score_ranks.max() * 100),
+                     int(np.median(ml_score_ranks) * 100))
+
         # Calibrated win probabilities from best calibrator
         if best_calibrator is not None:
             try:
@@ -1346,6 +1357,10 @@ def _apply_ml_scores(ranking: list[dict]) -> None:
                             float(calibrated.min()), float(calibrated.max()))
             except Exception as cal_err:
                 logger.warning("Calibration failed: %s", cal_err)
+
+        # v107: Bot win probability model (binary classifier: did the bot win this trade?)
+        # Separate from the regression ensemble — loaded from model_*_bot.json files.
+        _apply_bot_win_prob(ranking)
 
         # Apply multiplier to scores
         for token, ml_mult in zip(ranking, ml_multipliers):
@@ -1362,6 +1377,164 @@ def _apply_ml_scores(ranking: list[dict]) -> None:
         )
     except Exception as e:
         logger.warning("ML scoring failed: %s — keeping manual scores", e)
+
+
+# v107: Bot win probability model globals (lazy-loaded)
+_bot_ensemble: list[dict] = []
+_bot_ensemble_loaded = False
+
+
+def _load_bot_ensemble() -> list[dict]:
+    """
+    v107: Load bot win-probability models (binary classifiers).
+    Files: model_{horizon}_bot.json, model_{horizon}_bot_lgb.txt, model_{horizon}_bot_meta.json.
+    Returns list of model entries, same structure as _load_ml_ensemble but for classification.
+    """
+    global _bot_ensemble, _bot_ensemble_loaded
+    if _bot_ensemble_loaded:
+        return _bot_ensemble
+
+    _bot_ensemble_loaded = True
+    _bot_ensemble = []
+
+    for horizon in ("6h", "12h", "24h"):
+        xgb_path = _ML_MODEL_DIR / f"model_{horizon}_bot.json"
+        lgb_path = _ML_MODEL_DIR / f"model_{horizon}_bot_lgb.txt"
+        meta_path = _ML_MODEL_DIR / f"model_{horizon}_bot_meta.json"
+
+        if not xgb_path.exists() or not meta_path.exists():
+            continue
+
+        try:
+            with open(meta_path) as f:
+                meta = json.load(f)
+        except Exception:
+            continue
+
+        # Quality gate — bot models must also pass
+        if meta.get("quality_gate") != "PASSED":
+            logger.info("Bot ensemble: skipping %s (gate=%s)", horizon, meta.get("quality_gate"))
+            continue
+
+        entry = {
+            "horizon": horizon, "meta": meta, "features": meta.get("features", []),
+            "xgb": None, "lgb": None,
+            "weight": meta.get("metrics", {}).get("roc_auc", 0.5),
+        }
+
+        try:
+            import xgboost as xgb
+            m = xgb.XGBClassifier()
+            m.load_model(str(xgb_path))
+            entry["xgb"] = m
+        except Exception as e:
+            logger.warning("Bot ensemble: XGB %s load failed: %s", horizon, e)
+
+        if lgb_path.exists():
+            try:
+                import lightgbm as lgb_lib
+                entry["lgb"] = lgb_lib.Booster(model_file=str(lgb_path))
+            except Exception:
+                pass
+
+        if entry["xgb"] is None and entry["lgb"] is None:
+            continue
+
+        # Validate feature count (same logic as _load_ml_ensemble)
+        meta_feats = entry["features"]
+        actual_n = None
+        actual_names = None
+        if entry["lgb"] is not None:
+            actual_n = entry["lgb"].num_feature()
+            actual_names = entry["lgb"].feature_name()
+        elif entry["xgb"] is not None and hasattr(entry["xgb"], "n_features_in_"):
+            actual_n = entry["xgb"].n_features_in_
+
+        if actual_n is not None and len(meta_feats) != actual_n:
+            if actual_names and len(actual_names) == actual_n:
+                entry["features"] = actual_names
+            else:
+                entry["features"] = meta_feats[:actual_n]
+
+        _bot_ensemble.append(entry)
+
+    if _bot_ensemble:
+        horizons = [e["horizon"] for e in _bot_ensemble]
+        logger.info("Bot ensemble loaded: %d models (%s)", len(_bot_ensemble), "+".join(horizons))
+    else:
+        logger.info("Bot ensemble: no models found or none passed quality gate")
+
+    return _bot_ensemble
+
+
+def _apply_bot_win_prob(ranking: list[dict]) -> None:
+    """
+    v107: Compute ml_win_prob from bot classification models.
+    Loads model_{horizon}_bot.json + model_{horizon}_bot_lgb.txt and ensembles
+    their predicted probabilities (weight-averaged by ROC AUC).
+    Stores result as token["ml_win_prob"].
+    """
+    bot_models = _load_bot_ensemble()
+    if not bot_models:
+        return
+
+    try:
+        import pandas as pd
+
+        all_probs = []  # list of (probs_array, weight)
+
+        for entry in bot_models:
+            features = entry["features"]
+            xgb_model = entry["xgb"]
+            lgb_model = entry["lgb"]
+            ew = entry["meta"].get("ensemble_weights", {"xgboost": 0.5, "lightgbm": 0.5})
+            xgb_w = ew.get("xgboost", 0.5)
+            lgb_w = ew.get("lightgbm", 0.5)
+
+            rows = [_build_feature_row(token, features) for token in ranking]
+            X = pd.DataFrame(rows, columns=features)
+
+            xgb_proba = None
+            lgb_proba = None
+
+            if xgb_model is not None:
+                try:
+                    xgb_proba = xgb_model.predict_proba(X)[:, 1]
+                except Exception:
+                    pass
+
+            if lgb_model is not None:
+                try:
+                    lgb_proba = lgb_model.predict(X.values)
+                except Exception:
+                    pass
+
+            if xgb_proba is not None and lgb_proba is not None:
+                probs = xgb_w * xgb_proba + lgb_w * lgb_proba
+            elif xgb_proba is not None:
+                probs = xgb_proba
+            elif lgb_proba is not None:
+                probs = lgb_proba
+            else:
+                continue
+
+            all_probs.append((probs, entry["weight"]))
+
+        if not all_probs:
+            return
+
+        # Weight-average by ROC AUC
+        total_w = sum(w for _, w in all_probs)
+        combined_prob = sum(p * (w / total_w) for p, w in all_probs)
+
+        for token, prob in zip(ranking, combined_prob):
+            token["ml_win_prob"] = round(float(prob), 4)
+
+        logger.info("Bot win_prob applied for %d tokens [%.3f - %.3f]",
+                     len(ranking), float(combined_prob.min()), float(combined_prob.max()))
+
+    except Exception as e:
+        logger.warning("Bot win_prob scoring failed: %s", e)
 
 
 def _apply_kol_ml_scores(ranking: list[dict]) -> None:

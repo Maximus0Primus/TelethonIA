@@ -398,6 +398,9 @@ def upsert_tokens(
                 "market_cap": t.get("market_cap"),
                 # v40: Track CA provenance (kol=from KOL message, dexscreener=from search)
                 "ca_source": "kol" if t.get("kol_resolved_ca") else "dexscreener",
+                # v107: Standalone ML score (percentile rank 0-100) + bot win probability
+                "ml_score": t.get("ml_score"),
+                "ml_win_prob": t.get("ml_win_prob"),
             })
             for t in tokens
         ]
@@ -1022,6 +1025,9 @@ def insert_snapshots(ranking: list[dict]) -> None:
             "ml_win_probability": t.get("ml_win_probability"),
             # v83: ML ensemble multiplier
             "ml_multiplier": t.get("ml_multiplier"),
+            # v107: Standalone ML score + bot win probability
+            "ml_score": t.get("ml_score"),
+            "ml_win_prob": t.get("ml_win_prob"),
             # v44: Raw activity ratio for Optuna re-scoring
             "activity_ratio_raw": t.get("activity_ratio_raw"),
             # v25: Message-level text features

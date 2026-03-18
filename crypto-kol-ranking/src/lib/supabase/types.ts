@@ -25,6 +25,8 @@ export interface Database {
           change_24h: number | null;
           change_7d: number | null;
           updated_at: string;
+          ml_score: number | null;
+          ml_win_prob: number | null;
         };
         Insert: {
           id?: number;
@@ -41,6 +43,8 @@ export interface Database {
           change_24h?: number | null;
           change_7d?: number | null;
           updated_at?: string;
+          ml_score?: number | null;
+          ml_win_prob?: number | null;
         };
         Update: {
           id?: number;
@@ -57,6 +61,8 @@ export interface Database {
           change_24h?: number | null;
           change_7d?: number | null;
           updated_at?: string;
+          ml_score?: number | null;
+          ml_win_prob?: number | null;
         };
       };
       groups: {
@@ -250,6 +256,8 @@ export interface Database {
           sentiment: number;
           trend: string;
           change_24h: number;
+          ml_score: number | null;
+          ml_win_prob: number | null;
         }[];
       };
     };
