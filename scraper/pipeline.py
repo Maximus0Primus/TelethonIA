@@ -1167,6 +1167,10 @@ def _build_feature_row(token: dict, features: list[str]) -> dict:
         "v_buy_24h_usd_log": "v_buy_24h_usd",
         "v_sell_24h_usd_log": "v_sell_24h_usd",
         "helius_holder_count_log": "helius_holder_count",
+        # v107: trade-level log features (parity with train_model._transform_features)
+        "entry_mcap_log": "entry_mcap",
+        "rt_liquidity_log": "rt_liquidity_usd",
+        "rt_volume_24h_log": "rt_volume_24h",
     }
     # v44: Component values stored with underscore prefix in token dict
     # but ML features use unprefixed names. Map ML name → token dict key.

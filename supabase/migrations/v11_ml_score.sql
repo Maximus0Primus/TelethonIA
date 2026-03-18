@@ -17,7 +17,7 @@ DROP FUNCTION IF EXISTS get_token_ranking(character varying, integer, integer);
 DROP FUNCTION IF EXISTS get_token_ranking(character varying, integer, integer, integer);
 DROP FUNCTION IF EXISTS get_token_ranking(text, integer, integer, integer);
 
--- Recreate with ml_score and ml_win_prob included
+-- Recreate with ml_score, ml_win_prob, and restored token_address/freshest_mention_hours/market_cap
 CREATE OR REPLACE FUNCTION get_token_ranking(
   p_time_window VARCHAR(10) DEFAULT '24h',
   p_limit INTEGER DEFAULT 10,
@@ -27,6 +27,7 @@ CREATE OR REPLACE FUNCTION get_token_ranking(
 RETURNS TABLE (
   rank BIGINT,
   symbol VARCHAR(20),
+  token_address TEXT,
   score INTEGER,
   score_conviction INTEGER,
   score_momentum INTEGER,
@@ -38,6 +39,8 @@ RETURNS TABLE (
   weakest_component VARCHAR(20),
   score_interpretation VARCHAR(20),
   data_confidence NUMERIC,
+  freshest_mention_hours NUMERIC,
+  market_cap NUMERIC,
   ml_score REAL,
   ml_win_prob REAL
 ) AS $$
@@ -51,6 +54,7 @@ BEGIN
       END DESC
     ) as rank,
     t.symbol,
+    t.token_address,
     t.score,
     t.score_conviction,
     t.score_momentum,
@@ -62,6 +66,8 @@ BEGIN
     t.weakest_component,
     t.score_interpretation,
     t.data_confidence,
+    t.freshest_mention_hours,
+    t.market_cap,
     t.ml_score,
     t.ml_win_prob
   FROM tokens t
