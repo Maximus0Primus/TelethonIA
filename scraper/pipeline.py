@@ -1341,10 +1341,20 @@ def _apply_ml_scores(ranking: list[dict]) -> None:
         # v107b: mcap penalty — large caps can't x1.5, penalize their ml_score.
         ml_score_ranks = rankdata(combined) / len(combined)  # 0..1 percentile
         for token, pct in zip(ranking, ml_score_ranks):
-            # v107c: pure ML score — no hardcoded penalties.
-            # The model already has token_age_hours and market_cap_log as features.
-            # If it ranks a large-cap high, the fix is better training data, not post-hoc hacks.
-            token["ml_score"] = int(round(pct * 100))
+            raw_ml = round(pct * 100)
+            # v107d: hard caps only for EXTREME cases where data is unambiguous.
+            # The ML learns the nuance in the $10K-$5M zone — we don't touch that.
+            # These guards are for cases the ML hasn't seen enough of yet.
+            mcap = float(token.get("market_cap") or 0)
+            if mcap <= 0:                   # no DexScreener data at all
+                raw_ml = min(raw_ml, 15)    # cap at 15 (don't zero it — ML might know something)
+            elif mcap > 10_000_000:         # >$10M: 2% x1.5 in data, near impossible
+                raw_ml = min(raw_ml, 25)
+            # >30 day tokens: 3% x1.5 in data — ML hasn't seen enough to learn this yet
+            age_hours = float(token.get("token_age_hours") or 0)
+            if age_hours > 720:
+                raw_ml = min(raw_ml, 30)
+            token["ml_score"] = min(100, max(0, raw_ml))
 
         logger.info("ml_score assigned: min=%d, max=%d, median=%d",
                      int(min(t.get("ml_score", 50) for t in ranking)),
