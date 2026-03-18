@@ -1220,6 +1220,72 @@ def check_paper_trades(client) -> dict:
     return counts
 
 
+def correct_closed_prices(client) -> int:
+    """v107: Post-close price correction for recently closed trades.
+
+    Problem: DexScreener may not index new pools during pump.fun→Raydium migration.
+    Trades close (timeout) with high_price_seen=entry while the real price is x10+.
+    This corrupts ML training data and PnL reporting.
+
+    Fix: for trades closed in the last 6h, re-fetch current price via DexScreener+GeckoTerminal.
+    If current price > high_price_seen, update high_price_seen (but NOT status/pnl — the trade
+    was already closed, we just fix the tracking data for ML accuracy).
+
+    Runs once per full cycle (~15min), not on every price refresh.
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=6)).isoformat()
+
+    try:
+        result = (
+            client.table("paper_trades")
+            .select("id, token_address, symbol, entry_price, high_price_seen, status")
+            .neq("status", "open")
+            .gte("exit_at", cutoff)
+            .execute()
+        )
+        closed_trades = result.data or []
+    except Exception as e:
+        logger.warning("correct_closed_prices: fetch failed: %s", e)
+        return 0
+
+    if not closed_trades:
+        return 0
+
+    # Dedup addresses
+    addresses = list({t["token_address"] for t in closed_trades})
+    prices = _fetch_prices_batch(addresses)
+
+    corrected = 0
+    for trade in closed_trades:
+        addr = trade["token_address"]
+        current = prices.get(addr)
+        if current is None or current <= 0:
+            continue
+
+        entry = float(trade.get("entry_price") or 0)
+        old_high = float(trade.get("high_price_seen") or 0)
+
+        if current > old_high and entry > 0:
+            try:
+                client.table("paper_trades").update(
+                    {"high_price_seen": current}
+                ).eq("id", trade["id"]).execute()
+                corrected += 1
+                if current / entry > 1.5:  # only log significant corrections
+                    logger.info(
+                        "correct_closed_prices: %s %s high %.1fx→%.1fx",
+                        trade["symbol"], addr[:8],
+                        old_high / entry if old_high > 0 else 0,
+                        current / entry,
+                    )
+            except Exception:
+                pass
+
+    if corrected:
+        logger.info("correct_closed_prices: updated %d/%d trades", corrected, len(closed_trades))
+    return corrected
+
+
 def check_paper_trades_fast(client) -> dict:
     """v92: Fast 30s check for recent RT trades only (opened in last 30 min).
     Catches fast spikes that the 3-min full check would miss.

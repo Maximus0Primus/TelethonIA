@@ -1874,7 +1874,7 @@ async def run_one_cycle(client: TelegramClient, dump: bool = False,
 
         # Paper trading: check open positions + log summary
         try:
-            from paper_trader import check_paper_trades, paper_trade_summary
+            from paper_trader import check_paper_trades, paper_trade_summary, correct_closed_prices
             sb_pt = _get_supabase()
             pt_result = check_paper_trades(sb_pt)
             # v71: Update bankroll with RT PnL from cycle-end check
@@ -1885,6 +1885,8 @@ async def run_one_cycle(client: TelegramClient, dump: bool = False,
             summary = paper_trade_summary(sb_pt)
             if summary:
                 logger.info("paper_trader: %s", summary)
+            # v107: Fix high_price_seen for recently closed trades (pool migration bug)
+            correct_closed_prices(sb_pt)
             # v74: KOL attribution — aggregate paper trade PnL by KOL
             from paper_trader import kol_attribution
             kol_attribution(sb_pt, days=7)
