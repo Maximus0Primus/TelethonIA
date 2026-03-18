@@ -1425,7 +1425,7 @@ def _rt_open_trades(ca: str, symbol: str, price: float, mcap: float,
         "_rt_token_age_hours": token_info.get("token_age_hours"),
         "_rt_is_pump_fun": token_info.get("is_pump_fun"),
         "_rt_ml_pred": token_info.get("_rt_ml_pred"),        # v77: RT ML pred for A/B
-        "_rt_kol_ml_pred": token_info.get("kol_ml_mult"),    # v78: KCO score mult (from pipeline)
+        "_rt_kol_ml_pred": token_info.get("_rt_kol_ml_pred"),  # v78: KCO score (fix: was reading wrong key)
     }
 
     now = datetime.now(timezone.utc)
