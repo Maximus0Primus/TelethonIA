@@ -1338,14 +1338,25 @@ def _apply_ml_scores(ranking: list[dict]) -> None:
 
         # v107: Standalone ml_score — percentile rank of combined prediction (0-100)
         # Independent of formula score; used for ML-primary ranking in frontend.
+        # v107b: mcap penalty — large caps can't x1.5, penalize their ml_score.
         ml_score_ranks = rankdata(combined) / len(combined)  # 0..1 percentile
         for token, pct in zip(ranking, ml_score_ranks):
-            token["ml_score"] = int(round(pct * 100))
+            raw_ml = round(pct * 100)
+            # mcap penalty: tokens with high mcap get their ml_score reduced
+            mcap = float(token.get("market_cap") or 0)
+            if mcap > 10_000_000:       # >$10M: -50% (large cap, won't x1.5)
+                raw_ml = int(raw_ml * 0.50)
+            elif mcap > 5_000_000:      # >$5M: -30%
+                raw_ml = int(raw_ml * 0.70)
+            elif mcap > 1_000_000:      # >$1M: -15%
+                raw_ml = int(raw_ml * 0.85)
+            # mcap=0 means no data — no penalty (could be a new token)
+            token["ml_score"] = min(100, max(0, raw_ml))
 
         logger.info("ml_score assigned: min=%d, max=%d, median=%d",
-                     int(ml_score_ranks.min() * 100),
-                     int(ml_score_ranks.max() * 100),
-                     int(np.median(ml_score_ranks) * 100))
+                     int(min(t.get("ml_score", 50) for t in ranking)),
+                     int(max(t.get("ml_score", 50) for t in ranking)),
+                     int(np.median([t.get("ml_score", 50) for t in ranking])))
 
         # Calibrated win probabilities from best calibrator
         if best_calibrator is not None:
