@@ -1341,34 +1341,10 @@ def _apply_ml_scores(ranking: list[dict]) -> None:
         # v107b: mcap penalty — large caps can't x1.5, penalize their ml_score.
         ml_score_ranks = rankdata(combined) / len(combined)  # 0..1 percentile
         for token, pct in zip(ranking, ml_score_ranks):
-            raw_ml = round(pct * 100)
-            # mcap penalty — data-driven from 853 tokens (Mar 2026):
-            # sweet spot $10K-$500K (21-30% x1.5), <$10K = dead/rug (4%), >$5M = stable (2%)
-            mcap = float(token.get("market_cap") or 0)
-            if mcap <= 0:               # no data: dead, wrong chain, or delisted
-                raw_ml = int(raw_ml * 0.20)
-            elif mcap < 10_000:         # <$10K: 4% x1.5 — dead/rug territory
-                raw_ml = int(raw_ml * 0.30)
-            elif mcap > 5_000_000:      # >$5M: 2% x1.5 — too stable
-                raw_ml = int(raw_ml * 0.15)
-            elif mcap > 1_000_000:      # $1M-$5M: 7% x1.5
-                raw_ml = int(raw_ml * 0.40)
-            elif mcap > 500_000:        # $500K-$1M: 12% x1.5
-                raw_ml = int(raw_ml * 0.70)
-            # $10K-$500K: no penalty (sweet spot, 21-30% x1.5)
-
-            # token age penalty — data-driven: <6h best (18-19%), >30d dead (3%)
-            age_hours = float(token.get("token_age_hours") or 0)
-            if age_hours > 720:            # >30 days: 3% x1.5
-                raw_ml = int(raw_ml * 0.20)
-            elif age_hours > 168:          # >7 days: 12% x1.5
-                raw_ml = int(raw_ml * 0.65)
-            elif age_hours > 72:           # >3 days: 15% x1.5
-                raw_ml = int(raw_ml * 0.80)
-            elif age_hours > 24:           # 1-3 days: 15% x1.5
-                raw_ml = int(raw_ml * 0.85)
-            # <24h: no penalty (sweet spot, 11-19% x1.5)
-            token["ml_score"] = min(100, max(0, raw_ml))
+            # v107c: pure ML score — no hardcoded penalties.
+            # The model already has token_age_hours and market_cap_log as features.
+            # If it ranks a large-cap high, the fix is better training data, not post-hoc hacks.
+            token["ml_score"] = int(round(pct * 100))
 
         logger.info("ml_score assigned: min=%d, max=%d, median=%d",
                      int(min(t.get("ml_score", 50) for t in ranking)),
