@@ -1342,7 +1342,7 @@ def _apply_ml_scores(ranking: list[dict]) -> None:
         ml_score_ranks = rankdata(combined) / len(combined)  # 0..1 percentile
         for token, pct in zip(ranking, ml_score_ranks):
             raw_ml = round(pct * 100)
-            # mcap penalty: tokens with high mcap get their ml_score reduced
+            # mcap penalty: tokens with high mcap can't x1.5
             mcap = float(token.get("market_cap") or 0)
             if mcap > 10_000_000:       # >$10M: -50% (large cap, won't x1.5)
                 raw_ml = int(raw_ml * 0.50)
@@ -1350,7 +1350,17 @@ def _apply_ml_scores(ranking: list[dict]) -> None:
                 raw_ml = int(raw_ml * 0.70)
             elif mcap > 1_000_000:      # >$1M: -15%
                 raw_ml = int(raw_ml * 0.85)
-            # mcap=0 means no data — no penalty (could be a new token)
+            # mcap=0 or missing = no DexScreener data → likely dead/wrong chain → penalize
+            if mcap <= 0:
+                raw_ml = int(raw_ml * 0.30)  # -70% penalty for no mcap data
+            # token age penalty: old tokens (>72h) are unlikely to pump as memecoins
+            age_hours = float(token.get("token_age_hours") or 0)
+            if age_hours > 720:            # >30 days: -60% (established token, not memecoin)
+                raw_ml = int(raw_ml * 0.40)
+            elif age_hours > 168:          # >7 days: -30%
+                raw_ml = int(raw_ml * 0.70)
+            elif age_hours > 72:           # >3 days: -10%
+                raw_ml = int(raw_ml * 0.90)
             token["ml_score"] = min(100, max(0, raw_ml))
 
         logger.info("ml_score assigned: min=%d, max=%d, median=%d",
