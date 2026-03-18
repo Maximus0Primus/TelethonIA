@@ -176,6 +176,17 @@ CORE_FEATURES = [
     "phase_duration_cycles",
     # v56: KOL win rate signal
     "best_kol_win_rate",
+    # v107: Trade-level features from paper_trades (shadow join)
+    "pt_kol_win_rate",        # KOL's historical win rate at trade time
+    "pt_kol_score",           # KOL aggregate score at trade time
+    "pt_kol_tier_encoded",    # S=1, A=0 (binary)
+    "entry_mcap_log",         # log1p(entry_mcap) — market cap at entry
+    "rt_liquidity_log",       # log1p(rt_liquidity_usd) — RT liquidity
+    "rt_volume_24h_log",      # log1p(rt_volume_24h) — RT 24h volume
+    "rt_buy_sell_ratio",      # RT buy/sell ratio [0,1]
+    "rt_token_age_hours",     # RT token age in hours
+    "rt_is_pump_fun",         # 1 if pump.fun token, 0 otherwise
+    "n_kol_confirmations",    # Number of KOLs confirming this call
 ]
 
 # Tier 2 (extended): Add these when 500-2000 samples. ~30 features total.
@@ -347,6 +358,17 @@ ALL_FEATURE_COLS = [
     "mention_ema3",
     "volume_ema3",
     "recency_weighted_score_vel",
+    # v107: Trade-level features from paper_trades (shadow join)
+    "pt_kol_win_rate",
+    "pt_kol_score",
+    "pt_kol_tier_encoded",
+    "entry_mcap_log",
+    "rt_liquidity_log",
+    "rt_volume_24h_log",
+    "rt_buy_sell_ratio",
+    "rt_token_age_hours",
+    "rt_is_pump_fun",
+    "n_kol_confirmations",
 ]
 
 HORIZONS = {
@@ -689,7 +711,10 @@ def load_shadow_labeled_data(strategy: str = "TP50_SL30") -> pd.DataFrame:
         result = (
             client.table("paper_trades")
             .select("id, token_address, symbol, cycle_ts, entry_price, status, "
-                    "high_price_seen, snapshot_id")
+                    "high_price_seen, snapshot_id, "
+                    "kol_win_rate, kol_tier, kol_score, entry_mcap, "
+                    "rt_liquidity_usd, rt_volume_24h, rt_buy_sell_ratio, "
+                    "rt_token_age_hours, rt_is_pump_fun, n_kol_confirmations")
             .eq("is_shadow", True)
             .eq("strategy", strategy)
             .neq("status", "open")
@@ -814,6 +839,11 @@ def load_shadow_labeled_data(strategy: str = "TP50_SL30") -> pd.DataFrame:
         row = dict(snap)  # all snapshot columns
         row["_bot_won"] = trade["_bot_won"]
         row["max_return"] = trade.get("max_return")
+        # v107: carry trade-level features from paper_trades
+        for _ptcol in ("kol_win_rate", "kol_tier", "kol_score", "entry_mcap",
+                        "rt_liquidity_usd", "rt_volume_24h", "rt_buy_sell_ratio",
+                        "rt_token_age_hours", "rt_is_pump_fun", "n_kol_confirmations"):
+            row[_ptcol] = trade.get(_ptcol)
         merged_rows.append(row)
 
     if not merged_rows:
@@ -935,6 +965,34 @@ def _transform_features(df: pd.DataFrame, feature_pool: list[str]) -> pd.DataFra
         df["hour_paris"] = ts_paris.dt.hour              # 0-23
         df["is_weekend"] = (df["day_of_week"] >= 5).astype(int)
         df["is_prime_time"] = ((df["hour_paris"] >= 19) | (df["hour_paris"] < 5)).astype(int)
+
+    # v107: Trade-level feature transformations (from paper_trades shadow join)
+    # Categorical encoding: kol_tier S=1, A=0
+    if "kol_tier" in df.columns:
+        df["pt_kol_tier_encoded"] = (df["kol_tier"] == "S").astype(int)
+
+    # Rename to pt_ prefix to avoid collision with snapshot columns
+    if "kol_win_rate" in df.columns:
+        df["pt_kol_win_rate"] = pd.to_numeric(df["kol_win_rate"], errors="coerce")
+    if "kol_score" in df.columns:
+        df["pt_kol_score"] = pd.to_numeric(df["kol_score"], errors="coerce")
+
+    # Log-scale monetary trade-level features
+    _pt_log_cols = {
+        "entry_mcap": "entry_mcap_log",
+        "rt_liquidity_usd": "rt_liquidity_log",
+        "rt_volume_24h": "rt_volume_24h_log",
+    }
+    for raw_col, log_col in _pt_log_cols.items():
+        if raw_col in df.columns:
+            df[log_col] = df[raw_col].apply(
+                lambda x: np.log1p(float(x)) if pd.notna(x) and float(x) > 0 else np.nan
+            )
+
+    # Coerce remaining numeric trade-level columns
+    for col in ("rt_buy_sell_ratio", "rt_token_age_hours", "rt_is_pump_fun", "n_kol_confirmations"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
 
     return df
 
