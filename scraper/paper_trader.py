@@ -771,6 +771,23 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
             if (addr, strat_name) in cooldown_combos:
                 continue
 
+            # v108: Defensive re-check right before insert to catch race conditions
+            # (e.g. batch + RT overlap, or two RT calls that slipped past in-flight lock)
+            try:
+                recheck = (
+                    client.table("paper_trades")
+                    .select("id", count="exact")
+                    .eq("token_address", addr)
+                    .eq("strategy", strat_name)
+                    .eq("status", "open")
+                    .execute()
+                )
+                if recheck.count and recheck.count > 0:
+                    open_combos.add((addr, strat_name))
+                    continue
+            except Exception:
+                pass  # proceed with insert on query failure
+
             # v87: Bot ML gate — position sizing or skip (v89: disabled by default)
             bot_ml_mult = _bot_ml_gate(token, strat_name, config)
             if bot_ml_mult <= 0.0:
@@ -802,6 +819,8 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
                         "paper_trader: insert failed for %s/%s/%s: %s",
                         token.get("symbol"), strat_name, tranche["label"], e,
                     )
+            # v108: Mark as opened so subsequent iterations in this call don't re-insert
+            open_combos.add((addr, strat_name))
 
     # ── Shadow trades: open $0 trades for ALL other single-tranche strategies ──
     # This lets us compare strategies on the SAME tokens (apples-to-apples).
@@ -879,6 +898,8 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
                     except Exception as e:
                         logger.error("paper_trader: shadow insert failed %s/%s/%s: %s",
                                      token.get("symbol"), strat_name, tranche["label"], e)
+                # v108: Mark as opened so subsequent tokens in this call don't re-insert
+                open_combos.add((addr, strat_name))
 
     allocs = [f"{t.get('symbol','?')}=${t.get('_alloc_usd',0):.1f}" for t in candidates]
     logger.info(

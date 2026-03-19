@@ -1618,8 +1618,13 @@ async def _rt_on_new_message(event: events.NewMessage.Event):
         if not _rt_should_trade(username, ca):
             continue
 
-        flight_key = (username, ca)
+        # v108: Lock on CA only (not per-KOL) to prevent double-inserts when
+        # two KOLs post the same token within seconds. The second KOL waits until
+        # the first finishes inserting, so the dedup check in open_paper_trades sees
+        # the already-open trades and skips.
+        flight_key = ca
         if flight_key in _rt_in_flight:
+            logger.debug("RT SKIP: %s — already in-flight from another KOL", ca[:8])
             continue
         _rt_in_flight.add(flight_key)
 
