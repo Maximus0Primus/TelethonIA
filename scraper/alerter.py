@@ -184,19 +184,34 @@ def send_daily_summary(snapshot: dict):
         )
     api_text = "\n".join(api_lines) if api_lines else "  (no data)"
 
+    # v109: Strategy & bankroll info
+    strat = snapshot.get("strategy", {})
+    active_strat = strat.get("active", "?")
+    bankroll = strat.get("bankroll", 0)
+    bankroll_start = strat.get("bankroll_start", 0)
+    wl_count = strat.get("whitelist_count", 0)
+
+    # Paper trade PnL breakdown
+    real_pnl = paper.get("pnl_today", 0)
+    real_trades = paper.get("closes_today", 0)
+    real_wins = paper.get("wins_today", 0)
+    wr_today = f"{real_wins*100/real_trades:.0f}%" if real_trades > 0 else "N/A"
+
     text = (
-        "<b>📡 HEALTH CHECK</b>\n"
+        "<b>📡 DAILY SUMMARY</b>\n"
         f"Uptime: {uptime:.1f}h\n"
-        f"\n<b>Cycles:</b> {completed} completed, {errors} errors\n"
-        f"\n<b>RT:</b> {rt.get('events', 0)} events, "
+        f"\n<b>📊 Strategy:</b> {active_strat}\n"
+        f"Bankroll: ${bankroll:.2f} / ${bankroll_start:.2f} start\n"
+        f"Whitelist: {wl_count} KOLs\n"
+        f"\n<b>💰 Paper PnL today:</b>\n"
+        f"  Trades: {real_trades} closed ({wr_today} WR)\n"
+        f"  PnL: ${real_pnl:+.2f}\n"
+        f"\n<b>🔄 Cycles:</b> {completed} completed, {errors} errors\n"
+        f"\n<b>📡 RT:</b> {rt.get('events', 0)} events, "
         f"{rt.get('trades_opened', 0)} trades, "
         f"{rt.get('unique_kols', 0)} KOLs\n"
-        f"\n<b>APIs (24h):</b>\n{api_text}\n"
-        f"\n<b>Egress:</b> {egress.get('total_mb', 0):.1f} MB today\n"
-        f"\n<b>Paper trades (incl. shadow):</b> "
-        f"+{paper.get('opens_today', 0)} opened, "
-        f"-{paper.get('closes_today', 0)} closed, "
-        f"PnL ${paper.get('pnl_today', 0):+.2f} (real only)"
+        f"\n<b>🔌 APIs (24h):</b>\n{api_text}\n"
+        f"\n<b>📦 Egress:</b> {egress.get('total_mb', 0):.1f} MB today"
     )
     _send(text, "daily_summary")
 

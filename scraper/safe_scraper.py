@@ -2127,8 +2127,8 @@ async def main():
                         from alerter import alert_kol_silence
                         sb_kol = _get_supabase()
                         if sb_kol:
-                            wl_kols = ["Luca_Apes", "PowsGemCalls", "degenncabal",
-                                       "donniesdegen", "darkocalls", "lollycalls"]
+                            # v109: Use actual whitelist from DB
+                            wl_kols = list(_rt_kol_whitelist.keys()) if _rt_kol_whitelist else []
                             cutoff = (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()
                             for kol in wl_kols:
                                 res = await asyncio.get_event_loop().run_in_executor(
@@ -2149,6 +2149,24 @@ async def main():
                 if now_utc.hour == 8 and _last_daily_hour != 8:
                     _last_daily_hour = 8
                     snapshot = _metrics.get_full_snapshot()
+                    # v109: Add strategy/bankroll info to daily summary
+                    try:
+                        _sb = _get_supabase()
+                        if _sb:
+                            _cfg = _sb.table("scoring_config").select(
+                                "paper_trade_config,kol_rt_whitelist"
+                            ).eq("id", 1).execute()
+                            if _cfg.data:
+                                _ptc = _cfg.data[0].get("paper_trade_config") or {}
+                                _wl = _cfg.data[0].get("kol_rt_whitelist") or {}
+                                snapshot["strategy"] = {
+                                    "active": (_ptc.get("active_strategies") or ["?"])[0] if isinstance(_ptc.get("active_strategies"), list) else "?",
+                                    "bankroll": float(_ptc.get("budget_usd", 0)),
+                                    "bankroll_start": 500.0,
+                                    "whitelist_count": len(_wl),
+                                }
+                    except Exception:
+                        pass
                     send_daily_summary(snapshot)
                 elif now_utc.hour != 8:
                     _last_daily_hour = now_utc.hour
