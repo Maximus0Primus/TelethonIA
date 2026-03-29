@@ -352,15 +352,29 @@ def alert_kol_silence(kol_name: str, hours_silent: float):
 
 
 def alert_kol_trade(symbol: str, kol: str, price: float, pos_usd: float,
-                    rt_score: float, liq_usd: float, is_bonding: bool = False):
+                    rt_score: float, liq_usd: float, is_bonding: bool = False,
+                    ca: str = "", mcap: float = 0, tier: str = ""):
     """v109: Alert when a whitelisted KOL calls a token and a paper trade is opened."""
     bonding_tag = " 🟡BONDING" if is_bonding else ""
+    tier_emoji = "⭐" if tier == "S" else "🔹"
+
+    # Links
+    links = []
+    if ca:
+        links.append(f'<a href="https://dexscreener.com/solana/{ca}">DexScreener</a>')
+        if is_bonding:
+            links.append(f'<a href="https://pump.fun/{ca}">Pump.fun</a>')
+    links_text = " | ".join(links) if links else ""
+
+    mcap_text = f"${mcap/1000:.0f}K" if mcap > 0 else "?"
+
     _send(
         f"📢 <b>KOL CALL</b>{bonding_tag}\n\n"
-        f"<b>{symbol}</b> called by <b>{kol}</b>\n"
+        f"<b>{symbol}</b> called by {tier_emoji}<b>{kol}</b>\n"
         f"💰 Entry: ${price:.8f}\n"
-        f"📊 Position: ${pos_usd:.1f} | Score: {rt_score:.0f}\n"
-        f"💧 Liq: ${liq_usd/1000:.0f}K",
+        f"📊 MCap: {mcap_text} | Liq: ${liq_usd/1000:.0f}K | Score: {rt_score:.0f}\n"
+        f"💵 Position: ${pos_usd:.1f}\n"
+        f"\n🔗 {links_text}",
         "kol_trade",
     )
 
