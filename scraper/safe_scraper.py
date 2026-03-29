@@ -1549,9 +1549,13 @@ def _rt_extract_token_info(raw: dict) -> dict:
         "buy_sell_ratio": float(raw.get("buy_sell_ratio_24h") or raw.get("bsr_24h") or 0.5),
         "token_age_hours": float(raw.get("token_age_hours") or 0),
         "is_pump_fun": int(raw.get("is_pump_fun") or 0),
-        "mcap": float(raw.get("mcap") or 0),
+        "mcap": float(raw.get("market_cap") or raw.get("mcap") or 0),  # v109: fix key name
         "price_change_1h": float(raw.get("price_change_1h") or 0),
         "price_change_5m": float(raw.get("price_change_5m") or 0),
+        # v109: bonding curve support — needed for liq gate bypass
+        "pump_graduation_status": raw.get("pump_graduation_status"),
+        "dex_id": raw.get("dex_id"),
+        "pair_address": raw.get("pair_address"),
     }
 
 
@@ -1646,15 +1650,32 @@ async def _rt_on_new_message(event: events.NewMessage.Event):
             if price <= 0:
                 continue
 
-            mcap = float(raw.get("mcap") or 0)
+            mcap = float(raw.get("market_cap") or raw.get("mcap") or 0)  # v109: fix key
             token_info = _rt_extract_token_info(raw)
 
-            # v94: Hard liquidity gate (RT only)
+            # v109: Bonding curve tokens are tradeable on pump.fun even with liq=$0
+            # in DexScreener. Use mcap as proxy — bonding curve fills at ~$60-70K mcap.
+            is_bonding = token_info.get("pump_graduation_status") == "bonding"
+            dex_id = token_info.get("dex_id") or ""
+            is_pump_dex = "pump" in dex_id.lower()
+
+            # v94+v109: Hard liquidity gate (RT only) — bypass for bonding curve
             min_liq = float(config.get("min_liquidity_rt", 5000))
             liq_usd = token_info.get("liquidity_usd", 0)
             if liq_usd < min_liq:
-                logger.info("RT SKIP: %s — liq $%.0f < $%.0f min", symbol, liq_usd, min_liq)
-                continue
+                if is_bonding or is_pump_dex:
+                    # Bonding curve: DexScreener reports liq=0 but token IS tradeable.
+                    # Use mcap as safety check — skip if mcap too low (< $5K).
+                    min_mcap_bonding = float(config.get("min_mcap_bonding_rt", 5000))
+                    if mcap < min_mcap_bonding:
+                        logger.info("RT SKIP: %s — bonding mcap $%.0f < $%.0f min",
+                                    symbol, mcap, min_mcap_bonding)
+                        continue
+                    logger.info("RT BONDING: %s — liq $%.0f but bonding curve (mcap=$%.0fK, dex=%s), allowing",
+                                symbol, liq_usd, mcap / 1000, dex_id)
+                else:
+                    logger.info("RT SKIP: %s — liq $%.0f < $%.0f min", symbol, liq_usd, min_liq)
+                    continue
 
             # Compute RT score (drives sizing, never blocks)
             rt_score = _rt_compute_score(username, ca, kol_info, token_info, tier, config)
