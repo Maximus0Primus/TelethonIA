@@ -3407,13 +3407,16 @@ def aggregate_ranking(
             if not text or len(text) < 3:
                 continue
 
-            # v109: Skip flex/recap messages (KOLscope bot, PnL reports, gain celebrations)
+            # v109+: Skip flex/recap/PnL-report messages (same patterns as RT handler)
             import re as _re
-            if (_re.search(r'KOLscope|KOLscopeBot|MULTIPLIER DETECTED|STATUS UNLOCKED', text, _re.IGNORECASE)
+            if (_re.search(r'KOLscope|KOLscopeBot|MULTIPLIER DETECTED|STATUS UNLOCKED|CALL ALERT:.*✈', text, _re.IGNORECASE)
                 or _re.search(r'(made|hit|scored|bagged|caught)\s+\d+x', text, _re.IGNORECASE)
-                or _re.search(r'DIP MODE.*\d+x', text, _re.IGNORECASE)
+                or _re.search(r'DIP MODE', text, _re.IGNORECASE)
                 or _re.search(r'last (few|couple|recent)\s+.*calls', text, _re.IGNORECASE)
-                or _re.search(r'\d+k\s*(->|→|⮕|to)\s*\d+[km]?\s', text, _re.IGNORECASE)):
+                or _re.search(r'(very )?recent shills', text, _re.IGNORECASE)
+                or _re.search(r'\d+[km]?\s*(->|→|⮕|to)\s*\d+[km]?', text, _re.IGNORECASE)
+                or _re.search(r'\d+x\s*(🔥|🔫|💰|💎|🚀|from\s+(call|bottom|dip)|\+)', text, _re.IGNORECASE)
+                or _re.search(r'keep\s+print', text, _re.IGNORECASE)):
                 continue
 
             # v14: Cap tickers per message — scorecard/DCA-list posts

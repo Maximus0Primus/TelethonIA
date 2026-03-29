@@ -1594,7 +1594,7 @@ async def _rt_on_new_message(event: events.NewMessage.Event):
         if entity_urls:
             text += "\n" + "\n".join(entity_urls)
 
-    # v109: Filter out flex/recap messages — these are NOT new calls.
+    # v109+: Filter out flex/recap/PnL-report messages — these are NOT new calls.
     # KOLscope bot posts "MULTIPLIER DETECTED: 5x+", "CALL ALERT", "DIP MODE" etc.
     # KOLs post recaps like "100k → 700k (7x)" or "last few goated calls".
     # These contain CAs but are NOT entry signals — they refer to past gains.
@@ -1602,11 +1602,18 @@ async def _rt_on_new_message(event: events.NewMessage.Event):
     _FLEX_PATTERNS = [
         _re.compile(r'KOLscope|KOLscopeBot', _re.IGNORECASE),
         _re.compile(r'MULTIPLIER DETECTED', _re.IGNORECASE),
+        _re.compile(r'CALL ALERT:.*✈', _re.IGNORECASE),
         _re.compile(r'(made|hit|scored|bagged|caught)\s+\d+x', _re.IGNORECASE),
-        _re.compile(r'DIP MODE.*\d+x', _re.IGNORECASE),
+        _re.compile(r'DIP MODE', _re.IGNORECASE),
         _re.compile(r'STATUS UNLOCKED', _re.IGNORECASE),
         _re.compile(r'last (few|couple|recent)\s+.*calls', _re.IGNORECASE),
-        _re.compile(r'\d+k\s*(->|→|⮕|to)\s*\d+[km]?\s', _re.IGNORECASE),
+        _re.compile(r'(very )?recent shills', _re.IGNORECASE),
+        # PnL reports: "80k -> 1.6m", "100k to 700k", "300k → 3m" etc.
+        _re.compile(r'\d+[km]?\s*(->|→|⮕|to)\s*\d+[km]?', _re.IGNORECASE),
+        # Gain celebrations: "12x 🔥", "4x from call", "6x from bottom/dips"
+        _re.compile(r'\d+x\s*(🔥|🔫|💰|💎|🚀|from\s+(call|bottom|dip)|\+)', _re.IGNORECASE),
+        # "Keep printing", "dont fade me" — follow-up flex, not entry signals
+        _re.compile(r'keep\s+print', _re.IGNORECASE),
     ]
     for pat in _FLEX_PATTERNS:
         if pat.search(text):
@@ -1695,6 +1702,16 @@ async def _rt_on_new_message(event: events.NewMessage.Event):
                 else:
                     logger.info("RT SKIP: %s — liq $%.0f < $%.0f min", symbol, liq_usd, min_liq)
                     continue
+
+            # v109: Skip old tokens — real memecoin calls are on tokens < 24h old.
+            # Tokens with age > 24h are likely re-calls, recaps, or flex posts that
+            # slipped past the text filter (e.g. "WHAT A REVERSE FROM 3M BOTTOM").
+            max_age_hours = float(config.get("max_token_age_hours_rt", 24))
+            token_age = token_info.get("token_age_hours", 0)
+            if token_age > max_age_hours:
+                logger.info("RT SKIP: %s — token too old (%.0fh > %.0fh max)",
+                            symbol, token_age, max_age_hours)
+                continue
 
             # Compute RT score (drives sizing, never blocks)
             rt_score = _rt_compute_score(username, ca, kol_info, token_info, tier, config)
