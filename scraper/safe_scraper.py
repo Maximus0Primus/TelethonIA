@@ -192,7 +192,7 @@ GROUPS_DATA = {
     "TheReaperGems": {"conviction": 7, "tier": "A"},
     "ZAGREBIAN": {"conviction": 7, "tier": "A"},
     "aliensalphacalls": {"conviction": 7, "tier": "A"},
-    "bat_gamble": {"conviction": 7, "tier": "A"},
+    # "bat_gamble" removed v108 — -11.18% avg PnL, -248K% cumul on 22K shadow trades
     "chiggajogambles": {"conviction": 7, "tier": "A"},
     "gubbinscalls": {"conviction": 7, "tier": "A"},
     "ihzanswhaleschool": {"conviction": 7, "tier": "A"},
