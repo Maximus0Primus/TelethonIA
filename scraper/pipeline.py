@@ -3415,11 +3415,14 @@ def aggregate_ranking(
             if (_re.search(r'KOLscope|KOLscopeBot|MULTIPLIER DETECTED|STATUS UNLOCKED|CALL ALERT:.*✈', _text_no_ca, _re.IGNORECASE)
                 or _re.search(r'(made|hit|scored|bagged|caught)\s+\d+x', _text_no_ca, _re.IGNORECASE)
                 or _re.search(r'DIP MODE', _text_no_ca, _re.IGNORECASE)
+                or _re.search(r'Achievement Unlocked', _text_no_ca, _re.IGNORECASE)
+                or _re.search(r'reached\s+[\d.]+[xX]\s+after', _text_no_ca, _re.IGNORECASE)
                 or _re.search(r'last (few|couple|recent)\s+.*calls', _text_no_ca, _re.IGNORECASE)
                 or _re.search(r'(very )?recent shills', _text_no_ca, _re.IGNORECASE)
                 or _re.search(r'\d+[km]?\s*(->|→|⮕|to)\s*\d+[km]?', _text_no_ca, _re.IGNORECASE)
-                or _re.search(r'\d+x\s*(🔥|🔫|💰|💎|🚀|from\s+(call|bottom|dip)|\+)', _text_no_ca, _re.IGNORECASE)
-                or _re.search(r'keep\s+print', _text_no_ca, _re.IGNORECASE)):
+                or _re.search(r'\d+x\s*(🔥|🔫|💰|💎|🚀|from\s+(call|bottom|dip)|since\s+call|\+)', _text_no_ca, _re.IGNORECASE)
+                or _re.search(r'keep\s+print', _text_no_ca, _re.IGNORECASE)
+                or _re.search(r'Buy!\n[🟢🐳🔵🟣🔴]{20,}', text, _re.IGNORECASE)):
                 continue
 
             # v14: Cap tickers per message — scorecard/DCA-list posts
