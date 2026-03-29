@@ -1594,6 +1594,25 @@ async def _rt_on_new_message(event: events.NewMessage.Event):
         if entity_urls:
             text += "\n" + "\n".join(entity_urls)
 
+    # v109: Filter out flex/recap messages — these are NOT new calls.
+    # KOLscope bot posts "MULTIPLIER DETECTED: 5x+", "CALL ALERT", "DIP MODE" etc.
+    # KOLs post recaps like "100k → 700k (7x)" or "last few goated calls".
+    # These contain CAs but are NOT entry signals — they refer to past gains.
+    import re as _re
+    _FLEX_PATTERNS = [
+        _re.compile(r'KOLscope|KOLscopeBot', _re.IGNORECASE),
+        _re.compile(r'MULTIPLIER DETECTED', _re.IGNORECASE),
+        _re.compile(r'(made|hit|scored|bagged|caught)\s+\d+x', _re.IGNORECASE),
+        _re.compile(r'DIP MODE.*\d+x', _re.IGNORECASE),
+        _re.compile(r'STATUS UNLOCKED', _re.IGNORECASE),
+        _re.compile(r'last (few|couple|recent)\s+.*calls', _re.IGNORECASE),
+        _re.compile(r'\d+k\s*(->|→|⮕|to)\s*\d+[km]?\s', _re.IGNORECASE),
+    ]
+    for pat in _FLEX_PATTERNS:
+        if pat.search(text):
+            logger.debug("RT FLEX SKIP: %s — matched %s", username, pat.pattern[:40])
+            return
+
     from pipeline import extract_tokens, _load_ca_cache, _save_ca_cache
     if not _rt_ca_cache:
         _rt_ca_cache = _load_ca_cache()

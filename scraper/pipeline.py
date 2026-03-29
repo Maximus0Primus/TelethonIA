@@ -3407,6 +3407,15 @@ def aggregate_ranking(
             if not text or len(text) < 3:
                 continue
 
+            # v109: Skip flex/recap messages (KOLscope bot, PnL reports, gain celebrations)
+            import re as _re
+            if (_re.search(r'KOLscope|KOLscopeBot|MULTIPLIER DETECTED|STATUS UNLOCKED', text, _re.IGNORECASE)
+                or _re.search(r'(made|hit|scored|bagged|caught)\s+\d+x', text, _re.IGNORECASE)
+                or _re.search(r'DIP MODE.*\d+x', text, _re.IGNORECASE)
+                or _re.search(r'last (few|couple|recent)\s+.*calls', text, _re.IGNORECASE)
+                or _re.search(r'\d+k\s*(->|→|⮕|to)\s*\d+[km]?\s', text, _re.IGNORECASE)):
+                continue
+
             # v14: Cap tickers per message — scorecard/DCA-list posts
             # inflate many tickers at once. Keep first N only.
             # v82: Dynamic from scoring_config (was hardcoded 3)
