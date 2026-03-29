@@ -3410,19 +3410,28 @@ def aggregate_ranking(
             # v109+: Skip flex/recap/PnL-report messages (same patterns as RT handler)
             import re as _re
             # Strip Solana addresses before matching to avoid false positives
-            # (CAs like "Dq3to3Yw..." contain substrings matching PnL patterns)
             _text_no_ca = _re.sub(r'[1-9A-HJ-NP-Za-km-z]{32,44}', '', text)
-            if (_re.search(r'KOLscope|KOLscopeBot|MULTIPLIER DETECTED|STATUS UNLOCKED|CALL ALERT:.*✈', _text_no_ca, _re.IGNORECASE)
-                or _re.search(r'(made|hit|scored|bagged|caught)\s+\d+x', _text_no_ca, _re.IGNORECASE)
-                or _re.search(r'DIP MODE', _text_no_ca, _re.IGNORECASE)
-                or _re.search(r'Achievement Unlocked', _text_no_ca, _re.IGNORECASE)
+            if (# Bot-generated messages
+                _re.search(r'KOLscope|KOLscopeBot|MULTIPLIER DETECTED|STATUS UNLOCKED|CALL ALERT:.*✈', _text_no_ca, _re.IGNORECASE)
+                or _re.search(r'DIP MODE|Achievement Unlocked', _text_no_ca, _re.IGNORECASE)
                 or _re.search(r'reached\s+[\d.]+[xX]\s+after', _text_no_ca, _re.IGNORECASE)
-                or _re.search(r'last (few|couple|recent)\s+.*calls', _text_no_ca, _re.IGNORECASE)
-                or _re.search(r'(very )?recent shills', _text_no_ca, _re.IGNORECASE)
+                or _re.search(r'Buy!\n[🟢🐳🔵🟣🔴]{20,}', text, _re.IGNORECASE)
+                # Gain celebrations
+                or _re.search(r'(made|hit|scored|bagged|caught)\s+\d+x', _text_no_ca, _re.IGNORECASE)
+                or _re.search(r'\d+x\s*(🔥|🔫|💰|💎|🚀|from\s+(call|bottom|dip)|since\s+(call|entry)|\+)', _text_no_ca, _re.IGNORECASE)
+                or _re.search(r'^\d+[xX]\s*\n', _text_no_ca, _re.MULTILINE)
+                # Follow-up/update flex
+                or _re.search(r'(up|gained|profits?)\s+(over\s+)?\d+[xX%]?\s*(from|since)\s+(our|my|the)\s+(entry|call|dip)', _text_no_ca, _re.IGNORECASE)
+                or _re.search(r"we.re\s+(now\s+)?up\s+(over\s+)?\d+[xX]", _text_no_ca, _re.IGNORECASE)
+                or _re.search(r'already\s+(went|gone|did)\s+\d+x', _text_no_ca, _re.IGNORECASE)
+                or _re.search(r'(new|another)\s+ATH', _text_no_ca, _re.IGNORECASE)
+                # PnL reports + recaps
                 or _re.search(r'\d+[km]?\s*(->|→|⮕|to)\s*\d+[km]?', _text_no_ca, _re.IGNORECASE)
-                or _re.search(r'\d+x\s*(🔥|🔫|💰|💎|🚀|from\s+(call|bottom|dip)|since\s+call|\+)', _text_no_ca, _re.IGNORECASE)
-                or _re.search(r'keep\s+print', _text_no_ca, _re.IGNORECASE)
-                or _re.search(r'Buy!\n[🟢🐳🔵🟣🔴]{20,}', text, _re.IGNORECASE)):
+                or _re.search(r'last (few|couple|recent)\s+.*calls', _text_no_ca, _re.IGNORECASE)
+                or _re.search(r'(very )?recent shills|keep\s+print', _text_no_ca, _re.IGNORECASE)
+                # Twitter/X reposts + guest posts
+                or _re.search(r'^.{0,5}by\s+@\w+\s+\(\d+', _text_no_ca, _re.IGNORECASE)
+                or _re.search(r'^Yo its @\w+', _text_no_ca, _re.IGNORECASE)):
                 continue
 
             # v14: Cap tickers per message — scorecard/DCA-list posts

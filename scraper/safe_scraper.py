@@ -1604,25 +1604,34 @@ async def _rt_on_new_message(event: events.NewMessage.Event):
     _SOLANA_ADDR = _re.compile(r'[1-9A-HJ-NP-Za-km-z]{32,44}')
     _text_no_ca = _SOLANA_ADDR.sub('', text)
     _FLEX_PATTERNS = [
+        # --- Bot-generated messages ---
         _re.compile(r'KOLscope|KOLscopeBot', _re.IGNORECASE),
         _re.compile(r'MULTIPLIER DETECTED', _re.IGNORECASE),
         _re.compile(r'CALL ALERT:.*✈', _re.IGNORECASE),
-        _re.compile(r'(made|hit|scored|bagged|caught)\s+\d+x', _re.IGNORECASE),
         _re.compile(r'DIP MODE', _re.IGNORECASE),
         _re.compile(r'STATUS UNLOCKED', _re.IGNORECASE),
         _re.compile(r'Achievement Unlocked', _re.IGNORECASE),
         _re.compile(r'reached\s+[\d.]+[xX]\s+after', _re.IGNORECASE),
+        _re.compile(r'Buy!\n[🟢🐳🔵🟣🔴]{20,}', _re.IGNORECASE),
+        # --- Gain celebrations ---
+        _re.compile(r'(made|hit|scored|bagged|caught)\s+\d+x', _re.IGNORECASE),
+        _re.compile(r'\d+x\s*(🔥|🔫|💰|💎|🚀|from\s+(call|bottom|dip)|since\s+(call|entry)|\+)', _re.IGNORECASE),
+        _re.compile(r'^\d+[xX]\s*\n', _re.MULTILINE),  # standalone "8X\n"
+        # --- Follow-up/update flex ("up 2x from our entry", "we're now up over 3x") ---
+        _re.compile(r'(up|gained|profits?)\s+(over\s+)?\d+[xX%]?\s*(from|since)\s+(our|my|the)\s+(entry|call|dip)', _re.IGNORECASE),
+        _re.compile(r"we.re\s+(now\s+)?up\s+(over\s+)?\d+[xX]", _re.IGNORECASE),
+        _re.compile(r'already\s+(went|gone|did)\s+\d+x', _re.IGNORECASE),
+        _re.compile(r'(new|another)\s+ATH', _re.IGNORECASE),
+        # --- PnL reports ---
+        _re.compile(r'\d+[km]?\s*(->|→|⮕|to)\s*\d+[km]?', _re.IGNORECASE),
+        # --- Recaps ---
         _re.compile(r'last (few|couple|recent)\s+.*calls', _re.IGNORECASE),
         _re.compile(r'(very )?recent shills', _re.IGNORECASE),
-        # PnL reports: "80k -> 1.6m", "100k to 700k", "300k → 3m" etc.
-        # NOTE: runs on _text_no_ca to avoid matching inside Solana addresses
-        _re.compile(r'\d+[km]?\s*(->|→|⮕|to)\s*\d+[km]?', _re.IGNORECASE),
-        # Gain celebrations: "12x 🔥", "4x from call", "6x from bottom/dips/since call"
-        _re.compile(r'\d+x\s*(🔥|🔫|💰|💎|🚀|from\s+(call|bottom|dip)|since\s+call|\+)', _re.IGNORECASE),
-        # "Keep printing", "dont fade me" — follow-up flex, not entry signals
         _re.compile(r'keep\s+print', _re.IGNORECASE),
-        # Buy bot notifications (emoji floods with buy amounts)
-        _re.compile(r'Buy!\n[🟢🐳🔵🟣🔴]{20,}', _re.IGNORECASE),
+        # --- Twitter/X reposts (forwarded content, not original calls) ---
+        _re.compile(r'^.{0,5}by\s+@\w+\s+\(\d+', _re.IGNORECASE),
+        # --- Guest posts in KOL channels ---
+        _re.compile(r'^Yo its @\w+', _re.IGNORECASE),
     ]
     for pat in _FLEX_PATTERNS:
         if pat.search(_text_no_ca):
@@ -1715,7 +1724,7 @@ async def _rt_on_new_message(event: events.NewMessage.Event):
             # v109: Skip old tokens — real memecoin calls are on tokens < 24h old.
             # Tokens with age > 24h are likely re-calls, recaps, or flex posts that
             # slipped past the text filter (e.g. "WHAT A REVERSE FROM 3M BOTTOM").
-            max_age_hours = float(config.get("max_token_age_hours_rt", 24))
+            max_age_hours = float(config.get("max_token_age_hours_rt", 12))
             token_age = token_info.get("token_age_hours", 0)
             if token_age > max_age_hours:
                 logger.info("RT SKIP: %s — token too old (%.0fh > %.0fh max)",
