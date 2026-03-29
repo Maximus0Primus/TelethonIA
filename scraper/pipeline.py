@@ -1685,8 +1685,11 @@ def extract_tokens(
     # 3) Solana contract addresses → resolve to symbol (definitive proof)
     #    Skip addresses that are part of DexScreener/pump.fun/GMGN/Photon URLs (handled in step 4)
     url_addresses = set()
-    for _, pair_addr in DEXSCREENER_URL_REGEX.findall(text):
+    for chain, pair_addr in DEXSCREENER_URL_REGEX.findall(text):
         url_addresses.add(pair_addr)
+        # v109: Skip non-Solana chains (ETH 0x addresses, BSC, etc.)
+        if chain != "solana":
+            continue
     for pump_addr in PUMP_FUN_URL_REGEX.findall(text):
         url_addresses.add(pump_addr)
     for gmgn_addr in GMGN_URL_REGEX.findall(text):
@@ -1726,6 +1729,8 @@ def extract_tokens(
     if ca_cache is not None:
         # DexScreener: pair address → resolve via pairs API (v40: also get token CA)
         for chain, pair_addr in DEXSCREENER_URL_REGEX.findall(text):
+            if chain != "solana":  # v109: skip non-Solana chains
+                continue
             resolved, token_ca = _resolve_pair_to_symbol_and_ca(chain, pair_addr, ca_cache)
             if resolved:
                 symbol = f"${resolved}"
@@ -3322,6 +3327,8 @@ def aggregate_ranking(
                     confirmed_symbols.add(resolved)
             # DexScreener URL pair addresses → confirmed (v40: use _and_ca to warm cache with token_ca)
             for chain, pair_addr in DEXSCREENER_URL_REGEX.findall(text):
+                if chain != "solana":  # v109: skip non-Solana chains
+                    continue
                 resolved, _ = _resolve_pair_to_symbol_and_ca(chain, pair_addr, ca_cache)
                 if resolved and resolved not in EXCLUDED_TOKENS:
                     confirmed_symbols.add(resolved)
@@ -3529,6 +3536,8 @@ def aggregate_ranking(
                     "extracted_cas": msg_cas if msg_cas else None,
                     # v40+v50: Resolved CA — direct extraction or msg fallback
                     "resolved_ca": resolved,
+                    # v109: Telegram message ID for dedup
+                    "message_id": msg.get("message_id"),
                 })
 
             for token, source, ca in token_tuples:

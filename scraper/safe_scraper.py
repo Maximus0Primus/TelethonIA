@@ -272,6 +272,7 @@ async def _fetch_messages(client: TelegramClient, peer, count: int) -> list[dict
                 "date": message.date.isoformat(),
                 "is_forwarded": message.fwd_from is not None,
                 "is_reply": message.reply_to is not None,
+                "message_id": message.id,  # v109: track for dedup
             })
 
         if hit_age_limit:
@@ -1424,6 +1425,7 @@ def _rt_open_trades(ca: str, symbol: str, price: float, mcap: float,
         "_rt_buy_sell_ratio": token_info.get("buy_sell_ratio"),
         "_rt_token_age_hours": token_info.get("token_age_hours"),
         "_rt_is_pump_fun": token_info.get("is_pump_fun"),
+        "_rt_pair_address": token_info.get("pair_address"),  # v109: track pool for migration debug
         "_rt_ml_pred": token_info.get("_rt_ml_pred"),        # v77: RT ML pred for A/B
         "_rt_kol_ml_pred": token_info.get("_rt_kol_ml_pred"),  # v78: KCO score (fix: was reading wrong key)
     }
@@ -1777,6 +1779,15 @@ async def _rt_on_new_message(event: events.NewMessage.Event):
                 # v67: Record RT event for monitoring
                 if _monitoring:
                     _metrics.record_rt_event(symbol, username, ca, rt_score, pos_size, opened)
+                # v109: Alert on KOL trade (for live monitoring)
+                try:
+                    from alerter import alert_kol_trade
+                    alert_kol_trade(
+                        symbol, username, price, pos_size, rt_score,
+                        liq_usd, is_bonding=(is_bonding or is_pump_dex),
+                    )
+                except Exception:
+                    pass  # alerter is best-effort
         finally:
             _rt_in_flight.discard(flight_key)
 

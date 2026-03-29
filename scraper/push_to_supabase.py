@@ -80,8 +80,14 @@ def retry_failed_writes() -> dict:
                 continue
             result["succeeded"] += 1
         except Exception as e:
-            logger.warning("Replay failed for %s (%d rows): %s", table, len(rows), e)
-            remaining.append(entry)
+            err_str = str(e)
+            if "23505" in err_str or "duplicate" in err_str.lower() or "unique" in err_str.lower():
+                # v109: Drop duplicate key errors — these rows were already inserted.
+                # Don't re-queue them, they'll fail forever.
+                logger.info("Replay: dropping %d rows for %s (duplicate key — already inserted)", len(rows), table)
+            else:
+                logger.warning("Replay failed for %s (%d rows): %s", table, len(rows), e)
+                remaining.append(entry)
             result["failed"] += 1
 
     # Rewrite buffer with only failed entries
@@ -1163,6 +1169,8 @@ def insert_kol_mentions(mentions: list[dict]) -> None:
             "extracted_cas": m.get("extracted_cas"),
             # v40: Resolved CA from extraction (CA/URL sources)
             "resolved_ca": m.get("resolved_ca"),
+            # v109: Telegram message ID for dedup
+            "message_id": m.get("message_id"),
         }))
 
     # Upsert in chunks of 500 — ON CONFLICT (kol_group, message_date, symbol) DO NOTHING

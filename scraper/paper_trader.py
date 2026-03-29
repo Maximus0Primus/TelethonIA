@@ -750,6 +750,7 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
             "_rt_buy_sell_ratio": "rt_buy_sell_ratio",
             "_rt_token_age_hours": "rt_token_age_hours",
             "_rt_is_pump_fun": "rt_is_pump_fun",
+            "_rt_pair_address": "pair_address",  # v109: track pool for migration debug
             "_rt_ml_pred": "ml_pred",        # v77: ML predicted avg PnL — enables A/B analysis
             "_rt_kol_ml_pred": "kol_ml_pred", # v78: KOL ML predicted return — enables KCO A/B
             "_rt_n_kol_confirmations": "n_kol_confirmations",  # v80: multi-KOL confirmation count

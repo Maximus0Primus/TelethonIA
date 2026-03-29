@@ -45,6 +45,7 @@ _COOLDOWNS = {
     "loss_limit_hit":      3600,   # 1 hour per period
     "slippage_deviation":  300,    # 5 min
     "score_anomaly":       3600,   # 1 hour
+    "kol_trade":           0,      # v109: No cooldown — alert every whitelisted KOL trade
 }
 
 # Max consecutive alerts before going silent (0 = unlimited)
@@ -333,6 +334,20 @@ def alert_kol_silence(kol_name: str, hours_silent: float):
         f"No mentions for {hours_silent:.0f}h (threshold: 48h)"
     )
     _send(text, cat)
+
+
+def alert_kol_trade(symbol: str, kol: str, price: float, pos_usd: float,
+                    rt_score: float, liq_usd: float, is_bonding: bool = False):
+    """v109: Alert when a whitelisted KOL calls a token and a paper trade is opened."""
+    bonding_tag = " 🟡BONDING" if is_bonding else ""
+    _send(
+        f"📢 <b>KOL CALL</b>{bonding_tag}\n\n"
+        f"<b>{symbol}</b> called by <b>{kol}</b>\n"
+        f"💰 Entry: ${price:.8f}\n"
+        f"📊 Position: ${pos_usd:.1f} | Score: {rt_score:.0f}\n"
+        f"💧 Liq: ${liq_usd/1000:.0f}K",
+        "kol_trade",
+    )
 
 
 def _truncate(s: str, max_len: int) -> str:
