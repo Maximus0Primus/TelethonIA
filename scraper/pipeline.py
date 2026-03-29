@@ -3409,14 +3409,17 @@ def aggregate_ranking(
 
             # v109+: Skip flex/recap/PnL-report messages (same patterns as RT handler)
             import re as _re
-            if (_re.search(r'KOLscope|KOLscopeBot|MULTIPLIER DETECTED|STATUS UNLOCKED|CALL ALERT:.*✈', text, _re.IGNORECASE)
-                or _re.search(r'(made|hit|scored|bagged|caught)\s+\d+x', text, _re.IGNORECASE)
-                or _re.search(r'DIP MODE', text, _re.IGNORECASE)
-                or _re.search(r'last (few|couple|recent)\s+.*calls', text, _re.IGNORECASE)
-                or _re.search(r'(very )?recent shills', text, _re.IGNORECASE)
-                or _re.search(r'\d+[km]?\s*(->|→|⮕|to)\s*\d+[km]?', text, _re.IGNORECASE)
-                or _re.search(r'\d+x\s*(🔥|🔫|💰|💎|🚀|from\s+(call|bottom|dip)|\+)', text, _re.IGNORECASE)
-                or _re.search(r'keep\s+print', text, _re.IGNORECASE)):
+            # Strip Solana addresses before matching to avoid false positives
+            # (CAs like "Dq3to3Yw..." contain substrings matching PnL patterns)
+            _text_no_ca = _re.sub(r'[1-9A-HJ-NP-Za-km-z]{32,44}', '', text)
+            if (_re.search(r'KOLscope|KOLscopeBot|MULTIPLIER DETECTED|STATUS UNLOCKED|CALL ALERT:.*✈', _text_no_ca, _re.IGNORECASE)
+                or _re.search(r'(made|hit|scored|bagged|caught)\s+\d+x', _text_no_ca, _re.IGNORECASE)
+                or _re.search(r'DIP MODE', _text_no_ca, _re.IGNORECASE)
+                or _re.search(r'last (few|couple|recent)\s+.*calls', _text_no_ca, _re.IGNORECASE)
+                or _re.search(r'(very )?recent shills', _text_no_ca, _re.IGNORECASE)
+                or _re.search(r'\d+[km]?\s*(->|→|⮕|to)\s*\d+[km]?', _text_no_ca, _re.IGNORECASE)
+                or _re.search(r'\d+x\s*(🔥|🔫|💰|💎|🚀|from\s+(call|bottom|dip)|\+)', _text_no_ca, _re.IGNORECASE)
+                or _re.search(r'keep\s+print', _text_no_ca, _re.IGNORECASE)):
                 continue
 
             # v14: Cap tickers per message — scorecard/DCA-list posts

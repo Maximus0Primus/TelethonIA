@@ -1599,6 +1599,10 @@ async def _rt_on_new_message(event: events.NewMessage.Event):
     # KOLs post recaps like "100k → 700k (7x)" or "last few goated calls".
     # These contain CAs but are NOT entry signals — they refer to past gains.
     import re as _re
+    # Strip Solana addresses from text before flex matching to avoid false positives.
+    # CAs like "Dq3to3Yw..." contain substrings that match PnL patterns ("3to3").
+    _SOLANA_ADDR = _re.compile(r'[1-9A-HJ-NP-Za-km-z]{32,44}')
+    _text_no_ca = _SOLANA_ADDR.sub('', text)
     _FLEX_PATTERNS = [
         _re.compile(r'KOLscope|KOLscopeBot', _re.IGNORECASE),
         _re.compile(r'MULTIPLIER DETECTED', _re.IGNORECASE),
@@ -1609,6 +1613,7 @@ async def _rt_on_new_message(event: events.NewMessage.Event):
         _re.compile(r'last (few|couple|recent)\s+.*calls', _re.IGNORECASE),
         _re.compile(r'(very )?recent shills', _re.IGNORECASE),
         # PnL reports: "80k -> 1.6m", "100k to 700k", "300k → 3m" etc.
+        # NOTE: runs on _text_no_ca to avoid matching inside Solana addresses
         _re.compile(r'\d+[km]?\s*(->|→|⮕|to)\s*\d+[km]?', _re.IGNORECASE),
         # Gain celebrations: "12x 🔥", "4x from call", "6x from bottom/dips"
         _re.compile(r'\d+x\s*(🔥|🔫|💰|💎|🚀|from\s+(call|bottom|dip)|\+)', _re.IGNORECASE),
@@ -1616,7 +1621,7 @@ async def _rt_on_new_message(event: events.NewMessage.Event):
         _re.compile(r'keep\s+print', _re.IGNORECASE),
     ]
     for pat in _FLEX_PATTERNS:
-        if pat.search(text):
+        if pat.search(_text_no_ca):
             logger.debug("RT FLEX SKIP: %s — matched %s", username, pat.pattern[:40])
             return
 
