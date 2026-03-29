@@ -1749,14 +1749,9 @@ async def _rt_on_new_message(event: events.NewMessage.Event):
                 token_info["_rt_n_kol_confirmations"] = n_confs
 
             # v79: Unified ML position multiplier (KCO primary + RT ML secondary)
-            ml_mult, ml_label = _rt_ml_position_mult(
-                username, tier, kol_info, token_info, rt_score, config
-            )
-            if ml_mult != 1.0:
-                pos_size = max(
-                    float(config.get("min_position_usd", 10)),
-                    min(pos_size * ml_mult, float(config.get("max_position_usd", 100))),
-                )
+            # v109: ML disabled — skip entirely. Was anti-predictive, wasted API calls.
+            ml_mult = 1.0
+            ml_label = ""
 
             logger.info(
                 "RT score: %s rt_score=%.0f → pos=$%.2f | kol=%s(%.2f/%.0f%%) liq=$%.0fK bsr=%.2f%s%s",
@@ -1910,15 +1905,9 @@ async def setup_realtime_listener(client: TelegramClient):
         kol_scores = _rt_load_kol_scores()
         rt_config = _rt_load_config()
 
-        # Try loading ML model from Supabase
-        ml_status = "no model"
-        try:
-            from rt_model import load_rt_model
-            _rt_ml_model = load_rt_model()
-            if _rt_ml_model:
-                ml_status = "ML model loaded"
-        except Exception as e:
-            logger.debug("RT: ML model load failed: %s", e)
+        # v109: ML model disabled — anti-predictive, quality gate fails, wastes API calls.
+        # Skip loading entirely. ml_threshold=99 and ml_gate_mode=disabled already block usage.
+        ml_status = "ML disabled (v109)"
 
         logger.info(
             "RT v66: %d groups (%d S-tier) | %d KOLs | %s | "

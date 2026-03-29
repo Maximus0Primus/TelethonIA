@@ -579,7 +579,9 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
     Returns number of new trade rows opened.
     """
     # v88: Load precomputed bot ML predictions (one query per cycle)
-    _load_bot_predictions(client)
+    # v109: Skip loading — ML gate is disabled (ml_gate_mode=disabled, ml_threshold=99).
+    # Saves one Supabase query per cycle. Re-enable when ML is useful.
+    # _load_bot_predictions(client)
 
     if config is None:
         config = {
