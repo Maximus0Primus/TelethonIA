@@ -396,7 +396,12 @@ def alert_trade_closed(symbol: str, strategy: str, exit_reason: str,
     """v110: Alert when a main trade closes (trail_stop, sl_hit, timeout)."""
     # Emoji based on outcome
     if exit_reason == "trail_stop":
-        emoji = "🟢" if pnl_pct > 0.5 else "✅"
+        if pnl_pct > 0.5:
+            emoji = "🟢"   # big win (>+50%)
+        elif pnl_pct > 0:
+            emoji = "✅"   # small win
+        else:
+            emoji = "🟡"   # trail stop at loss (noise exit)
         reason_text = "TRAIL STOP"
     elif exit_reason == "tp_hit":
         emoji = "🎯"
@@ -405,7 +410,7 @@ def alert_trade_closed(symbol: str, strategy: str, exit_reason: str,
         emoji = "🔴"
         reason_text = "SL HIT"
     elif exit_reason == "timeout":
-        emoji = "⏰"
+        emoji = "⏰" if pnl_pct >= 0 else "🟠"
         reason_text = "TIMEOUT"
     else:
         emoji = "📊"
