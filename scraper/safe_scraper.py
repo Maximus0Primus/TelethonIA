@@ -1008,15 +1008,9 @@ def _rt_load_config() -> dict:
             "market_momentum": 0.20,
             "confirmation": 0.15,
         },
-        # Sizing multiplier curves (Optuna-tunable)
+        # v110: Kelly-based sizing — bankroll × kelly_fraction. No multipliers.
         "sizing": {
-            "kol_score_mult_cap": 1.8,     # best KOL → 1.8× budget
-            "kol_score_mult_floor": 0.3,    # unknown KOL → 0.3× budget
-            "tier_s_bonus": 1.3,            # S-tier KOL → extra 1.3×
-            "safety_mult_floor": 0.2,       # very risky token → 0.2× budget
-            "safety_mult_cap": 1.5,         # very safe token → 1.5× budget
-            "momentum_mult_floor": 0.5,     # negative momentum → 0.5×
-            "momentum_mult_cap": 1.5,       # strong momentum → 1.5×
+            "kelly_fraction": 0.127,  # Half-Kelly 12.7%
         },
     }
     try:
@@ -2059,8 +2053,9 @@ async def main():
                         from alerter import alert_kol_silence
                         sb_kol = _get_supabase()
                         if sb_kol:
-                            # v109: Use actual whitelist from DB
-                            wl_kols = list(_rt_kol_whitelist.keys()) if _rt_kol_whitelist else []
+                            # v110: Load whitelist for silence check even if trading whitelist is disabled
+                            _silence_wl = _rt_load_kol_whitelist(_rt_load_config())
+                            wl_kols = list(_silence_wl.keys()) if _silence_wl else []
                             cutoff = (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()
                             for kol in wl_kols:
                                 res = await asyncio.get_event_loop().run_in_executor(
@@ -2086,7 +2081,7 @@ async def main():
                         _sb = _get_supabase()
                         if _sb:
                             _cfg = _sb.table("scoring_config").select(
-                                "paper_trade_config,kol_rt_whitelist"
+                                "paper_trade_config"
                             ).eq("id", 1).execute()
                             if _cfg.data:
                                 _ptc = _cfg.data[0].get("paper_trade_config") or {}

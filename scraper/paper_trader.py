@@ -1281,7 +1281,7 @@ def check_paper_trades(client) -> dict:
         logger.info(
             "paper_trader: checked %d open, closed %d (TP=%d SL=%d timeout=%d trail=%d)",
             counts["checked"], counts["closed"], counts["tp"], counts["sl"],
-            counts["timeout"], counts.get("trail_stop", 0),
+            counts["timeout"], counts.get("trail", 0),
         )
         if _monitoring:
             _metrics.record_paper_trade_close(counts["closed"], _total_pnl_usd)
@@ -1465,6 +1465,7 @@ def paper_trade_summary(client) -> dict | None:
     tp_count = sum(1 for t in trades if t["status"] == "tp_hit")
     sl_count = sum(1 for t in trades if t["status"] == "sl_hit")
     timeout_count = sum(1 for t in trades if t["status"] == "timeout")
+    trail_count = sum(1 for t in trades if t["status"] == "trail_stop")
 
     pnls = [float(t["pnl_pct"]) for t in trades if t.get("pnl_pct") is not None]
     winners = [p for p in pnls if p > 0]
