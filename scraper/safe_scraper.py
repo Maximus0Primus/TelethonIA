@@ -544,7 +544,7 @@ def process_and_push(messages_data: dict[str, list[dict]], dump: bool = False,
         if data_24h:
             sb_pt = _get_supabase()
             pt_config = _load_paper_trade_config(sb_pt)
-            batch_enabled = pt_config.get("batch_trading_enabled", True)
+            batch_enabled = pt_config.get("batch_trading_enabled", False)  # v110: default=False
             if batch_enabled:
                 open_paper_trades(sb_pt, data_24h, cycle_ts=datetime.now(timezone.utc), config=pt_config)
             else:
