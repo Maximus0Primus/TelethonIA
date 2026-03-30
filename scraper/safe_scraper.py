@@ -434,15 +434,7 @@ def _check_api_health(tokens: list) -> None:
         "jupiter":     round(sum(1 for t in tokens if t.get("jup_tradeable")        is not None) / total * 100),
     }
 
-    # Birdeye: only top-N tokens enriched — report as % of expected, not absolute
-    try:
-        from enrich import BIRDEYE_TOP_N
-        bird_expected = min(BIRDEYE_TOP_N, total) / total
-        bird_actual   = sum(1 for t in tokens if t.get("holder_count") is not None) / total
-        if bird_expected > 0:
-            fill_rates["birdeye"] = round(bird_actual / bird_expected * 100)
-    except Exception:
-        pass
+    # Birdeye: removed from health alerts (noisy, not actionable)
 
     from alerter import alert_api_health
     alert_api_health(fill_rates, total)
@@ -1225,68 +1217,14 @@ def _rt_compute_score(kol_username: str, ca: str, kol_info: dict,
 def _rt_position_size(rt_score: float, kol_info: dict, token_info: dict,
                       tier: str, config: dict) -> float:
     """
-    v71: Bankroll-based position sizing with Kelly fraction.
-    base_bet = bankroll × kelly_fraction (7%)
-    Modulated by KOL WR and RT score. Floor $1, cap $200.
-    Falls back to old fixed-budget sizing if sizing.mode != "bankroll".
+    v110: Kelly-based position sizing — bankroll × kelly_fraction.
+    No multipliers, no caps. The whitelist IS the quality gate.
     """
     sizing = config.get("sizing", {})
-    mode = sizing.get("mode", "fixed")
-
-    if mode == "bankroll":
-        bankroll = _rt_load_bankroll()
-        balance = float(bankroll.get("current_balance", 100))
-        kelly = float(sizing.get("kelly_fraction", 0.07))
-        base_bet = balance * kelly
-
-        # WR multiplier: higher WR KOLs get bigger size
-        wr = float(kol_info.get("win_rate", 0))
-        if wr >= 0.80:
-            wr_mult = 1.5
-        elif wr >= 0.70:
-            wr_mult = 1.2
-        else:
-            wr_mult = 1.0  # 60% threshold already passed by WR gate
-
-        # Score multiplier: RT score 0→0.7x, 100→1.3x
-        score_frac = max(0, min(1, rt_score / 100))
-        score_mult = 0.7 + score_frac * 0.6
-
-        size = base_bet * wr_mult * score_mult
-
-        min_pos = float(config.get("min_position_usd", sizing.get("min_position_usd", 10.0)))
-        max_pos = float(config.get("max_position_usd", sizing.get("max_position_usd", 200.0)))
-        return round(max(min_pos, min(max_pos, size)), 2)
-
-    # --- Legacy fixed-budget mode (fallback) ---
-    budget = float(config.get("base_budget_usd", 20))
-
-    # KOL multiplier: [floor, cap] based on kol_score
-    kol_score = kol_info.get("score", 0)
-    kol_floor = float(sizing.get("kol_score_mult_floor", 0.3))
-    kol_cap = float(sizing.get("kol_score_mult_cap", 1.8))
-    kol_frac = min(1.0, kol_score / 3.0) if kol_score > 0 else 0
-    kol_mult = kol_floor + kol_frac * (kol_cap - kol_floor)
-
-    if tier == "S":
-        kol_mult *= float(sizing.get("tier_s_bonus", 1.3))
-
-    safety_sub = _rt_compute_token_safety(token_info)
-    safety_floor = float(sizing.get("safety_mult_floor", 0.2))
-    safety_cap = float(sizing.get("safety_mult_cap", 1.5))
-    safety_mult = safety_floor + (safety_sub / 100) * (safety_cap - safety_floor)
-
-    momentum_sub = _rt_compute_momentum(token_info)
-    mom_floor = float(sizing.get("momentum_mult_floor", 0.5))
-    mom_cap = float(sizing.get("momentum_mult_cap", 1.5))
-    mom_mult = mom_floor + (momentum_sub / 100) * (mom_cap - mom_floor)
-
-    combined = (kol_mult * safety_mult * mom_mult) ** (1 / 3)
-    size = budget * combined
-
-    min_pos = float(config.get("min_position_usd", 10.0))
-    max_pos = float(config.get("max_position_usd", 100.0))
-    return round(max(min_pos, min(max_pos, size)), 2)
+    kelly = float(sizing.get("kelly_fraction", 0.127))
+    bankroll = _rt_load_bankroll()
+    balance = float(bankroll.get("current_balance", 500))
+    return round(balance * kelly, 2)
 
 
 def _rt_ml_position_mult(
@@ -1433,24 +1371,25 @@ def _rt_open_trades(ca: str, symbol: str, price: float, mcap: float,
     now = datetime.now(timezone.utc)
     total_opened = 0
 
-    # v102: KOL whitelist gate — rejected KOLs get shadow-only trades (no main trades).
-    # Shadow trades ALWAYS open for ALL KOLs (unbiased data collection).
-    kol_wl = _rt_load_kol_whitelist(config)
-    kol_entry = kol_wl.get(kol_username, {})
-    kol_approved = kol_entry.get("approved", True)  # default=True if KOL not in whitelist yet
-    if not kol_approved:
-        logger.info("RT KOL REJECTED (shadow-only): %s — opening shadows but no main trades", kol_username)
-        # Open shadow trades only (no main trades, no live trades)
-        shadow_config = dict(pt_config)
-        shadow_config["budget_usd"] = pos_size
-        shadow_config["active_strategies"] = []  # no main strategies → 0 main trades
-        shadow_config["top_n"] = 1
-        shadow_config["ca_filter"] = False
-        shadow_config["shadow_enabled"] = True
-        token_entry["_rt_experiment_id"] = pt_config.get("experiment_id")
-        token_entry["_rt_variant_id"] = "shadow_only_rejected_kol"
-        open_paper_trades(sb, [token_entry], cycle_ts=now, config=shadow_config)
-        return 0  # 0 main trades opened
+    # v110: KOL whitelist gate — disabled by default (whitelist_enabled=false in rt_trade_config).
+    # Dynamic trail strategy is profitable across all KOLs, whitelist not needed.
+    whitelist_enabled = config.get("whitelist_enabled", False)
+    if whitelist_enabled:
+        kol_wl = _rt_load_kol_whitelist(config)
+        kol_entry = kol_wl.get(kol_username, {})
+        kol_approved = kol_entry.get("approved", False)
+        if not kol_approved:
+            logger.info("RT KOL REJECTED (shadow-only): %s — opening shadows but no main trades", kol_username)
+            shadow_config = dict(pt_config)
+            shadow_config["budget_usd"] = pos_size
+            shadow_config["active_strategies"] = []
+            shadow_config["top_n"] = 1
+            shadow_config["ca_filter"] = False
+            shadow_config["shadow_enabled"] = True
+            token_entry["_rt_experiment_id"] = pt_config.get("experiment_id")
+            token_entry["_rt_variant_id"] = "shadow_only_rejected_kol"
+            open_paper_trades(sb, [token_entry], cycle_ts=now, config=shadow_config)
+            return 0
 
     # v96: Hybrid strategy — split position across configured allocations
     hybrid_cfg = config.get("hybrid_strategy", {})
@@ -1624,6 +1563,11 @@ async def _rt_on_new_message(event: events.NewMessage.Event):
         _re.compile(r"we.re\s+(now\s+)?up\s+(over\s+)?\d+[xX]", _re.IGNORECASE),
         _re.compile(r'already\s+(went|gone|did)\s+\d+x', _re.IGNORECASE),
         _re.compile(r'(new|another)\s+ATH', _re.IGNORECASE),
+        # --- Cabal/update brags ("10X since cabal", "3X since my update", "another 10X in cabal") ---
+        _re.compile(r'\d+[xX]\s+since\s+(cabal|update|call|entry|my)', _re.IGNORECASE),
+        _re.compile(r'(another|yet another)\s+\d+[xX]\s+(in|from|for)', _re.IGNORECASE),
+        _re.compile(r'since\s+(cabal\s+)?chat\s+call', _re.IGNORECASE),
+        _re.compile(r'for\s+cabal\s+chads', _re.IGNORECASE),
         # --- PnL reports ---
         _re.compile(r'\d+[km]?\s*(->|→|⮕|to)\s*\d+[km]?', _re.IGNORECASE),
         # --- Recaps ---
@@ -1739,12 +1683,8 @@ async def _rt_on_new_message(event: events.NewMessage.Event):
             # Position sizing: confidence → dollars
             pos_size = _rt_position_size(rt_score, kol_info, token_info, tier, config)
 
-            # v80: Multi-KOL confirmation position boost
+            # v80: Multi-KOL confirmation — track count but no position boost (v110: flat sizing)
             n_confs = _rt_count_confirmations(username, ca)
-            if n_confs >= 2:
-                pos_size = min(pos_size * 1.5, float(config.get("max_position_usd", 100)))
-            elif n_confs == 1:
-                pos_size = min(pos_size * 1.3, float(config.get("max_position_usd", 100)))
             if n_confs > 0:
                 token_info["_rt_n_kol_confirmations"] = n_confs
 
@@ -2086,9 +2026,11 @@ async def main():
                     # RT is healthy again — reset backoff so next outage re-alerts
                     reset_alert("rt_listener_down")
 
-                # Check API error rates
+                # Check API error rates (birdeye excluded — noisy, not actionable)
                 api_stats = _metrics.get_api_stats(1.0)
                 for api, stats in api_stats.items():
+                    if api == "birdeye":
+                        continue
                     if stats["calls"] >= 5 and stats["error_rate"] > 0.30:
                         alert_api_errors(api, stats["error_rate"], stats["errors"], stats["calls"])
 
@@ -2148,12 +2090,12 @@ async def main():
                             ).eq("id", 1).execute()
                             if _cfg.data:
                                 _ptc = _cfg.data[0].get("paper_trade_config") or {}
-                                _wl = _cfg.data[0].get("kol_rt_whitelist") or {}
+                                _bankroll_data = _rt_load_bankroll()
                                 snapshot["strategy"] = {
                                     "active": (_ptc.get("active_strategies") or ["?"])[0] if isinstance(_ptc.get("active_strategies"), list) else "?",
-                                    "bankroll": float(_ptc.get("budget_usd", 0)),
-                                    "bankroll_start": 500.0,
-                                    "whitelist_count": len(_wl),
+                                    "bankroll": float(_bankroll_data.get("current_balance", 0)),
+                                    "bankroll_start": float(_bankroll_data.get("starting_capital", 500)),
+                                    "whitelist_count": 0,  # v110: whitelist disabled
                                 }
                     except Exception:
                         pass

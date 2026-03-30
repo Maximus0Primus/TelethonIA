@@ -338,6 +338,25 @@ for _trail_pct in [10, 15, 20, 25]:
 STRATEGIES.update(_TRAIL_STRATEGIES)
 SHADOW_STRATEGIES.extend(_TRAIL_STRATEGIES.keys())
 
+# v110: Dynamic trail — trail activates only after a gain threshold (activation_pct).
+# No TP cap: lets runners run. SL and timeout still apply.
+# Encoded: DTRAIL{trail}_ACT{act}_SL{sl}
+_DTRAIL_STRATEGIES = {}
+for _dt_trail in [10, 15, 20]:
+    for _dt_act in [10, 15, 20, 25, 30]:
+        for _dt_sl in [50, 60, 70]:
+            _dtname = f"DTRAIL{_dt_trail}_ACT{_dt_act}_SL{_dt_sl}"
+            _DTRAIL_STRATEGIES[_dtname] = [
+                {"pct": 1.0, "tp_mult": None,  # no TP cap
+                 "sl_mult": 1 - _dt_sl / 100, "horizon_min": 120,
+                 "trail_pct": _dt_trail / 100,
+                 "trail_activation_pct": _dt_act / 100,  # trail activates after this gain
+                 "label": "main"},
+            ]
+
+STRATEGIES.update(_DTRAIL_STRATEGIES)
+SHADOW_STRATEGIES.extend(_DTRAIL_STRATEGIES.keys())
+
 # v106: Split exit — 50% at TP50, 50% runner (TP100 or trailing stop).
 # Simpler version of SCALE_OUT (which had 4 tranches and -29% ROI).
 # Multi-tranche shadow support added in shadow insertion code.
@@ -939,6 +958,7 @@ def _dynamic_sell_slip_factor(trade: dict, exit_type: str, base_bps: int = 200,
 import re as _re
 _DECAY_RE = _re.compile(r"^DECAY_TP\d+_SL\d+_E(\d+)$")
 _TRAIL_RE = _re.compile(r"^TRAIL(\d+)_TP\d+_SL\d+$")
+_DTRAIL_RE = _re.compile(r"^DTRAIL(\d+)_ACT(\d+)_SL\d+$")
 _BE_RE = _re.compile(r"^BE(\d+)_TP\d+_SL\d+$")
 
 def _get_decay_end(strategy_name: str) -> float | None:
@@ -948,20 +968,27 @@ def _get_decay_end(strategy_name: str) -> float | None:
         return 1 + int(m.group(1)) / 100  # e.g., E20 → 1.20
     return None
 
-def _get_trail_pct(trade: dict) -> float | None:
-    """Get trailing stop % from strategy name (TRAIL20_... → 0.20) or tranche config."""
-    # Check strategy name first
+def _get_trail_config(trade: dict) -> tuple[float | None, float | None]:
+    """Get (trail_pct, activation_pct) from strategy name or tranche config.
+    Returns (trail_pct, activation_pct) or (None, None).
+    For DTRAIL strategies: activation_pct is the gain threshold before trail activates.
+    For TRAIL strategies: activation_pct = trail_pct (legacy behavior).
+    """
     strat = trade.get("strategy", "")
+    # v110: Dynamic trail — DTRAIL{trail}_ACT{act}_SL{sl}
+    m = _DTRAIL_RE.match(strat)
+    if m:
+        return int(m.group(1)) / 100, int(m.group(2)) / 100
+    # Legacy: TRAIL{pct}_TP{tp}_SL{sl} — activation = trail_pct
     m = _TRAIL_RE.match(strat)
     if m:
-        return int(m.group(1)) / 100
-    # Check if SPLIT strategy runner tranche has trail_pct
-    # (stored in tranche config, matched by label containing 'trail')
+        pct = int(m.group(1)) / 100
+        return pct, pct
+    # SPLIT strategy runner tranche
     label = trade.get("tranche_label", "")
     if "trail" in label:
-        # For SPLIT_50_TRAIL strategies, the trail_pct is 0.20
-        return 0.20
-    return None
+        return 0.20, 0.20
+    return None, None
 
 
 def _evaluate_trade_exit(trade: dict, current_price: float | None,
@@ -1041,18 +1068,17 @@ def _evaluate_trade_exit(trade: dict, current_price: float | None,
                     new_status = "tp_hit"
                     # Exit at the decayed threshold, not the peak
                     exit_price = decayed_price * _dynamic_sell_slip_factor(trade, "tp_hit", base_bps, sell_fee_bps)
-    # 3c) v106: Trailing stop — exit when price drops trail_pct% from peak
-    #     Only activates once peak > entry * (1 + trail_pct) to avoid noise.
+    # 3c) v106/v110: Trailing stop — exit when price drops trail_pct% from peak.
+    #     v106 TRAIL: activates once peak > entry * (1 + trail_pct).
+    #     v110 DTRAIL: activates once peak > entry * (1 + activation_pct).
     if new_status is None and current_price is not None:
-        trail_pct = _get_trail_pct(trade)
+        trail_pct, activation_pct = _get_trail_config(trade)
         if trail_pct is not None and high_seen > 0 and entry_price > 0:
-            # Activation: peak must have exceeded entry by at least trail_pct
-            activation_price = entry_price * (1 + trail_pct)
+            activation_price = entry_price * (1 + activation_pct)
             if high_seen >= activation_price:
                 trail_trigger = high_seen * (1 - trail_pct)
                 if current_price <= trail_trigger and trail_trigger > entry_price:
-                    # Trailing stop triggered — exit at trigger price
-                    new_status = "tp_hit"
+                    new_status = "trail_stop"
                     exit_price = trail_trigger * _dynamic_sell_slip_factor(trade, "tp_hit", base_bps, sell_fee_bps)
     # 4) Timeout
     if new_status is None and elapsed_minutes >= horizon:
@@ -1178,10 +1204,31 @@ def check_paper_trades(client) -> dict:
             closed_ids.add(trade["id"])
             counts["closed"] += 1
             _total_pnl_usd += pnl_usd or 0
-            if trade.get("source") == "rt":
+            if trade.get("source") == "rt" and not trade.get("is_shadow"):
                 _rt_pnl_usd += pnl_usd or 0
                 _rt_closed += 1
-            status_key = new_status.replace("_hit", "")
+                # v110: Alert on main trade close
+                try:
+                    from alerter import alert_trade_closed
+                    from safe_scraper import _rt_load_bankroll
+                    bankroll = _rt_load_bankroll()
+                    bal = float(bankroll.get("current_balance", 0)) + (pnl_usd or 0)
+                    alert_trade_closed(
+                        symbol=trade["symbol"], strategy=trade["strategy"],
+                        exit_reason=new_status,
+                        pnl_pct=ev.get("pnl_pct", 0), pnl_usd=pnl_usd or 0,
+                        pos_usd=float(trade.get("position_usd") or 0),
+                        entry_price=float(trade.get("entry_price") or 0),
+                        exit_price=ev.get("exit_price", 0),
+                        high_price=ev.get("high_price_seen", 0),
+                        minutes=int(ev.get("exit_minutes", 0)),
+                        kol=trade.get("kol_group", ""),
+                        bankroll=bal,
+                        ca=trade.get("token_address", ""),
+                    )
+                except Exception as e:
+                    logger.debug("trade close alert failed: %s", e)
+            status_key = new_status.replace("_hit", "").replace("_stop", "")
             counts[status_key] = counts.get(status_key, 0) + 1
             usd_str = f" ${pnl_usd:+.2f}" if pnl_usd is not None else ""
             logger.info(
@@ -1217,7 +1264,7 @@ def check_paper_trades(client) -> dict:
             closed_ids.add(trade["id"])
             counts["closed"] += 1
             _total_pnl_usd += pnl_usd or 0
-            if trade.get("source") == "rt":
+            if trade.get("source") == "rt" and not trade.get("is_shadow"):
                 _rt_pnl_usd += pnl_usd or 0
                 _rt_closed += 1
             counts["sl"] = counts.get("sl", 0) + 1
@@ -1232,9 +1279,9 @@ def check_paper_trades(client) -> dict:
 
     if counts["closed"] > 0:
         logger.info(
-            "paper_trader: checked %d open, closed %d (TP=%d SL=%d timeout=%d)",
+            "paper_trader: checked %d open, closed %d (TP=%d SL=%d timeout=%d trail=%d)",
             counts["checked"], counts["closed"], counts["tp"], counts["sl"],
-            counts["timeout"],
+            counts["timeout"], counts.get("trail_stop", 0),
         )
         if _monitoring:
             _metrics.record_paper_trade_close(counts["closed"], _total_pnl_usd)

@@ -45,7 +45,8 @@ _COOLDOWNS = {
     "loss_limit_hit":      3600,   # 1 hour per period
     "slippage_deviation":  300,    # 5 min
     "score_anomaly":       3600,   # 1 hour
-    "kol_trade":           0,      # v109: No cooldown — alert every whitelisted KOL trade
+    "kol_trade":           0,      # v109: No cooldown — alert every KOL trade
+    "trade_closed":        0,      # v110: No cooldown — alert every trade close
 }
 
 # Max consecutive alerts before going silent (0 = unlimited)
@@ -197,15 +198,23 @@ def send_daily_summary(snapshot: dict):
     real_wins = paper.get("wins_today", 0)
     wr_today = f"{real_wins*100/real_trades:.0f}%" if real_trades > 0 else "N/A"
 
+    # Bankroll change
+    bankroll_change = bankroll - bankroll_start
+    bankroll_pct = (bankroll / bankroll_start - 1) * 100 if bankroll_start > 0 else 0
+    bankroll_emoji = "📈" if bankroll_change >= 0 else "📉"
+
+    # Whitelist status
+    wl_text = f"{wl_count} KOLs" if wl_count > 0 else "OFF (all KOLs)"
+
     text = (
         "<b>📡 DAILY SUMMARY</b>\n"
         f"Uptime: {uptime:.1f}h\n"
         f"\n<b>📊 Strategy:</b> {active_strat}\n"
-        f"Bankroll: ${bankroll:.2f} / ${bankroll_start:.2f} start\n"
-        f"Whitelist: {wl_count} KOLs\n"
+        f"{bankroll_emoji} Bankroll: <b>${bankroll:.2f}</b> ({bankroll_pct:+.1f}% from ${bankroll_start:.0f})\n"
+        f"Whitelist: {wl_text}\n"
         f"\n<b>💰 Paper PnL today:</b>\n"
         f"  Trades: {real_trades} closed ({wr_today} WR)\n"
-        f"  PnL: ${real_pnl:+.2f}\n"
+        f"  PnL: <b>${real_pnl:+.2f}</b>\n"
         f"\n<b>🔄 Cycles:</b> {completed} completed, {errors} errors\n"
         f"\n<b>📡 RT:</b> {rt.get('events', 0)} events, "
         f"{rt.get('trades_opened', 0)} trades, "
@@ -256,7 +265,6 @@ def alert_api_health(fill_rates: dict, total: int) -> None:
     lines = "\n".join(f"• {api.upper()}: {pct}%" for api, pct in sorted(degraded.items()))
     hints = []
     if "helius"  in degraded: hints.append("helius.dev/dashboard")
-    if "birdeye" in degraded: hints.append("birdeye.so")
     hint_str = " | ".join(hints)
 
     text = (
@@ -376,6 +384,53 @@ def alert_kol_trade(symbol: str, kol: str, price: float, pos_usd: float,
         f"💵 Position: ${pos_usd:.1f}\n"
         f"\n🔗 {links_text}",
         "kol_trade",
+    )
+
+
+def alert_trade_closed(symbol: str, strategy: str, exit_reason: str,
+                       pnl_pct: float, pnl_usd: float, pos_usd: float,
+                       entry_price: float, exit_price: float,
+                       high_price: float, minutes: int,
+                       kol: str = "", bankroll: float = 0,
+                       ca: str = ""):
+    """v110: Alert when a main trade closes (trail_stop, sl_hit, timeout)."""
+    # Emoji based on outcome
+    if exit_reason == "trail_stop":
+        emoji = "🟢" if pnl_pct > 0.5 else "✅"
+        reason_text = "TRAIL STOP"
+    elif exit_reason == "tp_hit":
+        emoji = "🎯"
+        reason_text = "TP HIT"
+    elif exit_reason == "sl_hit":
+        emoji = "🔴"
+        reason_text = "SL HIT"
+    elif exit_reason == "timeout":
+        emoji = "⏰"
+        reason_text = "TIMEOUT"
+    else:
+        emoji = "📊"
+        reason_text = exit_reason.upper()
+
+    # Max gain from entry
+    max_gain = ((high_price / entry_price) - 1) * 100 if entry_price and high_price else 0
+
+    # Bankroll info
+    bankroll_text = f"\n💰 Bankroll: ${bankroll:.2f}" if bankroll > 0 else ""
+
+    # Link
+    link_text = f'\n🔗 <a href="https://dexscreener.com/solana/{ca}">DexScreener</a>' if ca else ""
+
+    _send(
+        f"{emoji} <b>TRADE {reason_text}</b>\n\n"
+        f"<b>{symbol}</b> | {strategy}\n"
+        f"👤 KOL: {kol}\n"
+        f"📈 PnL: <b>{pnl_pct*100:+.1f}%</b> (${pnl_usd:+.2f})\n"
+        f"💵 Position: ${pos_usd:.0f} | ⏱ {minutes}min\n"
+        f"📊 Entry: ${entry_price:.8f} → Exit: ${exit_price:.8f}\n"
+        f"🔝 Max: {max_gain:+.0f}%"
+        f"{bankroll_text}"
+        f"{link_text}",
+        "trade_closed",
     )
 
 
