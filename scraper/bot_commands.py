@@ -251,7 +251,7 @@ def _handle_trades(sb) -> str:
 # ── /stats ──
 
 def _handle_stats(sb) -> str:
-    """Performance stats: 24h, 7d, all-time — DTRAIL10 only."""
+    """Performance stats — DTRAIL10 only. Shows all-time + periods that differ."""
     now = datetime.now(timezone.utc)
 
     def _query_period(hours: int = 0) -> dict:
@@ -259,7 +259,7 @@ def _handle_stats(sb) -> str:
         try:
             q = (
                 sb.table("paper_trades")
-                .select("pnl_usd,pnl_pct,status,exit_minutes")
+                .select("pnl_usd,pnl_pct,status,exit_minutes,kol_group")
                 .eq("is_shadow", False)
                 .eq("strategy", _ACTIVE_STRATEGY)
                 .neq("status", "open")
@@ -270,16 +270,32 @@ def _handle_stats(sb) -> str:
             result = q.execute()
             trades = result.data or []
         except Exception:
-            return {"count": 0, "pnl": 0, "wins": 0, "losses": 0, "avg_min": 0}
+            return {"count": 0, "pnl": 0, "wins": 0, "losses": 0, "avg_min": 0, "best_kol": "", "worst_kol": ""}
 
         if not trades:
-            return {"count": 0, "pnl": 0, "wins": 0, "losses": 0, "avg_min": 0}
+            return {"count": 0, "pnl": 0, "wins": 0, "losses": 0, "avg_min": 0, "best_kol": "", "worst_kol": ""}
 
         pnl = sum(float(t.get("pnl_usd") or 0) for t in trades)
         wins = sum(1 for t in trades if float(t.get("pnl_usd") or 0) > 0)
         losses = sum(1 for t in trades if float(t.get("pnl_usd") or 0) < 0)
         avg_min = sum(int(t.get("exit_minutes") or 0) for t in trades) / len(trades)
-        return {"count": len(trades), "pnl": pnl, "wins": wins, "losses": losses, "avg_min": avg_min}
+
+        # Best/worst KOL by PnL
+        kol_pnl: dict[str, float] = {}
+        for t in trades:
+            k = t.get("kol_group", "?")
+            kol_pnl[k] = kol_pnl.get(k, 0) + float(t.get("pnl_usd") or 0)
+        best_kol = max(kol_pnl, key=kol_pnl.get) if kol_pnl else ""
+        worst_kol = min(kol_pnl, key=kol_pnl.get) if kol_pnl else ""
+        best_val = kol_pnl.get(best_kol, 0)
+        worst_val = kol_pnl.get(worst_kol, 0)
+
+        return {
+            "count": len(trades), "pnl": pnl, "wins": wins, "losses": losses,
+            "avg_min": avg_min,
+            "best_kol": f"{best_kol} (${best_val:+.0f})" if best_val > 0 else "",
+            "worst_kol": f"{worst_kol} (${worst_val:+.0f})" if worst_val < 0 else "",
+        }
 
     d1 = _query_period(24)
     d7 = _query_period(168)
@@ -297,12 +313,25 @@ def _handle_stats(sb) -> str:
             f"  ⏱ Durée moy: {d['avg_min']:.0f}min"
         )
 
-    return (
-        f"📊 <b>PERFORMANCE {_ACTIVE_STRATEGY}</b>\n\n"
-        f"{_fmt(d1, '24h')}\n\n"
-        f"{_fmt(d7, '7 jours')}\n\n"
-        f"{_fmt(dall, 'Depuis le début')}"
-    )
+    # Build output — skip periods that have same count as all-time (redundant)
+    sections = []
+    if d1["count"] > 0 and d1["count"] < dall["count"]:
+        sections.append(_fmt(d1, "24h"))
+    if d7["count"] > 0 and d7["count"] < dall["count"] and d7["count"] != d1["count"]:
+        sections.append(_fmt(d7, "7 jours"))
+    sections.append(_fmt(dall, f"All-time ({_ACTIVE_STRATEGY})"))
+
+    # KOL leaderboard
+    kol_section = ""
+    if dall["best_kol"] or dall["worst_kol"]:
+        kol_lines = []
+        if dall["best_kol"]:
+            kol_lines.append(f"  🏆 Best: {dall['best_kol']}")
+        if dall["worst_kol"]:
+            kol_lines.append(f"  💀 Worst: {dall['worst_kol']}")
+        kol_section = "\n\n<b>KOLs:</b>\n" + "\n".join(kol_lines)
+
+    return f"📊 <b>PERFORMANCE</b>\n\n" + "\n\n".join(sections) + kol_section
 
 
 # ── Command registry ──
