@@ -589,6 +589,25 @@ def get_deprecated_strategies(client=None, config=None) -> set:
     return set(_DEFAULT_DEPRECATED)
 
 
+def get_open_portfolio(client) -> dict:
+    """Return snapshot of open main (non-shadow) positions for alert context.
+    Returns {open_count, deployed_usd}. Lightweight: single aggregate query."""
+    try:
+        result = (
+            client.table("paper_trades")
+            .select("position_usd")
+            .eq("status", "open")
+            .eq("is_shadow", False)
+            .execute()
+        )
+        rows = result.data or []
+        total = sum(float(r.get("position_usd") or 0) for r in rows)
+        return {"open_count": len(rows), "deployed_usd": round(total, 2)}
+    except Exception as e:
+        logger.warning("get_open_portfolio failed: %s", e)
+        return {"open_count": 0, "deployed_usd": 0}
+
+
 def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: dict | None = None) -> int:
     """
     Open paper trades for top N tokens across configured strategies.
@@ -1215,6 +1234,7 @@ def check_paper_trades(client) -> dict:
                         bal = float(_rt_load_bankroll().get("current_balance", 0)) + (pnl_usd or 0)
                     except Exception:
                         bal = 0
+                    portfolio = get_open_portfolio(client)
                     alert_trade_closed(
                         symbol=trade["symbol"], strategy=trade["strategy"],
                         exit_reason=new_status,
@@ -1227,6 +1247,8 @@ def check_paper_trades(client) -> dict:
                         kol=trade.get("kol_group", ""),
                         bankroll=bal,
                         ca=trade.get("token_address", ""),
+                        deployed_usd=portfolio["deployed_usd"],
+                        open_count=portfolio["open_count"],
                     )
                 except Exception as e:
                     logger.warning("trade close alert failed: %s", e)
@@ -1277,6 +1299,7 @@ def check_paper_trades(client) -> dict:
                         bal = float(_rt_load_bankroll().get("current_balance", 0)) + (pnl_usd or 0)
                     except Exception:
                         bal = 0
+                    portfolio = get_open_portfolio(client)
                     alert_trade_closed(
                         symbol=trade["symbol"], strategy=trade["strategy"],
                         exit_reason=ev.get("status", "sl_hit"),
@@ -1289,6 +1312,8 @@ def check_paper_trades(client) -> dict:
                         kol=trade.get("kol_group", ""),
                         bankroll=bal,
                         ca=trade.get("token_address", ""),
+                        deployed_usd=portfolio["deployed_usd"],
+                        open_count=portfolio["open_count"],
                     )
                 except Exception as e:
                     logger.warning("SL cascade trade close alert failed: %s", e)

@@ -362,7 +362,8 @@ def alert_kol_silence(kol_name: str, hours_silent: float):
 def alert_kol_trade(symbol: str, kol: str, price: float, pos_usd: float,
                     rt_score: float, liq_usd: float, is_bonding: bool = False,
                     ca: str = "", mcap: float = 0, tier: str = "",
-                    bankroll: float = 0):
+                    bankroll: float = 0, deployed_usd: float = 0,
+                    open_count: int = 0):
     """v109: Alert when a whitelisted KOL calls a token and a paper trade is opened."""
     bonding_tag = " 🟡BONDING" if is_bonding else ""
     tier_emoji = "⭐" if tier == "S" else "🔹"
@@ -376,14 +377,24 @@ def alert_kol_trade(symbol: str, kol: str, price: float, pos_usd: float,
     links_text = " | ".join(links) if links else ""
 
     mcap_text = f"${mcap/1000:.0f}K" if mcap > 0 else "?"
-    bankroll_text = f"\n💰 Bankroll: ${bankroll:.2f} → alloc ${pos_usd:.1f}" if bankroll > 0 else f"\n💵 Position: ${pos_usd:.1f}"
+
+    # Portfolio line: bankroll | deployed / N pos | +this trade
+    deployed_after = deployed_usd + pos_usd
+    count_after = open_count + 1
+    available = bankroll - deployed_after if bankroll > 0 else 0
+    portfolio_text = (
+        f"\n💰 <b>${bankroll:.0f}</b> bankroll"
+        f" | ${deployed_after:.0f} déployé ({count_after} pos)"
+        f" | ${available:.0f} dispo"
+    ) if bankroll > 0 else f"\n💵 Position: ${pos_usd:.1f}"
 
     _send(
         f"📢 <b>KOL CALL</b>{bonding_tag}\n\n"
         f"<b>{symbol}</b> called by {tier_emoji}<b>{kol}</b>\n"
         f"💰 Entry: ${price:.8f}\n"
-        f"📊 MCap: {mcap_text} | Liq: ${liq_usd/1000:.0f}K | Score: {rt_score:.0f}"
-        f"{bankroll_text}\n"
+        f"📊 MCap: {mcap_text} | Liq: ${liq_usd/1000:.0f}K | Score: {rt_score:.0f}\n"
+        f"💵 Cette position: <b>${pos_usd:.1f}</b>"
+        f"{portfolio_text}\n"
         f"\n🔗 {links_text}",
         "kol_trade",
     )
@@ -394,7 +405,8 @@ def alert_trade_closed(symbol: str, strategy: str, exit_reason: str,
                        entry_price: float, exit_price: float,
                        high_price: float, minutes: int,
                        kol: str = "", bankroll: float = 0,
-                       ca: str = ""):
+                       ca: str = "", deployed_usd: float = 0,
+                       open_count: int = 0):
     """v110: Alert when a main trade closes (trail_stop, sl_hit, timeout)."""
     # Emoji based on outcome
     if exit_reason == "trail_stop":
@@ -421,8 +433,16 @@ def alert_trade_closed(symbol: str, strategy: str, exit_reason: str,
     # Max gain from entry
     max_gain = ((high_price / entry_price) - 1) * 100 if entry_price and high_price else 0
 
-    # Bankroll info — always show
-    bankroll_text = f"\n💰 Bankroll: ${bankroll:.2f} (alloc ${pos_usd:.0f})"
+    # Portfolio line: bankroll | still deployed / N pos | available
+    # After this close: deployed goes down by pos_usd, count goes down by 1
+    deployed_after = max(0, deployed_usd - pos_usd)
+    count_after = max(0, open_count - 1)
+    available = bankroll - deployed_after if bankroll > 0 else 0
+    portfolio_text = (
+        f"\n💰 <b>${bankroll:.0f}</b> bankroll"
+        f" | ${deployed_after:.0f} déployé ({count_after} pos)"
+        f" | ${available:.0f} dispo"
+    )
 
     # Link
     link_text = f'\n🔗 <a href="https://dexscreener.com/solana/{ca}">DexScreener</a>' if ca else ""
@@ -432,10 +452,10 @@ def alert_trade_closed(symbol: str, strategy: str, exit_reason: str,
         f"<b>{symbol}</b> | {strategy}\n"
         f"👤 KOL: {kol}\n"
         f"📈 PnL: <b>{pnl_pct*100:+.1f}%</b> (${pnl_usd:+.2f})\n"
-        f"⏱ {minutes}min\n"
+        f"💵 Position: ${pos_usd:.0f} | ⏱ {minutes}min\n"
         f"📊 Entry: ${entry_price:.8f} → Exit: ${exit_price:.8f}\n"
         f"🔝 Max: {max_gain:+.0f}%"
-        f"{bankroll_text}"
+        f"{portfolio_text}"
         f"{link_text}",
         "trade_closed",
     )
