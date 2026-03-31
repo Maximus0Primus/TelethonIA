@@ -485,32 +485,25 @@ def load_labeled_data(horizon: str = "12h", entry_mode: str = "snapshot") -> pd.
 
     # v111: Select only needed columns instead of * to avoid payload size crash
     # (supabase-py pydantic error when response > ~4MB at offset 31000+)
-    # Some ALL_FEATURE_COLS are computed during preprocessing (log transforms,
-    # paper_trade joins) and don't exist in the DB — exclude them from select.
-    _COMPUTED_COLS = {
-        # Log transforms (computed from raw cols during preprocessing)
+    # Columns computed during preprocessing — NOT in token_snapshots table.
+    _NOT_IN_DB = {
         "volume_24h_log", "volume_6h_log", "volume_1h_log", "volume_5m_log",
-        "liquidity_usd_log", "holder_count_log", "helius_holder_count_log",
-        "v_buy_24h_usd_log", "v_sell_24h_usd_log",
+        "liquidity_usd_log", "market_cap_log", "holder_count_log",
+        "helius_holder_count_log", "v_buy_24h_usd_log", "v_sell_24h_usd_log",
         "entry_mcap_log", "rt_liquidity_log", "rt_volume_24h_log",
-        # Paper trade joins (computed from paper_trades table)
         "pt_kol_win_rate", "pt_kol_score", "pt_kol_tier_encoded",
         "rt_buy_sell_ratio", "rt_token_age_hours", "rt_is_pump_fun",
-        "n_kol_confirmations",
-        # Derived during feature engineering (not stored in DB)
-        "birdeye_buy_sell_ratio",  # computed from birdeye_buy_24h / birdeye_sell_24h
-        "pump_graduated",          # derived from pump_graduation_status
-        "day_of_week", "hour_paris", "is_weekend", "is_prime_time",  # temporal from snapshot_at
+        "n_kol_confirmations", "birdeye_buy_sell_ratio", "pump_graduated",
+        "day_of_week", "hour_paris", "is_weekend", "is_prime_time",
     }
     _meta_cols = [
         "id", "token_address", "symbol", "snapshot_at",
         "price_at_snapshot", "price_at_first_call", "market_cap",
-        max_price_col,
-        "max_price_1h", "max_price_6h", "max_price_12h", "max_price_24h",
-        "score_at_snapshot",
+        max_price_col, "max_price_1h", "max_price_6h", "max_price_12h",
+        "max_price_24h", "score_at_snapshot",
     ]
-    _db_feature_cols = [c for c in ALL_FEATURE_COLS if c not in _COMPUTED_COLS]
-    _select_cols = ",".join(dict.fromkeys(_meta_cols + _db_feature_cols))
+    _all_wanted = list(dict.fromkeys(_meta_cols + ALL_FEATURE_COLS))
+    _select_cols = ",".join(c for c in _all_wanted if c not in _NOT_IN_DB)
 
     while True:
         result = (
