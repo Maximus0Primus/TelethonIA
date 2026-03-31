@@ -505,13 +505,19 @@ def _handle_config(sb, args: str) -> str:
     slippage_buy = ptc.get("buy_slippage_bps", 100)
     slippage_sell = ptc.get("sell_slippage_bps", 200)
 
-    # KOL filter
-    kol_filter = rtc.get("kol_filter", {})
-    kol_filter_on = kol_filter.get("enabled", False)
-    kol_min_calls = kol_filter.get("min_calls", 3)
-    kol_wr_thresh = kol_filter.get("wr_threshold", 0.4)
-
     alloc_str = ", ".join(f"{k}={v:.0%}" for k, v in hybrid_alloc.items()) if hybrid_alloc else "?"
+
+    # KOL access: whitelist_enabled controls everything.
+    # When OFF, all KOLs trade freely. kol_filter only matters when whitelist is ON.
+    if wl_enabled:
+        kol_filter = rtc.get("kol_filter", {})
+        kol_text = (
+            f"  KOLs: WHITELIST (min {kol_filter.get('min_calls', 3)} calls,"
+            f" {float(kol_filter.get('wr_threshold', 0.4)):.0%} WR,"
+            f" {kol_filter.get('lookback_days', 7)}j lookback)"
+        )
+    else:
+        kol_text = "  KOLs: TOUS (pas de whitelist)"
 
     return (
         f"⚙️ <b>CONFIG</b>\n\n"
@@ -523,9 +529,7 @@ def _handle_config(sb, args: str) -> str:
         f"  Kelly: {kelly} | Dedup: {dedup}h\n"
         f"  Slippage: buy {slippage_buy}bps / sell {slippage_sell}bps\n"
         f"\n<b>Filtres:</b>\n"
-        f"  Whitelist: {'ON' if wl_enabled else 'OFF'}\n"
-        f"  KOL filter: {'ON' if kol_filter_on else 'OFF'}"
-        f" (min {kol_min_calls} calls, {kol_wr_thresh:.0%} WR)\n"
+        f"{kol_text}\n"
         f"  ML: {ml_mode}\n"
         f"  Batch: {'ON' if batch else 'OFF'}\n"
         f"  Cooldown: {cooldown}s"
