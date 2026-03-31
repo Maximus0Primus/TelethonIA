@@ -2209,6 +2209,24 @@ async def main():
             except Exception as e:
                 logger.error("paper_fast_check error: %s", e)
 
+    # v111: Telegram bot command listener (polls every 5s)
+    BOT_CMD_INTERVAL = 5  # seconds
+
+    async def bot_command_loop():
+        """Poll Telegram for /commands and respond."""
+        await asyncio.sleep(10)  # let scraper initialize first
+        while True:
+            try:
+                from bot_commands import process_updates
+                sb_cmd = _get_supabase()
+                if sb_cmd:
+                    await asyncio.get_event_loop().run_in_executor(
+                        None, process_updates, sb_cmd
+                    )
+            except Exception as e:
+                logger.debug("bot_command_loop error: %s", e)
+            await asyncio.sleep(BOT_CMD_INTERVAL)
+
     # Start the price refresh loop as a background task
     refresh_task = asyncio.create_task(price_refresh_loop())
     # v67: Start monitor loop
@@ -2217,6 +2235,8 @@ async def main():
     live_monitor_task = asyncio.create_task(live_trade_monitor_loop())
     # v92: Start paper fast-check loop
     paper_fast_task = asyncio.create_task(paper_fast_check_loop())
+    # v111: Start bot command listener
+    bot_cmd_task = asyncio.create_task(bot_command_loop())
 
     try:
         _recon_last_run = 0  # v105: track last reconciliation time
@@ -2256,6 +2276,7 @@ async def main():
     finally:
         refresh_task.cancel()
         live_monitor_task.cancel()
+        bot_cmd_task.cancel()
         if monitor_task:
             monitor_task.cancel()
 
