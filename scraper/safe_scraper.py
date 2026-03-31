@@ -2081,31 +2081,11 @@ async def main():
                     except Exception:
                         pass
 
-                # Daily summary at 8h UTC
+                # v111: Daily summary disabled — replaced by /today bot command
+                # Old: send_daily_summary() at 8h UTC + daily-summary.yml GH Action
+                # Now: user triggers /today when needed, no spam
                 now_utc = datetime.now(timezone.utc)
-                if now_utc.hour == 8 and _last_daily_hour != 8:
-                    _last_daily_hour = 8
-                    snapshot = _metrics.get_full_snapshot()
-                    # v109: Add strategy/bankroll info to daily summary
-                    try:
-                        _sb = _get_supabase()
-                        if _sb:
-                            _cfg = _sb.table("scoring_config").select(
-                                "paper_trade_config"
-                            ).eq("id", 1).execute()
-                            if _cfg.data:
-                                _ptc = _cfg.data[0].get("paper_trade_config") or {}
-                                _bankroll_data = _rt_load_bankroll()
-                                snapshot["strategy"] = {
-                                    "active": (_ptc.get("active_strategies") or ["?"])[0] if isinstance(_ptc.get("active_strategies"), list) else "?",
-                                    "bankroll": float(_bankroll_data.get("current_balance", 0)),
-                                    "bankroll_start": float(_bankroll_data.get("starting_capital", 500)),
-                                    "whitelist_count": 0,  # v110: whitelist disabled
-                                }
-                    except Exception:
-                        pass
-                    send_daily_summary(snapshot)
-                elif now_utc.hour != 8:
+                if now_utc.hour != 8:
                     _last_daily_hour = now_utc.hour
 
             except Exception as e:

@@ -1,9 +1,10 @@
 name: Daily Summary
 
 on:
-  schedule:
-    - cron: '0 8 * * *'  # v74: Daily at 8am UTC — independent of scraper loop
-  workflow_dispatch: {} # Manual trigger
+  # v111: Disabled — replaced by /today bot command. Keep manual trigger for testing.
+  # schedule:
+  #   - cron: '0 8 * * *'
+  workflow_dispatch: {} # Manual trigger only
 
 jobs:
   summary:
