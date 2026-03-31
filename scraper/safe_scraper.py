@@ -1711,10 +1711,14 @@ async def _rt_on_new_message(event: events.NewMessage.Event):
                 # v109: Alert on KOL trade (for live monitoring)
                 try:
                     from alerter import alert_kol_trade
+                    try:
+                        bal = float(_rt_load_bankroll().get("current_balance", 0))
+                    except Exception:
+                        bal = 0
                     alert_kol_trade(
                         symbol, username, price, pos_size, rt_score,
                         liq_usd, is_bonding=(is_bonding or is_pump_dex),
-                        ca=ca, mcap=mcap, tier=tier,
+                        ca=ca, mcap=mcap, tier=tier, bankroll=bal,
                     )
                 except Exception as e:
                     logger.warning("KOL trade alert failed: %s", e)

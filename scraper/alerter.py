@@ -361,7 +361,8 @@ def alert_kol_silence(kol_name: str, hours_silent: float):
 
 def alert_kol_trade(symbol: str, kol: str, price: float, pos_usd: float,
                     rt_score: float, liq_usd: float, is_bonding: bool = False,
-                    ca: str = "", mcap: float = 0, tier: str = ""):
+                    ca: str = "", mcap: float = 0, tier: str = "",
+                    bankroll: float = 0):
     """v109: Alert when a whitelisted KOL calls a token and a paper trade is opened."""
     bonding_tag = " 🟡BONDING" if is_bonding else ""
     tier_emoji = "⭐" if tier == "S" else "🔹"
@@ -375,13 +376,14 @@ def alert_kol_trade(symbol: str, kol: str, price: float, pos_usd: float,
     links_text = " | ".join(links) if links else ""
 
     mcap_text = f"${mcap/1000:.0f}K" if mcap > 0 else "?"
+    bankroll_text = f"\n💰 Bankroll: ${bankroll:.2f} → alloc ${pos_usd:.1f}" if bankroll > 0 else f"\n💵 Position: ${pos_usd:.1f}"
 
     _send(
         f"📢 <b>KOL CALL</b>{bonding_tag}\n\n"
         f"<b>{symbol}</b> called by {tier_emoji}<b>{kol}</b>\n"
         f"💰 Entry: ${price:.8f}\n"
-        f"📊 MCap: {mcap_text} | Liq: ${liq_usd/1000:.0f}K | Score: {rt_score:.0f}\n"
-        f"💵 Position: ${pos_usd:.1f}\n"
+        f"📊 MCap: {mcap_text} | Liq: ${liq_usd/1000:.0f}K | Score: {rt_score:.0f}"
+        f"{bankroll_text}\n"
         f"\n🔗 {links_text}",
         "kol_trade",
     )
@@ -419,8 +421,8 @@ def alert_trade_closed(symbol: str, strategy: str, exit_reason: str,
     # Max gain from entry
     max_gain = ((high_price / entry_price) - 1) * 100 if entry_price and high_price else 0
 
-    # Bankroll info
-    bankroll_text = f"\n💰 Bankroll: ${bankroll:.2f}" if bankroll > 0 else ""
+    # Bankroll info — always show
+    bankroll_text = f"\n💰 Bankroll: ${bankroll:.2f} (alloc ${pos_usd:.0f})"
 
     # Link
     link_text = f'\n🔗 <a href="https://dexscreener.com/solana/{ca}">DexScreener</a>' if ca else ""
@@ -430,7 +432,7 @@ def alert_trade_closed(symbol: str, strategy: str, exit_reason: str,
         f"<b>{symbol}</b> | {strategy}\n"
         f"👤 KOL: {kol}\n"
         f"📈 PnL: <b>{pnl_pct*100:+.1f}%</b> (${pnl_usd:+.2f})\n"
-        f"💵 Position: ${pos_usd:.0f} | ⏱ {minutes}min\n"
+        f"⏱ {minutes}min\n"
         f"📊 Entry: ${entry_price:.8f} → Exit: ${exit_price:.8f}\n"
         f"🔝 Max: {max_gain:+.0f}%"
         f"{bankroll_text}"
