@@ -1719,9 +1719,12 @@ async def _rt_on_new_message(event: events.NewMessage.Event):
                         bal = 0
                     sb_alert = _get_supabase()
                     portfolio = get_open_portfolio(sb_alert) if sb_alert else {"open_count": 0, "deployed_usd": 0}
+                    # v112: Only tag as bonding if actually on bonding curve (liq < min_liq)
+                    # Previously is_pump_dex tagged graduated tokens as bonding too
+                    _actually_bonding = (is_bonding or is_pump_dex) and liq_usd < min_liq
                     alert_kol_trade(
                         symbol, username, price, pos_size, rt_score,
-                        liq_usd, is_bonding=(is_bonding or is_pump_dex),
+                        liq_usd, is_bonding=_actually_bonding,
                         ca=ca, mcap=mcap, tier=tier, bankroll=bal,
                         deployed_usd=portfolio["deployed_usd"],
                         open_count=portfolio["open_count"],
@@ -2057,29 +2060,8 @@ async def main():
                     except Exception:
                         pass
 
-                # v105: KOL silence check (every 30min)
-                if _monitor_iteration % 6 == 0:
-                    try:
-                        from alerter import alert_kol_silence
-                        sb_kol = _get_supabase()
-                        if sb_kol:
-                            # v110: Load whitelist for silence check even if trading whitelist is disabled
-                            _silence_wl = _rt_load_kol_whitelist(_rt_load_config())
-                            wl_kols = list(_silence_wl.keys()) if _silence_wl else []
-                            cutoff = (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()
-                            for kol in wl_kols:
-                                res = await asyncio.get_event_loop().run_in_executor(
-                                    None,
-                                    lambda k=kol: sb_kol.table("kol_mentions")
-                                        .select("id", count="exact")
-                                        .eq("kol_group", k)
-                                        .gte("message_date", cutoff)
-                                        .execute()
-                                )
-                                if res.count is not None and res.count == 0:
-                                    alert_kol_silence(kol, 48)
-                    except Exception:
-                        pass
+                # v105→v112: KOL silence check DISABLED — too noisy, whitelist rotates often
+                # Was: alert_kol_silence() every 30min for whitelisted KOLs silent >48h
 
                 # v111: Daily summary disabled — replaced by /today bot command
                 # Old: send_daily_summary() at 8h UTC + daily-summary.yml GH Action

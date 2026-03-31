@@ -1479,6 +1479,33 @@ def check_paper_trades_fast(client) -> dict:
                 trade["symbol"], trade["strategy"], addr[:8],
                 ev["status"], ev.get("pnl_pct", 0) * 100, usd_str, ev.get("exit_minutes", 0),
             )
+            # v112: Alert on main RT trade close (was missing from paper_fast)
+            if trade.get("source") == "rt" and not trade.get("is_shadow"):
+                try:
+                    from alerter import alert_trade_closed
+                    try:
+                        from safe_scraper import _rt_load_bankroll
+                        bal = float(_rt_load_bankroll().get("current_balance", 0)) + (pnl_usd or 0)
+                    except Exception:
+                        bal = 0
+                    portfolio = get_open_portfolio(client)
+                    alert_trade_closed(
+                        symbol=trade["symbol"], strategy=trade["strategy"],
+                        exit_reason=ev["status"],
+                        pnl_pct=ev.get("pnl_pct", 0), pnl_usd=pnl_usd or 0,
+                        pos_usd=float(trade.get("position_usd") or 0),
+                        entry_price=float(trade.get("entry_price") or 0),
+                        exit_price=ev.get("exit_price", 0),
+                        high_price=ev.get("high_price_seen", 0),
+                        minutes=int(ev.get("exit_minutes", 0)),
+                        kol=trade.get("kol_group", ""),
+                        bankroll=bal,
+                        ca=trade.get("token_address", ""),
+                        deployed_usd=portfolio["deployed_usd"],
+                        open_count=portfolio["open_count"],
+                    )
+                except Exception as e:
+                    logger.warning("paper_fast trade close alert failed: %s", e)
         except Exception as e:
             logger.error("paper_fast: update failed for trade %s: %s", trade["id"], e)
 
