@@ -483,10 +483,22 @@ def load_labeled_data(horizon: str = "12h", entry_mode: str = "snapshot") -> pd.
     page_size = 1000
     offset = 0
 
+    # v111: Select only needed columns instead of * to avoid payload size crash
+    # (supabase-py pydantic error when response > ~4MB at offset 31000+)
+    _meta_cols = [
+        "id", "token_address", "symbol", "snapshot_at",
+        "price_at_snapshot", "price_at_first_call", "market_cap",
+        max_price_col,
+        "max_price_1h", "max_price_2h", "max_price_6h", "max_price_12h", "max_price_24h",
+        "did_50pct_2h",
+        "score", "total_score",
+    ]
+    _select_cols = ",".join(dict.fromkeys(_meta_cols + ALL_FEATURE_COLS))
+
     while True:
         result = (
             client.table("token_snapshots")
-            .select("*")
+            .select(_select_cols)
             .not_.is_(max_price_col, "null")
             .not_.is_("price_at_snapshot", "null")
             .gte("snapshot_at", "2026-03-03T00:00:00Z")  # v105: skip pre-v95 data (known bugs)
