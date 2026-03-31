@@ -491,9 +491,8 @@ def _handle_config(sb, args: str) -> str:
 
     # Key values
     active = ptc.get("active_strategies", ["?"])
-    budget = rtc.get("base_budget_usd", "?")
-    max_pos = rtc.get("max_position_usd", "?")
-    kelly = rtc.get("sizing", {}).get("kelly_fraction", "?")
+    max_pos = float(rtc.get("max_position_usd", 120))
+    kelly = float(rtc.get("sizing", {}).get("kelly_fraction", 0.127))
     cooldown = rtc.get("cooldown_seconds", 0)
     wl_enabled = rtc.get("whitelist_enabled", False)
     batch = ptc.get("batch_trading_enabled", False) if "batch_trading_enabled" in ptc else "?"
@@ -505,10 +504,19 @@ def _handle_config(sb, args: str) -> str:
     slippage_buy = ptc.get("buy_slippage_bps", 100)
     slippage_sell = ptc.get("sell_slippage_bps", 200)
 
+    # Compute real position size from current bankroll
+    from safe_scraper import _rt_load_bankroll
+    try:
+        bal = float(_rt_load_bankroll().get("current_balance", 500))
+    except Exception:
+        bal = 500
+    raw_pos = bal * kelly
+    real_pos = min(raw_pos, max_pos)
+    capped = raw_pos > max_pos
+
     alloc_str = ", ".join(f"{k}={v:.0%}" for k, v in hybrid_alloc.items()) if hybrid_alloc else "?"
 
-    # KOL access: whitelist_enabled controls everything.
-    # When OFF, all KOLs trade freely. kol_filter only matters when whitelist is ON.
+    # KOL access
     if wl_enabled:
         kol_filter = rtc.get("kol_filter", {})
         kol_text = (
@@ -519,14 +527,16 @@ def _handle_config(sb, args: str) -> str:
     else:
         kol_text = "  KOLs: TOUS (pas de whitelist)"
 
+    cap_text = f" ⚠️ cappé (raw ${raw_pos:.0f})" if capped else ""
+
     return (
         f"⚙️ <b>CONFIG</b>\n\n"
         f"<b>Stratégie:</b>\n"
         f"  Active: {', '.join(active)}\n"
         f"  Hybrid: {'ON' if hybrid_on else 'OFF'} ({alloc_str})\n"
         f"\n<b>Sizing:</b>\n"
-        f"  Budget: ${budget} | Max: ${max_pos}\n"
-        f"  Kelly: {kelly} | Dedup: {dedup}h\n"
+        f"  Position: <b>${real_pos:.0f}</b> (${bal:.0f} × {kelly:.1%}){cap_text}\n"
+        f"  Cap: ${max_pos:.0f} | Dedup: {dedup}h\n"
         f"  Slippage: buy {slippage_buy}bps / sell {slippage_sell}bps\n"
         f"\n<b>Filtres:</b>\n"
         f"{kol_text}\n"

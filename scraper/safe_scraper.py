@@ -1211,14 +1211,15 @@ def _rt_compute_score(kol_username: str, ca: str, kol_info: dict,
 def _rt_position_size(rt_score: float, kol_info: dict, token_info: dict,
                       tier: str, config: dict) -> float:
     """
-    v110: Kelly-based position sizing — bankroll × kelly_fraction.
-    No multipliers, no caps. The whitelist IS the quality gate.
+    v111: Kelly-based position sizing — bankroll × kelly_fraction, capped at max_position_usd.
     """
     sizing = config.get("sizing", {})
     kelly = float(sizing.get("kelly_fraction", 0.127))
+    max_pos = float(config.get("max_position_usd", 120))
     bankroll = _rt_load_bankroll()
     balance = float(bankroll.get("current_balance", 500))
-    return round(balance * kelly, 2)
+    raw = balance * kelly
+    return round(min(raw, max_pos), 2)
 
 
 def _rt_ml_position_mult(
