@@ -1210,9 +1210,11 @@ def check_paper_trades(client) -> dict:
                 # v110: Alert on main trade close
                 try:
                     from alerter import alert_trade_closed
-                    from safe_scraper import _rt_load_bankroll
-                    bankroll = _rt_load_bankroll()
-                    bal = float(bankroll.get("current_balance", 0)) + (pnl_usd or 0)
+                    try:
+                        from safe_scraper import _rt_load_bankroll
+                        bal = float(_rt_load_bankroll().get("current_balance", 0)) + (pnl_usd or 0)
+                    except Exception:
+                        bal = 0
                     alert_trade_closed(
                         symbol=trade["symbol"], strategy=trade["strategy"],
                         exit_reason=new_status,
@@ -1227,7 +1229,7 @@ def check_paper_trades(client) -> dict:
                         ca=trade.get("token_address", ""),
                     )
                 except Exception as e:
-                    logger.debug("trade close alert failed: %s", e)
+                    logger.warning("trade close alert failed: %s", e)
             status_key = new_status.replace("_hit", "").replace("_stop", "")
             counts[status_key] = counts.get(status_key, 0) + 1
             usd_str = f" ${pnl_usd:+.2f}" if pnl_usd is not None else ""
@@ -1267,6 +1269,29 @@ def check_paper_trades(client) -> dict:
             if trade.get("source") == "rt" and not trade.get("is_shadow"):
                 _rt_pnl_usd += pnl_usd or 0
                 _rt_closed += 1
+                # v110-fix: Alert on SL cascade close (was missing)
+                try:
+                    from alerter import alert_trade_closed
+                    try:
+                        from safe_scraper import _rt_load_bankroll
+                        bal = float(_rt_load_bankroll().get("current_balance", 0)) + (pnl_usd or 0)
+                    except Exception:
+                        bal = 0
+                    alert_trade_closed(
+                        symbol=trade["symbol"], strategy=trade["strategy"],
+                        exit_reason=ev.get("status", "sl_hit"),
+                        pnl_pct=ev.get("pnl_pct", 0), pnl_usd=pnl_usd or 0,
+                        pos_usd=float(trade.get("position_usd") or 0),
+                        entry_price=float(trade.get("entry_price") or 0),
+                        exit_price=ev.get("exit_price", 0),
+                        high_price=ev.get("high_price_seen", 0),
+                        minutes=int(ev.get("exit_minutes", 0)),
+                        kol=trade.get("kol_group", ""),
+                        bankroll=bal,
+                        ca=trade.get("token_address", ""),
+                    )
+                except Exception as e:
+                    logger.warning("SL cascade trade close alert failed: %s", e)
             counts["sl"] = counts.get("sl", 0) + 1
             usd_str = f" ${pnl_usd:+.2f}" if pnl_usd is not None else ""
             logger.info(

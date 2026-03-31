@@ -1716,8 +1716,8 @@ async def _rt_on_new_message(event: events.NewMessage.Event):
                         liq_usd, is_bonding=(is_bonding or is_pump_dex),
                         ca=ca, mcap=mcap, tier=tier,
                     )
-                except Exception:
-                    pass  # alerter is best-effort
+                except Exception as e:
+                    logger.warning("KOL trade alert failed: %s", e)
         finally:
             _rt_in_flight.discard(flight_key)
 
