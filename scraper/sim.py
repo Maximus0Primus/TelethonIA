@@ -456,6 +456,7 @@ def fetch_paper_trades(since: str) -> list[dict]:
                    "entry_mcap,rt_liquidity_usd,rt_volume_24h,rt_token_age_hours,"
                    "rt_is_pump_fun,n_kol_confirmations"),
         ("status", "in.(trail_stop,sl_hit,timeout,tp_hit)"),
+        ("source", "eq.rt"),  # v113: RT only — batch has no age/enrichment data
         ("created_at", f"gte.{since}T00:00:00Z"),
         ("order", "created_at.asc"),
     ]
@@ -1013,8 +1014,10 @@ def main():
         if entry_price <= 0 or key not in candle_store:
             continue
         # v113: Token age filter — match live behavior (default 12h)
-        age_h = float(t.get("rt_token_age_hours") or 0)
-        if args.max_age > 0 and age_h > args.max_age:
+        # NULL age = unknown = exclude (batch trades have no age data)
+        raw_age = t.get("rt_token_age_hours")
+        age_h = float(raw_age) if raw_age is not None else None
+        if args.max_age > 0 and (age_h is None or age_h > args.max_age):
             skipped_age += 1
             continue
         # v113: Blacklist — bad KOLs and known bad tokens
