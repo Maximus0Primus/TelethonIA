@@ -131,8 +131,12 @@ def _fetch_dexscreener(symbol: str) -> dict | None:
         if not sol_pairs:
             return None
 
-        # Pick highest-volume pair
-        best = max(sol_pairs, key=lambda p: float(p.get("volume", {}).get("h24", 0) or 0))
+        # Pick highest-volume pair, preferring Raydium over pump.fun bonding curve
+        raydium_pairs = [p for p in sol_pairs if "raydium" in p.get("dexId", "").lower()]
+        best = max(
+            raydium_pairs or sol_pairs,
+            key=lambda p: float(p.get("volume", {}).get("h24", 0) or 0),
+        )
 
         # Count total active pairs for this token (more pairs = more liquidity venues)
         pair_count = len(sol_pairs)
@@ -549,8 +553,12 @@ def _fetch_dexscreener_by_address(address: str) -> dict | None:
         if not target_pairs:
             return None
 
-        # Pick highest-volume pair (same logic as _fetch_dexscreener)
-        best = max(target_pairs, key=lambda p: float(p.get("volume", {}).get("h24", 0) or 0))
+        # Pick highest-volume pair, preferring Raydium over pump.fun bonding curve
+        raydium_pairs = [p for p in target_pairs if "raydium" in p.get("dexId", "").lower()]
+        best = max(
+            raydium_pairs or target_pairs,
+            key=lambda p: float(p.get("volume", {}).get("h24", 0) or 0),
+        )
 
         pair_count = len(target_pairs)
         best_address = best.get("baseToken", {}).get("address", "")

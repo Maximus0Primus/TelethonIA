@@ -1226,14 +1226,15 @@ def check_paper_trades(client) -> dict:
             if trade.get("source") == "rt" and not trade.get("is_shadow"):
                 _rt_pnl_usd += pnl_usd or 0
                 _rt_closed += 1
-                # v110: Alert on main trade close
+                # v113: Update bankroll BEFORE alert so balance is fresh
+                try:
+                    from safe_scraper import _rt_update_bankroll, _rt_load_bankroll
+                    _rt_update_bankroll(pnl_usd or 0, 1)
+                    bal = float(_rt_load_bankroll().get("current_balance", 0))
+                except Exception:
+                    bal = 0
                 try:
                     from alerter import alert_trade_closed
-                    try:
-                        from safe_scraper import _rt_load_bankroll
-                        bal = float(_rt_load_bankroll().get("current_balance", 0)) + (pnl_usd or 0)
-                    except Exception:
-                        bal = 0
                     portfolio = get_open_portfolio(client)
                     alert_trade_closed(
                         symbol=trade["symbol"], strategy=trade["strategy"],
@@ -1291,14 +1292,15 @@ def check_paper_trades(client) -> dict:
             if trade.get("source") == "rt" and not trade.get("is_shadow"):
                 _rt_pnl_usd += pnl_usd or 0
                 _rt_closed += 1
-                # v110-fix: Alert on SL cascade close (was missing)
+                # v113: Update bankroll BEFORE alert so balance is fresh
+                try:
+                    from safe_scraper import _rt_update_bankroll, _rt_load_bankroll
+                    _rt_update_bankroll(pnl_usd or 0, 1)
+                    bal = float(_rt_load_bankroll().get("current_balance", 0))
+                except Exception:
+                    bal = 0
                 try:
                     from alerter import alert_trade_closed
-                    try:
-                        from safe_scraper import _rt_load_bankroll
-                        bal = float(_rt_load_bankroll().get("current_balance", 0)) + (pnl_usd or 0)
-                    except Exception:
-                        bal = 0
                     portfolio = get_open_portfolio(client)
                     alert_trade_closed(
                         symbol=trade["symbol"], strategy=trade["strategy"],
@@ -1479,15 +1481,16 @@ def check_paper_trades_fast(client) -> dict:
                 trade["symbol"], trade["strategy"], addr[:8],
                 ev["status"], ev.get("pnl_pct", 0) * 100, usd_str, ev.get("exit_minutes", 0),
             )
-            # v112: Alert on main RT trade close (was missing from paper_fast)
+            # v113: Update bankroll + alert on main RT trade close
             if trade.get("source") == "rt" and not trade.get("is_shadow"):
                 try:
+                    from safe_scraper import _rt_update_bankroll, _rt_load_bankroll
+                    _rt_update_bankroll(pnl_usd or 0, 1)
+                    bal = float(_rt_load_bankroll().get("current_balance", 0))
+                except Exception:
+                    bal = 0
+                try:
                     from alerter import alert_trade_closed
-                    try:
-                        from safe_scraper import _rt_load_bankroll
-                        bal = float(_rt_load_bankroll().get("current_balance", 0)) + (pnl_usd or 0)
-                    except Exception:
-                        bal = 0
                     portfolio = get_open_portfolio(client)
                     alert_trade_closed(
                         symbol=trade["symbol"], strategy=trade["strategy"],

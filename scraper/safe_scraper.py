@@ -1905,11 +1905,7 @@ async def run_one_cycle(client: TelegramClient, dump: bool = False,
             from paper_trader import check_paper_trades, paper_trade_summary, correct_closed_prices
             sb_pt = _get_supabase()
             pt_result = check_paper_trades(sb_pt)
-            # v71: Update bankroll with RT PnL from cycle-end check
-            rt_pnl = pt_result.get("rt_pnl_usd", 0)
-            rt_closed = pt_result.get("rt_closed", 0)
-            if rt_pnl != 0 or rt_closed > 0:
-                _rt_update_bankroll(rt_pnl, rt_closed)
+            # v113: bankroll now updated per-trade inside paper_trader (before alerts)
             summary = paper_trade_summary(sb_pt)
             if summary:
                 logger.info("paper_trader: %s", summary)
@@ -2088,11 +2084,7 @@ async def main():
                     from paper_trader import check_paper_trades
                     sb_pt = _get_supabase()
                     pt_result = check_paper_trades(sb_pt)
-                    # v71: Update bankroll with RT PnL
-                    rt_pnl = pt_result.get("rt_pnl_usd", 0)
-                    rt_closed = pt_result.get("rt_closed", 0)
-                    if rt_pnl != 0 or rt_closed > 0:
-                        _rt_update_bankroll(rt_pnl, rt_closed)
+                    # v113: bankroll now updated per-trade inside paper_trader (before alerts)
                 except Exception as e:
                     logger.error("Paper trading (check) failed: %s", e)
                 # v72 note: live trades monitored by dedicated live_trade_monitor_loop (10s)
