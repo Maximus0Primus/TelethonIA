@@ -581,11 +581,12 @@ def open_live_trade(client_sb, token_entry: dict, strategy: str,
 
 def check_live_trades(client_sb) -> dict:
     """
-    Check all open live trades against current prices.
-    For TP/SL/timeout hits: execute sell BEFORE updating DB.
+    v113: Check all open live trades using paper_trader's _evaluate_trade_exit().
+    Supports ALL strategy types: DTRAIL, TRAIL, BE, DECAY, FIXED, etc.
+    For exits: execute sell BEFORE updating DB.
     Returns {"checked": N, "closed": M, "tp": X, "sl": Y, "timeout": Z, "pnl_usd": total}.
     """
-    from paper_trader import _fetch_prices_batch
+    from paper_trader import _fetch_prices_batch, _evaluate_trade_exit
     now = datetime.now(timezone.utc)
 
     result_counts = {
@@ -618,35 +619,31 @@ def check_live_trades(client_sb) -> dict:
     for trade in open_trades:
         addr = trade["token_address"]
         current_price = prices.get(addr)
-        entry_price = float(trade["entry_price"])
-        sl_price = float(trade["sl_price"])
-        tp_price = float(trade["tp_price"]) if trade.get("tp_price") is not None else None
-        horizon = trade.get("horizon_minutes", 120)
 
-        created_str = trade["created_at"]
-        try:
-            created_at = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
-        except Exception:
+        # v113: Use paper_trader's full evaluation (DTRAIL, TRAIL, BE, DECAY, etc.)
+        # sell_slip_factor=1.0 because live uses real Jupiter execution, not simulated slippage
+        ev = _evaluate_trade_exit(trade, current_price, now, sell_slip_factor=1.0, sell_fee_bps=0)
+
+        if ev is None:
             continue
-        elapsed_minutes = (now - created_at).total_seconds() / 60
 
-        new_status = None
-        exit_price = None
+        # Always update high_price_seen (even without exit)
+        if ev.get("high_price_seen") is not None:
+            new_high = ev["high_price_seen"]
+            old_high = float(trade.get("high_price_seen") or 0)
+            if new_high > old_high:
+                try:
+                    client_sb.table("paper_trades").update(
+                        {"high_price_seen": new_high}
+                    ).eq("id", trade["id"]).execute()
+                except Exception as e:
+                    logger.debug("live_trader: high_price_seen update failed for %s: %s", trade["symbol"], e)
 
-        if current_price is not None:
-            if current_price <= sl_price:
-                new_status = "sl_hit"
-                exit_price = sl_price
-            elif tp_price is not None and current_price >= tp_price:
-                new_status = "tp_hit"
-                exit_price = tp_price
-
-        if new_status is None and elapsed_minutes >= horizon:
-            new_status = "timeout"
-            exit_price = current_price if current_price else entry_price
-
+        new_status = ev.get("status")
         if new_status is None:
             continue
+
+        exit_price = ev.get("exit_price")
 
         # Execute sell BEFORE updating DB
         sell_result = execute_sell(addr)
@@ -736,7 +733,7 @@ def check_live_trades(client_sb) -> dict:
         result_counts["closed"] += 1
         result_counts["pnl_usd"] += pnl_usd
         result_counts["rt_pnl_usd"] += pnl_usd
-        status_key = new_status.replace("_hit", "")
+        status_key = new_status.replace("_hit", "").replace("_stop", "")
         result_counts[status_key] = result_counts.get(status_key, 0) + 1
 
         logger.info(
