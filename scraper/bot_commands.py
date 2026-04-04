@@ -32,7 +32,33 @@ _API_BASE = "https://api.telegram.org/bot{token}"
 
 _last_update_id = 0
 
-_ACTIVE_STRATEGY = "DTRAIL10_ACT15_SL70"
+# v116: Active strategies loaded from DB config, cached 5min
+_active_strategies_cache: list[str] = []
+_active_strategies_ts: float = 0
+
+
+def _get_active_strategies(sb) -> list[str]:
+    """Load active strategies from scoring_config. Cached 5min."""
+    global _active_strategies_cache, _active_strategies_ts
+    import time
+    now = time.time()
+    if _active_strategies_cache and now - _active_strategies_ts < 300:
+        return _active_strategies_cache
+    try:
+        result = sb.table("scoring_config").select("rt_trade_config").eq("id", 1).execute()
+        if result.data:
+            hybrid = (result.data[0].get("rt_trade_config") or {}).get("hybrid_strategy", {})
+            if hybrid.get("enabled"):
+                strats = list(hybrid.get("allocations", {}).keys())
+                if strats:
+                    _active_strategies_cache = strats
+                    _active_strategies_ts = now
+                    return strats
+    except Exception:
+        pass
+    if not _active_strategies_cache:
+        _active_strategies_cache = ["DTRAIL10_ACT15_SL70"]
+    return _active_strategies_cache
 
 _PERIODS = {
     "1h": 1, "2h": 2, "6h": 6, "12h": 12,
@@ -123,13 +149,14 @@ def _exit_emoji(status: str, pnl: float) -> str:
 
 
 def _query_trades(sb, hours: int = 0, limit: int = 0, strategy: str = ""):
-    """Query closed main trades. strategy="" = active strategy only."""
-    strat = strategy or _ACTIVE_STRATEGY
+    """Query closed main trades across all active strategies.
+    v116: strategy="" queries all active strategies (not just one)."""
+    strategies = [strategy] if strategy else _get_active_strategies(sb)
     q = (
         sb.table("paper_trades")
-        .select("symbol,pnl_pct,pnl_usd,status,kol_group,exit_at,position_usd,exit_minutes,token_address,entry_price,exit_price,high_price_seen,cycle_ts")
+        .select("symbol,pnl_pct,pnl_usd,status,kol_group,exit_at,position_usd,exit_minutes,token_address,entry_price,exit_price,high_price_seen,cycle_ts,strategy")
         .eq("is_shadow", False)
-        .eq("strategy", strat)
+        .in_("strategy", strategies)
         .neq("status", "open")
     )
     if hours > 0:
@@ -173,29 +200,42 @@ def _handle_bank(sb, args: str) -> str:
 
     try:
         bk = _rt_load_bankroll()
-        bal = float(bk.get("current_balance", 0))
-        start = float(bk.get("starting_capital", 500))
-        peak = float(bk.get("peak_balance", bal))
-        total_pnl = float(bk.get("total_pnl", 0))
-        dd = float(bk.get("max_drawdown_pct", 0))
+        strat_bals = bk.get("strategy_bankrolls") or {}
     except Exception:
-        bal, start, peak, total_pnl, dd = 0, 500, 0, 0, 0
+        bk = {}
+        strat_bals = {}
 
     portfolio = get_open_portfolio(sb)
-    deployed = portfolio["deployed_usd"]
     n_open = portfolio["open_count"]
-    available = bal - deployed
-    pnl_pct = (bal / start - 1) * 100 if start > 0 else 0
-    emoji = "📈" if total_pnl >= 0 else "📉"
+    deployed = portfolio["deployed_usd"]
+
+    # v116: Per-strategy bankroll display
+    parts = []
+    total_bal = 0
+    total_pnl = 0
+    for sname, sdata in sorted(strat_bals.items()):
+        bal = float(sdata.get("balance", 500))
+        pnl = float(sdata.get("pnl", 0))
+        trades = int(sdata.get("trades", 0))
+        short = sname.replace("_ACT", "A").replace("_SL", "S").replace("_B5_T5_A15_S70_240m", "")
+        emoji = "📈" if pnl >= 0 else "📉"
+        parts.append(f"  {emoji} <b>{short}</b>: ${bal:.0f} ({pnl:+.0f}) | {trades}t")
+        total_bal += bal
+        total_pnl += pnl
+
+    if not parts:
+        total_bal = float(bk.get("current_balance", 0))
+        total_pnl = float(bk.get("total_pnl", 0))
+
+    strat_text = "\n".join(parts) if parts else "  Aucune stratégie"
+    available = total_bal - deployed
 
     return (
         f"💰 <b>BANKROLL</b>\n\n"
-        f"{emoji} Balance: <b>${bal:.2f}</b> ({pnl_pct:+.1f}%)\n"
-        f"📊 PnL total: ${total_pnl:+.2f}\n"
-        f"🏔 Peak: ${peak:.2f} | DD max: {dd:.1f}%\n"
-        f"\n📦 Déployé: ${deployed:.0f} ({n_open} pos)"
-        f" | Dispo: ${available:.0f}\n"
-        f"💼 Capital: ${start:.0f} | {_ACTIVE_STRATEGY}"
+        f"📊 <b>Stratégies:</b>\n{strat_text}\n"
+        f"\n💵 Total: <b>${total_bal:.0f}</b> ({total_pnl:+.0f})\n"
+        f"📦 Déployé: ${deployed:.0f} ({n_open} pos)"
+        f" | Dispo: ${available:.0f}"
     )
 
 
@@ -207,26 +247,39 @@ def _handle_pos(sb, args: str) -> str:
             sb.table("paper_trades")
             .select("symbol,strategy,position_usd,entry_price,kol_group,cycle_ts")
             .eq("status", "open").eq("is_shadow", False)
-            .order("cycle_ts", desc=True).limit(20).execute()
+            .order("cycle_ts", desc=True).limit(30).execute()
         )
         trades = result.data or []
     except Exception as e:
         return f"❌ Erreur: {e}"
 
     if trades:
-        total = sum(float(t.get("position_usd") or 0) for t in trades)
-        lines = [
-            f"  • <b>{t.get('symbol','?')}</b> ${float(t.get('position_usd') or 0):.0f}"
-            f" | {t.get('kol_group','?')} | {_age_str(t.get('cycle_ts',''))}"
-            for t in trades
-        ]
-        return f"📦 <b>{len(trades)} POSITIONS OUVERTES</b> (${total:.0f})\n\n" + "\n".join(lines)
+        # v116: Group by strategy
+        by_strat: dict[str, list] = {}
+        for t in trades:
+            s = t.get("strategy", "?")
+            by_strat.setdefault(s, []).append(t)
 
+        total = sum(float(t.get("position_usd") or 0) for t in trades)
+        lines = [f"📦 <b>{len(trades)} POSITIONS OUVERTES</b> (${total:.0f})\n"]
+        for sname, strades in sorted(by_strat.items()):
+            short = sname.replace("_ACT", "A").replace("_SL", "S").replace("_B5_T5_A15_S70_240m", "")
+            stot = sum(float(t.get("position_usd") or 0) for t in strades)
+            lines.append(f"\n<b>{short}</b> (${stot:.0f}):")
+            for t in strades:
+                lines.append(
+                    f"  • <b>{t.get('symbol','?')}</b> ${float(t.get('position_usd') or 0):.0f}"
+                    f" | {t.get('kol_group','?')} | {_age_str(t.get('cycle_ts',''))}"
+                )
+        return "\n".join(lines)
+
+    # No open positions — show last closed
+    strategies = _get_active_strategies(sb)
     try:
         last = (
             sb.table("paper_trades")
             .select("symbol,pnl_pct,pnl_usd,status,kol_group,exit_at")
-            .eq("is_shadow", False).eq("strategy", _ACTIVE_STRATEGY)
+            .eq("is_shadow", False).in_("strategy", strategies)
             .neq("status", "open").order("exit_at", desc=True).limit(1).execute()
         )
         t = (last.data or [None])[0]
@@ -334,7 +387,7 @@ def _handle_stats(sb, args: str) -> str:
         hours, label = _parse_period(args)
         trades = _query_trades(sb, hours=hours)
         d = _compute_stats(trades)
-        return f"📊 <b>PERFORMANCE {_ACTIVE_STRATEGY}</b>\n\n{_fmt_stats(d, label)}"
+        return f"📊 <b>PERFORMANCE</b>\n\n{_fmt_stats(d, label)}"
 
     d1 = _compute_stats(_query_trades(sb, hours=24))
     d7 = _compute_stats(_query_trades(sb, hours=168))
@@ -347,7 +400,7 @@ def _handle_stats(sb, args: str) -> str:
         sections.append(_fmt_stats(d7, "7 jours"))
     sections.append(_fmt_stats(dall, "All-time"))
 
-    return f"📊 <b>PERFORMANCE {_ACTIVE_STRATEGY}</b>\n\n" + "\n\n".join(sections)
+    return f"📊 <b>PERFORMANCE</b>\n\n" + "\n\n".join(sections)
 
 
 # ── /shadow [period] ──
@@ -396,13 +449,17 @@ def _handle_shadow(sb, args: str) -> str:
         d["wr"] = d["wins"] / d["count"] * 100 if d["count"] > 0 else 0
     sorted_strats = sorted(strats.items(), key=lambda x: -x[1]["avg_pnl_pct"])
 
-    # Main strategy line
+    # v116: Main strategies line (combined)
     main_wr = main_stats["wins"] / main_stats["count"] * 100 if main_stats["count"] > 0 else 0
     main_avg = sum(float(t.get("pnl_pct") or 0) for t in main_trades) / len(main_trades) * 100 if main_trades else 0
+    active = _get_active_strategies(sb)
+    active_set = set(active)
 
-    lines = [f"  ⭐ <b>{_ACTIVE_STRATEGY}</b> avg {main_avg:+.1f}% | {main_stats['count']}t | {main_wr:.0f}% WR"]
+    lines = [f"  ⭐ <b>MAIN ({len(active)} strats)</b> avg {main_avg:+.1f}% | {main_stats['count']}t | {main_wr:.0f}% WR"]
 
     for s_name, d in sorted_strats[:10]:
+        if s_name in active_set:
+            continue  # Don't show active strategies in shadow list
         better = d["avg_pnl_pct"] * 100 > main_avg
         indicator = "🟢" if better else "🔴"
         lines.append(
@@ -421,7 +478,7 @@ def _handle_shadow(sb, args: str) -> str:
 # ── /today ──
 
 def _handle_today(sb, args: str) -> str:
-    """Today's summary: trades, PnL, active KOLs, calls received."""
+    """Today's summary: trades, PnL, active KOLs, per-strategy bankroll."""
     from safe_scraper import _rt_load_bankroll
 
     # Trades closed today
@@ -431,13 +488,12 @@ def _handle_today(sb, args: str) -> str:
     # Active KOLs today
     kols_today = set(t.get("kol_group", "") for t in trades if t.get("kol_group"))
 
-    # Bankroll
+    # v116: Per-strategy bankroll
     try:
         bk = _rt_load_bankroll()
-        bal = float(bk.get("current_balance", 0))
-        start = float(bk.get("starting_capital", 500))
+        strat_bals = bk.get("strategy_bankrolls") or {}
     except Exception:
-        bal, start = 0, 500
+        strat_bals = {}
 
     # Open positions
     from paper_trader import get_open_portfolio
@@ -448,13 +504,22 @@ def _handle_today(sb, args: str) -> str:
     worst_t = min(trades, key=lambda t: float(t.get("pnl_usd") or 0)) if trades else None
 
     pnl_emoji = "📈" if stats["pnl"] >= 0 else "📉"
-    bal_pct = (bal / start - 1) * 100 if start > 0 else 0
 
-    text = (
-        f"📅 <b>RÉSUMÉ DU JOUR</b>\n\n"
-        f"💰 Bankroll: <b>${bal:.2f}</b> ({bal_pct:+.1f}%)\n"
-        f"📦 En cours: {portfolio['open_count']} pos (${portfolio['deployed_usd']:.0f})\n"
-    )
+    # Strategy bankroll lines
+    strat_parts = []
+    total_bal = 0
+    for sname, sdata in sorted(strat_bals.items()):
+        bal = float(sdata.get("balance", 500))
+        pnl = float(sdata.get("pnl", 0))
+        short = sname.replace("_ACT", "A").replace("_SL", "S").replace("_B5_T5_A15_S70_240m", "")
+        e = "📈" if pnl >= 0 else "📉"
+        strat_parts.append(f"  {e} {short}: <b>${bal:.0f}</b> ({pnl:+.0f})")
+        total_bal += bal
+
+    text = f"📅 <b>RÉSUMÉ DU JOUR</b>\n\n"
+    if strat_parts:
+        text += "\n".join(strat_parts) + "\n"
+    text += f"📦 En cours: {portfolio['open_count']} pos (${portfolio['deployed_usd']:.0f})\n"
 
     if stats["count"] > 0:
         wr = stats["wins"] / stats["count"] * 100
@@ -504,15 +569,13 @@ def _handle_config(sb, args: str) -> str:
     slippage_buy = ptc.get("buy_slippage_bps", 100)
     slippage_sell = ptc.get("sell_slippage_bps", 200)
 
-    # Compute real position size from current bankroll
+    # v116: Compute per-strategy position size
     from safe_scraper import _rt_load_bankroll
     try:
-        bal = float(_rt_load_bankroll().get("current_balance", 500))
+        bk = _rt_load_bankroll()
+        strat_bals = bk.get("strategy_bankrolls") or {}
     except Exception:
-        bal = 500
-    raw_pos = bal * kelly
-    real_pos = min(raw_pos, max_pos)
-    capped = raw_pos > max_pos
+        strat_bals = {}
 
     alloc_str = ", ".join(f"{k}={v:.0%}" for k, v in hybrid_alloc.items()) if hybrid_alloc else "?"
 
@@ -527,17 +590,24 @@ def _handle_config(sb, args: str) -> str:
     else:
         kol_text = "  KOLs: TOUS (pas de whitelist)"
 
-    cap_text = f" ⚠️ cappé (raw ${raw_pos:.0f})" if capped else ""
+    # Per-strategy sizing lines
+    sizing_lines = []
+    for sname in active:
+        s_bal = float((strat_bals.get(sname) or {}).get("balance", 500))
+        s_raw = s_bal * kelly
+        s_pos = min(s_raw, max_pos)
+        short = sname.replace("_ACT", "A").replace("_SL", "S").replace("_B5_T5_A15_S70_240m", "")
+        cap_tag = " ⚠️cap" if s_raw > max_pos else ""
+        sizing_lines.append(f"  {short}: <b>${s_pos:.0f}</b> (${s_bal:.0f} × {kelly:.1%}){cap_tag}")
 
     return (
         f"⚙️ <b>CONFIG</b>\n\n"
-        f"<b>Stratégie:</b>\n"
-        f"  Active: {', '.join(active)}\n"
+        f"<b>Stratégies ({len(active)}):</b>\n"
+        f"  {', '.join(s.replace('_ACT', 'A').replace('_SL', 'S').replace('_B5_T5_A15_S70_240m', '') for s in active)}\n"
         f"  Hybrid: {'ON' if hybrid_on else 'OFF'} ({alloc_str})\n"
-        f"\n<b>Sizing:</b>\n"
-        f"  Position: <b>${real_pos:.0f}</b> (${bal:.0f} × {kelly:.1%}){cap_text}\n"
-        f"  Cap: ${max_pos:.0f} | Dedup: {dedup}h\n"
-        f"  Slippage: buy {slippage_buy}bps / sell {slippage_sell}bps\n"
+        f"\n<b>Sizing (Kelly {kelly:.1%}, cap ${max_pos:.0f}):</b>\n"
+        + "\n".join(sizing_lines) + "\n"
+        f"  Dedup: {dedup}h | Slippage: {slippage_buy}/{slippage_sell}bps\n"
         f"\n<b>Filtres:</b>\n"
         f"{kol_text}\n"
         f"  ML: {ml_mode}\n"
@@ -555,13 +625,14 @@ def _handle_pnl(sb, args: str) -> str:
 
     kol_name = args.strip()
 
-    # Query all trades for this KOL (case-insensitive search)
+    # v116: Query all trades for this KOL across all active strategies
+    strategies = _get_active_strategies(sb)
     try:
         result = (
             sb.table("paper_trades")
             .select("symbol,pnl_pct,pnl_usd,status,exit_at,position_usd,exit_minutes,strategy")
             .eq("is_shadow", False)
-            .eq("strategy", _ACTIVE_STRATEGY)
+            .in_("strategy", strategies)
             .ilike("kol_group", f"%{kol_name}%")
             .neq("status", "open")
             .order("exit_at", desc=True)
@@ -603,12 +674,13 @@ def _handle_pnl(sb, args: str) -> str:
 # ── /best ──
 
 def _handle_best(sb, args: str) -> str:
-    """Best trade all-time."""
+    """Best trade all-time across all active strategies."""
+    strategies = _get_active_strategies(sb)
     try:
         result = (
             sb.table("paper_trades")
-            .select("symbol,pnl_pct,pnl_usd,status,kol_group,exit_at,position_usd,exit_minutes,entry_price,exit_price,high_price_seen,token_address")
-            .eq("is_shadow", False).eq("strategy", _ACTIVE_STRATEGY)
+            .select("symbol,pnl_pct,pnl_usd,status,kol_group,exit_at,position_usd,exit_minutes,entry_price,exit_price,high_price_seen,token_address,strategy")
+            .eq("is_shadow", False).in_("strategy", strategies)
             .neq("status", "open")
             .order("pnl_usd", desc=True).limit(1).execute()
         )
@@ -623,12 +695,13 @@ def _handle_best(sb, args: str) -> str:
 
 
 def _handle_worst(sb, args: str) -> str:
-    """Worst trade all-time."""
+    """Worst trade all-time across all active strategies."""
+    strategies = _get_active_strategies(sb)
     try:
         result = (
             sb.table("paper_trades")
-            .select("symbol,pnl_pct,pnl_usd,status,kol_group,exit_at,position_usd,exit_minutes,entry_price,exit_price,high_price_seen,token_address")
-            .eq("is_shadow", False).eq("strategy", _ACTIVE_STRATEGY)
+            .select("symbol,pnl_pct,pnl_usd,status,kol_group,exit_at,position_usd,exit_minutes,entry_price,exit_price,high_price_seen,token_address,strategy")
+            .eq("is_shadow", False).in_("strategy", strategies)
             .neq("status", "open")
             .order("pnl_usd", desc=False).limit(1).execute()
         )

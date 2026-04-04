@@ -1223,15 +1223,24 @@ def _rt_compute_score(kol_username: str, ca: str, kol_info: dict,
 
 
 def _rt_position_size(rt_score: float, kol_info: dict, token_info: dict,
-                      tier: str, config: dict) -> float:
+                      tier: str, config: dict, strategy: str = "") -> float:
     """
     v111: Kelly-based position sizing — bankroll × kelly_fraction, capped at max_position_usd.
+    v116: Per-strategy bankroll — each strategy sizes from its own balance (parallel mode).
     """
     sizing = config.get("sizing", {})
     kelly = float(sizing.get("kelly_fraction", 0.127))
     max_pos = float(config.get("max_position_usd", 120))
     bankroll = _rt_load_bankroll()
-    balance = float(bankroll.get("current_balance", 500))
+
+    # v116: Use strategy-specific bankroll if available
+    if strategy:
+        strat_bankrolls = bankroll.get("strategy_bankrolls") or {}
+        strat_entry = strat_bankrolls.get(strategy, {})
+        balance = float(strat_entry.get("balance", 500))
+    else:
+        balance = float(bankroll.get("current_balance", 500))
+
     raw = balance * kelly
     return round(min(raw, max_pos), 2)
 
@@ -1401,6 +1410,7 @@ def _rt_open_trades(ca: str, symbol: str, price: float, mcap: float,
             return 0
 
     # v96: Hybrid strategy — split position across configured allocations
+    # v116: Each strategy sizes independently from its own bankroll (parallel mode)
     hybrid_cfg = config.get("hybrid_strategy", {})
     if hybrid_cfg.get("enabled", False):
         allocations = dict(hybrid_cfg.get("allocations", {"TP50_SL30": 0.50, "TP30_SL50": 0.30, "TP50_SL50": 0.20}))
@@ -1409,7 +1419,9 @@ def _rt_open_trades(ca: str, symbol: str, price: float, mcap: float,
         for i, (strat_name, alloc_pct) in enumerate(allocations.items()):
             if strat_name not in STRATEGIES:
                 continue
-            strat_pos = round(pos_size * float(alloc_pct), 2)
+            # v116: Each strategy computes its own pos_size from its own bankroll
+            strat_pos = _rt_position_size(rt_score, kol_info, token_info, tier, config, strategy=strat_name)
+            strat_pos = round(strat_pos * float(alloc_pct), 2)
             if strat_pos < 1.0:
                 strat_pos = 1.0
 
@@ -1728,20 +1740,42 @@ async def _rt_on_new_message(event: events.NewMessage.Event):
                     from alerter import alert_kol_trade
                     from paper_trader import get_open_portfolio
                     try:
-                        bal = float(_rt_load_bankroll().get("current_balance", 0))
+                        _br = _rt_load_bankroll()
+                        bal = float(_br.get("current_balance", 0))
+                        # v116: Build per-strategy position detail for alert
+                        _strat_bals = _br.get("strategy_bankrolls") or {}
+                        _hybrid_cfg = config.get("hybrid_strategy", {})
+                        strat_positions = None
+                        if _hybrid_cfg.get("enabled"):
+                            _allocs = _hybrid_cfg.get("allocations", {})
+                            strat_positions = {}
+                            total_pos = 0
+                            for s, apct in _allocs.items():
+                                if s not in STRATEGIES:
+                                    continue
+                                s_pos = _rt_position_size(rt_score, kol_info, token_info, tier, config, strategy=s)
+                                s_pos = round(s_pos * float(apct), 2)
+                                s_bal = float((_strat_bals.get(s) or {}).get("balance", 500))
+                                strat_positions[s] = {"pos": s_pos, "balance": s_bal}
+                                total_pos += s_pos
+                        else:
+                            total_pos = pos_size
                     except Exception:
                         bal = 0
+                        total_pos = pos_size
+                        strat_positions = None
                     sb_alert = _get_supabase()
                     portfolio = get_open_portfolio(sb_alert) if sb_alert else {"open_count": 0, "deployed_usd": 0}
                     # v112: Only tag as bonding if actually on bonding curve (liq < min_liq)
                     # Previously is_pump_dex tagged graduated tokens as bonding too
                     _actually_bonding = (is_bonding or is_pump_dex) and liq_usd < min_liq
                     alert_kol_trade(
-                        symbol, username, price, pos_size, rt_score,
+                        symbol, username, price, total_pos, rt_score,
                         liq_usd, is_bonding=_actually_bonding,
                         ca=ca, mcap=mcap, tier=tier, bankroll=bal,
                         deployed_usd=portfolio["deployed_usd"],
                         open_count=portfolio["open_count"],
+                        strategy_positions=strat_positions,
                     )
                 except Exception as e:
                     logger.warning("KOL trade alert failed: %s", e)

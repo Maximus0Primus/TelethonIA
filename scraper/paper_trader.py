@@ -1651,6 +1651,7 @@ def check_paper_trades(client) -> dict:
                         ca=trade.get("token_address", ""),
                         deployed_usd=portfolio["deployed_usd"],
                         open_count=portfolio["open_count"],
+                        strategy_bankrolls=_strat_bals,
                     )
                 except Exception as e:
                     logger.warning("SL cascade trade close alert failed: %s", e)
@@ -1866,6 +1867,7 @@ def check_paper_trades_fast(client) -> dict:
                         ca=trade.get("token_address", ""),
                         deployed_usd=portfolio["deployed_usd"],
                         open_count=portfolio["open_count"],
+                        strategy_bankrolls=_strat_bals,
                     )
                 except Exception as e:
                     logger.warning("paper_fast trade close alert failed: %s", e)
