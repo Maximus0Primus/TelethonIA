@@ -1335,15 +1335,15 @@ def _open_dip_p2(client, key: tuple, watch: dict, current_price: float, now: dat
         # Alert for P2 open
         if not watch["base_row"].get("is_shadow"):
             try:
-                from alerter import send_telegram_message
+                from alerter import _send as _alert_send
                 dip_pct = (1 - watch["low_seen"] / watch["entry_price"]) * 100
                 msg = (
-                    f"🔄 DIP BUY P2\n"
-                    f"${watch['base_row'].get('symbol', '?')} dipped -{dip_pct:.0f}% → bounced +{watch['bounce_pct']*100:.0f}%\n"
-                    f"P2 entry: ${p2_entry:.8f} | ${watch['alloc_usd']:.0f}\n"
-                    f"Remaining: {remaining_horizon}min"
+                    f"🔄 DIP BUY P2\n\n"
+                    f"${watch['base_row'].get('symbol', '?')} dipped <b>-{dip_pct:.0f}%</b> → bounced +{watch['bounce_pct']*100:.0f}%\n"
+                    f"💰 P2 entry: ${p2_entry:.8f} | ${watch['alloc_usd']:.0f}\n"
+                    f"⏱ Remaining: {remaining_horizon}min"
                 )
-                send_telegram_message(msg)
+                _alert_send(msg, "dip_buy_p2")
             except Exception:
                 pass
     except Exception as e:
