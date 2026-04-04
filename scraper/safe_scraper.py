@@ -1740,6 +1740,7 @@ async def _rt_on_new_message(event: events.NewMessage.Event):
                     from alerter import alert_kol_trade
                     from paper_trader import get_open_portfolio
                     try:
+                        from paper_trader import STRATEGIES as _STRATS
                         _br = _rt_load_bankroll()
                         bal = float(_br.get("current_balance", 0))
                         # v116: Build per-strategy position detail for alert
@@ -1751,7 +1752,7 @@ async def _rt_on_new_message(event: events.NewMessage.Event):
                             strat_positions = {}
                             total_pos = 0
                             for s, apct in _allocs.items():
-                                if s not in STRATEGIES:
+                                if s not in _STRATS:
                                     continue
                                 s_pos = _rt_position_size(rt_score, kol_info, token_info, tier, config, strategy=s)
                                 s_pos = round(s_pos * float(apct), 2)
