@@ -1548,10 +1548,13 @@ def check_paper_trades(client) -> dict:
                 # v113: Update bankroll BEFORE alert so balance is fresh
                 try:
                     from safe_scraper import _rt_update_bankroll, _rt_load_bankroll
-                    _rt_update_bankroll(pnl_usd or 0, 1)
-                    bal = float(_rt_load_bankroll().get("current_balance", 0))
+                    _rt_update_bankroll(pnl_usd or 0, 1, strategy=trade.get("strategy", ""))
+                    _br = _rt_load_bankroll()
+                    bal = float(_br.get("current_balance", 0))
+                    _strat_bals = _br.get("strategy_bankrolls") or {}
                 except Exception:
                     bal = 0
+                    _strat_bals = {}
                 try:
                     from alerter import alert_trade_closed
                     portfolio = get_open_portfolio(client)
@@ -1569,6 +1572,7 @@ def check_paper_trades(client) -> dict:
                         ca=trade.get("token_address", ""),
                         deployed_usd=portfolio["deployed_usd"],
                         open_count=portfolio["open_count"],
+                        strategy_bankrolls=_strat_bals,
                     )
                 except Exception as e:
                     logger.warning("trade close alert failed: %s", e)
@@ -1623,10 +1627,13 @@ def check_paper_trades(client) -> dict:
                 # v113: Update bankroll BEFORE alert so balance is fresh
                 try:
                     from safe_scraper import _rt_update_bankroll, _rt_load_bankroll
-                    _rt_update_bankroll(pnl_usd or 0, 1)
-                    bal = float(_rt_load_bankroll().get("current_balance", 0))
+                    _rt_update_bankroll(pnl_usd or 0, 1, strategy=trade.get("strategy", ""))
+                    _br = _rt_load_bankroll()
+                    bal = float(_br.get("current_balance", 0))
+                    _strat_bals = _br.get("strategy_bankrolls") or {}
                 except Exception:
                     bal = 0
+                    _strat_bals = {}
                 try:
                     from alerter import alert_trade_closed
                     portfolio = get_open_portfolio(client)
@@ -1835,10 +1842,13 @@ def check_paper_trades_fast(client) -> dict:
             if trade.get("source") == "rt" and not trade.get("is_shadow"):
                 try:
                     from safe_scraper import _rt_update_bankroll, _rt_load_bankroll
-                    _rt_update_bankroll(pnl_usd or 0, 1)
-                    bal = float(_rt_load_bankroll().get("current_balance", 0))
+                    _rt_update_bankroll(pnl_usd or 0, 1, strategy=trade.get("strategy", ""))
+                    _br = _rt_load_bankroll()
+                    bal = float(_br.get("current_balance", 0))
+                    _strat_bals = _br.get("strategy_bankrolls") or {}
                 except Exception:
                     bal = 0
+                    _strat_bals = {}
                 try:
                     from alerter import alert_trade_closed
                     portfolio = get_open_portfolio(client)

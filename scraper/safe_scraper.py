@@ -918,8 +918,9 @@ def _rt_load_bankroll() -> dict:
     return _rt_bankroll
 
 
-def _rt_update_bankroll(pnl_usd: float, n_trades: int) -> None:
-    """v71: Update bankroll after trades close. Read-modify-write with peak/drawdown tracking."""
+def _rt_update_bankroll(pnl_usd: float, n_trades: int, strategy: str = "") -> None:
+    """v71: Update bankroll after trades close. Read-modify-write with peak/drawdown tracking.
+    v115: Also tracks per-strategy bankroll in strategy_bankrolls JSONB."""
     global _rt_bankroll, _rt_bankroll_loaded_at
     if pnl_usd == 0 and n_trades == 0:
         return
@@ -940,19 +941,32 @@ def _rt_update_bankroll(pnl_usd: float, n_trades: int) -> None:
         new_dd = round((1 - new_balance / new_peak) * 100, 2) if new_peak > 0 else 0
         new_dd = max(float(row["max_drawdown_pct"]), new_dd)
 
-        sb.table("rt_bankroll").update({
+        update_data = {
             "current_balance": new_balance,
             "total_pnl": new_total_pnl,
             "total_trades": new_total_trades,
             "peak_balance": new_peak,
             "max_drawdown_pct": new_dd,
             "last_updated_at": datetime.now(timezone.utc).isoformat(),
-        }).eq("id", row["id"]).execute()
+        }
+
+        # v115: Per-strategy bankroll tracking
+        if strategy:
+            strat_bankrolls = row.get("strategy_bankrolls") or {}
+            entry = strat_bankrolls.get(strategy, {"balance": 500, "trades": 0, "pnl": 0})
+            entry["balance"] = round(float(entry["balance"]) + pnl_usd, 2)
+            entry["pnl"] = round(float(entry["pnl"]) + pnl_usd, 2)
+            entry["trades"] = int(entry["trades"]) + n_trades
+            strat_bankrolls[strategy] = entry
+            update_data["strategy_bankrolls"] = strat_bankrolls
+
+        sb.table("rt_bankroll").update(update_data).eq("id", row["id"]).execute()
 
         # Invalidate cache so next read gets fresh data
         _rt_bankroll_loaded_at = 0
-        logger.info("RT bankroll: $%.2f → $%.2f (pnl=$%+.2f, %d trades, peak=$%.2f, dd=%.1f%%)",
-                     old_balance, new_balance, pnl_usd, n_trades, new_peak, new_dd)
+        strat_str = f" [{strategy}]" if strategy else ""
+        logger.info("RT bankroll: $%.2f → $%.2f (pnl=$%+.2f, %d trades, peak=$%.2f, dd=%.1f%%)%s",
+                     old_balance, new_balance, pnl_usd, n_trades, new_peak, new_dd, strat_str)
     except Exception as e:
         logger.error("RT bankroll update failed: %s", e)
 

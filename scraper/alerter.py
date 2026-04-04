@@ -406,8 +406,10 @@ def alert_trade_closed(symbol: str, strategy: str, exit_reason: str,
                        high_price: float, minutes: int,
                        kol: str = "", bankroll: float = 0,
                        ca: str = "", deployed_usd: float = 0,
-                       open_count: int = 0):
-    """v110: Alert when a main trade closes (trail_stop, sl_hit, timeout)."""
+                       open_count: int = 0,
+                       strategy_bankrolls: dict | None = None):
+    """v110: Alert when a main trade closes (trail_stop, sl_hit, timeout).
+    v115: Shows per-strategy bankroll comparison."""
     # Emoji based on outcome
     if exit_reason == "trail_stop":
         if pnl_pct > 0.5:
@@ -444,6 +446,18 @@ def alert_trade_closed(symbol: str, strategy: str, exit_reason: str,
         f" | ${available:.0f} dispo"
     )
 
+    # v115: Per-strategy bankroll comparison
+    strat_text = ""
+    if strategy_bankrolls:
+        parts = []
+        for sname, sdata in sorted(strategy_bankrolls.items()):
+            bal = float(sdata.get("balance", 500))
+            pnl = float(sdata.get("pnl", 0))
+            short = sname.replace("_ACT", "A").replace("_SL", "S").replace("_B5_T5_A15_S70_240m", "")
+            marker = " ◀" if sname == strategy else ""
+            parts.append(f"  {short}: <b>${bal:.0f}</b> ({pnl:+.0f}){marker}")
+        strat_text = "\n📊 Bankrolls:\n" + "\n".join(parts)
+
     # Link
     link_text = f'\n🔗 <a href="https://dexscreener.com/solana/{ca}">DexScreener</a>' if ca else ""
 
@@ -456,6 +470,7 @@ def alert_trade_closed(symbol: str, strategy: str, exit_reason: str,
         f"📊 Entry: ${entry_price:.8f} → Exit: ${exit_price:.8f}\n"
         f"🔝 Max: {max_gain:+.0f}%"
         f"{portfolio_text}"
+        f"{strat_text}"
         f"{link_text}",
         "trade_closed",
     )
