@@ -342,7 +342,7 @@ SHADOW_STRATEGIES.extend(_TRAIL_STRATEGIES.keys())
 # No TP cap: lets runners run. SL and timeout still apply.
 # Encoded: DTRAIL{trail}_ACT{act}_SL{sl}
 _DTRAIL_STRATEGIES = {}
-for _dt_trail in [10, 15, 20]:
+for _dt_trail in [5, 10, 15, 20]:  # v115: added trail=5 (sim best)
     for _dt_act in [10, 15, 20, 25, 30]:
         for _dt_sl in [50, 60, 70]:
             _dtname = f"DTRAIL{_dt_trail}_ACT{_dt_act}_SL{_dt_sl}"
@@ -379,6 +379,19 @@ for _sl_sp in [30, 50]:
 
 STRATEGIES.update(_SPLIT_STRATEGIES)
 SHADOW_STRATEGIES.extend(_SPLIT_STRATEGIES.keys())
+
+# v115: DIP_BUY strategy — P1 enters at KOL call (50%), P2 enters on dip+bounce (50%)
+# DIP30 = wait for -30% dip, B5 = +5% bounce confirmation, T5/A15 = trail 5% / activation 15%
+STRATEGIES["DIP30_B5_T5_A15_SL70_240m"] = [
+    {"pct": 0.5, "tp_mult": None, "sl_mult": 0.30,
+     "horizon_min": 240, "trail_pct": 0.05,
+     "trail_activation_pct": 0.15, "label": "dip_p1"},
+]
+
+# v115: DIP_BUY in-memory watchlist — tracks tokens waiting for dip+bounce to open P2
+# Key: (token_address, strategy_name) → tracking state
+_dip_watchlist: dict[tuple, dict] = {}
+_dip_watchlist_rebuilt = False
 
 
 def _load_bot_predictions(client) -> None:
@@ -855,6 +868,23 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
                 try:
                     client.table("paper_trades").insert(row).execute()
                     opened += 1
+                    # v115: DIP_BUY — add to watchlist for P2 monitoring
+                    if tranche["label"] == "dip_p1":
+                        m = _DIP_RE.match(strat_name)
+                        if m:
+                            _dip_watchlist[(addr, strat_name)] = {
+                                "entry_price": entry_price,
+                                "low_seen": entry_price,
+                                "dip_pct": int(m.group(1)) / 100,
+                                "bounce_pct": int(m.group(2)) / 100,
+                                "sl_pct": int(m.group(5)) / 100,
+                                "horizon_min": int(m.group(6)),
+                                "alloc_usd": round(alloc_usd * tranche["pct"] * bot_ml_mult, 2),
+                                "base_row": {k: v for k, v in base_row.items()},
+                                "created_at": datetime.now(timezone.utc),
+                            }
+                            logger.info("dip_watch: watching %s/%s for -%.0f%% dip",
+                                        token.get("symbol"), strat_name, int(m.group(1)))
                 except Exception as e:
                     logger.error(
                         "paper_trader: insert failed for %s/%s/%s: %s",
@@ -978,6 +1008,7 @@ import re as _re
 _DECAY_RE = _re.compile(r"^DECAY_TP\d+_SL\d+_E(\d+)$")
 _TRAIL_RE = _re.compile(r"^TRAIL(\d+)_TP\d+_SL\d+$")
 _DTRAIL_RE = _re.compile(r"^DTRAIL(\d+)_ACT(\d+)_SL\d+$")
+_DIP_RE = _re.compile(r"^DIP(\d+)_B(\d+)_T(\d+)_A(\d+)_SL(\d+)_(\d+)m$")  # v115
 _BE_RE = _re.compile(r"^BE(\d+)_TP\d+_SL\d+$")
 
 def _get_decay_end(strategy_name: str) -> float | None:
@@ -994,6 +1025,10 @@ def _get_trail_config(trade: dict) -> tuple[float | None, float | None]:
     For TRAIL strategies: activation_pct = trail_pct (legacy behavior).
     """
     strat = trade.get("strategy", "")
+    # v115: DIP_BUY — DIP{dip}_B{bounce}_T{trail}_A{act}_SL{sl}_{timeout}m
+    m = _DIP_RE.match(strat)
+    if m:
+        return int(m.group(3)) / 100, int(m.group(4)) / 100
     # v110: Dynamic trail — DTRAIL{trail}_ACT{act}_SL{sl}
     m = _DTRAIL_RE.match(strat)
     if m:
@@ -1126,6 +1161,195 @@ def _evaluate_trade_exit(trade: dict, current_price: float | None,
     return result
 
 
+# ---------------------------------------------------------------------------
+# v115: DIP_BUY watchlist — monitor for dip+bounce to open P2
+# ---------------------------------------------------------------------------
+
+def _rebuild_dip_watchlist(client):
+    """Rebuild dip watchlist from open P1 trades on startup."""
+    global _dip_watchlist, _dip_watchlist_rebuilt
+    if _dip_watchlist_rebuilt:
+        return
+    _dip_watchlist_rebuilt = True
+
+    try:
+        result = (
+            client.table("paper_trades")
+            .select("*")
+            .eq("status", "open")
+            .eq("tranche_label", "dip_p1")
+            .execute()
+        )
+        for trade in (result.data or []):
+            addr = trade["token_address"]
+            strat = trade["strategy"]
+            key = (addr, strat)
+
+            # Skip if P2 already opened
+            p2 = (
+                client.table("paper_trades")
+                .select("id", count="exact")
+                .eq("token_address", addr)
+                .eq("strategy", strat)
+                .eq("tranche_label", "dip_p2")
+                .neq("status", "open")  # if P2 exists and closed, also skip
+                .execute()
+            )
+            p2_open = (
+                client.table("paper_trades")
+                .select("id", count="exact")
+                .eq("token_address", addr)
+                .eq("strategy", strat)
+                .eq("tranche_label", "dip_p2")
+                .eq("status", "open")
+                .execute()
+            )
+            if (p2.count and p2.count > 0) or (p2_open.count and p2_open.count > 0):
+                continue
+
+            m = _DIP_RE.match(strat)
+            if not m:
+                continue
+
+            created = datetime.fromisoformat(trade["created_at"].replace("Z", "+00:00"))
+            _dip_watchlist[key] = {
+                "entry_price": float(trade["entry_price"]),
+                "low_seen": float(trade["entry_price"]),  # conservative reset
+                "dip_pct": int(m.group(1)) / 100,
+                "bounce_pct": int(m.group(2)) / 100,
+                "sl_pct": int(m.group(5)) / 100,
+                "horizon_min": int(m.group(6)),
+                "alloc_usd": float(trade["position_usd"]),  # P1 pos = P2 pos (50/50)
+                "base_row": {
+                    "cycle_ts": trade.get("cycle_ts"),
+                    "symbol": trade.get("symbol"),
+                    "token_address": addr,
+                    "pair_address": trade.get("pair_address"),
+                    "rank_in_cycle": trade.get("rank_in_cycle"),
+                    "entry_score": trade.get("entry_score"),
+                    "entry_mcap": trade.get("entry_mcap"),
+                    "source": trade.get("source"),
+                    "kol_group": trade.get("kol_group"),
+                    "is_shadow": trade.get("is_shadow", False),
+                },
+                "created_at": created,
+            }
+
+        if _dip_watchlist:
+            logger.info("dip_watch: rebuilt watchlist with %d entries", len(_dip_watchlist))
+    except Exception as e:
+        logger.warning("dip_watch: rebuild failed: %s", e)
+
+
+def _process_dip_watchlist(client, prices: dict, now: datetime):
+    """Check dip+bounce conditions for DIP_BUY P2 entries."""
+    to_remove = []
+
+    for key, watch in _dip_watchlist.items():
+        addr, strat_name = key
+        current_price = prices.get(addr)
+        if current_price is None:
+            continue
+
+        # Update low_seen
+        if current_price < watch["low_seen"]:
+            watch["low_seen"] = current_price
+
+        # Check timeout — watchlist shouldn't outlive the strategy horizon
+        elapsed = (now - watch["created_at"]).total_seconds() / 60
+        if elapsed >= watch["horizon_min"]:
+            to_remove.append(key)
+            logger.debug("dip_watch: timeout for %s/%s after %dmin", addr[:8], strat_name, int(elapsed))
+            continue
+
+        # Check if P1 is still open
+        try:
+            p1_check = (
+                client.table("paper_trades")
+                .select("id", count="exact")
+                .eq("token_address", addr)
+                .eq("strategy", strat_name)
+                .eq("tranche_label", "dip_p1")
+                .eq("status", "open")
+                .execute()
+            )
+            if not p1_check.count or p1_check.count == 0:
+                to_remove.append(key)
+                logger.info("dip_watch: P1 closed for %s/%s, cancelling P2 watch", addr[:8], strat_name)
+                continue
+        except Exception:
+            continue
+
+        # Check dip condition: price dropped dip_pct from P1 entry
+        dip_level = watch["entry_price"] * (1 - watch["dip_pct"])
+        if watch["low_seen"] <= dip_level:
+            # Dip triggered — check bounce from low
+            if watch["low_seen"] > 0:
+                bounce_from_low = current_price / watch["low_seen"] - 1
+            else:
+                bounce_from_low = 0
+            if bounce_from_low >= watch["bounce_pct"]:
+                # BOUNCE CONFIRMED — open P2
+                _open_dip_p2(client, key, watch, current_price, now)
+                to_remove.append(key)
+
+    for key in to_remove:
+        _dip_watchlist.pop(key, None)
+
+
+def _open_dip_p2(client, key: tuple, watch: dict, current_price: float, now: datetime):
+    """Open DIP_BUY P2 trade on confirmed bounce."""
+    addr, strat_name = key
+
+    # P2 entry = low * (1 + bounce) * (1 + slippage + fee)
+    buy_slip = BUY_SLIPPAGE_BPS / 10_000 + BUY_FEE_BPS / 10_000
+    p2_entry = watch["low_seen"] * (1 + watch["bounce_pct"]) * (1 + buy_slip)
+    p2_sl = p2_entry * (1 - watch["sl_pct"])
+
+    # P2 timeout = remaining time from P1 entry
+    elapsed_since_p1 = (now - watch["created_at"]).total_seconds() / 60
+    remaining_horizon = max(int(watch["horizon_min"] - elapsed_since_p1), 10)  # min 10min
+
+    row = {
+        **watch["base_row"],
+        "strategy": strat_name,
+        "entry_price": p2_entry,
+        "sl_price": p2_sl,
+        "tp_price": None,
+        "horizon_minutes": remaining_horizon,
+        "tranche_pct": 0.5,
+        "tranche_label": "dip_p2",
+        "position_usd": round(watch["alloc_usd"], 2),
+        "status": "open",
+        "high_price_seen": current_price,
+    }
+
+    try:
+        client.table("paper_trades").insert(row).execute()
+        logger.info(
+            "dip_watch: OPENED P2 %s/%s — entry=$%.8f (low=$%.8f, bounce=+%.0f%%), alloc=$%.0f, horizon=%dmin",
+            watch["base_row"].get("symbol", "?"), strat_name,
+            p2_entry, watch["low_seen"], watch["bounce_pct"] * 100,
+            watch["alloc_usd"], remaining_horizon,
+        )
+        # Alert for P2 open
+        if not watch["base_row"].get("is_shadow"):
+            try:
+                from alerter import send_telegram_message
+                dip_pct = (1 - watch["low_seen"] / watch["entry_price"]) * 100
+                msg = (
+                    f"🔄 DIP BUY P2\n"
+                    f"${watch['base_row'].get('symbol', '?')} dipped -{dip_pct:.0f}% → bounced +{watch['bounce_pct']*100:.0f}%\n"
+                    f"P2 entry: ${p2_entry:.8f} | ${watch['alloc_usd']:.0f}\n"
+                    f"Remaining: {remaining_horizon}min"
+                )
+                send_telegram_message(msg)
+            except Exception:
+                pass
+    except Exception as e:
+        logger.error("dip_watch: P2 insert failed for %s/%s: %s", addr[:8], strat_name, e)
+
+
 def _precache_ohlcv_for_closed(closed_ids: set, trades: list[dict]):
     """v114: Pre-cache OHLCV for recently closed trades so sim.py has data ready.
 
@@ -1235,7 +1459,15 @@ def check_paper_trades(client) -> dict:
 
     # Batch fetch current prices
     addresses = list({t["token_address"] for t in open_trades})
+    # v115: Include watchlist tokens in price fetch
+    for (waddr, _) in _dip_watchlist:
+        if waddr not in addresses:
+            addresses.append(waddr)
     prices = _fetch_prices_batch(addresses)
+
+    # v115: Process dip watchlist on full check too
+    if _dip_watchlist:
+        _process_dip_watchlist(client, prices, now)
 
     # v73: Load sell slippage + fee config for exit price simulation
     _sell_slip_bps = SELL_SLIPPAGE_BPS
@@ -1266,7 +1498,12 @@ def check_paper_trades(client) -> dict:
 
         addr = trade["token_address"]
         current_price = prices.get(addr)
-        group_key = (addr, trade["strategy"], trade["cycle_ts"])
+        # v115: DIP_BUY P1/P2 exit independently (no SL cascade between them)
+        label = trade.get("tranche_label", "")
+        if "dip_p" in label:
+            group_key = (addr, trade["strategy"], trade["cycle_ts"], label)
+        else:
+            group_key = (addr, trade["strategy"], trade["cycle_ts"])
 
         is_cascade = group_key in sl_triggered
         ev = _evaluate_trade_exit(trade, current_price, now, _sell_slip_factor, sl_cascade=is_cascade, sell_fee_bps=_sell_fee_bps)
@@ -1350,7 +1587,12 @@ def check_paper_trades(client) -> dict:
     for trade in open_trades:
         if trade["id"] in closed_ids:
             continue
-        group_key = (trade["token_address"], trade["strategy"], trade["cycle_ts"])
+        # v115: DIP_BUY P1/P2 exit independently
+        label = trade.get("tranche_label", "")
+        if "dip_p" in label:
+            group_key = (trade["token_address"], trade["strategy"], trade["cycle_ts"], label)
+        else:
+            group_key = (trade["token_address"], trade["strategy"], trade["cycle_ts"])
         if group_key not in sl_triggered:
             continue
 
@@ -1520,11 +1762,25 @@ def check_paper_trades_fast(client) -> dict:
         logger.warning("paper_fast: fetch failed: %s", e)
         return {"checked": 0, "closed": 0}
 
-    if not recent_trades:
+    # v115: Rebuild dip watchlist on first run after restart
+    _rebuild_dip_watchlist(client)
+
+    if not recent_trades and not _dip_watchlist:
         return {"checked": 0, "closed": 0}
 
     addresses = list({t["token_address"] for t in recent_trades})
-    prices = _fetch_prices_batch(addresses)
+    # v115: Include watchlist tokens in price fetch
+    for (waddr, _) in _dip_watchlist:
+        if waddr not in addresses:
+            addresses.append(waddr)
+    prices = _fetch_prices_batch(addresses) if addresses else {}
+
+    # v115: Process dip watchlist every 30s
+    if _dip_watchlist:
+        _process_dip_watchlist(client, prices, now)
+
+    if not recent_trades:
+        return {"checked": 0, "closed": 0}
 
     _sell_slip_bps = SELL_SLIPPAGE_BPS
     _sell_fee_bps = SELL_FEE_BPS
