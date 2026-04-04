@@ -651,6 +651,51 @@ def fetch_ohlcv_gecko(pool: str, start_ts: int, end_ts: int) -> list[dict] | Non
         return None
 
 
+BIRDEYE_API_KEY = os.environ.get("BIRDEYE_API_KEY")
+
+
+def fetch_ohlcv_birdeye(token_mint: str, start_ts: int, end_ts: int) -> list[dict] | None:
+    """Fetch OHLCV from Birdeye using token mint (not pool address). 30 CU per call."""
+    if not BIRDEYE_API_KEY:
+        return None
+    try:
+        r = requests.get(
+            "https://public-api.birdeye.so/defi/ohlcv",
+            params={"address": token_mint, "type": "15m",
+                    "time_from": start_ts, "time_to": end_ts},
+            headers={"X-API-KEY": BIRDEYE_API_KEY, "x-chain": "solana"},
+            timeout=15,
+        )
+        if r.status_code == 429:
+            time_mod.sleep(3)
+            r = requests.get(
+                "https://public-api.birdeye.so/defi/ohlcv",
+                params={"address": token_mint, "type": "15m",
+                        "time_from": start_ts, "time_to": end_ts},
+                headers={"X-API-KEY": BIRDEYE_API_KEY, "x-chain": "solana"},
+                timeout=15,
+            )
+            if r.status_code == 429:
+                return None
+        if r.status_code != 200:
+            return None
+        items = r.json().get("data", {}).get("items", [])
+        if not items:
+            return None
+        candles = []
+        for c in items:
+            h, l, o, cl, v = c.get("h", 0), c.get("l", 0), c.get("o", 0), c.get("c", 0), c.get("v", 0)
+            ts = int(c.get("unixTime", 0))
+            if h > 0 and l > 0 and ts >= start_ts - 60:
+                candles.append({"timestamp": ts, "open": float(o), "high": float(h),
+                                "low": float(l), "close": float(cl), "volume": float(v)})
+        candles.sort(key=lambda x: x["timestamp"])
+        return candles if candles else None
+    except Exception as e:
+        print(f"  Birdeye error for {token_mint[:12]}: {e}")
+        return None
+
+
 def fetch_candles_for_trade(trade: dict, cache_only: bool = False) -> tuple[list[dict] | None, bool]:
     pool = trade.get("pair_address")
     token = trade.get("token_address")
@@ -661,6 +706,11 @@ def fetch_candles_for_trade(trade: dict, cache_only: bool = False) -> tuple[list
     if not pool:
         pool = _pair_cache.get(token) or (resolve_pair_address(token) if not cache_only else None)
         if not pool:
+            # v114: Even without pool, try Birdeye (uses token mint)
+            if not cache_only and token:
+                candles = fetch_ohlcv_birdeye(token, start_ts, end_ts)
+                if candles and len(candles) >= 3:
+                    return candles, True
             return None, False
 
     cached = _load_cache(pool, start_ts, MAX_WINDOW_MIN)
@@ -683,6 +733,13 @@ def fetch_candles_for_trade(trade: dict, cache_only: bool = False) -> tuple[list
     time_mod.sleep(2.5)
     candles = fetch_ohlcv_gecko(pool, start_ts, end_ts)
     if candles and len(candles) >= 5:
+        _save_cache(pool, start_ts, candles, MAX_WINDOW_MIN)
+        return candles, True
+
+    # v114: 3rd fallback — Birdeye (uses token mint, works for deindexed tokens)
+    time_mod.sleep(0.5)
+    candles = fetch_ohlcv_birdeye(token, start_ts, end_ts)
+    if candles and len(candles) >= 3:
         _save_cache(pool, start_ts, candles, MAX_WINDOW_MIN)
         return candles, True
 

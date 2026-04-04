@@ -1126,6 +1126,84 @@ def _evaluate_trade_exit(trade: dict, current_price: float | None,
     return result
 
 
+def _precache_ohlcv_for_closed(closed_ids: set, trades: list[dict]):
+    """v114: Pre-cache OHLCV for recently closed trades so sim.py has data ready.
+
+    Uses sim.py's cache format (ohlcv_cache/{pool}_{ts}_{window}_{hash}.json).
+    Only fetches for trades with pair_address that don't already have cached data.
+    Non-blocking: errors are silently logged and don't affect trade processing.
+    """
+    import hashlib
+    import json
+    import os
+    from pathlib import Path
+
+    cache_dir = Path(__file__).resolve().parent / "ohlcv_cache"
+    cache_dir.mkdir(exist_ok=True)
+    window = 365  # match sim.py MAX_WINDOW_MIN
+
+    closed_trades = [t for t in trades if t["id"] in closed_ids and t.get("pair_address")]
+    # Dedup by (pair_address, created_at) — multiple strategies for same token
+    seen = set()
+    to_fetch = []
+    for t in closed_trades:
+        pool = t["pair_address"]
+        created = t["created_at"]
+        key = (pool, created)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        dt = datetime.fromisoformat(created.replace("Z", "+00:00"))
+        start_ts = int(dt.timestamp())
+        h = hashlib.md5(f"{pool}_{start_ts}_{window}".encode()).hexdigest()[:12]
+        cache_file = cache_dir / f"{pool[:12]}_{start_ts}_{window}_{h}.json"
+        if cache_file.exists():
+            continue  # already cached
+        to_fetch.append({"pool": pool, "token": t["token_address"], "start_ts": start_ts,
+                         "end_ts": start_ts + window * 60, "cache_file": cache_file})
+
+    if not to_fetch:
+        return
+
+    logger.info("ohlcv_precache: fetching %d OHLCV windows for closed trades", len(to_fetch))
+    fetched = 0
+    for entry in to_fetch[:10]:  # limit to 10 per cycle to avoid rate limits
+        try:
+            # Try DexPaprika first (free, uses pool address)
+            start_iso = datetime.fromtimestamp(entry["start_ts"], tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            end_iso = datetime.fromtimestamp(entry["end_ts"], tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            r = requests.get(
+                f"https://api.dexpaprika.com/networks/solana/pools/{entry['pool']}/ohlcv",
+                params={"start": start_iso, "end": end_iso, "interval": "15m"},
+                timeout=15,
+            )
+            candles = []
+            if r.status_code == 200:
+                for c in r.json():
+                    ts_str = c.get("time_open") or c.get("time_close") or c.get("timestamp")
+                    if not ts_str:
+                        continue
+                    ts = int(datetime.fromisoformat(ts_str.replace("Z", "+00:00")).timestamp()) \
+                        if isinstance(ts_str, str) else int(ts_str)
+                    candles.append({"timestamp": ts, "open": float(c.get("open", 0)),
+                                    "high": float(c.get("high", 0)), "low": float(c.get("low", 0)),
+                                    "close": float(c.get("close", 0)),
+                                    "volume": float(c.get("volume", 0))})
+                candles.sort(key=lambda x: x["timestamp"])
+
+            if len(candles) >= 3:
+                entry["cache_file"].write_text(json.dumps(candles))
+                fetched += 1
+            else:
+                entry["cache_file"].write_text("[]")  # mark as attempted
+        except Exception as e:
+            logger.debug("ohlcv_precache: error for %s: %s", entry["pool"][:12], e)
+
+    if fetched > 0:
+        logger.info("ohlcv_precache: cached %d/%d OHLCV windows", fetched, len(to_fetch[:10]))
+
+
 def check_paper_trades(client) -> dict:
     """
     Check all open paper trades against current prices.
@@ -1219,7 +1297,11 @@ def check_paper_trades(client) -> dict:
             update["high_price_seen"] = ev["high_price_seen"]
 
         try:
-            client.table("paper_trades").update(update).eq("id", trade["id"]).execute()
+            # v114: Conditional update — only close if still open (prevents race with fast check)
+            res = client.table("paper_trades").update(update).eq("id", trade["id"]).eq("status", "open").execute()
+            if not res.data:
+                logger.debug("paper_trader: trade %s already closed by another loop, skipping", trade["id"])
+                continue
             closed_ids.add(trade["id"])
             counts["closed"] += 1
             _total_pnl_usd += pnl_usd or 0
@@ -1285,7 +1367,11 @@ def check_paper_trades(client) -> dict:
             update["high_price_seen"] = ev["high_price_seen"]
 
         try:
-            client.table("paper_trades").update(update).eq("id", trade["id"]).execute()
+            # v114: Conditional update — only close if still open (prevents race)
+            res = client.table("paper_trades").update(update).eq("id", trade["id"]).eq("status", "open").execute()
+            if not res.data:
+                logger.debug("paper_trader: cascade trade %s already closed, skipping", trade["id"])
+                continue
             closed_ids.add(trade["id"])
             counts["closed"] += 1
             _total_pnl_usd += pnl_usd or 0
@@ -1337,6 +1423,10 @@ def check_paper_trades(client) -> dict:
         )
         if _monitoring:
             _metrics.record_paper_trade_close(counts["closed"], _total_pnl_usd)
+
+        # v114: Pre-cache OHLCV for closed trades (so sim.py has data ready)
+        _precache_ohlcv_for_closed(closed_ids, sorted_trades)
+
     counts["pnl_usd"] = round(_total_pnl_usd, 2)
     counts["rt_pnl_usd"] = round(_rt_pnl_usd, 2)
     counts["rt_closed"] = _rt_closed
@@ -1472,7 +1562,11 @@ def check_paper_trades_fast(client) -> dict:
             update["high_price_seen"] = ev["high_price_seen"]
 
         try:
-            client.table("paper_trades").update(update).eq("id", trade["id"]).execute()
+            # v114: Conditional update — only close if still open (prevents race with full check)
+            res = client.table("paper_trades").update(update).eq("id", trade["id"]).eq("status", "open").execute()
+            if not res.data:
+                logger.debug("paper_fast: trade %s already closed by another loop, skipping", trade["id"])
+                continue
             closed += 1
             pnl_usd = ev.get("pnl_usd")
             usd_str = f" ${pnl_usd:+.2f}" if pnl_usd is not None else ""
