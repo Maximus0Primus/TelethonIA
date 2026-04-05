@@ -222,7 +222,10 @@ def execute_buy(ca: str, amount_sol_lamports: int, slippage_bps: int = 300) -> d
             taker=client._get_public_key(),
         )
 
+        t0 = time.time()
         response = _order_with_slippage(client, order, slippage_bps)
+        exec_ms = int((time.time() - t0) * 1000)
+
         status = response.get("status", "Unknown")
         signature = str(response.get("signature", ""))
         success = status == "Success"
@@ -233,9 +236,9 @@ def execute_buy(ca: str, amount_sol_lamports: int, slippage_bps: int = 300) -> d
 
         if success:
             logger.info(
-                "LIVE BUY: %s | %s SOL → %s tokens | slip=%dbps (sig: %s...)",
+                "LIVE BUY: %s | %s SOL → %s tokens | slip=%dbps | %dms (sig: %s...)",
                 ca[:12], amount_sol_lamports / LAMPORTS_PER_SOL,
-                output_amount or "?", slippage_bps, signature[:16],
+                output_amount or "?", slippage_bps, exec_ms, signature[:16],
             )
         else:
             logger.warning(
@@ -251,6 +254,7 @@ def execute_buy(ca: str, amount_sol_lamports: int, slippage_bps: int = 300) -> d
             "input_amount": input_amount,
             "output_amount": output_amount,
             "slippage_bps": slippage_bps,
+            "exec_ms": exec_ms,
         }
     except Exception as e:
         logger.error("LIVE BUY ERROR: %s | %s", ca[:12], e)
@@ -290,7 +294,10 @@ def execute_sell(ca: str, amount_tokens: int | None = None, slippage_bps: int = 
             taker=client._get_public_key(),
         )
 
+        t0 = time.time()
         response = _order_with_slippage(client, order, slippage_bps)
+        exec_ms = int((time.time() - t0) * 1000)
+
         status = response.get("status", "Unknown")
         signature = str(response.get("signature", ""))
         success = status == "Success"
@@ -302,8 +309,8 @@ def execute_sell(ca: str, amount_tokens: int | None = None, slippage_bps: int = 
         if success:
             sol_received = output_amount / LAMPORTS_PER_SOL if output_amount else "?"
             logger.info(
-                "LIVE SELL: %s | %d tokens → %s SOL | slip=%dbps (sig: %s...)",
-                ca[:12], amount_tokens, sol_received, slippage_bps, signature[:16],
+                "LIVE SELL: %s | %d tokens → %s SOL | slip=%dbps | %dms (sig: %s...)",
+                ca[:12], amount_tokens, sol_received, slippage_bps, exec_ms, signature[:16],
             )
             # v117: Close ATA to recover ~0.002 SOL rent
             try:
@@ -324,6 +331,7 @@ def execute_sell(ca: str, amount_tokens: int | None = None, slippage_bps: int = 
             "input_amount": input_amount,
             "output_amount": output_amount,
             "slippage_bps": slippage_bps,
+            "exec_ms": exec_ms,
         }
     except Exception as e:
         logger.error("LIVE SELL ERROR: %s | %s", ca[:12], e)
@@ -684,6 +692,10 @@ def open_live_trade(client_sb, token_entry: dict, strategy: str,
         "buy_fee_bps": slippage,  # configured tolerance
         "sol_price_at_entry": sol_price,
         "position_sol": round(position_sol, 6),
+        # v117: Extended execution tracking
+        "buy_exec_ms": result.get("exec_ms"),
+        "buy_input_lamports": result.get("input_amount"),  # SOL actually spent
+        "buy_output_tokens": result.get("output_amount"),  # tokens received (raw)
     }
 
     try:
@@ -822,6 +834,8 @@ def check_live_trades(client_sb) -> dict:
             except Exception:
                 pass
 
+        sell_sol_received = (sell_output / LAMPORTS_PER_SOL) if sell_output else None
+
         update = {
             "status": new_status,
             "exit_price": exit_price,
@@ -833,6 +847,11 @@ def check_live_trades(client_sb) -> dict:
             # v105: Fee tracking
             "sell_slippage_bps": sell_slippage_bps,
             "sol_price_at_exit": sol_price_at_exit,
+            # v117: Extended sell tracking
+            "sell_exec_ms": sell_result.get("exec_ms"),
+            "sell_output_lamports": sell_output,  # SOL received (lamports)
+            "sell_input_tokens": sell_result.get("input_amount"),  # tokens sold (raw)
+            "sell_sol_received": round(sell_sol_received, 6) if sell_sol_received else None,
         }
 
         # DB update with retry — sell already executed, must not leave trade as 'open'
