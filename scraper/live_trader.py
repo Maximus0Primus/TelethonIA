@@ -119,18 +119,34 @@ def get_wallet_balance() -> dict | None:
         sol_balance = 0.0
         token_balances = {}
 
-        # Holdings response: dict of mint -> {amount, uiAmount, ...}
         if isinstance(data, dict):
-            for mint, info in data.items():
-                if not isinstance(info, dict):
-                    continue
-                ui_amount = float(info.get("uiAmount", 0))
-                amount = int(info.get("amount", 0))
-                if mint == "SOL" or mint == WSOL_MINT:
-                    sol_balance = ui_amount
-                else:
+            # v117: Jupiter Ultra /holdings response format:
+            # {amount, uiAmount, uiAmountString, tokens: {mint: {amount, uiAmount}}}
+            # SOL balance is at root level, tokens are nested under "tokens" key
+            if "uiAmount" in data:
+                sol_balance = float(data.get("uiAmount", 0))
+            tokens_dict = data.get("tokens", {})
+            if isinstance(tokens_dict, dict):
+                for mint, info in tokens_dict.items():
+                    if not isinstance(info, dict):
+                        continue
+                    ui_amount = float(info.get("uiAmount", 0))
+                    amount = int(info.get("amount", 0))
                     if amount > 0:
                         token_balances[mint] = {"amount": amount, "ui_amount": ui_amount}
+
+            # Fallback: old format where SOL is keyed by mint
+            if sol_balance == 0:
+                for mint, info in data.items():
+                    if not isinstance(info, dict):
+                        continue
+                    if mint == "SOL" or mint == WSOL_MINT:
+                        sol_balance = float(info.get("uiAmount", 0))
+                    elif int(info.get("amount", 0)) > 0:
+                        token_balances[mint] = {
+                            "amount": int(info["amount"]),
+                            "ui_amount": float(info.get("uiAmount", 0)),
+                        }
 
         return {"sol_balance": sol_balance, "token_balances": token_balances}
     except Exception as e:
