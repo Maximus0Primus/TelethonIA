@@ -299,6 +299,11 @@ def execute_sell(ca: str, amount_tokens: int | None = None, slippage_bps: int = 
                 "LIVE SELL: %s | %d tokens → %s SOL | slip=%dbps (sig: %s...)",
                 ca[:12], amount_tokens, sol_received, slippage_bps, signature[:16],
             )
+            # v117: Close ATA to recover ~0.002 SOL rent
+            try:
+                _close_token_account(ca)
+            except Exception:
+                pass
         else:
             logger.warning(
                 "LIVE SELL FAILED: %s | status=%s code=%s error=%s",
@@ -317,6 +322,91 @@ def execute_sell(ca: str, amount_tokens: int | None = None, slippage_bps: int = 
     except Exception as e:
         logger.error("LIVE SELL ERROR: %s | %s", ca[:12], e)
         return {"success": False, "signature": "", "error": str(e)}
+
+
+def _close_token_account(ca: str) -> bool:
+    """v117: Close the ATA for a token after selling all of it. Recovers ~0.002 SOL rent."""
+    client = _get_ultra_client()
+    if not client:
+        return False
+    try:
+        import base58 as _b58
+        from solders.keypair import Keypair as _Keypair
+        from solders.pubkey import Pubkey as _Pubkey
+        from solders.transaction import Transaction as _Tx
+        from solders.message import Message as _Msg
+        from solders.instruction import Instruction as _Ix, AccountMeta as _AM
+        from solders.hash import Hash as _Hash
+
+        pk_str = os.environ.get("SOLANA_PRIVATE_KEY", "")
+        kp = _Keypair.from_bytes(_b58.b58decode(pk_str))
+        owner = kp.pubkey()
+        token_mint = _Pubkey.from_string(ca)
+
+        # Derive ATA address
+        TOKEN_PROGRAM = _Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
+        ATA_PROGRAM = _Pubkey.from_string("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
+        ata, _bump = _Pubkey.find_program_address(
+            [bytes(owner), bytes(TOKEN_PROGRAM), bytes(token_mint)],
+            ATA_PROGRAM,
+        )
+
+        # Check if ATA has 0 balance before closing
+        balances = get_wallet_balance()
+        if balances and ca in balances.get("token_balances", {}):
+            remaining = balances["token_balances"][ca].get("amount", 0)
+            if remaining > 0:
+                logger.debug("close_ata: %s still has %d tokens, skipping", ca[:12], remaining)
+                return False
+
+        # Build CloseAccount instruction (SPL Token instruction index 9)
+        close_ix = _Ix(
+            program_id=TOKEN_PROGRAM,
+            accounts=[
+                _AM(ata, is_signer=False, is_writable=True),      # account to close
+                _AM(owner, is_signer=False, is_writable=True),    # destination for rent
+                _AM(owner, is_signer=True, is_writable=False),    # owner/authority
+            ],
+            data=bytes([9]),  # CloseAccount instruction
+        )
+
+        # Get recent blockhash
+        rpc_resp = requests.post(
+            "https://api.mainnet-beta.solana.com",
+            json={"jsonrpc": "2.0", "id": 1, "method": "getLatestBlockhash"},
+            timeout=10,
+        )
+        blockhash_str = rpc_resp.json()["result"]["value"]["blockhash"]
+        blockhash = _Hash.from_string(blockhash_str)
+
+        # Build, sign, send
+        msg = _Msg.new_with_blockhash([close_ix], owner, blockhash)
+        tx = _Tx.new_unsigned(msg)
+        tx.sign([kp], blockhash)
+        tx_bytes = bytes(tx)
+
+        import base64
+        tx_b64 = base64.b64encode(tx_bytes).decode()
+        send_resp = requests.post(
+            "https://api.mainnet-beta.solana.com",
+            json={
+                "jsonrpc": "2.0", "id": 1,
+                "method": "sendTransaction",
+                "params": [tx_b64, {"encoding": "base64", "skipPreflight": True}],
+            },
+            timeout=15,
+        )
+        result = send_resp.json()
+        if "result" in result:
+            logger.info("close_ata: closed %s ATA, recovered rent (tx: %s...)",
+                        ca[:12], result["result"][:16])
+            return True
+        else:
+            logger.warning("close_ata: failed for %s: %s", ca[:12], result.get("error", {}).get("message", ""))
+            return False
+    except Exception as e:
+        logger.debug("close_ata: error for %s: %s", ca[:12], e)
+        return False
 
 
 def _get_sol_price_usd() -> float:
