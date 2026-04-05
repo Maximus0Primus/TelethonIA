@@ -157,27 +157,41 @@ def get_wallet_balance() -> dict | None:
 def _order_with_slippage(client, order_request, slippage_bps: int):
     """
     v105: Call Jupiter Ultra /order with slippageBps param.
-    The SDK's UltraOrderRequest doesn't include slippageBps, so we inject it
-    into the query params manually. Then sign + execute as usual.
+    v117: Sign with solders directly (SDK signing produces invalid signatures).
     """
-    from jup_python_sdk.models.ultra_api.ultra_execute_request_model import UltraExecuteRequest
+    import base64
+    import base58 as _b58
+    from solders.keypair import Keypair as _Keypair
+    from solders.transaction import VersionedTransaction as _VTx
 
     params = order_request.to_dict()
     params["slippageBps"] = slippage_bps
 
+    headers = client._get_headers()
     url = f"{client.base_url}/ultra/v1/order"
-    response = client.client.get(url, params=params, headers=client._get_headers())
+    response = client.client.get(url, params=params, headers=headers)
     response.raise_for_status()
     order_response = response.json()
 
     request_id = order_response["requestId"]
-    signed_transaction = client._sign_base64_transaction(order_response["transaction"])
+    tx_base64 = order_response["transaction"]
 
-    execute_request = UltraExecuteRequest(
-        request_id=request_id,
-        signed_transaction=client._serialize_versioned_transaction(signed_transaction),
+    # Sign with solders (bypasses buggy SDK signing)
+    pk_str = os.environ.get("SOLANA_PRIVATE_KEY", "")
+    kp = _Keypair.from_bytes(_b58.b58decode(pk_str))
+    tx = _VTx.from_bytes(base64.b64decode(tx_base64))
+    signed_tx = _VTx(tx.message, [kp])
+    signed_b64 = base64.b64encode(bytes(signed_tx)).decode()
+
+    # Execute via raw POST (SDK execute also broken)
+    exec_resp = client.client.post(
+        f"{client.base_url}/ultra/v1/execute",
+        json={"signedTransaction": signed_b64, "requestId": request_id},
+        headers={**headers, "Content-Type": "application/json"},
+        timeout=30,
     )
-    return client.execute(execute_request)
+    exec_resp.raise_for_status()
+    return exec_resp.json()
 
 
 def execute_buy(ca: str, amount_sol_lamports: int, slippage_bps: int = 300) -> dict:
