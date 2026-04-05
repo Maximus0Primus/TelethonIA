@@ -26,6 +26,13 @@ import requests
 
 logger = logging.getLogger(__name__)
 
+# v116: Reuse strategy name shortener from alerter
+try:
+    from alerter import short_strat as _short_strat
+except ImportError:
+    def _short_strat(name: str) -> str:
+        return name.replace("_ACT", "A").replace("_SL", "S")
+
 _BOT_TOKEN = os.environ.get("MONITOR_BOT_TOKEN")
 _CHAT_ID = os.environ.get("MONITOR_CHAT_ID")
 _API_BASE = "https://api.telegram.org/bot{token}"
@@ -217,7 +224,7 @@ def _handle_bank(sb, args: str) -> str:
         bal = float(sdata.get("balance", 500))
         pnl = float(sdata.get("pnl", 0))
         trades = int(sdata.get("trades", 0))
-        short = sname.replace("_ACT", "A").replace("_SL", "S").replace("_B5_T5_A15_S70_240m", "")
+        short = _short_strat(sname)
         emoji = "📈" if pnl >= 0 else "📉"
         parts.append(f"  {emoji} <b>{short}</b>: ${bal:.0f} ({pnl:+.0f}) | {trades}t")
         total_bal += bal
@@ -263,7 +270,7 @@ def _handle_pos(sb, args: str) -> str:
         total = sum(float(t.get("position_usd") or 0) for t in trades)
         lines = [f"📦 <b>{len(trades)} POSITIONS OUVERTES</b> (${total:.0f})\n"]
         for sname, strades in sorted(by_strat.items()):
-            short = sname.replace("_ACT", "A").replace("_SL", "S").replace("_B5_T5_A15_S70_240m", "")
+            short = _short_strat(sname)
             stot = sum(float(t.get("position_usd") or 0) for t in strades)
             lines.append(f"\n<b>{short}</b> (${stot:.0f}):")
             for t in strades:
@@ -511,7 +518,7 @@ def _handle_today(sb, args: str) -> str:
     for sname, sdata in sorted(strat_bals.items()):
         bal = float(sdata.get("balance", 500))
         pnl = float(sdata.get("pnl", 0))
-        short = sname.replace("_ACT", "A").replace("_SL", "S").replace("_B5_T5_A15_S70_240m", "")
+        short = _short_strat(sname)
         e = "📈" if pnl >= 0 else "📉"
         strat_parts.append(f"  {e} {short}: <b>${bal:.0f}</b> ({pnl:+.0f})")
         total_bal += bal
@@ -596,14 +603,14 @@ def _handle_config(sb, args: str) -> str:
         s_bal = float((strat_bals.get(sname) or {}).get("balance", 500))
         s_raw = s_bal * kelly
         s_pos = min(s_raw, max_pos)
-        short = sname.replace("_ACT", "A").replace("_SL", "S").replace("_B5_T5_A15_S70_240m", "")
+        short = _short_strat(sname)
         cap_tag = " ⚠️cap" if s_raw > max_pos else ""
         sizing_lines.append(f"  {short}: <b>${s_pos:.0f}</b> (${s_bal:.0f} × {kelly:.1%}){cap_tag}")
 
     return (
         f"⚙️ <b>CONFIG</b>\n\n"
         f"<b>Stratégies ({len(active)}):</b>\n"
-        f"  {', '.join(s.replace('_ACT', 'A').replace('_SL', 'S').replace('_B5_T5_A15_S70_240m', '') for s in active)}\n"
+        f"  {', '.join(_short_strat(s) for s in active)}\n"
         f"  Hybrid: {'ON' if hybrid_on else 'OFF'} ({alloc_str})\n"
         f"\n<b>Sizing (Kelly {kelly:.1%}, cap ${max_pos:.0f}):</b>\n"
         + "\n".join(sizing_lines) + "\n"

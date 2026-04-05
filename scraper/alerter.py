@@ -14,6 +14,21 @@ import requests
 
 logger = logging.getLogger(__name__)
 
+
+def short_strat(name: str) -> str:
+    """v116: Shorten strategy names for Telegram display."""
+    import re
+    # Split DIP: DIP30_B5_P1T5A10S70_P2T10A15S60_240m → DIP30_B5_P1T5A10S70_P2T10A15S60
+    m = re.match(r"^(DIP\d+_B\d+_P1T\d+A\d+S\d+_P2T\d+A\d+S\d+)_\d+m$", name)
+    if m:
+        return m.group(1)
+    # Shared DIP: DIP30_B5_T5_A15_SL70_240m → DIP30_B5_T5A15S70
+    name = re.sub(r"_B(\d+)_T(\d+)_A(\d+)_SL(\d+)_\d+m$", r"_B\1_T\2A\3S\4", name)
+    # DTRAIL/standard: _ACT → A, _SL → S
+    name = name.replace("_ACT", "A").replace("_SL", "S")
+    return name
+
+
 TELEGRAM_API_URL = "https://api.telegram.org/bot{token}/sendMessage"
 
 _BOT_TOKEN = os.environ.get("MONITOR_BOT_TOKEN")
@@ -198,7 +213,7 @@ def send_daily_summary(snapshot: dict):
         bal = float(sdata.get("balance", 500))
         pnl = float(sdata.get("pnl", 0))
         trades_n = int(sdata.get("trades", 0))
-        short = sname.replace("_ACT", "A").replace("_SL", "S").replace("_B5_T5_A15_S70_240m", "")
+        short = short_strat(sname)
         e = "📈" if pnl >= 0 else "📉"
         strat_lines.append(f"  {e} {short}: <b>${bal:.0f}</b> ({pnl:+.0f}) | {trades_n}t")
         total_bal += bal
@@ -395,7 +410,7 @@ def alert_kol_trade(symbol: str, kol: str, price: float, pos_usd: float,
         for sname, sdata in sorted(strategy_positions.items()):
             pos = float(sdata.get("pos", 0))
             bal = float(sdata.get("balance", 500))
-            short = sname.replace("_ACT", "A").replace("_SL", "S").replace("_B5_T5_A15_S70_240m", "")
+            short = short_strat(sname)
             parts.append(f"  {short}: <b>${pos:.0f}</b> (bank ${bal:.0f})")
         strat_text = "\n📊 Positions:\n" + "\n".join(parts)
     elif bankroll > 0:
@@ -462,7 +477,7 @@ def alert_trade_closed(symbol: str, strategy: str, exit_reason: str,
         for sname, sdata in sorted(strategy_bankrolls.items()):
             bal = float(sdata.get("balance", 500))
             pnl = float(sdata.get("pnl", 0))
-            short = sname.replace("_ACT", "A").replace("_SL", "S").replace("_B5_T5_A15_S70_240m", "")
+            short = short_strat(sname)
             marker = " ◀" if sname == strategy else ""
             parts.append(f"  {short}: <b>${bal:.0f}</b> ({pnl:+.0f}){marker}")
         strat_text = "\n📊 Bankrolls:\n" + "\n".join(parts)
@@ -482,7 +497,7 @@ def alert_trade_closed(symbol: str, strategy: str, exit_reason: str,
 
     _send(
         f"{emoji} <b>TRADE {reason_text}</b>\n\n"
-        f"<b>{symbol}</b> | {strategy}\n"
+        f"<b>{symbol}</b> | {short_strat(strategy)}\n"
         f"👤 KOL: {kol}\n"
         f"📈 PnL: <b>{pnl_pct*100:+.1f}%</b> (${pnl_usd:+.2f})\n"
         f"💵 Position: ${pos_usd:.0f} | ⏱ {minutes}min\n"

@@ -91,13 +91,14 @@ MAX_WINDOW_MIN = 365
 # ---------------------------------------------------------------------------
 
 def build_strategy_grid(strategy_filter: str | None = None) -> list[dict]:
-    """Generate all strategy configurations."""
+    """Generate all strategy configurations.
+    v116: Expanded grid — more param ranges for exhaustive search."""
     configs = []
 
-    # 1. FIXED: TP{40..100} x SL{30..70} x timeout
-    for tp in [40, 50, 60, 70, 80, 90, 100]:
-        for sl in [30, 40, 50, 60, 70]:
-            for timeout in [30, 45, 60, 120, 240, 360]:
+    # 1. FIXED: TP x SL x timeout (expanded)
+    for tp in [30, 40, 50, 60, 70, 80, 90, 100, 120, 150]:
+        for sl in [20, 30, 40, 50, 60, 70, 80]:
+            for timeout in [30, 45, 60, 90, 120, 180, 240, 360, 480]:
                 configs.append({
                     "name": f"TP{tp}_SL{sl}_{timeout}m",
                     "type": "FIXED",
@@ -106,11 +107,11 @@ def build_strategy_grid(strategy_filter: str | None = None) -> list[dict]:
                     "horizon_min": timeout,
                 })
 
-    # 2. DTRAIL: trail{5,10} x act{10..30} x SL{50..70} x timeout
-    for trail in [5, 10]:
-        for act in [10, 15, 20, 25, 30]:
-            for sl in [50, 60, 70]:
-                for timeout in [120, 240, 360]:
+    # 2. DTRAIL: trail x act x SL x timeout (expanded)
+    for trail in [3, 5, 8, 10, 15]:
+        for act in [5, 10, 15, 20, 25, 30, 35, 40]:
+            for sl in [40, 50, 60, 70, 80]:
+                for timeout in [60, 120, 240, 360, 480]:
                     configs.append({
                         "name": f"DTRAIL{trail}_ACT{act}_SL{sl}_{timeout}m",
                         "type": "DTRAIL",
@@ -120,11 +121,11 @@ def build_strategy_grid(strategy_filter: str | None = None) -> list[dict]:
                         "horizon_min": timeout,
                     })
 
-    # 3. TRAIL: trail x TP x SL x timeout
-    for trail in [10, 15]:
-        for tp in [50, 100]:
-            for sl in [50, 60, 70]:
-                for timeout in [120, 240, 360]:
+    # 3. TRAIL: trail x TP x SL x timeout (expanded)
+    for trail in [5, 10, 15, 20, 25]:
+        for tp in [30, 50, 70, 100, 150]:
+            for sl in [40, 50, 60, 70]:
+                for timeout in [60, 120, 240, 360]:
                     configs.append({
                         "name": f"TRAIL{trail}_TP{tp}_SL{sl}_{timeout}m",
                         "type": "TRAIL",
@@ -135,11 +136,11 @@ def build_strategy_grid(strategy_filter: str | None = None) -> list[dict]:
                         "horizon_min": timeout,
                     })
 
-    # 4. BE: activation x TP x SL x timeout
-    for be_act in [15, 20, 30]:
-        for tp in [50, 100]:
-            for sl in [50, 60, 70]:
-                for timeout in [60, 120, 240]:
+    # 4. BE: activation x TP x SL x timeout (expanded)
+    for be_act in [10, 15, 20, 25, 30]:
+        for tp in [30, 50, 70, 100, 150]:
+            for sl in [40, 50, 60, 70]:
+                for timeout in [60, 120, 240, 360]:
                     configs.append({
                         "name": f"BE{be_act}_TP{tp}_SL{sl}_{timeout}m",
                         "type": "BE",
@@ -149,10 +150,10 @@ def build_strategy_grid(strategy_filter: str | None = None) -> list[dict]:
                         "horizon_min": timeout,
                     })
 
-    # 5. SCALP: TP{10..20} x SL{10..20} x timeout{30,60}
-    for tp in [10, 15, 20]:
-        for sl in [10, 15, 20]:
-            for timeout in [30, 60]:
+    # 5. SCALP: TP x SL x timeout (expanded)
+    for tp in [5, 10, 15, 20, 25, 30]:
+        for sl in [5, 10, 15, 20, 25]:
+            for timeout in [15, 30, 45, 60]:
                 configs.append({
                     "name": f"SCALP_TP{tp}_SL{sl}_{timeout}m",
                     "type": "SCALP",
@@ -161,33 +162,40 @@ def build_strategy_grid(strategy_filter: str | None = None) -> list[dict]:
                     "horizon_min": timeout,
                 })
 
-    # 6. DECAY: tp_start/end x SL x timeout
-    for tp_s, tp_e, label_tp in [(2.0, 1.20, "TP100_E20"), (2.0, 1.15, "TP100_E15"),
-                                  (2.0, 1.30, "TP100_E30"), (1.70, 1.15, "TP70_E15")]:
-        for sl in [50, 60, 70]:
-            for timeout in [120, 240, 360]:
+    # 6. DECAY: tp_start/end x SL x timeout (expanded)
+    for tp_s, tp_e, label_tp in [
+        (2.0, 1.20, "TP100_E20"), (2.0, 1.15, "TP100_E15"),
+        (2.0, 1.30, "TP100_E30"), (1.70, 1.15, "TP70_E15"),
+        (2.0, 1.10, "TP100_E10"), (1.50, 1.10, "TP50_E10"),
+        (1.50, 1.20, "TP50_E20"), (2.50, 1.20, "TP150_E20"),
+        (2.50, 1.30, "TP150_E30"), (3.0, 1.30, "TP200_E30"),
+    ]:
+        for sl in [40, 50, 60, 70]:
+            for timeout in [60, 120, 240, 360]:
                 configs.append({
                     "name": f"DECAY_{label_tp}_SL{sl}_{timeout}m", "type": "DECAY",
                     "tp_start": tp_s, "tp_end": tp_e, "sl_mult": 1 - sl / 100,
                     "horizon_min": timeout,
                 })
 
-    # 7. SPLIT: variants x SL x timeout
+    # 7. SPLIT: variants x SL x timeout (expanded)
     for label, t1, t2, t2t in [
         ("SPLIT_50_100", 1.50, 2.0, None),
         ("SPLIT_50_TRAIL", 1.50, None, 0.20),
+        ("SPLIT_30_100", 1.30, 2.0, None),
+        ("SPLIT_50_150", 1.50, 2.50, None),
+        ("SPLIT_30_TRAIL", 1.30, None, 0.15),
     ]:
-        for sl in [50, 60, 70]:
-            for timeout in [120, 240, 360]:
+        for sl in [40, 50, 60, 70]:
+            for timeout in [60, 120, 240, 360]:
                 configs.append({
                     "name": f"{label}_SL{sl}_{timeout}m", "type": "SPLIT",
                     "t1_tp": t1, "t2_tp": t2, "sl_mult": 1 - sl / 100, "t2_trail": t2t,
                     "horizon_min": timeout,
                 })
 
-    # 8. DYNAMIC_TRAIL strategies
-    configs.extend(_build_dynamic_trail_grid(
-        full=strategy_filter and "dynamic_full" in strategy_filter))
+    # 8. DYNAMIC_TRAIL strategies (always full mode now)
+    configs.extend(_build_dynamic_trail_grid(full=True))
 
     # 9. CONTEXTUAL: trail adapts to mcap segment
     configs.extend(_build_contextual_grid())
@@ -213,24 +221,16 @@ def build_strategy_grid(strategy_filter: str | None = None) -> list[dict]:
 
 
 def _build_dynamic_trail_grid(full: bool = False) -> list[dict]:
-    """Build dynamic trail strategy configs."""
+    """Build dynamic trail strategy configs. (expanded v116 — always full)"""
     configs = []
 
-    # --- TIME DECAY ---
-    if full:
-        td_combos = [(s, e) for s in [5, 8, 10, 12, 15, 20]
-                      for e in [3, 4, 5, 8, 10, 15] if s != e]
-        td_timeouts = [120, 240, 360]
-        td_acts = [15, 20, 25]
-        td_sls = [50, 60, 70]
-    else:
-        td_combos = [
-            (15, 3), (12, 4), (20, 5), (10, 3),  # wide -> tight
-            (3, 15), (4, 12),                       # tight -> wide (NEW)
-        ]
-        td_timeouts = [240, 360]
-        td_acts = [15, 20]
-        td_sls = [60, 70]
+    # --- TIME DECAY (expanded) ---
+    # Pruned: only combos where start and end differ by ≥3 (skip near-identical pairs)
+    td_combos = [(s, e) for s in [3, 5, 8, 10, 12, 15, 20, 25]
+                  for e in [3, 5, 8, 10, 15, 20] if s != e and abs(s - e) >= 3]
+    td_timeouts = [60, 120, 240, 360, 480]
+    td_acts = [10, 15, 20, 25, 30]
+    td_sls = [40, 50, 60, 70]
 
     for start, end in td_combos:
         direction = "W2T" if start > end else "T2W"
@@ -245,45 +245,48 @@ def _build_dynamic_trail_grid(full: bool = False) -> list[dict]:
                         "horizon_min": timeout,
                     })
 
-    # --- GAIN ADAPTIVE ---
+    # --- GAIN ADAPTIVE (expanded) ---
     profiles = [
         ("STD", [30, 100, 300], [0.05, 0.10, 0.15, 0.20]),
         ("AGG", [20, 50, 150], [0.05, 0.08, 0.12, 0.18]),
         ("PAT", [50, 150, 400], [0.05, 0.10, 0.15, 0.25]),
+        ("TIGHT", [15, 40, 100], [0.03, 0.05, 0.08, 0.12]),
+        ("WIDE", [50, 200, 500], [0.08, 0.15, 0.20, 0.30]),
     ]
-    ga_timeouts = [240, 360] if not full else [120, 240, 360]
-    ga_sls = [60, 70] if not full else [50, 60, 70]
-
     for label, thresholds, trails in profiles:
-        for timeout in ga_timeouts:
-            for sl in ga_sls:
+        for timeout in [120, 240, 360, 480]:
+            for act in [10, 15, 20, 25]:
+                for sl in [50, 60, 70]:
+                    configs.append({
+                        "name": f"GADAPT_{label}_ACT{act}_SL{sl}_{timeout}m",
+                        "type": "DYNAMIC_TRAIL", "mode": "gain_adaptive",
+                        "gain_thresholds": thresholds, "gain_trails": trails,
+                        "activation_pct": act / 100, "sl_mult": 1 - sl / 100,
+                        "horizon_min": timeout,
+                    })
+
+    # --- GAIN-TIME HYBRID (expanded) ---
+    for timeout in [60, 120, 240, 360]:
+        for act in [10, 15, 20, 25]:
+            for sl in [50, 60, 70]:
                 configs.append({
-                    "name": f"GADAPT_{label}_SL{sl}_{timeout}m",
-                    "type": "DYNAMIC_TRAIL", "mode": "gain_adaptive",
-                    "gain_thresholds": thresholds, "gain_trails": trails,
-                    "activation_pct": 0.20, "sl_mult": 1 - sl / 100,
+                    "name": f"GTHYBRID_ACT{act}_SL{sl}_{timeout}m",
+                    "type": "DYNAMIC_TRAIL", "mode": "gain_time_hybrid",
+                    "activation_pct": act / 100, "sl_mult": 1 - sl / 100,
                     "horizon_min": timeout,
                 })
 
-    # --- GAIN-TIME HYBRID ---
-    for timeout in [120, 240, 360]:
-        for sl in [50, 60, 70]:
-            configs.append({
-                "name": f"GTHYBRID_SL{sl}_{timeout}m",
-                "type": "DYNAMIC_TRAIL", "mode": "gain_time_hybrid",
-                "activation_pct": 0.20, "sl_mult": 1 - sl / 100,
-                "horizon_min": timeout,
-            })
-
-    # --- RATCHET TRAIL ---
+    # --- RATCHET TRAIL (expanded) ---
     milestone_sets = [
         ("STD", [(30, 10, 5), (50, 25, 7), (100, 50, 10), (200, 120, 15), (400, 250, 20)]),
         ("AGG", [(20, 5, 5), (40, 15, 8), (80, 35, 12), (150, 80, 15)]),
+        ("PAT", [(50, 20, 5), (100, 50, 8), (200, 100, 12), (500, 300, 18)]),
+        ("TIGHT", [(15, 5, 3), (30, 10, 5), (60, 25, 8), (100, 50, 10)]),
     ]
     for ms_label, milestones in milestone_sets:
-        for timeout in [240, 360]:
-            for act in [15, 20]:
-                for sl in [60, 70]:
+        for timeout in [120, 240, 360, 480]:
+            for act in [10, 15, 20, 25]:
+                for sl in [50, 60, 70]:
                     configs.append({
                         "name": f"RATCHET_{ms_label}_ACT{act}_SL{sl}_{timeout}m",
                         "type": "DYNAMIC_TRAIL", "mode": "ratchet_trail",
@@ -292,48 +295,57 @@ def _build_dynamic_trail_grid(full: bool = False) -> list[dict]:
                         "horizon_min": timeout,
                     })
 
-    # --- TIME-GAIN RATCHET ---
-    for timeout in [240, 360]:
-        for act in [15, 20]:
-            for sl in [60, 70]:
-                configs.append({
-                    "name": f"TGRATCHET_ACT{act}_SL{sl}_{timeout}m",
-                    "type": "DYNAMIC_TRAIL", "mode": "time_gain_ratchet",
-                    "milestones": [(30, 10, 8), (50, 25, 10), (100, 50, 12), (200, 120, 15)],
-                    "trail_base": 5,
-                    "activation_pct": act / 100, "sl_mult": 1 - sl / 100,
-                    "horizon_min": timeout,
-                })
+    # --- TIME-GAIN RATCHET (expanded) ---
+    tg_milestone_sets = [
+        ("STD", [(30, 10, 8), (50, 25, 10), (100, 50, 12), (200, 120, 15)]),
+        ("AGG", [(20, 5, 5), (40, 15, 8), (80, 30, 10), (150, 70, 12)]),
+        ("PAT", [(50, 20, 8), (100, 50, 10), (200, 100, 15), (400, 200, 20)]),
+    ]
+    for tg_label, milestones in tg_milestone_sets:
+        for timeout in [120, 240, 360, 480]:
+            for act in [10, 15, 20, 25]:
+                for sl in [50, 60, 70]:
+                    configs.append({
+                        "name": f"TGRATCHET_{tg_label}_ACT{act}_SL{sl}_{timeout}m",
+                        "type": "DYNAMIC_TRAIL", "mode": "time_gain_ratchet",
+                        "milestones": milestones, "trail_base": 5,
+                        "activation_pct": act / 100, "sl_mult": 1 - sl / 100,
+                        "horizon_min": timeout,
+                    })
 
     return configs
 
 
 def _build_contextual_grid() -> list[dict]:
-    """Build CONTEXTUAL strategies — trail/timeout vary by mcap segment."""
+    """Build CONTEXTUAL strategies — trail/timeout vary by mcap segment. (expanded v116)"""
     configs = []
-    # Each set: (label, breakpoints, trails_per_seg, timeouts_per_seg, acts_per_seg)
     segmentation_sets = [
         # 2 segments: micro vs rest
         ("2SEG_100K", [100000],
-         [[15, 5], [12, 5], [20, 8]],
-         [[360, 120], [360, 240]],
-         [[25, 15], [20, 15]]),
+         [[15, 5], [12, 5], [20, 8], [10, 3], [8, 5]],
+         [[360, 120], [360, 240], [480, 120], [240, 120]],
+         [[25, 15], [20, 15], [30, 15], [20, 10]]),
         # 3 segments: micro / small / mid+
         ("3SEG", [100000, 1000000],
-         [[15, 10, 5], [20, 10, 5], [12, 8, 5]],
-         [[360, 240, 120], [360, 360, 240]],
-         [[25, 20, 15], [30, 20, 15]]),
+         [[15, 10, 5], [20, 10, 5], [12, 8, 5], [20, 12, 3], [10, 5, 3]],
+         [[360, 240, 120], [360, 360, 240], [480, 240, 120]],
+         [[25, 20, 15], [30, 20, 15], [20, 15, 10]]),
         # 2 segments: small vs big
         ("2SEG_500K", [500000],
-         [[12, 5], [15, 5], [10, 5]],
-         [[360, 120], [360, 240]],
-         [[20, 15], [25, 15]]),
+         [[12, 5], [15, 5], [10, 5], [20, 5], [8, 3]],
+         [[360, 120], [360, 240], [480, 120], [240, 60]],
+         [[20, 15], [25, 15], [30, 15], [15, 10]]),
+        # 2 segments: tiny (< 50K mcap) vs rest
+        ("2SEG_50K", [50000],
+         [[20, 8], [15, 5], [25, 10]],
+         [[480, 240], [360, 120]],
+         [[30, 15], [25, 20]]),
     ]
     for seg_label, bps, trail_combos, to_combos, act_combos in segmentation_sets:
         for ti, trails in enumerate(trail_combos):
             for toi, timeouts in enumerate(to_combos):
                 for ai, acts in enumerate(act_combos):
-                    for sl in [60, 70]:
+                    for sl in [50, 60, 70]:
                         name = f"CTX_{seg_label}_t{ti}_to{toi}_a{ai}_SL{sl}"
                         configs.append({
                             "name": name, "type": "CONTEXTUAL",
@@ -342,13 +354,13 @@ def _build_contextual_grid() -> list[dict]:
                             "timeout_per_segment": timeouts,
                             "act_per_segment": acts,
                             "sl_mult": 1 - sl / 100,
-                            "horizon_min": max(timeouts),  # for grid stats
+                            "horizon_min": max(timeouts),
                         })
     return configs
 
 
 def _build_scale_out_grid() -> list[dict]:
-    """Build SCALE_OUT strategies — progressive exit in tranches."""
+    """Build SCALE_OUT strategies — progressive exit in tranches. (expanded v116)"""
     configs = []
     tranche_configs = [
         ("SO_30_60_100", [(30, 0.25), (60, 0.25), (100, 0.25)]),  # 25% runner
@@ -356,12 +368,14 @@ def _build_scale_out_grid() -> list[dict]:
         ("SO_30_60", [(30, 0.33), (60, 0.33)]),  # 33% runner
         ("SO_50_100", [(50, 0.33), (100, 0.33)]),  # 33% runner, patient
         ("SO_20_40_80", [(20, 0.25), (40, 0.25), (80, 0.25)]),  # aggressive
+        ("SO_50_150", [(50, 0.33), (150, 0.33)]),  # very patient
+        ("SO_20_50", [(20, 0.33), (50, 0.33)]),  # quick scalp out
     ]
     for label, tranches in tranche_configs:
-        for runner_trail in [10, 15, 20]:
-            for runner_act in [30, 50]:
-                for sl in [60, 70]:
-                    for timeout in [240, 360]:
+        for runner_trail in [5, 10, 15, 20, 25]:
+            for runner_act in [20, 30, 40, 50, 70]:
+                for sl in [50, 60, 70]:
+                    for timeout in [120, 240, 360]:
                         configs.append({
                             "name": f"{label}_RT{runner_trail}_RA{runner_act}_SL{sl}_{timeout}m",
                             "type": "SCALE_OUT",
@@ -375,9 +389,15 @@ def _build_scale_out_grid() -> list[dict]:
 
 
 def _build_dip_buy_grid() -> list[dict]:
-    """Build DIP_BUY strategies — re-enter after dump + bounce."""
+    """Build DIP_BUY strategies — re-enter after dump + bounce.
+
+    v116: Two tiers of DIP_BUY configs:
+    1. Shared-param (original): P1 and P2 use same trail/act/sl — full dip/bounce/timeout grid.
+    2. Split-param (new): P1 and P2 have independent trail/act/sl — focused on best dip/bounce.
+    """
     configs = []
-    # Full DIP grid: ALL params variable
+
+    # ---- Tier 1: Shared-param DIP_BUY (original grid) ----
     for dip in [20, 30, 40]:
         for bounce in [0, 5, 10]:
             for trail in [5, 10]:
@@ -396,7 +416,50 @@ def _build_dip_buy_grid() -> list[dict]:
                                 "horizon_min": timeout,
                             })
 
-    # DIP + SCALE_OUT: ALL params variable
+    # ---- Tier 2: Split-param DIP_BUY (P1 ≠ P2) ----
+    # Rationale: P1 enters at KOL call (top of pump) → needs tighter SL, wider trail
+    #            P2 enters after dip+bounce (proven floor) → can use wider SL, tighter trail
+    # Full dip/bounce/timeout grid × independent P1/P2 trail/act/sl
+    _P1_TRAILS = [5, 10, 15]      # P1 wider trail: let pump run
+    _P1_ACTS   = [10, 15, 20]     # P1 activation thresholds
+    _P1_SLS    = [50, 60, 70]     # P1 SL: tighter to cut rugs fast
+    _P2_TRAILS = [5, 10]          # P2 tighter trail: lock in bounce profit
+    _P2_ACTS   = [10, 15]         # P2 lower activation: bounce already confirmed
+    _P2_SLS    = [60, 70]         # P2 wider SL: dip already cleaned weak hands
+
+    for dip in [20, 30, 40]:
+        for bounce in [0, 5, 10]:
+            for timeout in [240, 360]:
+                b_label = f"B{bounce}" if bounce > 0 else "DIR"
+                for p1_trail in _P1_TRAILS:
+                    for p1_act in _P1_ACTS:
+                        for p1_sl in _P1_SLS:
+                            for p2_trail in _P2_TRAILS:
+                                for p2_act in _P2_ACTS:
+                                    for p2_sl in _P2_SLS:
+                                        # Skip if P1 == P2 (already covered by tier 1)
+                                        if (p1_trail, p1_act, p1_sl) == (p2_trail, p2_act, p2_sl):
+                                            continue
+                                        configs.append({
+                                            "name": (f"DIP{dip}_{b_label}"
+                                                     f"_P1T{p1_trail}A{p1_act}S{p1_sl}"
+                                                     f"_P2T{p2_trail}A{p2_act}S{p2_sl}"
+                                                     f"_{timeout}m"),
+                                            "type": "DIP_BUY",
+                                            "dip_threshold": -dip,
+                                            "bounce_threshold": bounce,
+                                            "dip_size_mult": 1.0,
+                                            # Shared fallbacks (used by engine if p1_*/p2_* missing)
+                                            "trail": p1_trail, "act": p1_act, "sl": p1_sl,
+                                            "sl_mult": 1 - p1_sl / 100,
+                                            "horizon_min": timeout,
+                                            # P1-specific
+                                            "p1_trail": p1_trail, "p1_act": p1_act, "p1_sl": p1_sl,
+                                            # P2-specific
+                                            "p2_trail": p2_trail, "p2_act": p2_act, "p2_sl": p2_sl,
+                                        })
+
+    # ---- DIP + SCALE_OUT (unchanged) ----
     for dip in [20, 30]:
         for bounce in [0, 5]:
             for tranche_label, tranches in [
@@ -422,7 +485,6 @@ def _build_dip_buy_grid() -> list[dict]:
                                 "horizon_min": 360,
                             })
 
-    # SCALE_OUT: also vary runner_act
     return configs
 
 

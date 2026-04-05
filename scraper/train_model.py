@@ -505,19 +505,45 @@ def load_labeled_data(horizon: str = "12h", entry_mode: str = "snapshot") -> pd.
     _all_wanted = list(dict.fromkeys(_meta_cols + ALL_FEATURE_COLS))
     _select_cols = ",".join(c for c in _all_wanted if c not in _NOT_IN_DB)
 
-    while True:
-        result = (
-            client.table("token_snapshots")
-            .select(_select_cols)
-            .not_.is_(max_price_col, "null")
-            .not_.is_("price_at_snapshot", "null")
-            .gte("snapshot_at", "2026-03-03T00:00:00Z")  # v105: skip pre-v95 data (known bugs)
-            .order("snapshot_at")
-            .range(offset, offset + page_size - 1)
-            .execute()
-        )
+    max_offset = 80_000  # safety cap — Supabase/Cloudflare 502s at very high offsets
+    max_retries = 3
 
-        if not result.data:
+    while offset < max_offset:
+        # v116: retry on transient 502/503 from Supabase/Cloudflare
+        result = None
+        for attempt in range(max_retries):
+            try:
+                result = (
+                    client.table("token_snapshots")
+                    .select(_select_cols)
+                    .not_.is_(max_price_col, "null")
+                    .not_.is_("price_at_snapshot", "null")
+                    .gte("snapshot_at", "2026-03-03T00:00:00Z")  # v105: skip pre-v95 data (known bugs)
+                    .order("snapshot_at")
+                    .range(offset, offset + page_size - 1)
+                    .execute()
+                )
+                break  # success
+            except Exception as e:
+                err_str = str(e)
+                is_transient = ("502" in err_str or "503" in err_str or "Bad Gateway" in err_str
+                                or "57014" in err_str or "statement timeout" in err_str)
+                if attempt < max_retries - 1 and is_transient:
+                    import time
+                    wait = 2 ** (attempt + 1)
+                    logger.warning("load_labeled_data: %s at offset %d, retry %d/%d in %ds",
+                                   str(e)[:80], offset, attempt + 1, max_retries, wait)
+                    time.sleep(wait)
+                else:
+                    logger.error("load_labeled_data: error at offset %d after %d attempts: %s",
+                                 offset, attempt + 1, str(e)[:120])
+                    result = None
+                    break
+
+        if result is None or not result.data:
+            if result is None and all_data:
+                logger.warning("load_labeled_data: stopping at offset %d, using %d rows collected so far",
+                               offset, len(all_data))
             break
 
         all_data.extend(result.data)

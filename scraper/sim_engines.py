@@ -557,19 +557,30 @@ def simulate_dip_buy(candles: list[dict], entry_price: float, cfg: dict,
     """
     Base DTRAIL strategy + re-entry if price dips then bounces.
     Two positions tracked independently, weighted by size.
+
+    v116: P1 and P2 can have independent trail/act/sl params.
+    If p2_trail/p2_act/p2_sl are not set, falls back to shared trail/act/sl.
     """
-    sl_pct = cfg["sl"]
-    trail_pct = cfg["trail"] / 100
-    act_pct = cfg["act"] / 100
+    # Shared params
     horizon = cfg["horizon_min"]
     dip_threshold = cfg["dip_threshold"] / 100    # e.g. -0.30
     bounce_threshold = cfg["bounce_threshold"] / 100  # e.g. 0.10
     dip_size_mult = cfg["dip_size_mult"]  # e.g. 0.5
     base_ts = candles[0]["timestamp"]
 
+    # P1 params (fall back to shared)
+    p1_sl_pct = cfg.get("p1_sl", cfg["sl"])
+    p1_trail_pct = cfg.get("p1_trail", cfg["trail"]) / 100
+    p1_act_pct = cfg.get("p1_act", cfg["act"]) / 100
+
+    # P2 params (fall back to shared)
+    p2_sl_pct = cfg.get("p2_sl", cfg["sl"])
+    p2_trail_pct = cfg.get("p2_trail", cfg["trail"]) / 100
+    p2_act_pct = cfg.get("p2_act", cfg["act"]) / 100
+
     # Position 1: original
     p1_entry = entry_price
-    p1_sl = p1_entry * (1 - sl_pct / 100)
+    p1_sl = p1_entry * (1 - p1_sl_pct / 100)
     p1_high = p1_entry
     p1_activated = False
     p1_weight = 1.0 / (1.0 + dip_size_mult)  # normalize weights
@@ -605,10 +616,10 @@ def simulate_dip_buy(candles: list[dict], entry_price: float, cfg: dict,
             if c["low"] <= p1_sl:
                 p1_pnl = _exit("sl_hit", p1_sl, p1_entry, mins, is_sl=True)["pnl_pct"]
                 p1_closed = True
-            elif not p1_activated and p1_high >= p1_entry * (1 + act_pct):
+            elif not p1_activated and p1_high >= p1_entry * (1 + p1_act_pct):
                 p1_activated = True
             if not p1_closed and p1_activated:
-                trail = p1_high * (1 - trail_pct)
+                trail = p1_high * (1 - p1_trail_pct)
                 if trail > p1_entry and c["low"] <= trail:
                     p1_pnl = _exit("trail_stop", trail, p1_entry, mins)["pnl_pct"]
                     p1_closed = True
@@ -624,7 +635,7 @@ def simulate_dip_buy(candles: list[dict], entry_price: float, cfg: dict,
                     p2_opened = True
                     reentry_done = True
                     p2_entry = dip_level * (1 + BUY_SLIPPAGE)  # buy slippage (1.5%)
-                    p2_sl = p2_entry * (1 - sl_pct / 100)
+                    p2_sl = p2_entry * (1 - p2_sl_pct / 100)
                     p2_high = c["high"]
                 else:
                     bounce_from_low = (c["high"] / low_since_entry - 1)
@@ -633,7 +644,7 @@ def simulate_dip_buy(candles: list[dict], entry_price: float, cfg: dict,
                         p2_opened = True
                         reentry_done = True
                         p2_entry = low_since_entry * (1 + bounce_threshold) * (1 + BUY_SLIPPAGE)
-                        p2_sl = p2_entry * (1 - sl_pct / 100)
+                        p2_sl = p2_entry * (1 - p2_sl_pct / 100)
                         p2_high = c["high"]
 
         # --- Position 2 logic ---
@@ -643,10 +654,10 @@ def simulate_dip_buy(candles: list[dict], entry_price: float, cfg: dict,
             if c["low"] <= p2_sl:
                 p2_pnl = _exit("sl_hit", p2_sl, p2_entry, mins, is_sl=True)["pnl_pct"]
                 p2_closed = True
-            elif not p2_activated and p2_high >= p2_entry * (1 + act_pct):
+            elif not p2_activated and p2_high >= p2_entry * (1 + p2_act_pct):
                 p2_activated = True
             if not p2_closed and p2_activated:
-                trail = p2_high * (1 - trail_pct)
+                trail = p2_high * (1 - p2_trail_pct)
                 if trail > p2_entry and c["low"] <= trail:
                     p2_pnl = _exit("trail_stop", trail, p2_entry, mins)["pnl_pct"]
                     p2_closed = True

@@ -342,8 +342,8 @@ SHADOW_STRATEGIES.extend(_TRAIL_STRATEGIES.keys())
 # No TP cap: lets runners run. SL and timeout still apply.
 # Encoded: DTRAIL{trail}_ACT{act}_SL{sl}
 _DTRAIL_STRATEGIES = {}
-for _dt_trail in [5, 10, 15, 20]:  # v115: added trail=5 (sim best)
-    for _dt_act in [10, 15, 20, 25, 30]:
+for _dt_trail in [3, 5, 10, 15, 20]:  # v116: added trail=3 (sim best)
+    for _dt_act in [5, 10, 15, 20, 25, 30]:  # v116: added act=5 (sim best)
         for _dt_sl in [50, 60, 70]:
             _dtname = f"DTRAIL{_dt_trail}_ACT{_dt_act}_SL{_dt_sl}"
             _DTRAIL_STRATEGIES[_dtname] = [
@@ -386,6 +386,15 @@ STRATEGIES["DIP30_B5_T5_A15_SL70_240m"] = [
     {"pct": 0.5, "tp_mult": None, "sl_mult": 0.30,
      "horizon_min": 240, "trail_pct": 0.05,
      "trail_activation_pct": 0.15, "label": "dip_p1"},
+]
+
+# v116: DIP_BUY split — P1 and P2 have independent trail/act/sl params.
+# P1: trail 5%, activation 10%, SL 70% (enter at KOL call — tight trail, fast activation)
+# P2: trail 10%, activation 15%, SL 60% (enter at dip bounce — wider trail, tighter SL)
+STRATEGIES["DIP30_B5_P1T5A10S70_P2T10A15S60_240m"] = [
+    {"pct": 0.5, "tp_mult": None, "sl_mult": 0.30,  # P1: SL70 → sl_mult=0.30
+     "horizon_min": 240, "trail_pct": 0.05,
+     "trail_activation_pct": 0.10, "label": "dip_p1"},
 ]
 
 # v115: DIP_BUY in-memory watchlist — tracks tokens waiting for dip+bounce to open P2
@@ -870,8 +879,25 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
                     opened += 1
                     # v115: DIP_BUY — add to watchlist for P2 monitoring
                     if tranche["label"] == "dip_p1":
-                        m = _DIP_RE.match(strat_name)
-                        if m:
+                        # v116: Try split regex first, then shared
+                        ms = _DIP_SPLIT_RE.match(strat_name)
+                        m = _DIP_RE.match(strat_name) if not ms else None
+                        if ms:
+                            _dip_watchlist[(addr, strat_name)] = {
+                                "entry_price": entry_price,
+                                "low_seen": entry_price,
+                                "dip_pct": int(ms.group(1)) / 100,
+                                "bounce_pct": int(ms.group(2)) / 100,
+                                "sl_pct": int(ms.group(8)) / 100,  # P2 SL
+                                "horizon_min": int(ms.group(9)),
+                                "alloc_usd": round(alloc_usd * tranche["pct"] * bot_ml_mult, 2),
+                                "base_row": {k: v for k, v in base_row.items()},
+                                "created_at": datetime.now(timezone.utc),
+                            }
+                            logger.info("dip_watch: watching %s/%s for -%.0f%% dip (split P2: T%sA%sS%s)",
+                                        token.get("symbol"), strat_name, int(ms.group(1)),
+                                        ms.group(6), ms.group(7), ms.group(8))
+                        elif m:
                             _dip_watchlist[(addr, strat_name)] = {
                                 "entry_price": entry_price,
                                 "low_seen": entry_price,
@@ -1009,6 +1035,11 @@ _DECAY_RE = _re.compile(r"^DECAY_TP\d+_SL\d+_E(\d+)$")
 _TRAIL_RE = _re.compile(r"^TRAIL(\d+)_TP\d+_SL\d+$")
 _DTRAIL_RE = _re.compile(r"^DTRAIL(\d+)_ACT(\d+)_SL\d+$")
 _DIP_RE = _re.compile(r"^DIP(\d+)_B(\d+)_T(\d+)_A(\d+)_SL(\d+)_(\d+)m$")  # v115
+# v116: Split DIP — P1 and P2 have independent params
+# DIP{dip}_B{bounce}_P1T{t}A{a}S{sl}_P2T{t}A{a}S{sl}_{timeout}m
+_DIP_SPLIT_RE = _re.compile(
+    r"^DIP(\d+)_B(\d+)_P1T(\d+)A(\d+)S(\d+)_P2T(\d+)A(\d+)S(\d+)_(\d+)m$"
+)
 _BE_RE = _re.compile(r"^BE(\d+)_TP\d+_SL\d+$")
 
 def _get_decay_end(strategy_name: str) -> float | None:
@@ -1025,7 +1056,14 @@ def _get_trail_config(trade: dict) -> tuple[float | None, float | None]:
     For TRAIL strategies: activation_pct = trail_pct (legacy behavior).
     """
     strat = trade.get("strategy", "")
-    # v115: DIP_BUY — DIP{dip}_B{bounce}_T{trail}_A{act}_SL{sl}_{timeout}m
+    # v116: DIP_BUY split — return P1 or P2 params based on tranche_label
+    m = _DIP_SPLIT_RE.match(strat)
+    if m:
+        label = trade.get("tranche_label", "")
+        if label == "dip_p2":
+            return int(m.group(6)) / 100, int(m.group(7)) / 100  # P2 trail, P2 act
+        return int(m.group(3)) / 100, int(m.group(4)) / 100  # P1 trail, P1 act
+    # v115: DIP_BUY shared — DIP{dip}_B{bounce}_T{trail}_A{act}_SL{sl}_{timeout}m
     m = _DIP_RE.match(strat)
     if m:
         return int(m.group(3)) / 100, int(m.group(4)) / 100
@@ -1207,18 +1245,31 @@ def _rebuild_dip_watchlist(client):
             if (p2.count and p2.count > 0) or (p2_open.count and p2_open.count > 0):
                 continue
 
-            m = _DIP_RE.match(strat)
-            if not m:
+            # v116: Try split regex first, then shared
+            ms = _DIP_SPLIT_RE.match(strat)
+            m = _DIP_RE.match(strat) if not ms else None
+            if not ms and not m:
                 continue
 
             created = datetime.fromisoformat(trade["created_at"].replace("Z", "+00:00"))
+            if ms:
+                dip_pct = int(ms.group(1)) / 100
+                bounce_pct = int(ms.group(2)) / 100
+                sl_pct = int(ms.group(8)) / 100  # P2 SL
+                horizon_min = int(ms.group(9))
+            else:
+                dip_pct = int(m.group(1)) / 100
+                bounce_pct = int(m.group(2)) / 100
+                sl_pct = int(m.group(5)) / 100
+                horizon_min = int(m.group(6))
+
             _dip_watchlist[key] = {
                 "entry_price": float(trade["entry_price"]),
                 "low_seen": float(trade["entry_price"]),  # conservative reset
-                "dip_pct": int(m.group(1)) / 100,
-                "bounce_pct": int(m.group(2)) / 100,
-                "sl_pct": int(m.group(5)) / 100,
-                "horizon_min": int(m.group(6)),
+                "dip_pct": dip_pct,
+                "bounce_pct": bounce_pct,
+                "sl_pct": sl_pct,
+                "horizon_min": horizon_min,
                 "alloc_usd": float(trade["position_usd"]),  # P1 pos = P2 pos (50/50)
                 "base_row": {
                     "cycle_ts": trade.get("cycle_ts"),
