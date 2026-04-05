@@ -36,6 +36,7 @@ import logging
 from datetime import datetime, timezone, timedelta
 
 import requests
+import time as _time_mod
 
 logger = logging.getLogger(__name__)
 
@@ -1467,11 +1468,36 @@ def _precache_ohlcv_for_closed(closed_ids: set, trades: list[dict]):
                                     "volume": float(c.get("volume", 0))})
                 candles.sort(key=lambda x: x["timestamp"])
 
+            # v117: Fallback to GeckoTerminal if DexPaprika returns no data
+            if len(candles) < 3:
+                try:
+                    pool_addr = entry["pool"]
+                    gt_r = requests.get(
+                        f"https://api.geckoterminal.com/api/v2/networks/solana/pools/{pool_addr}/ohlcv/minute",
+                        params={"aggregate": "15", "limit": 100,
+                                "before_timestamp": entry["end_ts"]},
+                        headers={"Accept": "application/json"},
+                        timeout=15,
+                    )
+                    if gt_r.status_code == 200:
+                        gt_data = gt_r.json().get("data", {}).get("attributes", {}).get("ohlcv_list", [])
+                        candles = []
+                        for row in gt_data:
+                            if len(row) >= 6:
+                                candles.append({"timestamp": int(row[0]), "open": float(row[1]),
+                                                "high": float(row[2]), "low": float(row[3]),
+                                                "close": float(row[4]), "volume": float(row[5])})
+                        candles.sort(key=lambda x: x["timestamp"])
+                        # Filter to our window
+                        candles = [c for c in candles if entry["start_ts"] <= c["timestamp"] <= entry["end_ts"]]
+                except Exception:
+                    pass
+                _time_mod.sleep(0.5)  # rate limit GeckoTerminal
+
             if len(candles) >= 3:
                 entry["cache_file"].write_text(json.dumps(candles))
                 fetched += 1
-            else:
-                entry["cache_file"].write_text("[]")  # mark as attempted
+            # v117: Don't cache empty results — retry next cycle
         except Exception as e:
             logger.debug("ohlcv_precache: error for %s: %s", entry["pool"][:12], e)
 
