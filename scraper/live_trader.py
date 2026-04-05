@@ -128,12 +128,18 @@ def get_wallet_balance() -> dict | None:
             tokens_dict = data.get("tokens", {})
             if isinstance(tokens_dict, dict):
                 for mint, info in tokens_dict.items():
-                    if not isinstance(info, dict):
-                        continue
-                    ui_amount = float(info.get("uiAmount", 0))
-                    amount = int(info.get("amount", 0))
-                    if amount > 0:
-                        token_balances[mint] = {"amount": amount, "ui_amount": ui_amount}
+                    # v117: tokens can be a dict or a list of account objects
+                    if isinstance(info, list):
+                        # Sum across all accounts for this mint
+                        total_amount = sum(int(acc.get("amount", 0)) for acc in info if isinstance(acc, dict))
+                        total_ui = sum(float(acc.get("uiAmount", 0)) for acc in info if isinstance(acc, dict))
+                        if total_amount > 0:
+                            token_balances[mint] = {"amount": total_amount, "ui_amount": total_ui}
+                    elif isinstance(info, dict):
+                        ui_amount = float(info.get("uiAmount", 0))
+                        amount = int(info.get("amount", 0))
+                        if amount > 0:
+                            token_balances[mint] = {"amount": amount, "ui_amount": ui_amount}
 
             # Fallback: old format where SOL is keyed by mint
             if sol_balance == 0:
