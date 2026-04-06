@@ -398,6 +398,14 @@ STRATEGIES["DIP30_B5_P1T5A10S70_P2T10A15S60_240m"] = [
      "trail_activation_pct": 0.10, "label": "dip_p1"},
 ]
 
+# v118: DIP_BUY T10 — best reliable strategy from sim (trail 10%, activation 30%, SL 60%)
+# Shared params: both P1 and P2 use the same trail/act/sl
+STRATEGIES["DIP30_B5_T10_A30_SL60_240m"] = [
+    {"pct": 0.5, "tp_mult": None, "sl_mult": 0.40,
+     "horizon_min": 240, "trail_pct": 0.10,
+     "trail_activation_pct": 0.30, "label": "dip_p1"},
+]
+
 # v115: DIP_BUY in-memory watchlist — tracks tokens waiting for dip+bounce to open P2
 # Key: (token_address, strategy_name) → tracking state
 _dip_watchlist: dict[tuple, dict] = {}
