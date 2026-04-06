@@ -782,6 +782,17 @@ def check_live_trades(client_sb) -> dict:
             continue
 
         exit_price = ev.get("exit_price")
+        entry_price = float(trade.get("entry_price") or 0)
+        elapsed_minutes = ev.get("exit_minutes", 0)
+        if not elapsed_minutes:
+            created = trade.get("created_at")
+            if created:
+                from datetime import datetime as _dt
+                try:
+                    ct = _dt.fromisoformat(created.replace("Z", "+00:00")) if isinstance(created, str) else created
+                    elapsed_minutes = int((now - ct).total_seconds() / 60)
+                except Exception:
+                    elapsed_minutes = 0
 
         # Execute sell BEFORE updating DB
         sell_result = execute_sell(addr)
@@ -798,43 +809,51 @@ def check_live_trades(client_sb) -> dict:
             continue
 
         # v74: Use actual SOL received from Jupiter to compute real exit price
+        # v118: Wrapped in try-except — sell already executed, DB update MUST happen
         sell_output = sell_result.get("output_amount")  # SOL lamports received
-        if sell_output and sell_output > 0 and entry_price > 0:
-            sol_received = sell_output / LAMPORTS_PER_SOL
-            sol_price_now = _get_sol_price_usd()
-            usd_received = sol_received * sol_price_now
-            pos_usd_val = float(trade.get("position_usd") or 0)
-            if pos_usd_val > 0:
-                exit_price = entry_price * (usd_received / pos_usd_val)
-
-        pnl_pct = round((exit_price / entry_price) - 1, 4) if exit_price and entry_price else 0
+        pnl_pct = 0
+        pnl_usd = 0
         pos_usd = float(trade.get("position_usd") or 0)
-        pnl_usd = round(pos_usd * pnl_pct, 2) if pos_usd else 0
-
-        # Track daily PnL in SOL
-        sol_price = _get_sol_price_usd()
-        pnl_sol = pnl_usd / sol_price if sol_price > 0 else 0
-        _track_pnl(pnl_sol)
-
-        # v105: Compute sell slippage (actual SOL received vs expected)
         sell_slippage_bps = 0
-        sol_price_at_exit = _get_sol_price_usd()
-        if sell_output and sell_output > 0 and pos_usd > 0:
-            sol_received = sell_output / LAMPORTS_PER_SOL
-            usd_received_actual = sol_received * sol_price_at_exit
-            expected_usd = pos_usd * (1 + pnl_pct)  # what we'd get at exit_price
-            if expected_usd > 0:
-                sell_slippage_bps = round((1 - usd_received_actual / expected_usd) * 10000)
+        sol_price_at_exit = 0
+        sell_sol_received = None
 
-        # v105: Alert on high sell slippage
-        if abs(sell_slippage_bps) > 500:
-            try:
+        try:
+            if sell_output and sell_output > 0 and entry_price > 0:
+                sol_received = sell_output / LAMPORTS_PER_SOL
+                sol_price_now = _get_sol_price_usd()
+                usd_received = sol_received * sol_price_now
+                pos_usd_val = float(trade.get("position_usd") or 0)
+                if pos_usd_val > 0:
+                    exit_price = entry_price * (usd_received / pos_usd_val)
+
+            pnl_pct = round((exit_price / entry_price) - 1, 4) if exit_price and entry_price else 0
+            pnl_usd = round(pos_usd * pnl_pct, 2) if pos_usd else 0
+
+            # Track daily PnL in SOL
+            sol_price = _get_sol_price_usd()
+            pnl_sol = pnl_usd / sol_price if sol_price > 0 else 0
+            _track_pnl(pnl_sol)
+
+            # v105: Compute sell slippage (actual SOL received vs expected)
+            sol_price_at_exit = _get_sol_price_usd()
+            if sell_output and sell_output > 0 and pos_usd > 0:
+                sol_received = sell_output / LAMPORTS_PER_SOL
+                usd_received_actual = sol_received * sol_price_at_exit
+                expected_usd = pos_usd * (1 + pnl_pct)
+                if expected_usd > 0:
+                    sell_slippage_bps = round((1 - usd_received_actual / expected_usd) * 10000)
+
+            # v105: Alert on high sell slippage
+            if abs(sell_slippage_bps) > 500:
                 from alerter import alert_slippage_deviation
                 alert_slippage_deviation(trade["symbol"], 500, sell_slippage_bps)
-            except Exception:
-                pass
 
-        sell_sol_received = (sell_output / LAMPORTS_PER_SOL) if sell_output else None
+            sell_sol_received = (sell_output / LAMPORTS_PER_SOL) if sell_output else None
+        except Exception as e:
+            logger.warning("live_trader: PnL calc error for %s (sell OK, sig=%s): %s — DB update proceeds with defaults",
+                           trade["symbol"], sell_result.get("signature"), e)
+            sell_sol_received = (sell_output / LAMPORTS_PER_SOL) if sell_output else None
 
         update = {
             "status": new_status,
