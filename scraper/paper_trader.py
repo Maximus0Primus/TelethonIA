@@ -1118,6 +1118,52 @@ def _get_trail_config(trade: dict) -> tuple[float | None, float | None]:
     return None, None
 
 
+# v118: LAZY check mode — strategies with check_mode="lazy" skip exit evaluation
+# during throttle windows, but still update high_price_seen.
+# LAZY: first 5min check every 3min, after that every 10min.
+# This lets trail stops ride longer without triggering on micro-pullbacks.
+LAZY_STRATEGIES = {
+    "DIP30_B5_T10_A30_SL60_240m",
+    # Add more strategies here to test LAZY mode
+}
+_last_eval_ts: dict[str, float] = {}  # trade_id -> last evaluation timestamp
+LAZY_FAST_SEC = 180     # 3 min during fast phase
+LAZY_FAST_WINDOW = 300  # 5 min fast phase
+LAZY_SLOW_SEC = 600     # 10 min after fast phase
+
+
+def _should_evaluate_exit(trade: dict, now: datetime) -> bool:
+    """v118: Check if this trade should be evaluated for exit.
+    LAZY strategies are throttled to check less frequently.
+    Always returns True for non-LAZY strategies."""
+    strat = trade.get("strategy", "")
+    if strat not in LAZY_STRATEGIES:
+        return True
+
+    trade_id = str(trade.get("id", ""))
+    now_ts = now.timestamp()
+
+    # How old is the trade?
+    try:
+        created = datetime.fromisoformat(trade["created_at"].replace("Z", "+00:00"))
+        age_sec = (now - created).total_seconds()
+    except Exception:
+        return True
+
+    # Determine throttle interval
+    if age_sec < LAZY_FAST_WINDOW:
+        interval = LAZY_FAST_SEC
+    else:
+        interval = LAZY_SLOW_SEC
+
+    last = _last_eval_ts.get(trade_id, 0)
+    if now_ts - last < interval:
+        return False  # skip this evaluation
+
+    _last_eval_ts[trade_id] = now_ts
+    return True
+
+
 def _evaluate_trade_exit(trade: dict, current_price: float | None,
                          now: datetime, sell_slip_factor: float,
                          sl_cascade: bool = False,
@@ -1127,6 +1173,9 @@ def _evaluate_trade_exit(trade: dict, current_price: float | None,
     Checks in order: SL → TP → timeout.
     Updates high_price_seen on every call (even when no exit).
     sell_slip_factor is used as base_bps source; dynamic slippage + fee applied per exit type.
+
+    v118: LAZY mode — returns high_price_seen update only (no exit eval)
+    when _should_evaluate_exit() says to skip.
 
     Returns dict with keys {status, exit_price, pnl_pct, pnl_usd, exit_minutes,
     high_price_seen} or None if no action. Caller handles DB update.
@@ -1148,10 +1197,14 @@ def _evaluate_trade_exit(trade: dict, current_price: float | None,
     elapsed_minutes = (now - created_at).total_seconds() / 60
     horizon = trade.get("horizon_minutes", 120)
 
-    # Track high_price_seen
+    # Track high_price_seen (always, even in LAZY skip mode)
     high_seen = float(trade.get("high_price_seen") or 0)
     if current_price is not None and current_price > high_seen:
         high_seen = current_price
+
+    # v118: LAZY mode — update high_price_seen but skip exit evaluation
+    if not _should_evaluate_exit(trade, now):
+        return {"high_price_seen": high_seen}  # caller updates DB but no exit
 
     new_status = None
     exit_price = None
