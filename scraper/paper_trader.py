@@ -488,6 +488,32 @@ def _fetch_price_fallback(address: str) -> float | None:
     return None
 
 
+# v118: Price tick logger — records DexScreener spot prices for future backtesting
+_last_tick_log: dict[str, float] = {}  # token_address -> last log timestamp
+
+
+def _log_price_ticks(client, prices: dict[str, float], source: str = "check"):
+    """Log DexScreener spot prices to price_ticks table. Throttled to 1/min per token."""
+    if not prices or not client:
+        return
+    now = _time_mod.time()
+    rows = []
+    for addr, price in prices.items():
+        if price <= 0:
+            continue
+        last = _last_tick_log.get(addr, 0)
+        if now - last < 60:  # throttle: max 1 insert per token per minute
+            continue
+        _last_tick_log[addr] = now
+        rows.append({"token_address": addr, "price_usd": price, "source": source})
+    if not rows:
+        return
+    try:
+        client.table("price_ticks").insert(rows).execute()
+    except Exception as e:
+        logger.debug("price_ticks insert failed (%d rows): %s", len(rows), e)
+
+
 def _fetch_prices_batch(addresses: list[str]) -> dict[str, float]:
     """Batch fetch current USD prices. DexScreener primary, Jupiter fallback.
     v107: Jupiter fallback catches pool migrations that DexScreener misses."""
@@ -1541,6 +1567,7 @@ def check_paper_trades(client) -> dict:
         if waddr not in addresses:
             addresses.append(waddr)
     prices = _fetch_prices_batch(addresses)
+    _log_price_ticks(client, prices, "full")
 
     # v115: Process dip watchlist on full check too
     if _dip_watchlist:
@@ -1859,6 +1886,7 @@ def check_paper_trades_fast(client) -> dict:
         if waddr not in addresses:
             addresses.append(waddr)
     prices = _fetch_prices_batch(addresses) if addresses else {}
+    _log_price_ticks(client, prices, "fast")
 
     # v115: Process dip watchlist every 30s
     if _dip_watchlist:

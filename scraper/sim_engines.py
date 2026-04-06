@@ -30,8 +30,27 @@ def compute_buy_slippage(position_usd: float, liquidity_usd: float,
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _dynamic_sell_slippage(liquidity_usd: float, is_sl: bool = False) -> float:
+    """Match paper_trader.py _dynamic_sell_slip_factor() logic.
+    Base: 200 bps (2%) + 50 bps fee. Scaled by liquidity and exit type.
+    When liq=0 (unknown), assume median ~$13K (from real trade data)."""
+    base_bps = 200
+    fee_bps = 50
+    liq = liquidity_usd if liquidity_usd > 0 else 13_000  # median from real trades
+    liq_mult = max(1.0, min(4.0, 50_000 / max(liq, 1_000)))
+    exit_mult = 1.5 if is_sl else 1.0
+    adjusted_bps = int(base_bps * liq_mult * exit_mult) + fee_bps
+    return adjusted_bps / 10_000
+
+
+_sim_liquidity_usd = 0  # Set per-simulation by simulate() from context
+
+
 def _exit(reason: str, exit_price: float, entry_price: float,
           elapsed_min: float, is_sl: bool = False) -> dict:
+    # Dynamic slippage available but empirically flat 2.5% matches paper trade
+    # reality better (candle close ≠ DexScreener spot price, difference absorbs
+    # the real slippage). Use dynamic only when explicitly enabled.
     slip = SLIPPAGE_SL if is_sl else SLIPPAGE_TRAIL
     net_price = exit_price * (1 - slip)
     return {
@@ -47,14 +66,20 @@ def _elapsed(candle: dict, base_ts: int) -> float:
 
 def resample_to_live_checks(candles: list[dict], interval_min: int = 3,
                             fast_interval_sec: int = 30,
-                            fast_window_min: int = 30) -> list[dict]:
+                            fast_window_min: int = 30,
+                            hl_blend: float = 0.0) -> list[dict]:
     """
     Resample candles to simulate live price checks.
     - First `fast_window_min` min: check every `fast_interval_sec` seconds
     - After that: check every `interval_min` minutes
 
-    Uses CLOSE price only (like live uses current_price from DexScreener).
-    Sets high=low=close to mimic spot-only checks.
+    high/low are blended between close-only and real extremes:
+      blended_high = close + hl_blend * (real_high - close)
+      blended_low  = close + hl_blend * (close - real_low) [towards low]
+
+    hl_blend=0.0: close-only (old behavior, ignores intra-candle moves)
+    hl_blend=1.0: full high/low (too aggressive, SLs trigger on noise)
+    hl_blend=0.5: halfway — DexScreener sees ~50% of intra-candle range
     """
     if not candles:
         return candles
@@ -65,18 +90,35 @@ def resample_to_live_checks(candles: list[dict], interval_min: int = 3,
 
     sampled = []
     next_check_ts = base_ts
+    # Accumulate high/low between checks
+    pending_high = None
+    pending_low = None
 
     for c in candles:
+        h = c["high"]
+        lo = c["low"]
+        if pending_high is None:
+            pending_high = h
+            pending_low = lo
+        else:
+            pending_high = max(pending_high, h)
+            pending_low = min(pending_low, lo)
+
         if c["timestamp"] >= next_check_ts:
+            close = c["close"]
+            # Blend high/low towards close based on hl_blend
+            blended_high = close + hl_blend * (pending_high - close)
+            blended_low = close - hl_blend * (close - pending_low)
             sampled.append({
                 "timestamp": c["timestamp"],
-                "open": c["close"],
-                "high": c["close"],
-                "low": c["close"],
-                "close": c["close"],
+                "open": close,
+                "high": blended_high,
+                "low": blended_low,
+                "close": close,
                 "volume": c.get("volume", 0),
             })
-            # Fast checks for first 30 min, normal after
+            pending_high = None
+            pending_low = None
             if c["timestamp"] < fast_cutoff:
                 next_check_ts = c["timestamp"] + fast_interval
             else:
@@ -84,10 +126,12 @@ def resample_to_live_checks(candles: list[dict], interval_min: int = 3,
 
     if not sampled:
         c = candles[0]
+        cl = c["close"]
         sampled.append({
-            "timestamp": c["timestamp"], "open": c["close"],
-            "high": c["close"], "low": c["close"], "close": c["close"],
-            "volume": c.get("volume", 0),
+            "timestamp": c["timestamp"], "open": cl,
+            "high": cl + hl_blend * (c["high"] - cl),
+            "low": cl - hl_blend * (cl - c["low"]),
+            "close": cl, "volume": c.get("volume", 0),
         })
 
     return sampled
@@ -896,6 +940,8 @@ def simulate_dip_scale_out(candles: list[dict], entry_price: float, cfg: dict,
 def simulate(candles: list[dict], entry_price: float, cfg: dict,
              context: dict | None = None) -> dict:
     """Route to the correct simulation engine based on cfg['type']."""
+    global _sim_liquidity_usd
+    _sim_liquidity_usd = (context or {}).get("liq", 0)
     t = cfg["type"]
     if t in ("FIXED", "SCALP"):
         return simulate_fixed(candles, entry_price, cfg)

@@ -511,6 +511,23 @@ def sb_get(table: str, params: list[tuple]) -> list[dict]:
     return all_rows
 
 
+def fetch_all_trades_by_strategy(since: str) -> list[dict]:
+    """Fetch ALL closed paper trades (including shadows) grouped by strategy.
+    Used by --from-trades mode: real PnL instead of OHLCV simulation."""
+    params = [
+        ("select", "token_address,strategy,pnl_pct,status,created_at,kol_group,"
+                   "position_usd,exit_minutes,high_price_seen,entry_price,exit_price,"
+                   "rt_liquidity_usd,rt_token_age_hours,is_shadow"),
+        ("status", "in.(trail_stop,sl_hit,timeout,tp_hit)"),
+        ("source", "eq.rt"),
+        ("created_at", f"gte.{since}T00:00:00Z"),
+        ("order", "created_at.asc"),
+    ]
+    trades = sb_get("paper_trades", params)
+    print(f"Fetched {len(trades)} closed trades (all strategies, incl shadows) since {since}")
+    return trades
+
+
 def fetch_paper_trades(since: str) -> list[dict]:
     params = [
         ("select", "id,token_address,pair_address,strategy,entry_price,exit_price,"
@@ -838,6 +855,9 @@ def compute_metrics(pnl_list: list[float], n_days: int) -> dict:
     }
 
 
+FLAT_POS_SIZE = 0  # 0 = use Kelly, >0 = fixed $ per trade (set by --flat-sizing)
+
+
 def simulate_bankroll(trade_results: list[dict]) -> dict:
     bankroll = START_BANKROLL
     peak_bankroll = bankroll
@@ -860,7 +880,10 @@ def simulate_bankroll(trade_results: list[dict]) -> dict:
                 pass
         seen_tokens[token] = day
 
-        pos_size = min(bankroll * KELLY_FRAC, MAX_POS)
+        if FLAT_POS_SIZE > 0:
+            pos_size = min(FLAT_POS_SIZE, bankroll * 0.5)  # never risk > 50% of bankroll
+        else:
+            pos_size = min(bankroll * KELLY_FRAC, MAX_POS)
         if pos_size < 1.0:
             continue
 
@@ -1103,6 +1126,10 @@ def main():
                         help="Number of top strategies to test in check-grid")
     parser.add_argument("--interval-cross", action="store_true",
                         help="Full cross-grid: all strategies x 5 interval profiles")
+    parser.add_argument("--flat-sizing", type=float, default=0,
+                        help="Fixed position size in USD (default: 0 = Kelly sizing). Use ~99 to match paper trader.")
+    parser.add_argument("--from-trades", action="store_true",
+                        help="Use real paper trade PnL instead of OHLCV simulation (ground truth mode)")
     parser.add_argument("--dual-wallet", action="store_true",
                         help="Run dual-wallet analysis on top strategies")
     parser.add_argument("--dual-deltas", type=str, default="0,5,10,15,30",
@@ -1112,6 +1139,157 @@ def main():
     parser.add_argument("--dual-position", type=float, default=0,
                         help="Position size USD for slippage calc (default: Kelly-sized)")
     args = parser.parse_args()
+
+    global FLAT_POS_SIZE
+    if args.flat_sizing > 0:
+        FLAT_POS_SIZE = args.flat_sizing
+
+    # =====================================================================
+    # FROM-TRADES MODE: use real paper trade PnL, skip OHLCV entirely
+    # =====================================================================
+    if args.from_trades:
+        print("=" * 80)
+        print("FROM-TRADES MODE: Real paper trade results (ground truth)")
+        print("=" * 80)
+
+        all_trades = fetch_all_trades_by_strategy(args.since)
+        if not all_trades:
+            print("No trades found. Exiting.")
+            return
+
+        # Filter by token age
+        if args.max_age > 0:
+            all_trades = [t for t in all_trades
+                          if t.get("rt_token_age_hours") is not None
+                          and float(t["rt_token_age_hours"]) <= args.max_age]
+            print(f"After age filter (<= {args.max_age}h): {len(all_trades)} trades")
+
+        # Dedup: first trade per (token_address, strategy) within 24h
+        sorted_trades = sorted(all_trades, key=lambda t: t["created_at"])
+        seen_ts: dict[str, datetime] = {}  # (token, strategy) -> last time
+        deduped = []
+        for t in sorted_trades:
+            key = f"{t['token_address']}_{t['strategy']}"
+            dt = datetime.fromisoformat(t["created_at"].replace("Z", "+00:00"))
+            last = seen_ts.get(key)
+            if last and (dt - last).total_seconds() < 86400:
+                continue
+            seen_ts[key] = dt
+            deduped.append(t)
+        print(f"After dedup (first per token x strategy, 24h): {len(deduped)} trades")
+
+        # Group by strategy
+        by_strategy: dict[str, list[dict]] = defaultdict(list)
+        for t in deduped:
+            by_strategy[t["strategy"]].append(t)
+
+        # Date range
+        dates = [t["created_at"][:10] for t in deduped]
+        date_range = (datetime.strptime(max(dates), "%Y-%m-%d") -
+                      datetime.strptime(min(dates), "%Y-%m-%d")).days + 1
+        print(f"Period: {min(dates)} -> {max(dates)} ({date_range} days)")
+        print(f"Strategies with data: {len(by_strategy)}")
+
+        # Compute metrics per strategy
+        ranked = []
+        for strat_name, trades in by_strategy.items():
+            for wl_flag in [False, True]:
+                if wl_flag:
+                    strat_trades = [t for t in trades
+                                    if (t.get("kol_group") or "").lower() in KOL_WHITELIST]
+                else:
+                    strat_trades = trades
+
+                pnl_list = [float(t["pnl_pct"]) for t in strat_trades]
+                if len(pnl_list) < MIN_TRADES:
+                    continue
+
+                n_tokens = len(set(t["token_address"] for t in strat_trades))
+                metrics = compute_metrics(pnl_list, date_range)
+
+                # Bankroll simulation
+                br_trades = [{
+                    "pnl_pct": float(t["pnl_pct"]),
+                    "token_address": t["token_address"],
+                    "created_at": t["created_at"],
+                } for t in strat_trades]
+                br = simulate_bankroll(sorted(br_trades, key=lambda x: x["created_at"]))
+
+                # Detect strategy type from name
+                stype = "UNKNOWN"
+                for prefix in ["DIP_SCALE_OUT", "DIP", "DTRAIL", "TRAIL", "SCALP",
+                                "DECAY", "SPLIT", "BE", "DYNAMIC_TRAIL", "CONTEXTUAL",
+                                "SCALE_OUT", "FIXED", "TP"]:
+                    if strat_name.startswith(prefix) or (prefix == "FIXED" and strat_name.startswith("TP")):
+                        stype = prefix if prefix != "TP" else "FIXED"
+                        break
+
+                ranked.append({
+                    "name": strat_name, "type": stype,
+                    "whitelist": "YES" if wl_flag else "NO",
+                    "n_tokens": n_tokens,
+                    **metrics, **br,
+                })
+
+        ranked.sort(key=lambda x: -x["final_bankroll"])
+
+        # Output
+        top_n = args.top
+        print(f"\n{'=' * 110}")
+        print(f"TOP {top_n} STRATEGIES — FROM REAL PAPER TRADES (ground truth)")
+        print(f"{'=' * 110}")
+        header = (f"{'Rank':>4s}  {'Strategy':40s} {'WL?':4s} {'Type':12s} "
+                  f"{'N':>5s} {'Tok':>4s} {'WR%':>5s} {'AvgPnL%':>8s} {'Sharpe':>7s} "
+                  f"{'MaxDD%':>7s} {'Final$':>9s}")
+        print(header)
+        print("-" * len(header))
+        for i, r in enumerate(ranked[:top_n]):
+            print(f"{i+1:4d}  {r['name']:40s} {r['whitelist']:4s} {r['type']:12s} "
+                  f"{r['n_trades']:5d} {r.get('n_tokens', 0):4d} {r['wr_pct']:4.0f}% "
+                  f"{r['avg_pnl_pct']:+7.1f}% {r['sharpe']:7.2f} {r['max_dd_pct']:6.1f}% "
+                  f"$ {r['final_bankroll']:8.0f}")
+
+        # Best per type
+        print(f"\n{'=' * 110}")
+        print("BEST PER STRATEGY TYPE — FROM REAL TRADES")
+        print(f"{'=' * 110}")
+        for stype in ["FIXED", "DTRAIL", "TRAIL", "BE", "SCALP", "DECAY",
+                       "DYNAMIC_TRAIL", "CONTEXTUAL", "SCALE_OUT", "DIP", "DIP_SCALE_OUT"]:
+            all_r = [r for r in ranked if r["type"] == stype and r["whitelist"] == "NO"]
+            wl_r = [r for r in ranked if r["type"] == stype and r["whitelist"] == "YES"]
+            if all_r or wl_r:
+                best_all = all_r[0] if all_r else None
+                best_wl = wl_r[0] if wl_r else None
+                print(f"  {stype:15s} "
+                      f"All: {best_all['name']:40s} ${best_all['final_bankroll']:7.0f}" if best_all else f"  {stype:15s} All: {'—':40s}        ",
+                      end="")
+                if best_wl:
+                    print(f"  WL: {best_wl['name']:40s} ${best_wl['final_bankroll']:7.0f}")
+                else:
+                    print()
+
+        # Monte Carlo on top 5
+        print(f"\n{'=' * 110}")
+        print(f"MONTE CARLO (top 5, {args.mc_sims} sims x {args.mc_trades} trades)")
+        print(f"{'=' * 110}")
+        mc_header = (f"{'Strategy':45s} {'WL?':4s} {'Median$':>8s} {'P5$':>8s} "
+                     f"{'P25$':>8s} {'P75$':>8s} {'P95$':>8s}")
+        print(mc_header)
+        print("-" * len(mc_header))
+        for r in ranked[:5]:
+            strat_trades = by_strategy.get(r["name"], [])
+            if r["whitelist"] == "YES":
+                strat_trades = [t for t in strat_trades
+                                if (t.get("kol_group") or "").lower() in KOL_WHITELIST]
+            pnl_list = [float(t["pnl_pct"]) for t in strat_trades]
+            mc = monte_carlo(pnl_list, args.mc_sims, args.mc_trades)
+            if mc:
+                print(f"{r['name']:45s} {r['whitelist']:4s} $ {mc['median']:6.0f} "
+                      f"$ {mc['p5']:6.0f} $ {mc['p25']:6.0f} $ {mc['p75']:6.0f} "
+                      f"$ {mc['p95']:6.0f}")
+
+        print(f"\nTotal ranked strategies: {len(ranked)}")
+        return  # Skip OHLCV simulation path
 
     # --- Grid ---
     grid = build_strategy_grid(args.strategies)
