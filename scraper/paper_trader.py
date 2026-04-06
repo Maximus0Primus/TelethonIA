@@ -398,6 +398,15 @@ STRATEGIES["DIP30_B5_P1T5A10S70_P2T10A15S60_240m"] = [
      "trail_activation_pct": 0.10, "label": "dip_p1"},
 ]
 
+# v118: DIP_BUY T5 LAZY — best overall strategy in sim with LAZY interval ($11,457)
+# Trail 5% is unreliable with CURRENT checks (exits too fast on micro-pullbacks)
+# but with LAZY (3min/10min) the check frequency matches the sim → results should hold
+STRATEGIES["DIP30_B5_T5_A20_SL70_240m"] = [
+    {"pct": 0.5, "tp_mult": None, "sl_mult": 0.30,
+     "horizon_min": 240, "trail_pct": 0.05,
+     "trail_activation_pct": 0.20, "label": "dip_p1"},
+]
+
 # v118: DIP_BUY T10 — best reliable strategy from sim (trail 10%, activation 30%, SL 60%)
 # Shared params: both P1 and P2 use the same trail/act/sl
 STRATEGIES["DIP30_B5_T10_A30_SL60_240m"] = [
@@ -1127,6 +1136,7 @@ LAZY_STRATEGIES = {
     # A/B test: these run LAZY on hybrid (pos>0), shadows keep CURRENT.
     "DTRAIL3_ACT5_SL60",
     "DTRAIL5_ACT10_SL60",
+    "DIP30_B5_T5_A20_SL70_240m",  # best overall sim strat — LAZY makes T5 viable
 }
 _last_eval_ts: dict[str, float] = {}  # trade_id -> last evaluation timestamp
 LAZY_FAST_SEC = 180     # 3 min during fast phase
