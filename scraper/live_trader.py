@@ -595,6 +595,9 @@ def open_live_trade(client_sb, token_entry: dict, strategy: str,
         logger.info("live_trader: position too small (%.6f SOL) — skipping %s", position_sol, symbol)
         return False
 
+    # v118: Recalculate position_usd after SOL cap — must match actual SOL spent
+    position_usd = round(position_sol * sol_price, 2)
+
     lamports = int(position_sol * LAMPORTS_PER_SOL)
     slippage = int(config.get("slippage_buy_bps", 300))
 
