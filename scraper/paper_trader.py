@@ -1124,7 +1124,11 @@ def _get_trail_config(trade: dict) -> tuple[float | None, float | None]:
 # This lets trail stops ride longer without triggering on micro-pullbacks.
 LAZY_STRATEGIES = {
     "DIP30_B5_T10_A30_SL60_240m",
-    # Add more strategies here to test LAZY mode
+    "DTRAIL10_ACT15_SL70",
+    # Both hybrid strategies use LAZY checks.
+    # Shadow grid trades (is_shadow=true) still use CURRENT interval (no throttle)
+    # because shadows have position_usd=0 and different trade IDs.
+    # This gives A/B: hybrid(LAZY) vs shadow(CURRENT) on same tokens.
 }
 _last_eval_ts: dict[str, float] = {}  # trade_id -> last evaluation timestamp
 LAZY_FAST_SEC = 180     # 3 min during fast phase
@@ -1135,9 +1139,13 @@ LAZY_SLOW_SEC = 600     # 10 min after fast phase
 def _should_evaluate_exit(trade: dict, now: datetime) -> bool:
     """v118: Check if this trade should be evaluated for exit.
     LAZY strategies are throttled to check less frequently.
-    Always returns True for non-LAZY strategies."""
+    Only applies to hybrid trades (position_usd > 0), NOT shadows.
+    Shadows keep CURRENT interval = control group for A/B test."""
     strat = trade.get("strategy", "")
     if strat not in LAZY_STRATEGIES:
+        return True
+    # Shadows (position_usd=0) always use CURRENT interval (control group)
+    if float(trade.get("position_usd") or 0) == 0:
         return True
 
     trade_id = str(trade.get("id", ""))
