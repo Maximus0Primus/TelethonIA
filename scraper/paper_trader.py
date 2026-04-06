@@ -1123,9 +1123,10 @@ def _get_trail_config(trade: dict) -> tuple[float | None, float | None]:
 # LAZY: first 5min check every 3min, after that every 10min.
 # This lets trail stops ride longer without triggering on micro-pullbacks.
 LAZY_STRATEGIES = {
-    # v118: LAZY only helps trails < 10% (reduces micro-pullback exits).
-    # For T10 strategies, sim shows CURRENT > LAZY. Keep empty for now.
-    # To A/B test LAZY on tight trails later, add e.g. "DTRAIL3_ACT5_SL60".
+    # v118: LAZY helps trails < 10% by skipping micro-pullback exits.
+    # A/B test: these run LAZY on hybrid (pos>0), shadows keep CURRENT.
+    "DTRAIL3_ACT5_SL60",
+    "DTRAIL5_ACT10_SL60",
 }
 _last_eval_ts: dict[str, float] = {}  # trade_id -> last evaluation timestamp
 LAZY_FAST_SEC = 180     # 3 min during fast phase
