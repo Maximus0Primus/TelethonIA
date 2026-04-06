@@ -16,17 +16,25 @@ logger = logging.getLogger(__name__)
 
 
 def short_strat(name: str) -> str:
-    """v116: Shorten strategy names for Telegram display."""
+    """v116: Shorten strategy names for Telegram display.
+    v118: Add [LAZY] tag for strategies using LAZY check interval."""
     import re
+    # v118: Check if strategy uses LAZY mode
+    try:
+        from paper_trader import LAZY_STRATEGIES
+        is_lazy = name in LAZY_STRATEGIES
+    except Exception:
+        is_lazy = False
+    tag = " [LAZY]" if is_lazy else ""
     # Split DIP: DIP30_B5_P1T5A10S70_P2T10A15S60_240m → DIP30_B5_P1T5A10S70_P2T10A15S60
     m = re.match(r"^(DIP\d+_B\d+_P1T\d+A\d+S\d+_P2T\d+A\d+S\d+)_\d+m$", name)
     if m:
-        return m.group(1)
+        return m.group(1) + tag
     # Shared DIP: DIP30_B5_T5_A15_SL70_240m → DIP30_B5_T5A15S70
     name = re.sub(r"_B(\d+)_T(\d+)_A(\d+)_SL(\d+)_\d+m$", r"_B\1_T\2A\3S\4", name)
     # DTRAIL/standard: _ACT → A, _SL → S
     name = name.replace("_ACT", "A").replace("_SL", "S")
-    return name
+    return name + tag
 
 
 TELEGRAM_API_URL = "https://api.telegram.org/bot{token}/sendMessage"
