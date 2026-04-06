@@ -1123,12 +1123,9 @@ def _get_trail_config(trade: dict) -> tuple[float | None, float | None]:
 # LAZY: first 5min check every 3min, after that every 10min.
 # This lets trail stops ride longer without triggering on micro-pullbacks.
 LAZY_STRATEGIES = {
-    "DIP30_B5_T10_A30_SL60_240m",
-    "DTRAIL10_ACT15_SL70",
-    # Both hybrid strategies use LAZY checks.
-    # Shadow grid trades (is_shadow=true) still use CURRENT interval (no throttle)
-    # because shadows have position_usd=0 and different trade IDs.
-    # This gives A/B: hybrid(LAZY) vs shadow(CURRENT) on same tokens.
+    # v118: LAZY only helps trails < 10% (reduces micro-pullback exits).
+    # For T10 strategies, sim shows CURRENT > LAZY. Keep empty for now.
+    # To A/B test LAZY on tight trails later, add e.g. "DTRAIL3_ACT5_SL60".
 }
 _last_eval_ts: dict[str, float] = {}  # trade_id -> last evaluation timestamp
 LAZY_FAST_SEC = 180     # 3 min during fast phase
