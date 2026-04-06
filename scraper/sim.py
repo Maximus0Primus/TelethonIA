@@ -38,7 +38,7 @@ from pathlib import Path
 import requests
 from dotenv import load_dotenv
 
-from sim_engines import simulate, resample_to_live_checks
+from sim_engines import simulate, resample_to_live_checks, compute_buy_slippage
 
 # ---------------------------------------------------------------------------
 # Config
@@ -986,6 +986,96 @@ def runner_analysis(trade_entries: list[dict], candle_store: dict,
 # Main
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Dual-Wallet Simulation
+# ---------------------------------------------------------------------------
+
+CANDLE_INTERVAL_MIN = 15  # DexPaprika/Birdeye default
+
+
+def get_price_at_delta(candles: list[dict], base_ts: int, delta_min: float) -> float | None:
+    """Get interpolated price at base_ts + delta_min from OHLCV candles."""
+    if delta_min == 0:
+        return None  # caller should use entry_price directly
+    target_ts = base_ts + delta_min * 60
+    for c in candles:
+        candle_end = c["timestamp"] + CANDLE_INTERVAL_MIN * 60
+        if c["timestamp"] <= target_ts < candle_end:
+            frac = (target_ts - c["timestamp"]) / (CANDLE_INTERVAL_MIN * 60)
+            return c["open"] + (c["close"] - c["open"]) * frac
+    return None
+
+
+def simulate_dual_wallet(sim_candles: list[dict], raw_candles: list[dict],
+                         entry_price: float, cfg: dict,
+                         context: dict | None, delta_min: float,
+                         position_usd: float) -> dict | None:
+    """
+    Run simulate() for two independent wallets:
+      Wallet A: buys at entry_price (t=0)
+      Wallet B: buys at t+delta_min (OHLCV price) or t=0 if delta=0
+    Both use liquidity-aware slippage.
+
+    sim_candles: candles used for simulation (may be resampled for --realistic)
+    raw_candles: original 15min OHLCV candles (used for price lookup at delta)
+    """
+    liq = (context or {}).get("liq", 0)
+    base_ts = raw_candles[0]["timestamp"] if raw_candles else 0
+
+    simultaneous = (delta_min == 0)
+    n_sim = 2 if simultaneous else 1
+
+    # Wallet A: always buys at signal time
+    wa_slip = compute_buy_slippage(position_usd, liq, n_sim)
+    wa_entry = entry_price * (1 + wa_slip)
+    wa_result = simulate(sim_candles, wa_entry, cfg, context)
+
+    # Wallet B
+    if simultaneous:
+        wb_entry = wa_entry
+        wb_sim_candles = sim_candles
+    else:
+        # Use raw candles for price interpolation (not resampled)
+        wb_raw_price = get_price_at_delta(raw_candles, base_ts, delta_min)
+        if wb_raw_price is None:
+            return None
+        wb_slip = compute_buy_slippage(position_usd, liq, 1)
+        wb_entry = wb_raw_price * (1 + wb_slip)
+        # Trim sim candles from Wallet B's entry time
+        target_ts = base_ts + delta_min * 60
+        wb_sim_candles = [c for c in sim_candles if c["timestamp"] >= target_ts]
+        if len(wb_sim_candles) < 2:
+            return None
+
+    wb_result = simulate(wb_sim_candles, wb_entry, cfg, context)
+
+    # Single wallet baseline (original flat slippage for fair comparison)
+    single_result = simulate(sim_candles, entry_price, cfg, context)
+
+    return {
+        "wa": wa_result,
+        "wb": wb_result,
+        "single": single_result,
+        "combined_pnl_pct": (wa_result["pnl_pct"] + wb_result["pnl_pct"]) / 2,
+        "combined_total_pnl_pct": wa_result["pnl_pct"] + wb_result["pnl_pct"],
+        "delta_min": delta_min,
+        "wa_slip": wa_slip,
+        "wb_slip": compute_buy_slippage(position_usd, liq, 1) if not simultaneous else wa_slip,
+    }
+
+
+def simulate_bankroll_dual(trade_results_a: list[dict], trade_results_b: list[dict]) -> dict:
+    """Two independent bankrolls, each starting at START_BANKROLL."""
+    br_a = simulate_bankroll(trade_results_a)
+    br_b = simulate_bankroll(trade_results_b)
+    return {
+        "wa_final": br_a["final_bankroll"],
+        "wb_final": br_b["final_bankroll"],
+        "combined_final": br_a["final_bankroll"] + br_b["final_bankroll"],
+        "single_2x": br_a["final_bankroll"],  # what 2x single bankroll would be
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description="Unified strategy simulator")
     parser.add_argument("--dry-run", action="store_true")
@@ -1000,9 +1090,27 @@ def main():
     parser.add_argument("--realistic", action="store_true",
                         help="Resample candles to 3-min spot checks (like live)")
     parser.add_argument("--check-interval", type=int, default=3,
-                        help="Check interval in minutes for --realistic mode")
+                        help="Slow check interval in minutes for --realistic mode")
+    parser.add_argument("--fast-interval", type=int, default=30,
+                        help="Fast check interval in seconds (default: 30)")
+    parser.add_argument("--fast-window", type=int, default=30,
+                        help="Fast check window in minutes (default: 30)")
     parser.add_argument("--max-age", type=float, default=12.0,
                         help="Max token age in hours (live default: 12h). 0=no filter")
+    parser.add_argument("--check-grid", action="store_true",
+                        help="Grid search check intervals (fast_sec x slow_min x fast_window)")
+    parser.add_argument("--check-grid-top", type=int, default=10,
+                        help="Number of top strategies to test in check-grid")
+    parser.add_argument("--interval-cross", action="store_true",
+                        help="Full cross-grid: all strategies x 5 interval profiles")
+    parser.add_argument("--dual-wallet", action="store_true",
+                        help="Run dual-wallet analysis on top strategies")
+    parser.add_argument("--dual-deltas", type=str, default="0,5,10,15,30",
+                        help="Comma-separated delta minutes for Wallet B (default: 0,5,10,15,30)")
+    parser.add_argument("--dual-top", type=int, default=30,
+                        help="Number of top strategies to test with dual-wallet (default: 30)")
+    parser.add_argument("--dual-position", type=float, default=0,
+                        help="Position size USD for slippage calc (default: Kelly-sized)")
     args = parser.parse_args()
 
     # --- Grid ---
@@ -1166,7 +1274,7 @@ def main():
     if skipped_age > 0:
         print(f"Skipped {skipped_age} tokens older than {args.max_age}h (--max-age)")
     if args.realistic:
-        print(f"REALISTIC MODE: resampling to {args.check_interval}min spot checks")
+        print(f"REALISTIC MODE: fast={args.fast_interval}s/{args.fast_window}min, slow={args.check_interval}min")
     print(f"Total simulations: {len(grid)} strategies x {len(trade_entries)} trades "
           f"= {len(grid) * len(trade_entries):,}")
 
@@ -1174,7 +1282,10 @@ def main():
     if args.realistic:
         live_candle_store = {}
         for key, candles in candle_store.items():
-            live_candle_store[key] = resample_to_live_checks(candles, args.check_interval)
+            live_candle_store[key] = resample_to_live_checks(
+                candles, args.check_interval,
+                fast_interval_sec=args.fast_interval,
+                fast_window_min=args.fast_window)
         sim_store = live_candle_store
     else:
         sim_store = candle_store
@@ -1408,6 +1519,364 @@ def main():
             print(f"{r['name']:40s} {r['whitelist']:4s} $ {mc['median']:6.0f} "
                   f"$ {mc['p5']:6.0f} $ {mc['p25']:6.0f} $ {mc['p75']:6.0f} "
                   f"$ {mc['p95']:6.0f} {mc['ror_pct']:4.1f}% {r['sharpe']:7.2f}")
+
+    # CHECK INTERVAL GRID SEARCH (old, per-strategy)
+    if args.check_grid and ranked:
+        n_cg = min(args.check_grid_top, len(ranked))
+        cg_strats = ranked[:n_cg]
+
+        # Grid: fast_interval_sec x slow_interval_min x fast_window_min
+        fast_secs = [15, 30, 45, 60, 120, 180]      # how often to check in fast phase
+        slow_mins = [1, 2, 3, 5, 10]                 # how often to check after fast phase
+        fast_windows = [5, 15, 30, 60]               # how long the fast phase lasts (minutes)
+
+        print(f"\n{'=' * 130}")
+        print(f"CHECK INTERVAL GRID SEARCH (top {n_cg} strategies)")
+        print(f"Fast intervals: {fast_secs}s | Slow intervals: {slow_mins}min | Fast windows: {fast_windows}min")
+        print(f"{'=' * 130}")
+
+        for r in cg_strats:
+            name = r["name"]
+            is_wl = r["whitelist"] == "YES"
+            cfg = next(c for c in grid if c["name"] == name)
+
+            strat_trades = [te for te in trade_entries
+                           if (not is_wl or te["kol_group"] in KOL_WHITELIST)
+                           and te["candles_key"] in candle_store]
+
+            if len(strat_trades) < MIN_TRADES:
+                continue
+
+            print(f"\n  {name} (WL={r['whitelist']}, N={len(strat_trades)})")
+
+            # Collect results for all combos
+            combo_results = []
+            for fw in fast_windows:
+                for fs in fast_secs:
+                    for sm in slow_mins:
+                        pnl_list = []
+                        for te in strat_trades:
+                            raw = candle_store[te["candles_key"]]
+                            resampled = resample_to_live_checks(
+                                raw, interval_min=sm,
+                                fast_interval_sec=fs,
+                                fast_window_min=fw)
+                            res = simulate(resampled, te["entry_price"], cfg,
+                                          context=te.get("context"))
+                            pnl_list.append(res["pnl_pct"])
+
+                        avg_pnl = statistics.mean(pnl_list) * 100
+                        wr = sum(1 for p in pnl_list if p > 0) / len(pnl_list) * 100
+                        br = simulate_bankroll([{
+                            "pnl_pct": pnl_list[i],
+                            "token_address": strat_trades[i]["token_address"],
+                            "created_at": strat_trades[i]["created_at"],
+                        } for i in range(len(pnl_list))])
+
+                        combo_results.append({
+                            "fast_sec": fs, "slow_min": sm, "fast_win": fw,
+                            "avg_pnl": avg_pnl, "wr": wr,
+                            "final_br": br["final_bankroll"],
+                            "label": f"fast={fs}s/{fw}min slow={sm}min",
+                        })
+
+            # Sort by bankroll
+            combo_results.sort(key=lambda x: -x["final_br"])
+
+            # Print top 15 and bottom 5
+            header = (f"    {'Rank':>4s} {'Fast Check':>10s} {'Window':>7s} {'Slow Check':>10s} "
+                      f"{'WR%':>5s} {'AvgPnL%':>8s} {'Final$':>8s}")
+            print(header)
+            print(f"    {'-' * (len(header) - 4)}")
+            for i, cr in enumerate(combo_results[:15]):
+                marker = " <-- BEST" if i == 0 else ""
+                marker = " <-- CURRENT" if cr["fast_sec"] == 30 and cr["slow_min"] == 3 and cr["fast_win"] == 30 else marker
+                print(f"    {i+1:4d} {cr['fast_sec']:>7d}s  {cr['fast_win']:>5d}min {cr['slow_min']:>7d}min "
+                      f"{cr['wr']:4.0f}% {cr['avg_pnl']:+7.1f}% ${cr['final_br']:7.0f}{marker}")
+            if len(combo_results) > 15:
+                print(f"    {'...':>4s}")
+                for cr in combo_results[-3:]:
+                    marker = " <-- CURRENT" if cr["fast_sec"] == 30 and cr["slow_min"] == 3 and cr["fast_win"] == 30 else ""
+                    rank = combo_results.index(cr) + 1
+                    print(f"    {rank:4d} {cr['fast_sec']:>7d}s  {cr['fast_win']:>5d}min {cr['slow_min']:>7d}min "
+                          f"{cr['wr']:4.0f}% {cr['avg_pnl']:+7.1f}% ${cr['final_br']:7.0f}{marker}")
+
+    # STRATEGY × INTERVAL CROSS-GRID
+    if args.interval_cross:
+        PROFILES = [
+            ("AGGRESSIVE", 15, 30, 1),    # fast=15s, window=30min, slow=1min
+            ("CURRENT",    30, 30, 3),     # what prod does now
+            ("MODERATE",   60, 15, 3),     # slightly less frequent
+            ("RELAXED",   120,  5, 5),     # calibrated to match DTRAIL10 reality
+            ("LAZY",      180,  5, 10),    # infrequent checks
+        ]
+
+        print(f"\n{'=' * 140}")
+        print(f"STRATEGY × INTERVAL CROSS-GRID ({len(grid)} strategies × {len(PROFILES)} profiles × {len(trade_entries)} trades)")
+        print(f"{'=' * 140}")
+
+        # Pre-compute resampled candles for each profile
+        profile_stores = {}
+        for pname, fs, fw, sm in PROFILES:
+            store = {}
+            for key, candles in candle_store.items():
+                store[key] = resample_to_live_checks(candles, interval_min=sm,
+                                                      fast_interval_sec=fs,
+                                                      fast_window_min=fw)
+            profile_stores[pname] = store
+            print(f"  Resampled {pname}: fast={fs}s/{fw}min, slow={sm}min")
+
+        # Run all strategies × all profiles
+        cross_results = {}  # (strategy_name, profile) -> {metrics}
+        t_cross = time_mod.time()
+        total_cross = len(grid) * len(PROFILES) * len(trade_entries)
+
+        for pi, (pname, fs, fw, sm) in enumerate(PROFILES):
+            p_store = profile_stores[pname]
+            for cfg in grid:
+                name = cfg["name"]
+                pnl_list = []
+                for te in trade_entries:
+                    candles = p_store[te["candles_key"]]
+                    res = simulate(candles, te["entry_price"], cfg, context=te.get("context"))
+                    pnl_list.append(res["pnl_pct"])
+
+                if len(pnl_list) < MIN_TRADES:
+                    continue
+
+                wr = sum(1 for p in pnl_list if p > 0) / len(pnl_list) * 100
+                avg_pnl = statistics.mean(pnl_list) * 100
+                br_trades = [{"pnl_pct": pnl_list[i],
+                              "token_address": trade_entries[i]["token_address"],
+                              "created_at": trade_entries[i]["created_at"]}
+                             for i in range(len(pnl_list))]
+                br = simulate_bankroll(sorted(br_trades, key=lambda x: x["created_at"]))
+
+                cross_results[(name, pname)] = {
+                    "name": name, "type": cfg["type"], "profile": pname,
+                    "wr": wr, "avg_pnl": avg_pnl, "final_br": br["final_bankroll"],
+                    "n": len(pnl_list),
+                }
+
+            print(f"  Profile {pi+1}/{len(PROFILES)} {pname} done")
+
+        elapsed_cross = time_mod.time() - t_cross
+        print(f"  Cross-grid complete: {total_cross:,} sims in {elapsed_cross:.1f}s "
+              f"({total_cross / elapsed_cross:,.0f} sims/sec)")
+
+        # --- Report 1: Best (strategy, interval) combos overall ---
+        all_combos = sorted(cross_results.values(), key=lambda x: -x["final_br"])
+
+        print(f"\n  {'-' * 120}")
+        print(f"  TOP 30 (STRATEGY × INTERVAL) COMBOS")
+        print(f"  {'-' * 120}")
+        header = f"  {'Rank':>4s} {'Strategy':40s} {'Profile':>12s} {'WR%':>5s} {'AvgPnL%':>8s} {'Final$':>8s}"
+        print(header)
+        print(f"  {'-' * (len(header) - 2)}")
+        for i, c in enumerate(all_combos[:30]):
+            print(f"  {i+1:4d} {c['name']:40s} {c['profile']:>12s} {c['wr']:4.0f}% "
+                  f"{c['avg_pnl']:+7.1f}% ${c['final_br']:7.0f}")
+
+        # --- Report 2: Best interval per strategy TYPE ---
+        print(f"\n  {'-' * 120}")
+        print(f"  BEST INTERVAL PER STRATEGY TYPE")
+        print(f"  {'-' * 120}")
+        strat_types = ["FIXED", "DTRAIL", "TRAIL", "BE", "SCALP", "DECAY",
+                       "DYNAMIC_TRAIL", "CONTEXTUAL", "SCALE_OUT", "DIP_BUY", "DIP_SCALE_OUT"]
+        header2 = f"  {'Type':15s}"
+        for pname, _, _, _ in PROFILES:
+            header2 += f" {pname:>14s}"
+        print(header2)
+        print(f"  {'-' * (15 + 15 * len(PROFILES))}")
+
+        for stype in strat_types:
+            line = f"  {stype:15s}"
+            for pname, _, _, _ in PROFILES:
+                matches = [v for v in cross_results.values()
+                           if v["type"] == stype and v["profile"] == pname]
+                if matches:
+                    best = max(matches, key=lambda x: x["final_br"])
+                    line += f" ${best['final_br']:>12.0f}"
+                else:
+                    line += f" {'—':>14s}"
+            print(line)
+
+        # --- Report 3: For each strategy type, best strategy + best interval ---
+        print(f"\n  {'-' * 120}")
+        print(f"  OPTIMAL STRATEGY + INTERVAL PER TYPE")
+        print(f"  {'-' * 120}")
+        print(f"  {'Type':15s} {'Best Strategy':40s} {'Best Interval':>14s} {'WR%':>5s} {'AvgPnL%':>8s} {'Final$':>8s}")
+        print(f"  {'-' * 95}")
+
+        for stype in strat_types:
+            matches = [v for v in cross_results.values() if v["type"] == stype]
+            if matches:
+                best = max(matches, key=lambda x: x["final_br"])
+                print(f"  {stype:15s} {best['name']:40s} {best['profile']:>14s} "
+                      f"{best['wr']:4.0f}% {best['avg_pnl']:+7.1f}% ${best['final_br']:7.0f}")
+
+        # --- Report 4: Strategies that CHANGE RANK significantly across profiles ---
+        print(f"\n  {'-' * 120}")
+        print(f"  INTERVAL-SENSITIVE STRATEGIES (biggest rank change CURRENT vs RELAXED)")
+        print(f"  {'-' * 120}")
+
+        # Rank within CURRENT and RELAXED profiles
+        current_ranked = sorted([v for v in cross_results.values() if v["profile"] == "CURRENT"],
+                                key=lambda x: -x["final_br"])
+        relaxed_ranked = sorted([v for v in cross_results.values() if v["profile"] == "RELAXED"],
+                                key=lambda x: -x["final_br"])
+        current_rank = {v["name"]: i+1 for i, v in enumerate(current_ranked)}
+        relaxed_rank = {v["name"]: i+1 for i, v in enumerate(relaxed_ranked)}
+
+        deltas = []
+        for name in current_rank:
+            if name in relaxed_rank:
+                cr = current_rank[name]
+                rr = relaxed_rank[name]
+                cur_br = next(v["final_br"] for v in current_ranked if v["name"] == name)
+                rel_br = next(v["final_br"] for v in relaxed_ranked if v["name"] == name)
+                deltas.append({"name": name, "cur_rank": cr, "rel_rank": rr,
+                               "rank_delta": cr - rr, "cur_br": cur_br, "rel_br": rel_br,
+                               "br_delta": rel_br - cur_br})
+
+        # Show strategies that improve most with RELAXED
+        deltas.sort(key=lambda x: -x["br_delta"])
+        print(f"  Strategies that IMPROVE most with RELAXED interval:")
+        print(f"  {'Strategy':40s} {'CURRENT$':>9s} {'RELAXED$':>9s} {'Delta$':>8s}  {'Cur Rank':>8s} {'Rel Rank':>8s}")
+        print(f"  {'-' * 80}")
+        for d in deltas[:10]:
+            print(f"  {d['name']:40s} ${d['cur_br']:8.0f} ${d['rel_br']:8.0f} "
+                  f"${d['br_delta']:+7.0f}  #{d['cur_rank']:>6d} #{d['rel_rank']:>6d}")
+
+        # Show strategies that get WORSE with RELAXED
+        print(f"\n  Strategies that get WORSE with RELAXED interval:")
+        print(f"  {'Strategy':40s} {'CURRENT$':>9s} {'RELAXED$':>9s} {'Delta$':>8s}  {'Cur Rank':>8s} {'Rel Rank':>8s}")
+        print(f"  {'-' * 80}")
+        for d in deltas[-10:]:
+            print(f"  {d['name']:40s} ${d['cur_br']:8.0f} ${d['rel_br']:8.0f} "
+                  f"${d['br_delta']:+7.0f}  #{d['cur_rank']:>6d} #{d['rel_rank']:>6d}")
+
+        # --- Report 5: DTRAIL3 specifically across all profiles ---
+        print(f"\n  {'-' * 120}")
+        print(f"  DTRAIL3 variants across ALL profiles (the strategy you questioned)")
+        print(f"  {'-' * 120}")
+        dtrail3_strats = sorted(set(v["name"] for v in cross_results.values()
+                                    if "DTRAIL3" in v["name"]),
+                                key=lambda n: -max(v["final_br"] for v in cross_results.values()
+                                                   if v["name"] == n))[:5]
+        for strat in dtrail3_strats:
+            print(f"\n  {strat}:")
+            print(f"  {'Profile':>14s} {'WR%':>5s} {'AvgPnL%':>8s} {'Final$':>8s}")
+            for pname, _, _, _ in PROFILES:
+                key = (strat, pname)
+                if key in cross_results:
+                    v = cross_results[key]
+                    marker = " <-- PROD" if pname == "CURRENT" else ""
+                    print(f"  {pname:>14s} {v['wr']:4.0f}% {v['avg_pnl']:+7.1f}% ${v['final_br']:7.0f}{marker}")
+
+    # DUAL-WALLET ANALYSIS
+    if args.dual_wallet and ranked:
+        deltas = [float(d) for d in args.dual_deltas.split(",")]
+        n_dual = min(args.dual_top, len(ranked))
+        dual_strats = ranked[:n_dual]
+
+        print(f"\n{'=' * 120}")
+        print(f"DUAL-WALLET ANALYSIS (top {n_dual} strategies, deltas: {deltas})")
+        print(f"2 independent wallets, each full position. Liquidity-aware slippage.")
+        print(f"{'=' * 120}")
+
+        for r in dual_strats:
+            name = r["name"]
+            is_wl = r["whitelist"] == "YES"
+            cfg = next(c for c in grid if c["name"] == name)
+
+            # Collect trades for this strategy
+            strat_trades = []
+            for te in trade_entries:
+                if is_wl and te["kol_group"] not in KOL_WHITELIST:
+                    continue
+                if te["candles_key"] not in sim_store:
+                    continue
+                strat_trades.append(te)
+
+            if len(strat_trades) < MIN_TRADES:
+                continue
+
+            print(f"\n  {name} (WL={r['whitelist']}, N={len(strat_trades)})")
+            header = (f"    {'Delta':>6s} | {'WA PnL%':>8s} {'WB PnL%':>8s} {'Combined':>9s} "
+                      f"{'2x Total':>9s} | {'Single%':>8s} {'vs Sngl':>8s} | "
+                      f"{'WA Slip':>7s} {'WB Slip':>7s} | "
+                      f"{'WA BR$':>8s} {'WB BR$':>8s} {'Total$':>8s} {'1x BR$':>8s}")
+            print(header)
+            print(f"    {'-' * (len(header) - 4)}")
+
+            for delta in deltas:
+                wa_pnls = []
+                wb_pnls = []
+                single_pnls = []
+                wa_slips = []
+                wb_slips = []
+                wa_trades_br = []
+                wb_trades_br = []
+                skipped = 0
+
+                for te in strat_trades:
+                    candles = sim_store[te["candles_key"]]
+                    pos = args.dual_position if args.dual_position > 0 else min(
+                        START_BANKROLL * KELLY_FRAC, MAX_POS)
+
+                    raw_candles = candle_store[te["candles_key"]]
+                    dw = simulate_dual_wallet(
+                        candles, raw_candles, te["entry_price"], cfg,
+                        context=te.get("context"),
+                        delta_min=delta,
+                        position_usd=pos,
+                    )
+                    if dw is None:
+                        skipped += 1
+                        continue
+
+                    wa_pnls.append(dw["wa"]["pnl_pct"])
+                    wb_pnls.append(dw["wb"]["pnl_pct"])
+                    single_pnls.append(dw["single"]["pnl_pct"])
+                    wa_slips.append(dw["wa_slip"])
+                    wb_slips.append(dw["wb_slip"])
+                    wa_trades_br.append({
+                        "pnl_pct": dw["wa"]["pnl_pct"],
+                        "token_address": te["token_address"],
+                        "created_at": te["created_at"],
+                    })
+                    wb_trades_br.append({
+                        "pnl_pct": dw["wb"]["pnl_pct"],
+                        "token_address": te["token_address"],
+                        "created_at": te["created_at"],
+                    })
+
+                if len(wa_pnls) < MIN_TRADES:
+                    continue
+
+                avg_wa = statistics.mean(wa_pnls) * 100
+                avg_wb = statistics.mean(wb_pnls) * 100
+                avg_single = statistics.mean(single_pnls) * 100
+                avg_combined = (avg_wa + avg_wb) / 2
+                total_2x = avg_wa + avg_wb
+                vs_single = avg_combined - avg_single
+                avg_wa_slip = statistics.mean(wa_slips) * 100
+                avg_wb_slip = statistics.mean(wb_slips) * 100
+
+                # Bankroll sim
+                br_wa = simulate_bankroll(sorted(wa_trades_br, key=lambda x: x["created_at"]))
+                br_wb = simulate_bankroll(sorted(wb_trades_br, key=lambda x: x["created_at"]))
+
+                delta_label = f"{int(delta)}min" if delta > 0 else "0(sim)"
+                print(f"    {delta_label:>6s} | {avg_wa:+7.1f}% {avg_wb:+7.1f}% {avg_combined:+8.1f}% "
+                      f"{total_2x:+8.1f}% | {avg_single:+7.1f}% {vs_single:+7.1f}% | "
+                      f"{avg_wa_slip:6.2f}% {avg_wb_slip:6.2f}% | "
+                      f"${br_wa['final_bankroll']:7.0f} ${br_wb['final_bankroll']:7.0f} "
+                      f"${br_wa['final_bankroll'] + br_wb['final_bankroll']:7.0f} "
+                      f"${r['final_bankroll']:7.0f}")
+                if skipped > 0:
+                    print(f"           (skipped {skipped} trades — no OHLCV at delta)")
 
     # CSV
     csv_path = SCRAPER_DIR / "grid_search_results.csv"

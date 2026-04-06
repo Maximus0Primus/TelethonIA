@@ -15,6 +15,17 @@ SLIPPAGE_SL = 0.025      # 2.5% for SL exits (v113: was 3.5% — paper_trader us
 BUY_SLIPPAGE = 0.015     # 1.5% for DIP_BUY re-entries (matches live: 1% buy + 0.5% fee)
 
 
+def compute_buy_slippage(position_usd: float, liquidity_usd: float,
+                         n_simultaneous: int = 1) -> float:
+    """Liquidity-aware buy slippage: base fee + AMM price impact."""
+    BASE_FEE = 0.010  # 1% swap fee + MEV
+    if liquidity_usd <= 0:
+        return BUY_SLIPPAGE  # fallback flat 1.5%
+    total_vol = position_usd * n_simultaneous
+    impact = total_vol / (liquidity_usd + total_vol)
+    return BASE_FEE + impact
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -34,11 +45,13 @@ def _elapsed(candle: dict, base_ts: int) -> float:
     return (candle["timestamp"] - base_ts) / 60.0
 
 
-def resample_to_live_checks(candles: list[dict], interval_min: int = 3) -> list[dict]:
+def resample_to_live_checks(candles: list[dict], interval_min: int = 3,
+                            fast_interval_sec: int = 30,
+                            fast_window_min: int = 30) -> list[dict]:
     """
-    Resample candles to simulate live price checks exactly like paper_trader.py:
-    - First 30 min: check every 30 seconds (check_paper_trades_fast)
-    - After 30 min: check every `interval_min` minutes (check_paper_trades)
+    Resample candles to simulate live price checks.
+    - First `fast_window_min` min: check every `fast_interval_sec` seconds
+    - After that: check every `interval_min` minutes
 
     Uses CLOSE price only (like live uses current_price from DexScreener).
     Sets high=low=close to mimic spot-only checks.
@@ -46,8 +59,8 @@ def resample_to_live_checks(candles: list[dict], interval_min: int = 3) -> list[
     if not candles:
         return candles
     base_ts = candles[0]["timestamp"]
-    fast_cutoff = base_ts + 30 * 60  # 30 min fast check window
-    fast_interval = 30  # 30 seconds
+    fast_cutoff = base_ts + fast_window_min * 60
+    fast_interval = fast_interval_sec
     normal_interval = interval_min * 60
 
     sampled = []
