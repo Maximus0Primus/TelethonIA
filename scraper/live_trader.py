@@ -714,7 +714,8 @@ def open_live_trade(client_sb, token_entry: dict, strategy: str,
             _live_cfg = config.get("live_trading", config)
             if _live_cfg.get("trigger_orders_enabled", False):
                 token_amount = result.get("output_amount")
-                if token_amount and token_amount > 0 and trade_id:
+                _min_usd = float(_live_cfg.get("trigger_min_usd", 10))
+                if token_amount and token_amount > 0 and trade_id and position_usd >= _min_usd:
                     from jupiter_trigger import place_stop_loss
                     _expiry = int(_live_cfg.get("trigger_expiry_seconds", tranche["horizon_min"] * 60))
                     _sl_slip = int(_live_cfg.get("trigger_sl_slippage_bps", 2000))
@@ -733,6 +734,9 @@ def open_live_trade(client_sb, token_entry: dict, strategy: str,
                                     symbol, trigger_res["order_id"][:16], sl_price)
                     else:
                         logger.warning("TRIGGER SL FAILED: %s — fallback to polling", symbol)
+                elif position_usd < _min_usd:
+                    logger.info("TRIGGER SL SKIP: %s pos=$%.2f < min $%.0f — polling only",
+                                symbol, position_usd, _min_usd)
         except Exception as e:
             logger.warning("live_trader: trigger order failed for %s (fallback to polling): %s",
                            symbol, e)
