@@ -1675,10 +1675,12 @@ def check_paper_trades(client) -> dict:
     # v73: Load sell slippage + fee config for exit price simulation
     _sell_slip_bps = SELL_SLIPPAGE_BPS
     _sell_fee_bps = SELL_FEE_BPS
+    _active_strats = []
     try:
         _cfg = _load_paper_trade_config(client)
         _sell_slip_bps = int(_cfg.get("sell_slippage_bps", SELL_SLIPPAGE_BPS))
         _sell_fee_bps = int(_cfg.get("sell_fee_bps", SELL_FEE_BPS))
+        _active_strats = _cfg.get("active_strategies", [])
     except Exception:
         pass
     _sell_slip_factor = 1 - _sell_slip_bps / 10_000
@@ -1776,6 +1778,7 @@ def check_paper_trades(client) -> dict:
                         deployed_usd=portfolio["deployed_usd"],
                         open_count=portfolio["open_count"],
                         strategy_bankrolls=_strat_bals,
+                        active_strategies=_active_strats,
                     )
                 except Exception as e:
                     logger.warning("trade close alert failed: %s", e)
@@ -1855,6 +1858,7 @@ def check_paper_trades(client) -> dict:
                         deployed_usd=portfolio["deployed_usd"],
                         open_count=portfolio["open_count"],
                         strategy_bankrolls=_strat_bals,
+                        active_strategies=_active_strats,
                     )
                 except Exception as e:
                     logger.warning("SL cascade trade close alert failed: %s", e)
@@ -2072,6 +2076,7 @@ def check_paper_trades_fast(client) -> dict:
                         deployed_usd=portfolio["deployed_usd"],
                         open_count=portfolio["open_count"],
                         strategy_bankrolls=_strat_bals,
+                        active_strategies=_active_strats,
                     )
                 except Exception as e:
                     logger.warning("paper_fast trade close alert failed: %s", e)

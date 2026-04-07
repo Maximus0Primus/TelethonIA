@@ -520,9 +520,11 @@ def alert_trade_closed(symbol: str, strategy: str, exit_reason: str,
                        kol: str = "", bankroll: float = 0,
                        ca: str = "", deployed_usd: float = 0,
                        open_count: int = 0,
-                       strategy_bankrolls: dict | None = None):
+                       strategy_bankrolls: dict | None = None,
+                       active_strategies: list | None = None):
     """v110: Alert when a main trade closes (trail_stop, sl_hit, timeout).
-    v115: Shows per-strategy bankroll comparison."""
+    v115: Shows per-strategy bankroll comparison.
+    v119: active_strategies filters bankroll display to only active ones."""
     # Emoji based on outcome
     if exit_reason == "trail_stop":
         if pnl_pct > 0.5:
@@ -553,6 +555,9 @@ def alert_trade_closed(symbol: str, strategy: str, exit_reason: str,
     if strategy_bankrolls:
         parts = []
         for sname, sdata in sorted(strategy_bankrolls.items()):
+            # v119: Only show active strategies (passed via active_strategies param)
+            if active_strategies and sname not in active_strategies and sname != strategy:
+                continue
             bal = float(sdata.get("balance", 500))
             pnl = float(sdata.get("pnl", 0))
             short = short_strat(sname)
