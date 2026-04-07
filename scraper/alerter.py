@@ -353,7 +353,7 @@ def alert_api_health(fill_rates: dict, total: int) -> None:
     fill_rates: {api_name: fill_pct} where 0-100.
     Birdeye is reported as % of expected fill (top-N only), not absolute.
     """
-    degraded = {api: pct for api, pct in fill_rates.items() if pct < 85}
+    degraded = {api: pct for api, pct in fill_rates.items() if pct < 50}
     if not degraded:
         reset_alert("api_health_warning")
         reset_alert("api_health_critical")
