@@ -702,11 +702,41 @@ def open_live_trade(client_sb, token_entry: dict, strategy: str,
     }
 
     try:
-        client_sb.table("paper_trades").insert(row).execute()
+        insert_res = client_sb.table("paper_trades").insert(row).execute()
+        trade_id = insert_res.data[0]["id"] if insert_res.data else None
         logger.info(
             "LIVE TRADE OPENED: %s %s @ $%.8f | %.4f SOL ($%.2f) | sig: %s",
             symbol, strategy, entry_price, position_sol, position_usd, result["signature"][:16],
         )
+
+        # v119: Place Jupiter trigger stop-loss order (on-chain protection)
+        try:
+            _live_cfg = config.get("live_trading", config)
+            if _live_cfg.get("trigger_orders_enabled", False):
+                token_amount = result.get("output_amount")
+                if token_amount and token_amount > 0 and trade_id:
+                    from jupiter_trigger import place_stop_loss
+                    _expiry = int(_live_cfg.get("trigger_expiry_seconds", tranche["horizon_min"] * 60))
+                    _sl_slip = int(_live_cfg.get("trigger_sl_slippage_bps", 2000))
+                    trigger_res = place_stop_loss(
+                        ca=ca,
+                        amount_tokens=token_amount,
+                        sl_price_usd=sl_price,
+                        expiry_seconds=_expiry,
+                        sl_slippage_bps=_sl_slip,
+                    )
+                    if trigger_res:
+                        client_sb.table("paper_trades").update(
+                            {"trigger_order_id": trigger_res["order_id"]}
+                        ).eq("id", trade_id).execute()
+                        logger.info("TRIGGER SL PLACED: %s order=%s sl=$%.8f",
+                                    symbol, trigger_res["order_id"][:16], sl_price)
+                    else:
+                        logger.warning("TRIGGER SL FAILED: %s — fallback to polling", symbol)
+        except Exception as e:
+            logger.warning("live_trader: trigger order failed for %s (fallback to polling): %s",
+                           symbol, e)
+
         # Alert via Telegram — v119: detailed buy alert
         try:
             from alerter import alert_live_buy
@@ -728,6 +758,107 @@ def open_live_trade(client_sb, token_entry: dict, strategy: str,
         logger.error("live_trader: DB insert failed for %s (trade executed but not tracked!): %s",
                      symbol, e)
         return False
+
+
+def _handle_trigger_fill(client_sb, trade: dict, order_status: dict, now) -> None:
+    """
+    v119: Handle a Jupiter trigger order that was filled by keepers.
+    Updates DB with PnL, sends alert. No execute_sell needed (already on-chain).
+    """
+    entry_price = float(trade.get("entry_price") or 0)
+    pos_usd = float(trade.get("position_usd") or 0)
+    pos_sol = float(trade.get("position_sol") or 0)
+
+    # Extract fill data from order
+    fill_event = order_status.get("fill_event") or {}
+    output_amount = fill_event.get("outputAmount")
+
+    # Compute PnL from SOL received
+    sol_received = 0
+    pnl_pct = -1.0  # assume total loss as fallback
+    pnl_usd = -pos_usd
+
+    try:
+        if output_amount and int(output_amount) > 0:
+            sol_received = int(output_amount) / LAMPORTS_PER_SOL
+            sol_price = _get_sol_price_usd()
+            usd_received = sol_received * sol_price
+            if pos_usd > 0:
+                pnl_pct = round(usd_received / pos_usd - 1, 4)
+                pnl_usd = round(pos_usd * pnl_pct, 2)
+                exit_price = entry_price * (usd_received / pos_usd) if pos_usd > 0 else 0
+            else:
+                exit_price = 0
+        else:
+            exit_price = float(trade.get("sl_price") or 0)
+            sol_price = _get_sol_price_usd()
+    except Exception as e:
+        logger.warning("_handle_trigger_fill: PnL calc error for %s: %s", trade["symbol"], e)
+        exit_price = float(trade.get("sl_price") or 0)
+        sol_price = _get_sol_price_usd()
+
+    # Determine exit reason (trigger = SL hit by keeper)
+    new_status = "sl_hit"  # trigger orders are SL-only for now
+
+    # Elapsed time
+    elapsed_minutes = 0
+    created = trade.get("created_at")
+    if created:
+        try:
+            from datetime import datetime as _dt
+            ct = _dt.fromisoformat(created.replace("Z", "+00:00")) if isinstance(created, str) else created
+            elapsed_minutes = int((now - ct).total_seconds() / 60)
+        except Exception:
+            pass
+
+    # Update DB
+    update = {
+        "status": new_status,
+        "exit_price": exit_price,
+        "exit_at": now.isoformat(),
+        "pnl_pct": pnl_pct,
+        "pnl_usd": pnl_usd,
+        "exit_minutes": elapsed_minutes,
+        "trigger_order_id": None,  # consumed
+        "sell_sol_received": round(sol_received, 6) if sol_received else None,
+        "sol_price_at_exit": sol_price,
+    }
+
+    try:
+        client_sb.table("paper_trades").update(update).eq("id", trade["id"]).execute()
+    except Exception as e:
+        logger.error("CRITICAL: trigger fill for %s but DB update failed: %s", trade["symbol"], e)
+        return
+
+    # Track PnL
+    if sol_price > 0:
+        _track_pnl(pnl_usd / sol_price)
+
+    logger.info(
+        "TRIGGER FILL: %s %s — %s pnl=%.1f%% $%+.2f | keeper executed SL",
+        trade["symbol"], trade.get("strategy", ""), new_status,
+        pnl_pct * 100, pnl_usd,
+    )
+
+    # Alert
+    try:
+        from alerter import alert_live_sell
+        alert_live_sell(
+            symbol=trade["symbol"], strategy=trade.get("strategy", ""),
+            exit_reason=new_status,
+            pnl_pct=pnl_pct, pnl_usd=pnl_usd,
+            position_usd=pos_usd,
+            entry_price=entry_price, exit_price=exit_price,
+            sol_received=sol_received,
+            minutes=elapsed_minutes,
+            kol=trade.get("kol_group", ""),
+            signature="trigger-fill",
+            sol_price=sol_price,
+            ca=trade.get("token_address", ""),
+            high_price=float(trade.get("high_price_seen") or 0),
+        )
+    except Exception:
+        pass
 
 
 def check_live_trades(client_sb) -> dict:
@@ -763,6 +894,27 @@ def check_live_trades(client_sb) -> dict:
 
     result_counts["checked"] = len(open_trades)
 
+    # v119: Check trigger order fills FIRST (faster than DexScreener)
+    remaining_trades = []
+    for trade in open_trades:
+        trigger_id = trade.get("trigger_order_id")
+        if trigger_id:
+            try:
+                from jupiter_trigger import check_order_status
+                order_status = check_order_status(trigger_id)
+                if order_status and order_status.get("state") in ("filled", "completed"):
+                    _handle_trigger_fill(client_sb, trade, order_status, now)
+                    result_counts["closed"] += 1
+                    result_counts["pnl_usd"] += 0  # computed inside _handle_trigger_fill
+                    continue  # skip this trade in price check loop
+            except Exception as e:
+                logger.debug("trigger status check failed for %s: %s", trade["symbol"], e)
+        remaining_trades.append(trade)
+    open_trades = remaining_trades
+
+    if not open_trades:
+        return result_counts
+
     # Batch fetch current prices
     addresses = list({t["token_address"] for t in open_trades})
     prices = _fetch_prices_batch(addresses)
@@ -790,6 +942,31 @@ def check_live_trades(client_sb) -> dict:
                 except Exception as e:
                     logger.debug("live_trader: high_price_seen update failed for %s: %s", trade["symbol"], e)
 
+                # v119: PATCH trigger SL upward when trail activates
+                trigger_id = trade.get("trigger_order_id")
+                if trigger_id:
+                    try:
+                        from paper_trader import _get_trail_config
+                        trail_pct, activation_pct = _get_trail_config(trade)
+                        if trail_pct is not None:
+                            entry_p = float(trade.get("entry_price") or 0)
+                            activation_price = entry_p * (1 + activation_pct)
+                            if new_high >= activation_price:
+                                new_sl = new_high * (1 - trail_pct)
+                                old_sl = float(trade.get("sl_price") or 0)
+                                if new_sl > old_sl:
+                                    from jupiter_trigger import update_sl_price
+                                    if update_sl_price(trigger_id, new_sl):
+                                        client_sb.table("paper_trades").update(
+                                            {"sl_price": new_sl}
+                                        ).eq("id", trade["id"]).execute()
+                                        logger.info(
+                                            "TRAIL PATCH: %s SL $%.8f → $%.8f (high=$%.8f)",
+                                            trade["symbol"], old_sl, new_sl, new_high,
+                                        )
+                    except Exception as e:
+                        logger.debug("trail PATCH failed for %s: %s", trade["symbol"], e)
+
         new_status = ev.get("status")
         if new_status is None:
             continue
@@ -806,6 +983,15 @@ def check_live_trades(client_sb) -> dict:
                     elapsed_minutes = int((now - ct).total_seconds() / 60)
                 except Exception:
                     elapsed_minutes = 0
+
+        # v119: Cancel trigger order before market selling (avoid double-sell)
+        trigger_id = trade.get("trigger_order_id")
+        if trigger_id:
+            try:
+                from jupiter_trigger import cancel_order
+                cancel_order(trigger_id)
+            except Exception:
+                pass  # Best effort — market sell proceeds regardless
 
         # Execute sell BEFORE updating DB
         sell_result = execute_sell(addr)
