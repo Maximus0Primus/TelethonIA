@@ -400,7 +400,8 @@ def check_order_status(order_id: str) -> dict | None:
             timeout=TIMEOUT,
         )
         resp.raise_for_status()
-        orders = resp.json()
+        data = resp.json()
+        orders = data.get("orders", data) if isinstance(data, dict) else data
         if isinstance(orders, list):
             for o in orders:
                 oid = o.get("id") or o.get("orderId")
@@ -415,7 +416,8 @@ def check_order_status(order_id: str) -> dict | None:
             timeout=TIMEOUT,
         )
         resp2.raise_for_status()
-        past_orders = resp2.json()
+        data2 = resp2.json()
+        past_orders = data2.get("orders", data2) if isinstance(data2, dict) else data2
         if isinstance(past_orders, list):
             for o in past_orders:
                 oid = o.get("id") or o.get("orderId")
