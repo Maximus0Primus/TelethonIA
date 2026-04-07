@@ -261,7 +261,7 @@ def execute_buy(ca: str, amount_sol_lamports: int, slippage_bps: int = 300) -> d
         return {"success": False, "signature": "", "error": str(e)}
 
 
-def execute_sell(ca: str, amount_tokens: int | None = None, slippage_bps: int = 500) -> dict:
+def execute_sell(ca: str, amount_tokens: int | None = None, slippage_bps: int = 1000) -> dict:
     """
     Execute a sell swap: token → SOL via Jupiter Ultra.
     If amount_tokens is None, sells entire balance of that token.
@@ -858,9 +858,9 @@ def check_live_trades(client_sb) -> dict:
                     sell_slippage_bps = round((1 - usd_received_actual / expected_usd) * 10000)
 
             # v105: Alert on high sell slippage
-            if abs(sell_slippage_bps) > 500:
+            if abs(sell_slippage_bps) > 1000:
                 from alerter import alert_slippage_deviation
-                alert_slippage_deviation(trade["symbol"], 500, sell_slippage_bps)
+                alert_slippage_deviation(trade["symbol"], 1000, sell_slippage_bps)
 
             sell_sol_received = (sell_output / LAMPORTS_PER_SOL) if sell_output else None
         except Exception as e:
