@@ -1054,8 +1054,14 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
 
 def _dynamic_sell_slip_factor(trade: dict, exit_type: str, base_bps: int = 200,
                               fee_bps: int = SELL_FEE_BPS) -> float:
-    """v94: Dynamic sell slippage + fee based on liquidity and exit type.
-    SL hits during dumps = worse slippage. TP hits during pumps = near-base.
+    """v119: Dynamic sell slippage calibrated from live Jupiter data.
+
+    Live observations (17 trades):
+      trail_UP (sell during uptrend):  ~0-2% slippage — Jupiter fills well
+      trail_CRASH (sell during crash): ~20-55% slippage — liquidity vanishes
+      sl_hit:                          ~5-10% slippage — moderate dump
+      tp_hit / timeout:                ~0-2% slippage — normal conditions
+
     fee_bps = Jupiter priority fee (flat, added on top of slippage).
     Batch trades (no rt_liquidity_usd) fall back to 50K default = 2% base."""
     liq_usd = float(trade.get("rt_liquidity_usd") or 50_000)
@@ -1063,12 +1069,20 @@ def _dynamic_sell_slip_factor(trade: dict, exit_type: str, base_bps: int = 200,
     # Liquidity multiplier: $50K+ = 1x, $5K = 2x, $1K = 4x
     liq_mult = max(1.0, min(4.0, 50_000 / max(liq_usd, 1_000)))
 
-    # Exit type multiplier: SL = 1.5x (selling into dump), TP = 1.0x (selling into pump)
-    exit_mult = 1.5 if exit_type == "sl_hit" else 1.0
+    # v119: Exit type multiplier calibrated from live data
+    if exit_type == "trail_crash":
+        exit_mult = 3.0   # crash: live shows 20-55% effective slippage
+    elif exit_type == "sl_hit":
+        exit_mult = 2.0   # SL dump: live shows 5-10% slippage
+    elif exit_type == "trail_stop":
+        exit_mult = 1.2   # normal pullback: slightly worse than calm sell
+    else:
+        exit_mult = 1.0   # tp_hit, timeout: normal conditions
 
     adjusted_bps = int(base_bps * liq_mult * exit_mult) + fee_bps
-    # Cap at 15% to avoid absurd numbers
-    adjusted_bps = min(adjusted_bps, 1500)
+    # v119: Higher cap for crash (50%) vs normal (15%)
+    max_bps = 5000 if exit_type == "trail_crash" else 1500
+    adjusted_bps = min(adjusted_bps, max_bps)
 
     return 1 - adjusted_bps / 10_000
 
@@ -1275,7 +1289,15 @@ def _evaluate_trade_exit(trade: dict, current_price: float | None,
                 trail_trigger = high_seen * (1 - trail_pct)
                 if current_price <= trail_trigger and trail_trigger > entry_price:
                     new_status = "trail_stop"
-                    exit_price = trail_trigger * _dynamic_sell_slip_factor(trade, "tp_hit", base_bps, sell_fee_bps)
+                    # v119: Detect crash vs normal pullback using price-to-trigger ratio
+                    # If current_price is >5% below trail_trigger, it's a crash
+                    crash_ratio = current_price / trail_trigger if trail_trigger > 0 else 1.0
+                    if crash_ratio < 0.95:
+                        # Crash: price already well below trigger — use current_price as base
+                        exit_price = current_price * _dynamic_sell_slip_factor(trade, "trail_crash", base_bps, sell_fee_bps)
+                    else:
+                        # Normal pullback: use current_price with mild penalty
+                        exit_price = current_price * _dynamic_sell_slip_factor(trade, "trail_stop", base_bps, sell_fee_bps)
     # 4) Timeout
     if new_status is None and elapsed_minutes >= horizon:
         new_status = "timeout"
