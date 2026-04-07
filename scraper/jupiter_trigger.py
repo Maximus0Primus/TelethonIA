@@ -253,7 +253,9 @@ def place_stop_loss(
             },
             timeout=TIMEOUT,
         )
-        resp.raise_for_status()
+        if resp.status_code != 200:
+            logger.warning("jupiter_trigger: deposit/craft %d: %s", resp.status_code, resp.text[:500])
+            return None
         deposit = resp.json()
 
         tx_b64 = deposit.get("transaction")
@@ -290,7 +292,9 @@ def place_stop_loss(
             },
             timeout=TIMEOUT,
         )
-        resp2.raise_for_status()
+        if resp2.status_code != 200:
+            logger.warning("jupiter_trigger: orders/price %d: %s", resp2.status_code, resp2.text[:500])
+            return None
         order = resp2.json()
 
         order_id = order.get("id") or order.get("orderId")
@@ -323,7 +327,10 @@ def update_sl_price(order_id: str, new_sl_price_usd: float) -> bool:
             json={"triggerPriceUsd": new_sl_price_usd},
             timeout=TIMEOUT,
         )
-        resp.raise_for_status()
+        if resp.status_code != 200:
+            logger.warning("jupiter_trigger: update_sl_price %d for %s: %s",
+                           resp.status_code, order_id[:16], resp.text[:300])
+            return False
         return True
     except Exception as e:
         logger.warning("jupiter_trigger: update_sl_price failed for %s: %s",
