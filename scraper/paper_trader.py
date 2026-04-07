@@ -2000,10 +2000,12 @@ def check_paper_trades_fast(client) -> dict:
 
     _sell_slip_bps = SELL_SLIPPAGE_BPS
     _sell_fee_bps = SELL_FEE_BPS
+    _active_strats = []
     try:
         _cfg = _load_paper_trade_config(client)
         _sell_slip_bps = int(_cfg.get("sell_slippage_bps", SELL_SLIPPAGE_BPS))
         _sell_fee_bps = int(_cfg.get("sell_fee_bps", SELL_FEE_BPS))
+        _active_strats = _cfg.get("active_strategies", [])
     except Exception:
         pass
     _sell_slip_factor = 1 - _sell_slip_bps / 10_000
