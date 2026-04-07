@@ -283,7 +283,7 @@ def alert_live_buy(symbol: str, strategy: str, position_sol: float,
         f"🎯 Strat: {short_strat(strategy)}\n"
         f"👤 KOL: {kol}\n"
         f"⭐ Score: {score:.0f} | MCap: {mcap_str}\n"
-        f"⚡ Slip: {slippage_bps}bps | {exec_ms}ms\n"
+        f"⚡ Slip: {slippage_bps/100:.1f}% | {exec_ms}ms\n"
         f"💵 SOL: ${sol_price:.2f}\n"
         f'🔗 <a href="{solscan}">Solscan</a>'
         + (f' | <a href="{dex}">DexScreener</a>' if dex else "")
@@ -328,7 +328,7 @@ def alert_live_sell(symbol: str, strategy: str, exit_reason: str,
         f"🔝 Max: {max_gain:+.0f}%\n"
         f"🎯 Strat: {short_strat(strategy)}\n"
         f"👤 KOL: {kol}\n"
-        f"⚡ Slip: {slippage_bps}bps | {exec_ms}ms\n"
+        f"⚡ Slip: {slippage_bps/100:.1f}% | {exec_ms}ms\n"
         f'🔗 <a href="{solscan}">Solscan</a>'
         + (f' | <a href="{dex}">DexScreener</a>' if dex else "")
     )
