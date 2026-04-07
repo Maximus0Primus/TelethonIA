@@ -265,8 +265,78 @@ def send_startup_message(total_groups: int, rt_groups: int):
     _send(text, "startup")
 
 
+def alert_live_buy(symbol: str, strategy: str, position_sol: float,
+                   position_usd: float, entry_price: float, score: float,
+                   kol: str, mcap: float, signature: str,
+                   slippage_bps: int = 0, exec_ms: int = 0,
+                   sol_price: float = 0, ca: str = ""):
+    """v119: Detailed Telegram alert for live buy execution."""
+    solscan = f"https://solscan.io/tx/{signature}"
+    dex = f"https://dexscreener.com/solana/{ca}" if ca else ""
+
+    mcap_str = f"${mcap/1000:.0f}K" if mcap < 1_000_000 else f"${mcap/1_000_000:.1f}M"
+
+    text = (
+        f"🟢 <b>LIVE BUY: ${symbol}</b>\n\n"
+        f"💰 {position_sol:.4f} SOL (${position_usd:.2f})\n"
+        f"📊 Entry: ${entry_price:.8f}\n"
+        f"🎯 Strat: {short_strat(strategy)}\n"
+        f"👤 KOL: {kol}\n"
+        f"⭐ Score: {score:.0f} | MCap: {mcap_str}\n"
+        f"⚡ Slip: {slippage_bps}bps | {exec_ms}ms\n"
+        f"💵 SOL: ${sol_price:.2f}\n"
+        f'🔗 <a href="{solscan}">Solscan</a>'
+        + (f' | <a href="{dex}">DexScreener</a>' if dex else "")
+    )
+    _send(text, "live_trade")
+
+
+def alert_live_sell(symbol: str, strategy: str, exit_reason: str,
+                    pnl_pct: float, pnl_usd: float, position_usd: float,
+                    entry_price: float, exit_price: float,
+                    sol_received: float, minutes: int,
+                    kol: str, signature: str,
+                    slippage_bps: int = 0, exec_ms: int = 0,
+                    sol_price: float = 0, ca: str = "",
+                    high_price: float = 0):
+    """v119: Detailed Telegram alert for live sell execution."""
+    solscan = f"https://solscan.io/tx/{signature}"
+    dex = f"https://dexscreener.com/solana/{ca}" if ca else ""
+
+    # Emoji
+    if exit_reason == "trail_stop":
+        emoji = "🟢" if pnl_pct > 0.5 else ("✅" if pnl_pct > 0 else "🟡")
+        reason_text = "TRAIL STOP"
+    elif exit_reason == "tp_hit":
+        emoji, reason_text = "🎯", "TP HIT"
+    elif exit_reason == "sl_hit":
+        emoji, reason_text = "🔴", "SL HIT"
+    elif exit_reason == "timeout":
+        emoji = "⏰" if pnl_pct >= 0 else "🟠"
+        reason_text = "TIMEOUT"
+    else:
+        emoji, reason_text = "📊", exit_reason.upper()
+
+    max_gain = ((high_price / entry_price) - 1) * 100 if entry_price and high_price else 0
+
+    text = (
+        f"{emoji} <b>LIVE SELL: ${symbol}</b> — {reason_text}\n\n"
+        f"📈 PnL: <b>{pnl_pct*100:+.1f}%</b> (${pnl_usd:+.2f})\n"
+        f"💰 Reçu: {sol_received:.4f} SOL (${sol_received * sol_price:.2f})\n"
+        f"💵 Position: ${position_usd:.2f} | ⏱ {minutes}min\n"
+        f"📊 Entry: ${entry_price:.8f} → Exit: ${exit_price:.8f}\n"
+        f"🔝 Max: {max_gain:+.0f}%\n"
+        f"🎯 Strat: {short_strat(strategy)}\n"
+        f"👤 KOL: {kol}\n"
+        f"⚡ Slip: {slippage_bps}bps | {exec_ms}ms\n"
+        f'🔗 <a href="{solscan}">Solscan</a>'
+        + (f' | <a href="{dex}">DexScreener</a>' if dex else "")
+    )
+    _send(text, "live_trade")
+
+
 def alert_live_trade(symbol: str, action: str, amount_sol: float, signature: str):
-    """v72: Send Telegram alert for every live trade execution."""
+    """v72: LEGACY — kept for backwards compat. Use alert_live_buy/alert_live_sell instead."""
     solscan_link = f"https://solscan.io/tx/{signature}"
     emoji = "BUY" if action == "BUY" else "SELL"
     text = (

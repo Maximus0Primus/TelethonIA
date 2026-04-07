@@ -599,7 +599,7 @@ def open_live_trade(client_sb, token_entry: dict, strategy: str,
     position_usd = round(position_sol * sol_price, 2)
 
     lamports = int(position_sol * LAMPORTS_PER_SOL)
-    slippage = int(config.get("slippage_buy_bps", 300))
+    slippage = int(config.get("slippage_buy_bps", 500))
 
     # Execute the buy
     result = execute_buy(ca, lamports, slippage)
@@ -707,10 +707,20 @@ def open_live_trade(client_sb, token_entry: dict, strategy: str,
             "LIVE TRADE OPENED: %s %s @ $%.8f | %.4f SOL ($%.2f) | sig: %s",
             symbol, strategy, entry_price, position_sol, position_usd, result["signature"][:16],
         )
-        # Alert via Telegram
+        # Alert via Telegram — v119: detailed buy alert
         try:
-            from alerter import alert_live_trade
-            alert_live_trade(symbol, "BUY", position_sol, result["signature"])
+            from alerter import alert_live_buy
+            alert_live_buy(
+                symbol=symbol, strategy=strategy,
+                position_sol=position_sol, position_usd=position_usd,
+                entry_price=execution_price, score=float(token_entry.get("score", 0)),
+                kol=token_entry.get("_rt_kol_group", ""),
+                mcap=float(token_entry.get("market_cap", 0)),
+                signature=result["signature"],
+                slippage_bps=actual_slippage_bps,
+                exec_ms=result.get("exec_ms", 0),
+                sol_price=sol_price, ca=ca,
+            )
         except Exception:
             pass
         return True
@@ -909,13 +919,24 @@ def check_live_trades(client_sb) -> dict:
             pnl_pct * 100, pnl_usd, sell_result["signature"][:16],
         )
 
-        # Alert via Telegram
+        # Alert via Telegram — v119: detailed sell alert
         try:
-            from alerter import alert_live_trade
-            alert_live_trade(
-                trade["symbol"], "SELL",
-                abs(pnl_usd / sol_price) if sol_price else 0,
-                sell_result["signature"],
+            from alerter import alert_live_sell
+            alert_live_sell(
+                symbol=trade["symbol"], strategy=trade.get("strategy", ""),
+                exit_reason=new_status,
+                pnl_pct=pnl_pct, pnl_usd=pnl_usd,
+                position_usd=pos_usd,
+                entry_price=entry_price, exit_price=exit_price,
+                sol_received=sell_sol_received or 0,
+                minutes=int(elapsed_minutes),
+                kol=trade.get("kol_group", ""),
+                signature=sell_result["signature"],
+                slippage_bps=sell_slippage_bps,
+                exec_ms=sell_result.get("exec_ms", 0),
+                sol_price=sol_price_at_exit,
+                ca=trade.get("token_address", ""),
+                high_price=float(trade.get("high_price_seen") or 0),
             )
         except Exception:
             pass
@@ -993,21 +1014,44 @@ def reconcile_positions(client_sb) -> dict:
                 logger.error("reconcile: failed to close trade %s: %s", trade["id"], e)
 
     # Check reverse: on-chain tokens not tracked in DB (orphaned positions)
+    # v119: Auto-sell orphaned tokens to recover SOL
     tracked_cas = {t["token_address"] for t in open_trades if t.get("token_address")}
     for mint in on_chain_mints:
         if mint not in tracked_cas and mint != WSOL_MINT:
             bal = balances["token_balances"][mint]
             if bal.get("ui_amount", 0) > 0:
                 logger.warning(
-                    "RECONCILE: on-chain token %s (%.4f) not tracked in DB — orphaned position",
+                    "RECONCILE: on-chain token %s (%.4f) not tracked in DB — orphaned position, attempting auto-sell",
                     mint[:12], bal["ui_amount"],
                 )
                 result["mismatches"] += 1
-                result["details"].append({
-                    "ca": mint,
-                    "issue": "on_chain_but_not_in_db",
-                    "ui_amount": bal["ui_amount"],
-                })
+                # Try to sell the orphaned tokens
+                sell_res = execute_sell(mint, slippage_bps=1000)  # higher slippage for stale tokens
+                if sell_res["success"]:
+                    sol_recovered = (sell_res.get("output_amount") or 0) / LAMPORTS_PER_SOL
+                    logger.info(
+                        "RECONCILE: auto-sold orphan %s — recovered %.4f SOL (sig: %s)",
+                        mint[:12], sol_recovered, sell_res.get("signature", "")[:16],
+                    )
+                    result["auto_closed"] += 1
+                    result["details"].append({
+                        "ca": mint,
+                        "issue": "orphan_auto_sold",
+                        "ui_amount": bal["ui_amount"],
+                        "sol_recovered": sol_recovered,
+                        "signature": sell_res.get("signature"),
+                    })
+                else:
+                    logger.warning(
+                        "RECONCILE: failed to sell orphan %s: %s",
+                        mint[:12], sell_res.get("error"),
+                    )
+                    result["details"].append({
+                        "ca": mint,
+                        "issue": "on_chain_but_not_in_db",
+                        "ui_amount": bal["ui_amount"],
+                        "sell_error": sell_res.get("error"),
+                    })
 
     if result["mismatches"] > 0:
         logger.info(

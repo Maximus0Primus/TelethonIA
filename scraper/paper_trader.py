@@ -1626,7 +1626,7 @@ def check_paper_trades(client) -> dict:
     now = datetime.now(timezone.utc)
 
     try:
-        result = client.table("paper_trades").select("*").eq("status", "open").execute()
+        result = client.table("paper_trades").select("*").eq("status", "open").neq("source", "rt_live").execute()
         open_trades = result.data or []
         if _monitoring:
             _estimate_egress("paper_trader", "paper_trades", len(open_trades))
