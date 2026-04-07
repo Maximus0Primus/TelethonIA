@@ -599,7 +599,7 @@ def open_live_trade(client_sb, token_entry: dict, strategy: str,
     position_usd = round(position_sol * sol_price, 2)
 
     lamports = int(position_sol * LAMPORTS_PER_SOL)
-    slippage = int(config.get("slippage_buy_bps", 500))
+    slippage = int(config.get("slippage_buy_bps", 1000))
 
     # Execute the buy
     result = execute_buy(ca, lamports, slippage)
