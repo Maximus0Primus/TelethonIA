@@ -2176,6 +2176,13 @@ async def main():
                     continue
 
                 _consecutive_empty = 0
+                # v120: Log when live trades exist but none closed (every 6th = ~1min)
+                if closed == 0 and not hasattr(live_trade_monitor_loop, '_open_log_ctr'):
+                    live_trade_monitor_loop._open_log_ctr = 0
+                if closed == 0:
+                    live_trade_monitor_loop._open_log_ctr = getattr(live_trade_monitor_loop, '_open_log_ctr', 0) + 1
+                    if live_trade_monitor_loop._open_log_ctr % 6 == 1:
+                        logger.info("LIVE MONITOR: %d open trades, no exit yet", checked)
                 if closed > 0:
                     logger.info(
                         "LIVE MONITOR: closed %d/%d trades (TP=%d SL=%d TO=%d) pnl=$%+.2f",

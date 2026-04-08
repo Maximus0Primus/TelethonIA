@@ -1969,6 +1969,7 @@ def check_paper_trades_fast(client) -> dict:
             client.table("paper_trades")
             .select("*")
             .eq("status", "open")
+            .neq("source", "rt_live")  # v120: rt_live trades handled by live_trade_monitor (needs Jupiter sell)
             .gte("created_at", cutoff)
             .execute()
         )

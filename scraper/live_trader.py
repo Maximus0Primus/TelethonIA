@@ -927,6 +927,10 @@ def check_live_trades(client_sb) -> dict:
         addr = trade["token_address"]
         current_price = prices.get(addr)
 
+        # v120: Warn if price is None — trade can't exit without a price
+        if current_price is None:
+            logger.warning("live_trader: no price for %s (%s) — exit eval skipped", trade["symbol"], addr[:8])
+
         # v113: Use paper_trader's full evaluation (DTRAIL, TRAIL, BE, DECAY, etc.)
         # sell_slip_factor=1.0 because live uses real Jupiter execution, not simulated slippage
         ev = _evaluate_trade_exit(trade, current_price, now, sell_slip_factor=1.0, sell_fee_bps=0)
