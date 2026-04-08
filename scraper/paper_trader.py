@@ -70,13 +70,16 @@ SHADOW_STRATEGIES = [
     "TP30_SL10",
 ]
 
-# v73: Slippage simulation — realistic entry/exit price adjustments
-BUY_SLIPPAGE_BPS = 100   # 1.0% buy slippage (v92: was 150 — too aggressive)
-SELL_SLIPPAGE_BPS = 200   # 2.0% sell slippage (v92: was 300 — TP needed +54% raw move)
+# v121: Slippage calibrated from 33 live Jupiter Ultra RFQ trades.
+# Ultra uses market-maker fills (NOT AMM routing) → near-zero slippage.
+# Real data: buy=-10bps (Jupiter platform fee), sell=0-2bps normal, 2000-5500bps crash.
+# Old values (100/200 + 50/50 fees) were AMM-era — overestimated costs by ~4-5% per trade.
+BUY_SLIPPAGE_BPS = 10    # 0.1% — Jupiter Ultra platform fee (was 100)
+SELL_SLIPPAGE_BPS = 10   # 0.1% — Jupiter Ultra platform fee (was 200)
 
-# v94: Fee simulation — Jupiter priority fees on buy + sell
-BUY_FEE_BPS = 50    # 0.5% Jupiter priority fee on buy
-SELL_FEE_BPS = 50   # 0.5% Jupiter priority fee on sell
+# v121: Fees folded into slippage above. Jupiter Ultra has no separate fee.
+BUY_FEE_BPS = 0     # 0% — included in slippage above (was 50)
+SELL_FEE_BPS = 0    # 0% — included in slippage above (was 50)
 
 # --- Strategy Definitions ---
 # Each strategy has a list of tranches. Moonbag tranches have tp_mult=None.
@@ -507,10 +510,41 @@ def _fetch_price_fallback(address: str) -> float | None:
 
 # v118: Price tick logger — records DexScreener spot prices for future backtesting
 _last_tick_log: dict[str, float] = {}  # token_address -> last log timestamp
+_last_dex_extra: dict[str, dict] = {}  # v121: token_address -> {volume_usd, liquidity_usd}
+
+# v121: Cached SOL price for paper trade USD context
+_cached_sol_price: float = 0.0
+_cached_sol_price_ts: float = 0.0
 
 
-def _log_price_ticks(client, prices: dict[str, float], source: str = "check"):
-    """Log DexScreener spot prices to price_ticks table. Throttled to 1/min per token."""
+def _get_sol_price() -> float:
+    """Get SOL/USD price, cached for 60s. For paper trade sol_price_at_entry/exit."""
+    global _cached_sol_price, _cached_sol_price_ts
+    now = _time_mod.time()
+    if _cached_sol_price > 0 and now - _cached_sol_price_ts < 60:
+        return _cached_sol_price
+    try:
+        resp = requests.get(
+            "https://api.dexscreener.com/tokens/v1/solana/So11111111111111111111111111111111111111112",
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            pairs = resp.json()
+            if isinstance(pairs, list) and pairs:
+                price = float(pairs[0].get("priceUsd", 0))
+                if price > 0:
+                    _cached_sol_price = price
+                    _cached_sol_price_ts = now
+                    return price
+    except Exception:
+        pass
+    return _cached_sol_price or 80.0  # fallback
+
+
+def _log_price_ticks(client, prices: dict[str, float], source: str = "check",
+                     live_tokens: set | None = None):
+    """Log DexScreener spot prices to price_ticks table.
+    v121: Includes volume/liquidity. Throttle: 15s for live trades, 60s for paper."""
     if not prices or not client:
         return
     now = _time_mod.time()
@@ -519,10 +553,18 @@ def _log_price_ticks(client, prices: dict[str, float], source: str = "check"):
         if price <= 0:
             continue
         last = _last_tick_log.get(addr, 0)
-        if now - last < 60:  # throttle: max 1 insert per token per minute
+        # v121: 15s throttle for tokens with open live trades, 60s for paper-only
+        throttle = 15 if (live_tokens and addr in live_tokens) else 60
+        if now - last < throttle:
             continue
         _last_tick_log[addr] = now
-        rows.append({"token_address": addr, "price_usd": price, "source": source})
+        row = {"token_address": addr, "price_usd": price, "source": source}
+        # v121: Enrich with volume/liquidity from DexScreener (same API call)
+        extra = _last_dex_extra.get(addr)
+        if extra:
+            row["volume_usd"] = extra.get("volume_usd")
+            row["liquidity_usd"] = extra.get("liquidity_usd")
+        rows.append(row)
     if not rows:
         return
     try:
@@ -564,6 +606,11 @@ def _fetch_prices_batch(addresses: list[str]) -> dict[str, float]:
                 if price:
                     try:
                         prices[addr] = float(price)
+                        # v121: Cache volume/liquidity for price tick enrichment
+                        _last_dex_extra[addr] = {
+                            "volume_usd": float(best.get("volume", {}).get("h24", 0) or 0),
+                            "liquidity_usd": float(best.get("liquidity", {}).get("usd", 0) or 0),
+                        }
                     except (ValueError, TypeError):
                         pass
         except requests.RequestException as e:
@@ -828,6 +875,7 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
             "whale_new_entries": token.get("whale_new_entries"),
             "momentum_mult": float(token["momentum_mult"]) if token.get("momentum_mult") else None,
             "portfolio_budget": budget_usd,
+            "sol_price_at_entry": _get_sol_price(),  # v121: SOL context for USD comparison
         }
         # v96: Batch KOL attribution — propagate top_kol as kol_group + source="batch"
         if not token.get("_rt_source"):
@@ -1052,36 +1100,37 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
     return opened
 
 
-def _dynamic_sell_slip_factor(trade: dict, exit_type: str, base_bps: int = 200,
+def _dynamic_sell_slip_factor(trade: dict, exit_type: str, base_bps: int = 10,
                               fee_bps: int = SELL_FEE_BPS) -> float:
-    """v119: Dynamic sell slippage calibrated from live Jupiter data.
+    """v121: Dynamic sell slippage calibrated from 33 live Jupiter Ultra RFQ trades.
 
-    Live observations (17 trades):
-      trail_UP (sell during uptrend):  ~0-2% slippage — Jupiter fills well
-      trail_CRASH (sell during crash): ~20-55% slippage — liquidity vanishes
-      sl_hit:                          ~5-10% slippage — moderate dump
-      tp_hit / timeout:                ~0-2% slippage — normal conditions
+    Jupiter Ultra uses market-maker RFQ fills — near-zero slippage for normal exits.
+    Real data (33 trades):
+      trail_stop / tp_hit / timeout:   0-2 bps slippage (market maker fills tight)
+      sl_hit:                          varies — depends on dump speed + liquidity
+      trail_crash:                     2000-5500 bps — liquidity vanishes in crash
 
-    fee_bps = Jupiter priority fee (flat, added on top of slippage).
-    Batch trades (no rt_liquidity_usd) fall back to 50K default = 2% base."""
+    base_bps = 10 (Jupiter Ultra 0.1% platform fee).
+    Batch trades (no rt_liquidity_usd) fall back to 50K default."""
     liq_usd = float(trade.get("rt_liquidity_usd") or 50_000)
 
     # Liquidity multiplier: $50K+ = 1x, $5K = 2x, $1K = 4x
     liq_mult = max(1.0, min(4.0, 50_000 / max(liq_usd, 1_000)))
 
-    # v119: Exit type multiplier calibrated from live data
+    # v121: Exit type multiplier — crash exits have massive slippage,
+    # normal exits are near-zero with RFQ market makers.
     if exit_type == "trail_crash":
-        exit_mult = 3.0   # crash: live shows 20-55% effective slippage
+        exit_mult = 30.0   # crash: base 10 * 30 = 300bps minimum, scales with liq
     elif exit_type == "sl_hit":
-        exit_mult = 2.0   # SL dump: live shows 5-10% slippage
+        exit_mult = 15.0   # SL dump: base 10 * 15 = 150bps minimum
     elif exit_type == "trail_stop":
-        exit_mult = 1.2   # normal pullback: slightly worse than calm sell
+        exit_mult = 1.5    # normal pullback: ~15bps
     else:
-        exit_mult = 1.0   # tp_hit, timeout: normal conditions
+        exit_mult = 1.0    # tp_hit, timeout: ~10bps (just the platform fee)
 
     adjusted_bps = int(base_bps * liq_mult * exit_mult) + fee_bps
-    # v119: Higher cap for crash (50%) vs normal (15%)
-    max_bps = 5000 if exit_type == "trail_crash" else 1500
+    # v121: Higher cap for crash (55%) vs normal (5%) — calibrated from live data
+    max_bps = 5500 if exit_type == "trail_crash" else 500
     adjusted_bps = min(adjusted_bps, max_bps)
 
     return 1 - adjusted_bps / 10_000
@@ -1321,6 +1370,7 @@ def _evaluate_trade_exit(trade: dict, current_price: float | None,
         "pnl_pct": pnl_pct,
         "pnl_usd": pnl_usd,
         "exit_minutes": int(elapsed_minutes),
+        "sol_price_at_exit": _get_sol_price(),  # v121: SOL context at exit
     })
     return result
 
@@ -1734,7 +1784,7 @@ def check_paper_trades(client) -> dict:
         if new_status == "sl_hit" and not is_cascade:
             sl_triggered.add(group_key)
 
-        update = {k: ev[k] for k in ("status", "exit_price", "exit_at", "pnl_pct", "pnl_usd", "exit_minutes") if k in ev}
+        update = {k: ev[k] for k in ("status", "exit_price", "exit_at", "pnl_pct", "pnl_usd", "exit_minutes", "sol_price_at_exit") if k in ev}
         if ev.get("high_price_seen") is not None:
             update["high_price_seen"] = ev["high_price_seen"]
 
@@ -1814,7 +1864,7 @@ def check_paper_trades(client) -> dict:
             continue
 
         pnl_usd = ev.get("pnl_usd")
-        update = {k: ev[k] for k in ("status", "exit_price", "exit_at", "pnl_pct", "pnl_usd", "exit_minutes") if k in ev}
+        update = {k: ev[k] for k in ("status", "exit_price", "exit_at", "pnl_pct", "pnl_usd", "exit_minutes", "sol_price_at_exit") if k in ev}
         if ev.get("high_price_seen") is not None:
             update["high_price_seen"] = ev["high_price_seen"]
 
@@ -2032,7 +2082,7 @@ def check_paper_trades_fast(client) -> dict:
         if "status" not in ev:
             continue
 
-        update = {k: ev[k] for k in ("status", "exit_price", "exit_at", "pnl_pct", "pnl_usd", "exit_minutes") if k in ev}
+        update = {k: ev[k] for k in ("status", "exit_price", "exit_at", "pnl_pct", "pnl_usd", "exit_minutes", "sol_price_at_exit") if k in ev}
         if ev.get("high_price_seen") is not None:
             update["high_price_seen"] = ev["high_price_seen"]
 

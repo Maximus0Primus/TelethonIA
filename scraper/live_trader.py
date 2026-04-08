@@ -598,6 +598,24 @@ def open_live_trade(client_sb, token_entry: dict, strategy: str,
     except Exception as e:
         logger.warning("live_trader: failed to check open positions: %s", e)
 
+    # v121: 24h dedup cooldown — same as paper trades. Prevents re-entering dead tokens.
+    dedup_hours = int(config.get("dedup_cooldown_hours", 24))
+    try:
+        cutoff = (datetime.now(timezone.utc) - __import__("datetime").timedelta(hours=dedup_hours)).isoformat()
+        dedup_res = (
+            client_sb.table("paper_trades")
+            .select("id", count="exact")
+            .eq("token_address", ca)
+            .eq("source", "rt_live")
+            .gte("created_at", cutoff)
+            .execute()
+        )
+        if dedup_res.count and dedup_res.count > 0:
+            logger.info("live_trader: dedup cooldown — %s traded in last %dh, skipping", symbol, dedup_hours)
+            return False
+    except Exception as e:
+        logger.debug("live_trader: dedup check failed for %s: %s", symbol, e)
+
     # Convert USD → SOL → lamports
     sol_price = _get_sol_price_usd()
     position_sol = position_usd / sol_price
@@ -723,6 +741,10 @@ def open_live_trade(client_sb, token_entry: dict, strategy: str,
         "buy_exec_ms": result.get("exec_ms"),
         "buy_input_lamports": result.get("input_amount"),  # SOL actually spent
         "buy_output_tokens": result.get("output_amount"),  # tokens received (raw)
+        # v121: DexScreener spot price vs Jupiter fill for slippage calibration
+        "dex_spot_price_at_entry": entry_price,  # DexScreener price BEFORE Jupiter fill
+        # v121: pair_address for OHLCV backtesting on live trades
+        "pair_address": token_entry.get("_rt_pair_address"),
     }
 
     try:
@@ -967,6 +989,10 @@ def check_live_trades(client_sb) -> dict:
     # Batch fetch current prices
     addresses = list({t["token_address"] for t in open_trades})
     prices = _fetch_prices_batch(addresses)
+
+    # v121: Log price ticks at 15s resolution for live trades
+    from paper_trader import _log_price_ticks
+    _log_price_ticks(client_sb, prices, "live", live_tokens=set(addresses))
 
     for trade in open_trades:
         addr = trade["token_address"]
