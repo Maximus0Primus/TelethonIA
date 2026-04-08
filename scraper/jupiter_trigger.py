@@ -196,14 +196,40 @@ def _get_vault() -> str | None:
 # ---------------------------------------------------------------------------
 
 def _sign_transaction(tx_base64: str) -> str | None:
-    """Sign a base64-encoded versioned transaction. Returns signed base64."""
+    """Partial-sign a base64-encoded versioned transaction.
+
+    v120: The tx from Jupiter may already contain signatures from other
+    signers (vault, program). We must preserve those and only fill in our
+    own slot — identified by matching our pubkey in the account keys.
+    """
     kp = _get_keypair()
     if not kp:
         return None
     try:
         tx_bytes = base64.b64decode(tx_base64)
         tx = VersionedTransaction.from_bytes(tx_bytes)
-        signed_tx = VersionedTransaction(tx.message, [kp])
+        msg = tx.message
+
+        # Sign the serialized message with our keypair
+        # VersionedTransaction (v0) signs with 0x80 prefix before message bytes
+        our_sig = kp.sign_message(b"\x80" + bytes(msg))
+        our_pubkey = kp.pubkey()
+
+        # Find our pubkey's position in the static account keys
+        # (signers are always in the first num_required_signatures slots)
+        sigs = list(tx.signatures)
+        found = False
+        for i, key in enumerate(msg.account_keys):
+            if key == our_pubkey:
+                sigs[i] = our_sig
+                found = True
+                break
+
+        if not found:
+            logger.warning("jupiter_trigger: our pubkey %s not in tx account_keys", our_pubkey)
+            return None
+
+        signed_tx = VersionedTransaction.populate(msg, sigs)
         return base64.b64encode(bytes(signed_tx)).decode()
     except Exception as e:
         logger.warning("jupiter_trigger: tx signing failed: %s", e)
