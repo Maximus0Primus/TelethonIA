@@ -350,7 +350,7 @@ def update_sl_price(order_id: str, new_sl_price_usd: float) -> bool:
         resp = requests.patch(
             f"{TRIGGER_BASE}/orders/price/{order_id}",
             headers=headers,
-            json={"triggerPriceUsd": new_sl_price_usd},
+            json={"triggerPriceUsd": new_sl_price_usd, "orderType": "single"},
             timeout=TIMEOUT,
         )
         if resp.status_code != 200:
