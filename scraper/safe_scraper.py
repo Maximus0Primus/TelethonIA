@@ -2140,12 +2140,12 @@ async def main():
             except Exception as e:
                 logger.error("Price refresh failed: %s", e)
 
-    # v72: Dedicated fast-poll loop for live trades (10s interval).
-    # Single owner of check_live_trades() — no calls from price_refresh or cycle-end.
-    LIVE_TRADE_POLL_INTERVAL = 10  # seconds
+    # v72→v121: Live trade monitor — aligned to 30s (same as paper_fast).
+    # Strategies were optimized on 30s paper data; live must match to avoid divergence.
+    LIVE_TRADE_POLL_INTERVAL = 30  # seconds (was 10s, caused paper/live strategy mismatch)
 
     async def live_trade_monitor_loop():
-        """Fast monitoring loop for live trades only. 10s polling."""
+        """Monitoring loop for live trades. 30s polling (aligned with paper_fast)."""
         _consecutive_empty = 0
         while True:
             await asyncio.sleep(LIVE_TRADE_POLL_INTERVAL)
@@ -2198,12 +2198,11 @@ async def main():
             except Exception as e:
                 logger.error("live_trade_monitor error: %s", e)
 
-    # v92→v121: Fast paper trade check — aligned to 10s (same as live_trade_monitor)
-    # so paper DTRAIL10 behaves identically to live DTRAIL10.
-    PAPER_FAST_CHECK_INTERVAL = 10  # seconds (was 30s, caused paper/live divergence)
+    # v92: Fast paper trade check for recent RT trades (30s interval)
+    PAPER_FAST_CHECK_INTERVAL = 30  # seconds
 
     async def paper_fast_check_loop():
-        """Fast check loop for recently opened paper trades (last 30 min). 10s polling."""
+        """Fast check loop for recently opened paper trades (last 30 min). 30s polling."""
         while True:
             await asyncio.sleep(PAPER_FAST_CHECK_INTERVAL)
             try:
