@@ -2198,11 +2198,12 @@ async def main():
             except Exception as e:
                 logger.error("live_trade_monitor error: %s", e)
 
-    # v92: Fast paper trade check for recent RT trades (30s interval)
-    PAPER_FAST_CHECK_INTERVAL = 30  # seconds
+    # v92→v121: Fast paper trade check — aligned to 10s (same as live_trade_monitor)
+    # so paper DTRAIL10 behaves identically to live DTRAIL10.
+    PAPER_FAST_CHECK_INTERVAL = 10  # seconds (was 30s, caused paper/live divergence)
 
     async def paper_fast_check_loop():
-        """Fast check loop for recently opened paper trades (last 30 min). 30s polling."""
+        """Fast check loop for recently opened paper trades (last 30 min). 10s polling."""
         while True:
             await asyncio.sleep(PAPER_FAST_CHECK_INTERVAL)
             try:
