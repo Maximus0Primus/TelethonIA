@@ -56,6 +56,18 @@ def _log_trigger_event(client_sb, *, trade_id=None, token_ca="", token_symbol=""
         logger.debug("trigger_events log failed: %s", e)
 
 
+def _calc_message_to_buy(message_ts_iso: str | None) -> int | None:
+    """v121: Seconds between Telegram message and buy execution."""
+    if not message_ts_iso:
+        return None
+    try:
+        msg_dt = datetime.fromisoformat(message_ts_iso.replace("Z", "+00:00"))
+        delta = (datetime.now(timezone.utc) - msg_dt).total_seconds()
+        return int(delta) if delta >= 0 else None
+    except Exception:
+        return None
+
+
 def _safe_int(val) -> int | None:
     """Convert Jupiter amount result to int, returning None on failure."""
     if val is None:
@@ -732,6 +744,10 @@ def open_live_trade(client_sb, token_entry: dict, strategy: str,
         "rt_buy_sell_ratio": token_entry.get("_rt_buy_sell_ratio"),
         "rt_token_age_hours": token_entry.get("_rt_token_age_hours"),
         "rt_is_pump_fun": token_entry.get("_rt_is_pump_fun"),
+        # v121: Call reaction speed
+        "message_ts": token_entry.get("_rt_message_ts"),
+        "price_at_message": token_entry.get("_rt_price_at_message"),
+        "message_to_buy_seconds": _calc_message_to_buy(token_entry.get("_rt_message_ts")),
         # v105: Fee tracking — actual execution metrics
         "buy_slippage_bps": actual_slippage_bps,
         "buy_fee_bps": slippage,  # configured tolerance
@@ -1119,8 +1135,12 @@ def check_live_trades(client_sb) -> dict:
         sell_result = execute_sell(addr)
         if not sell_result["success"]:
             # v121: Revert status from 'closing' back to 'open' so next cycle retries
+            # Increment sell_attempts counter for congestion tracking
             try:
-                client_sb.table("paper_trades").update({"status": "open"}).eq("id", trade["id"]).execute()
+                cur_attempts = int(trade.get("sell_attempts") or 1)
+                client_sb.table("paper_trades").update(
+                    {"status": "open", "sell_attempts": cur_attempts + 1}
+                ).eq("id", trade["id"]).execute()
             except Exception:
                 pass
             logger.warning(

@@ -511,6 +511,7 @@ def _fetch_price_fallback(address: str) -> float | None:
 # v118: Price tick logger — records DexScreener spot prices for future backtesting
 _last_tick_log: dict[str, float] = {}  # token_address -> last log timestamp
 _last_dex_extra: dict[str, dict] = {}  # v121: token_address -> {volume_usd, liquidity_usd}
+_last_tick_liq: dict[str, float] = {}  # v121: token_address -> last liquidity_usd (for rug detection)
 
 # v121: Cached SOL price for paper trade USD context
 _cached_sol_price: float = 0.0
@@ -562,8 +563,16 @@ def _log_price_ticks(client, prices: dict[str, float], source: str = "check",
         # v121: Enrich with volume/liquidity from DexScreener (same API call)
         extra = _last_dex_extra.get(addr)
         if extra:
+            cur_liq = extra.get("liquidity_usd")
             row["volume_usd"] = extra.get("volume_usd")
-            row["liquidity_usd"] = extra.get("liquidity_usd")
+            row["liquidity_usd"] = cur_liq
+            # v121: Detect liquidity changes (rug pull = sudden drop)
+            prev_liq = _last_tick_liq.get(addr)
+            if prev_liq and prev_liq > 0 and cur_liq is not None:
+                liq_change = round((cur_liq / prev_liq - 1) * 100, 2)
+                row["liq_change_pct"] = liq_change
+            if cur_liq and cur_liq > 0:
+                _last_tick_liq[addr] = cur_liq
         rows.append(row)
     if not rows:
         return
@@ -910,6 +919,8 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
             "_rt_n_kol_confirmations": "n_kol_confirmations",  # v80: multi-KOL confirmation count
             "_rt_experiment_id": "experiment_id",    # v92: A/B testing
             "_rt_variant_id": "variant_id",          # v92: A/B testing
+            "_rt_message_ts": "message_ts",          # v121: Telegram message timestamp
+            "_rt_price_at_message": "price_at_message",  # v121: DexScreener price at call time
         }
         for src_key, db_col in _rt_col_map.items():
             val = token.get(src_key)

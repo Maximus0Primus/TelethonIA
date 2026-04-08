@@ -1384,6 +1384,9 @@ def _rt_open_trades(ca: str, symbol: str, price: float, mcap: float,
         "_rt_pair_address": token_info.get("pair_address"),  # v109: track pool for migration debug
         "_rt_ml_pred": token_info.get("_rt_ml_pred"),        # v77: RT ML pred for A/B
         "_rt_kol_ml_pred": token_info.get("_rt_kol_ml_pred"),  # v78: KCO score (fix: was reading wrong key)
+        # v121: Call reaction speed — message timestamp + price at message time
+        "_rt_message_ts": msg.date.isoformat() if hasattr(msg, "date") and msg.date else None,
+        "_rt_price_at_message": token_info.get("price_usd"),  # DexScreener price fetched right after msg
     }
 
     now = datetime.now(timezone.utc)
