@@ -881,10 +881,11 @@ def check_live_trades(client_sb) -> dict:
     }
 
     try:
+        # v121: Also pick up 'closing' trades (claimed but sell failed/crashed — need retry)
         result = (
             client_sb.table("paper_trades")
             .select("*")
-            .eq("status", "open")
+            .in_("status", ["open", "closing"])
             .eq("source", "rt_live")
             .execute()
         )
@@ -927,13 +928,20 @@ def check_live_trades(client_sb) -> dict:
         addr = trade["token_address"]
         current_price = prices.get(addr)
 
-        # v120: Warn if price is None — trade can't exit without a price
-        if current_price is None:
-            logger.warning("live_trader: no price for %s (%s) — exit eval skipped", trade["symbol"], addr[:8])
+        # v121: Trade stuck in 'closing' from a previous failed sell — force sell immediately
+        if trade.get("status") == "closing":
+            logger.info("live_trader: retrying sell for stuck 'closing' trade %s (%s)", trade["symbol"], trade["id"])
+            # Skip evaluation — this trade already decided to exit, just needs the sell
+            # Build a minimal ev dict so the sell logic below works
+            ev = {"status": "closing_retry", "exit_price": current_price or float(trade.get("entry_price") or 0)}
+        else:
+            # v120: Warn if price is None — trade can't exit without a price
+            if current_price is None:
+                logger.warning("live_trader: no price for %s (%s) — exit eval skipped", trade["symbol"], addr[:8])
 
-        # v113: Use paper_trader's full evaluation (DTRAIL, TRAIL, BE, DECAY, etc.)
-        # sell_slip_factor=1.0 because live uses real Jupiter execution, not simulated slippage
-        ev = _evaluate_trade_exit(trade, current_price, now, sell_slip_factor=1.0, sell_fee_bps=0)
+            # v113: Use paper_trader's full evaluation (DTRAIL, TRAIL, BE, DECAY, etc.)
+            # sell_slip_factor=1.0 because live uses real Jupiter execution, not simulated slippage
+            ev = _evaluate_trade_exit(trade, current_price, now, sell_slip_factor=1.0, sell_fee_bps=0)
 
         if ev is None:
             continue
@@ -992,6 +1000,29 @@ def check_live_trades(client_sb) -> dict:
                 except Exception:
                     elapsed_minutes = 0
 
+        # v121: Claim trade atomically — prevents race condition where another loop
+        # (paper_fast, reconcile, restart) closes the same trade concurrently.
+        # We set status='closing' so no other loop can pick it up.
+        # Skip claim for trades already in 'closing' (retry from previous failed sell).
+        if trade.get("status") != "closing":
+            try:
+                claim = (
+                    client_sb.table("paper_trades")
+                    .update({"status": "closing"})
+                    .eq("id", trade["id"])
+                    .eq("status", "open")
+                    .execute()
+                )
+                if not claim.data:
+                    logger.info(
+                        "live_trader: trade %s (%s) already closed by another loop, skipping sell",
+                        trade["symbol"], trade["id"],
+                    )
+                    continue
+            except Exception as e:
+                logger.warning("live_trader: claim failed for %s: %s — skipping", trade["symbol"], e)
+                continue
+
         # v119: Cancel trigger order before market selling (avoid double-sell)
         trigger_id = trade.get("trigger_order_id")
         if trigger_id:
@@ -1004,8 +1035,13 @@ def check_live_trades(client_sb) -> dict:
         # Execute sell BEFORE updating DB
         sell_result = execute_sell(addr)
         if not sell_result["success"]:
+            # v121: Revert status from 'closing' back to 'open' so next cycle retries
+            try:
+                client_sb.table("paper_trades").update({"status": "open"}).eq("id", trade["id"]).execute()
+            except Exception:
+                pass
             logger.warning(
-                "live_trader: sell failed for %s (%s) — keeping trade open (retry next cycle): %s",
+                "live_trader: sell failed for %s (%s) — reverted to open (retry next cycle): %s",
                 trade["symbol"], new_status, sell_result.get("error"),
             )
             try:
@@ -1160,10 +1196,11 @@ def reconcile_positions(client_sb) -> dict:
         return result
 
     try:
+        # v121: Also check 'closing' trades (sell may have succeeded but DB update crashed)
         resp = (
             client_sb.table("paper_trades")
-            .select("id, symbol, token_address, entry_price, position_usd, created_at")
-            .eq("status", "open")
+            .select("id, symbol, token_address, entry_price, position_usd, created_at, status")
+            .in_("status", ["open", "closing"])
             .eq("source", "rt_live")
             .execute()
         )
