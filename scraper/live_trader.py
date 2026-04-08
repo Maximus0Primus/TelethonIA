@@ -32,6 +32,30 @@ WSOL_MINT = "So11111111111111111111111111111111111111112"
 LAMPORTS_PER_SOL = 1_000_000_000
 
 
+# --- v121: Trigger event logging ---
+def _log_trigger_event(client_sb, *, trade_id=None, token_ca="", token_symbol="",
+                       order_id=None, event_type: str, old_sl=None, new_sl=None,
+                       current_price=None, high_price=None, fill_sol=None, details=None):
+    """Log a trigger order event for later analysis (trigger vs polling)."""
+    try:
+        row = {
+            "trade_id": trade_id,
+            "token_ca": token_ca,
+            "token_symbol": token_symbol,
+            "order_id": order_id,
+            "event_type": event_type,
+            "old_sl_price": old_sl,
+            "new_sl_price": new_sl,
+            "current_price": current_price,
+            "high_price_seen": high_price,
+            "fill_sol_received": fill_sol,
+            "details": details,
+        }
+        client_sb.table("trigger_events").insert(row).execute()
+    except Exception as e:
+        logger.debug("trigger_events log failed: %s", e)
+
+
 def _safe_int(val) -> int | None:
     """Convert Jupiter amount result to int, returning None on failure."""
     if val is None:
@@ -732,8 +756,19 @@ def open_live_trade(client_sb, token_entry: dict, strategy: str,
                         ).eq("id", trade_id).execute()
                         logger.info("TRIGGER SL PLACED: %s order=%s sl=$%.8f",
                                     symbol, trigger_res["order_id"][:16], sl_price)
+                        _log_trigger_event(
+                            client_sb, trade_id=trade_id, token_ca=ca,
+                            token_symbol=symbol, order_id=trigger_res["order_id"],
+                            event_type="placed", new_sl=sl_price,
+                            current_price=execution_price,
+                        )
                     else:
                         logger.warning("TRIGGER SL FAILED: %s — fallback to polling", symbol)
+                        _log_trigger_event(
+                            client_sb, trade_id=trade_id, token_ca=ca,
+                            token_symbol=symbol, event_type="failed",
+                            details={"reason": "place_stop_loss returned None"},
+                        )
                 elif position_usd < _min_usd:
                     logger.info("TRIGGER SL SKIP: %s pos=$%.2f < min $%.0f — polling only",
                                 symbol, position_usd, _min_usd)
@@ -837,6 +872,15 @@ def _handle_trigger_fill(client_sb, trade: dict, order_status: dict, now) -> Non
     # Track PnL
     if sol_price > 0:
         _track_pnl(pnl_usd / sol_price)
+
+    _log_trigger_event(
+        client_sb, trade_id=trade["id"], token_ca=trade.get("token_address", ""),
+        token_symbol=trade["symbol"], order_id=trade.get("trigger_order_id"),
+        event_type="filled", new_sl=float(trade.get("sl_price") or 0),
+        current_price=exit_price, high_price=float(trade.get("high_price_seen") or 0),
+        fill_sol=sol_received,
+        details={"pnl_pct": pnl_pct, "pnl_usd": pnl_usd, "elapsed_min": elapsed_minutes},
+    )
 
     logger.info(
         "TRIGGER FILL: %s %s — %s pnl=%.1f%% $%+.2f | keeper executed SL",
@@ -980,6 +1024,12 @@ def check_live_trades(client_sb) -> dict:
                                             "TRAIL PATCH: %s SL $%.8f → $%.8f (high=$%.8f)",
                                             trade["symbol"], old_sl, new_sl, new_high,
                                         )
+                                        _log_trigger_event(
+                                            client_sb, trade_id=trade["id"], token_ca=addr,
+                                            token_symbol=trade["symbol"], order_id=trigger_id,
+                                            event_type="patched", old_sl=old_sl, new_sl=new_sl,
+                                            current_price=current_price, high_price=new_high,
+                                        )
                     except Exception as e:
                         logger.debug("trail PATCH failed for %s: %s", trade["symbol"], e)
 
@@ -1029,6 +1079,13 @@ def check_live_trades(client_sb) -> dict:
             try:
                 from jupiter_trigger import cancel_order
                 cancel_order(trigger_id)
+                _log_trigger_event(
+                    client_sb, trade_id=trade["id"], token_ca=addr,
+                    token_symbol=trade["symbol"], order_id=trigger_id,
+                    event_type="cancelled", current_price=current_price,
+                    high_price=float(trade.get("high_price_seen") or 0),
+                    details={"reason": new_status, "polling_beat_keeper": True},
+                )
             except Exception:
                 pass  # Best effort — market sell proceeds regardless
 
