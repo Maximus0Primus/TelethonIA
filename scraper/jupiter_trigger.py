@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 TRIGGER_BASE = "https://api.jup.ag/trigger/v2"
 WSOL_MINT = "So11111111111111111111111111111111111111112"
-TIMEOUT = 15  # seconds for API calls
+TIMEOUT = 30  # v122: increased from 15s — deposit/craft can be slow on Jupiter
 
 # ---------------------------------------------------------------------------
 # Module-level cached state (follows _rt_config pattern in safe_scraper.py)
