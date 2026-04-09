@@ -580,9 +580,9 @@ def _log_price_ticks(client, prices: dict[str, float], source: str = "check",
                 _last_tick_liq[addr] = cur_liq
         rows.append(row)
 
-        # v122: Log Jupiter price as separate tick for bonding curve tokens
+        # v122: Log Jupiter price as separate tick for ALL tokens with Jupiter pricing
         jup_price = _jupiter_prices_cache.get(addr)
-        if jup_price and jup_price > 0 and addr in _jupiter_overridden:
+        if jup_price and jup_price > 0:
             rows.append({
                 "token_address": addr,
                 "price_usd": jup_price,
@@ -652,47 +652,49 @@ def _fetch_prices_batch(addresses: list[str]) -> dict[str, float]:
         if gecko_recovered:
             logger.info("paper_trader: GeckoTerminal fallback recovered %d/%d missing prices", gecko_recovered, len(missing))
 
-    # v122: Jupiter Price override for pump.fun bonding curve tokens.
-    # DexScreener spot price diverges from actual execution price on bonding curves.
-    # Jupiter Price API reflects the routing engine's view — closer to real fills.
+    # v122: Jupiter Price for ALL tokens — dual price series for tick-based sim.
+    # Fetch Jupiter prices for every address (1 batch call), then:
+    #   1. Cache ALL Jupiter prices for tick logging (source='jupiter')
+    #   2. Override paper pricing only for pump.fun bonding curves with <$10K liq + >10% divergence
     _jupiter_overridden.clear()
     _jupiter_prices_cache.clear()
-    pump_addrs = [a for a in addresses if a.endswith("pump")]
-    if pump_addrs:
-        # Only fetch for tokens with zero or very low liquidity on DexScreener
-        low_liq_pumps = []
-        for addr in pump_addrs:
+    if addresses:
+        try:
+            from enrich_jupiter import _fetch_jupiter_prices
+            jup_prices = _fetch_jupiter_prices(addresses)
+        except Exception as e:
+            logger.debug("paper_trader: Jupiter price fetch failed: %s", e)
+            jup_prices = {}
+        # Cache ALL Jupiter prices for tick logging
+        for addr, jup_price in jup_prices.items():
+            if jup_price and jup_price > 0:
+                _jupiter_prices_cache[addr] = jup_price
+        # Override paper pricing only for bonding curve tokens with low liquidity
+        jup_overrides = 0
+        for addr in addresses:
+            if not addr.endswith("pump"):
+                continue
             extra = _last_dex_extra.get(addr, {})
             liq = extra.get("liquidity_usd", 0) or 0
-            if liq < 10_000:  # Under $10K liquidity = bonding curve likely
-                low_liq_pumps.append(addr)
-        if low_liq_pumps:
-            try:
-                from enrich_jupiter import _fetch_jupiter_prices
-                jup_prices = _fetch_jupiter_prices(low_liq_pumps)
-            except Exception as e:
-                logger.debug("paper_trader: Jupiter price fetch failed: %s", e)
-                jup_prices = {}
-            jup_overrides = 0
-            for addr, jup_price in jup_prices.items():
-                if jup_price and jup_price > 0:
-                    _jupiter_prices_cache[addr] = jup_price  # v122: cache for tick logging
-                dex_price = prices.get(addr)
-                if jup_price and jup_price > 0:
-                    if dex_price is None or dex_price <= 0:
-                        prices[addr] = jup_price
-                        _jupiter_overridden.add(addr)
-                        jup_overrides += 1
-                    elif abs(jup_price / dex_price - 1) > 0.10:
-                        # >10% divergence — prefer Jupiter for bonding curves
-                        prices[addr] = jup_price
-                        _jupiter_overridden.add(addr)
-                        jup_overrides += 1
-            if jup_overrides:
-                logger.info(
-                    "paper_trader: Jupiter price override for %d/%d low-liq pump.fun tokens",
-                    jup_overrides, len(low_liq_pumps),
-                )
+            if liq >= 10_000:
+                continue
+            jup_price = jup_prices.get(addr)
+            if not jup_price or jup_price <= 0:
+                continue
+            dex_price = prices.get(addr)
+            if dex_price is None or dex_price <= 0:
+                prices[addr] = jup_price
+                _jupiter_overridden.add(addr)
+                jup_overrides += 1
+            elif abs(jup_price / dex_price - 1) > 0.10:
+                prices[addr] = jup_price
+                _jupiter_overridden.add(addr)
+                jup_overrides += 1
+        if jup_overrides:
+            logger.info(
+                "paper_trader: Jupiter price override for %d bonding curve tokens (%d total Jupiter prices)",
+                jup_overrides, len(_jupiter_prices_cache),
+            )
 
     return prices
 
