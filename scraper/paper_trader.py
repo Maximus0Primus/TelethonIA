@@ -653,15 +653,21 @@ def _fetch_prices_batch(addresses: list[str]) -> dict[str, float]:
             logger.info("paper_trader: GeckoTerminal fallback recovered %d/%d missing prices", gecko_recovered, len(missing))
 
     # v122: Jupiter Price for ALL tokens — dual price series for tick-based sim.
-    # Fetch Jupiter prices for every address (1 batch call), then:
-    #   1. Cache ALL Jupiter prices for tick logging (source='jupiter')
+    # Fetch Jupiter prices (1 batch call), then:
+    #   1. Cache Jupiter prices for tick logging (source='jupiter')
     #   2. Override paper pricing only for pump.fun bonding curves with <$10K liq + >10% divergence
+    # Rate limit aware: skip if last fetch was < 60s ago (fast check runs every 30s)
     _jupiter_overridden.clear()
-    _jupiter_prices_cache.clear()
-    if addresses:
+    now_ts = _time_mod.time()
+    _jup_fetch_cooldown = getattr(_fetch_prices_batch, "_last_jup_ts", 0)
+    _skip_jup = (now_ts - _jup_fetch_cooldown) < 60
+    if not _skip_jup:
+        _jupiter_prices_cache.clear()
+    if addresses and not _skip_jup:
         try:
             from enrich_jupiter import _fetch_jupiter_prices
             jup_prices = _fetch_jupiter_prices(addresses)
+            _fetch_prices_batch._last_jup_ts = now_ts  # rate limit cooldown
         except Exception as e:
             logger.debug("paper_trader: Jupiter price fetch failed: %s", e)
             jup_prices = {}
