@@ -1332,7 +1332,7 @@ def _rt_count_confirmations(kol: str, ca: str) -> int:
 
 def _rt_open_trades(ca: str, symbol: str, price: float, mcap: float,
                     kol_username: str, tier: str, rt_score: float, pos_size: float,
-                    kol_info: dict, token_info: dict, config: dict):
+                    kol_info: dict, token_info: dict, config: dict, msg=None):
     """
     v71: Open paper trades with hybrid strategy allocation.
     When hybrid_strategy.enabled: split pos_size across configured strategies (e.g. 60/40).
@@ -1730,7 +1730,7 @@ async def _rt_on_new_message(event: events.NewMessage.Event):
             # Open trades across all strategies
             opened = await loop.run_in_executor(
                 None, _rt_open_trades, ca, symbol, price, mcap,
-                username, tier, rt_score, pos_size, kol_info, token_info, config,
+                username, tier, rt_score, pos_size, kol_info, token_info, config, msg,
             )
 
             if opened and opened > 0:
