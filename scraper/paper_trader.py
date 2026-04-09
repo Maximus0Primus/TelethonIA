@@ -50,8 +50,9 @@ except ImportError:
 DEXSCREENER_BATCH_URL = "https://api.dexscreener.com/tokens/v1/solana/{addresses}"
 BATCH_SIZE = 30
 
-# v122: Track which addresses got Jupiter price override (for alert annotation)
+# v122: Track which addresses got Jupiter price override (for alert annotation + tick logging)
 _jupiter_overridden: set[str] = set()
+_jupiter_prices_cache: dict[str, float] = {}  # v122: Jupiter prices for tick logging
 
 # v88: Bot ML predictions — precomputed in GH Actions, read from Supabase
 _BOT_PREDICTIONS: dict = {}  # {(token_address, strategy): gate_mult}
@@ -548,7 +549,8 @@ def _get_sol_price() -> float:
 def _log_price_ticks(client, prices: dict[str, float], source: str = "check",
                      live_tokens: set | None = None):
     """Log DexScreener spot prices to price_ticks table.
-    v121: Includes volume/liquidity. Throttle: 15s for live trades, 60s for paper."""
+    v121: Includes volume/liquidity. Throttle: 15s for live trades, 60s for paper.
+    v122: Also logs Jupiter price ticks for pump.fun bonding curve tokens (source='jupiter')."""
     if not prices or not client:
         return
     now = _time_mod.time()
@@ -577,6 +579,16 @@ def _log_price_ticks(client, prices: dict[str, float], source: str = "check",
             if cur_liq and cur_liq > 0:
                 _last_tick_liq[addr] = cur_liq
         rows.append(row)
+
+        # v122: Log Jupiter price as separate tick for bonding curve tokens
+        jup_price = _jupiter_prices_cache.get(addr)
+        if jup_price and jup_price > 0 and addr in _jupiter_overridden:
+            rows.append({
+                "token_address": addr,
+                "price_usd": jup_price,
+                "source": "jupiter",
+            })
+
     if not rows:
         return
     try:
@@ -644,6 +656,7 @@ def _fetch_prices_batch(addresses: list[str]) -> dict[str, float]:
     # DexScreener spot price diverges from actual execution price on bonding curves.
     # Jupiter Price API reflects the routing engine's view — closer to real fills.
     _jupiter_overridden.clear()
+    _jupiter_prices_cache.clear()
     pump_addrs = [a for a in addresses if a.endswith("pump")]
     if pump_addrs:
         # Only fetch for tokens with zero or very low liquidity on DexScreener
@@ -662,6 +675,8 @@ def _fetch_prices_batch(addresses: list[str]) -> dict[str, float]:
                 jup_prices = {}
             jup_overrides = 0
             for addr, jup_price in jup_prices.items():
+                if jup_price and jup_price > 0:
+                    _jupiter_prices_cache[addr] = jup_price  # v122: cache for tick logging
                 dex_price = prices.get(addr)
                 if jup_price and jup_price > 0:
                     if dex_price is None or dex_price <= 0:
