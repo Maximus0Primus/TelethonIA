@@ -772,6 +772,7 @@ def open_live_trade(client_sb, token_entry: dict, strategy: str,
         )
 
         # v119: Place Jupiter trigger stop-loss order (on-chain protection)
+        _trigger_variant = "polling"  # v122: default, overridden if trigger succeeds
         try:
             _live_cfg = config.get("live_trading", config)
             if _live_cfg.get("trigger_orders_enabled", False):
@@ -788,7 +789,8 @@ def open_live_trade(client_sb, token_entry: dict, strategy: str,
                         expiry_seconds=_expiry,
                         sl_slippage_bps=_sl_slip,
                     )
-                    if trigger_res:
+                    if trigger_res and "order_id" in trigger_res:
+                        _trigger_variant = "trigger"  # v122: keeper will manage SL
                         client_sb.table("paper_trades").update(
                             {"trigger_order_id": trigger_res["order_id"]}
                         ).eq("id", trade_id).execute()
@@ -801,11 +803,13 @@ def open_live_trade(client_sb, token_entry: dict, strategy: str,
                             current_price=execution_price,
                         )
                     else:
-                        logger.warning("TRIGGER SL FAILED: %s — fallback to polling", symbol)
+                        # v122: Log which step failed for diagnostics
+                        fail_step = trigger_res.get("error", "unknown") if trigger_res else "returned_none"
+                        logger.warning("TRIGGER SL FAILED: %s step=%s — fallback to polling", symbol, fail_step)
                         _log_trigger_event(
                             client_sb, trade_id=trade_id, token_ca=ca,
                             token_symbol=symbol, event_type="failed",
-                            details={"reason": "place_stop_loss returned None"},
+                            details={"reason": f"failed at step: {fail_step}", **(trigger_res or {})},
                         )
                 elif position_usd < _min_usd:
                     logger.info("TRIGGER SL SKIP: %s pos=$%.2f < min $%.0f — polling only",
@@ -813,6 +817,15 @@ def open_live_trade(client_sb, token_entry: dict, strategy: str,
         except Exception as e:
             logger.warning("live_trader: trigger order failed for %s (fallback to polling): %s",
                            symbol, e)
+
+        # v122: A/B experiment — track trigger vs polling for live trade comparison
+        try:
+            client_sb.table("paper_trades").update({
+                "experiment_id": "trigger_v2_ab",
+                "variant_id": _trigger_variant,
+            }).eq("id", trade_id).execute()
+        except Exception:
+            pass
 
         # Alert via Telegram — v119: detailed buy alert
         try:
@@ -888,6 +901,13 @@ def _handle_trigger_fill(client_sb, trade: dict, order_status: dict, now) -> Non
         except Exception:
             pass
 
+    # v122: Paper exit price = SL price with simulated slippage (what paper would get)
+    from paper_trader import _dynamic_sell_slip_factor
+    paper_exit_price = float(trade.get("sl_price") or 0) * _dynamic_sell_slip_factor(trade, "sl_hit")
+    price_divergence_pct = None
+    if paper_exit_price and paper_exit_price > 0 and exit_price and exit_price > 0:
+        price_divergence_pct = round((exit_price / paper_exit_price) - 1, 4)
+
     # Update DB
     update = {
         "status": new_status,
@@ -899,6 +919,9 @@ def _handle_trigger_fill(client_sb, trade: dict, order_status: dict, now) -> Non
         "trigger_order_id": None,  # consumed
         "sell_sol_received": round(sol_received, 6) if sol_received else None,
         "sol_price_at_exit": sol_price,
+        # v122: Paper vs live divergence
+        "paper_exit_price": paper_exit_price,
+        "price_divergence_pct": price_divergence_pct,
     }
 
     try:
@@ -1080,6 +1103,7 @@ def check_live_trades(client_sb) -> dict:
             continue
 
         exit_price = ev.get("exit_price")
+        paper_exit_price = exit_price  # v122: Save DexScreener-based price before Jupiter override
         entry_price = float(trade.get("entry_price") or 0)
         elapsed_minutes = ev.get("exit_minutes", 0)
         if not elapsed_minutes:
@@ -1201,6 +1225,11 @@ def check_live_trades(client_sb) -> dict:
                            trade["symbol"], sell_result.get("signature"), e)
             sell_sol_received = (sell_output / LAMPORTS_PER_SOL) if sell_output else None
 
+        # v122: Compute paper vs live price divergence
+        price_divergence_pct = None
+        if paper_exit_price and paper_exit_price > 0 and exit_price and exit_price > 0:
+            price_divergence_pct = round((exit_price / paper_exit_price) - 1, 4)
+
         update = {
             "status": new_status,
             "exit_price": exit_price,
@@ -1217,6 +1246,9 @@ def check_live_trades(client_sb) -> dict:
             "sell_output_lamports": sell_output,  # SOL received (lamports)
             "sell_input_tokens": sell_result.get("input_amount"),  # tokens sold (raw)
             "sell_sol_received": round(sell_sol_received, 6) if sell_sol_received else None,
+            # v122: Paper vs live price divergence tracking
+            "paper_exit_price": paper_exit_price,
+            "price_divergence_pct": price_divergence_pct,
         }
 
         # DB update with retry — sell already executed, must not leave trade as 'open'
@@ -1246,10 +1278,11 @@ def check_live_trades(client_sb) -> dict:
         status_key = new_status.replace("_hit", "").replace("_stop", "")
         result_counts[status_key] = result_counts.get(status_key, 0) + 1
 
+        div_str = f" div={price_divergence_pct:+.0%}" if price_divergence_pct else ""
         logger.info(
-            "LIVE TRADE CLOSED: %s %s — %s pnl=%.1f%% $%+.2f | sell sig: %s",
+            "LIVE TRADE CLOSED: %s %s — %s pnl=%.1f%% $%+.2f%s | sell sig: %s",
             trade["symbol"], trade["strategy"], new_status,
-            pnl_pct * 100, pnl_usd, sell_result["signature"][:16],
+            pnl_pct * 100, pnl_usd, div_str, sell_result["signature"][:16],
         )
 
         # Alert via Telegram — v119: detailed sell alert

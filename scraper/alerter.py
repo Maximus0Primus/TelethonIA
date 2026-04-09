@@ -521,7 +521,8 @@ def alert_trade_closed(symbol: str, strategy: str, exit_reason: str,
                        ca: str = "", deployed_usd: float = 0,
                        open_count: int = 0,
                        strategy_bankrolls: dict | None = None,
-                       active_strategies: list | None = None):
+                       active_strategies: list | None = None,
+                       price_source: str = ""):
     """v110: Alert when a main trade closes (trail_stop, sl_hit, timeout).
     v115: Shows per-strategy bankroll comparison.
     v119: active_strategies filters bankroll display to only active ones."""
@@ -584,7 +585,8 @@ def alert_trade_closed(symbol: str, strategy: str, exit_reason: str,
         f"👤 KOL: {kol}\n"
         f"📈 PnL: <b>{pnl_pct*100:+.1f}%</b> (${pnl_usd:+.2f})\n"
         f"💵 Position: ${pos_usd:.0f} | ⏱ {minutes}min\n"
-        f"📊 Entry: ${entry_price:.8f} → Exit: ${exit_price:.8f}\n"
+        f"📊 Entry: ${entry_price:.8f} → Exit: ${exit_price:.8f}"
+        f"{' 🪐' if price_source == 'jupiter' else ''}\n"
         f"🔝 Max: {max_gain:+.0f}%"
         f"{strat_text}"
         f"{link_text}",

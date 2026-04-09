@@ -148,6 +148,25 @@ def _auth_headers() -> dict | None:
     return h
 
 
+def test_auth() -> dict:
+    """v122: Diagnostic — test auth + vault without placing an order.
+    Returns {"ok": True, "wallet": ..., "vault": ...} or {"ok": False, "step": ..., "error": ...}."""
+    kp = _get_keypair()
+    if not kp:
+        return {"ok": False, "step": "keypair", "error": "SOLANA_PRIVATE_KEY missing or invalid"}
+
+    wallet = str(kp.pubkey())
+    token = _ensure_auth()
+    if not token:
+        return {"ok": False, "step": "auth", "error": "JWT auth failed", "wallet": wallet}
+
+    vault = _get_vault()
+    if not vault:
+        return {"ok": False, "step": "vault", "error": "vault registration failed", "wallet": wallet}
+
+    return {"ok": True, "wallet": wallet, "vault": vault, "jwt_len": len(token)}
+
+
 # ---------------------------------------------------------------------------
 # Vault management
 # ---------------------------------------------------------------------------
@@ -252,22 +271,30 @@ def place_stop_loss(
 
     Flow: get vault → craft deposit → sign → create order
     Returns {"order_id": str} or None on failure.
+    v122: Step tracking — logs which step failed for diagnostics.
     """
+    step = "auth"
     headers = _auth_headers()
     if not headers:
-        return None
+        logger.warning("jupiter_trigger: place_stop_loss failed at step=%s for %s", step, ca[:12])
+        return {"error": step}
 
+    step = "vault"
     vault = _get_vault()
     if not vault:
-        return None
+        logger.warning("jupiter_trigger: place_stop_loss failed at step=%s for %s", step, ca[:12])
+        return {"error": step}
 
+    step = "keypair"
     kp = _get_keypair()
     if not kp:
-        return None
+        logger.warning("jupiter_trigger: place_stop_loss failed at step=%s for %s", step, ca[:12])
+        return {"error": step}
     wallet = str(kp.pubkey())
 
     try:
         # Step 1: Craft deposit transaction
+        step = "deposit_craft"
         resp = requests.post(
             f"{TRIGGER_BASE}/deposit/craft",
             headers=headers,
@@ -280,23 +307,26 @@ def place_stop_loss(
             timeout=TIMEOUT,
         )
         if resp.status_code != 200:
-            logger.warning("jupiter_trigger: deposit/craft %d: %s", resp.status_code, resp.text[:500])
-            return None
+            logger.warning("jupiter_trigger: %s %d: %s (token=%s)", step, resp.status_code, resp.text[:500], ca[:12])
+            return {"error": step, "http": resp.status_code}
         deposit = resp.json()
 
         tx_b64 = deposit.get("transaction")
         request_id = deposit.get("requestId")
         if not tx_b64 or not request_id:
-            logger.warning("jupiter_trigger: deposit craft missing fields: %s",
-                           list(deposit.keys()))
-            return None
+            logger.warning("jupiter_trigger: %s missing fields: %s (token=%s)",
+                           step, list(deposit.keys()), ca[:12])
+            return {"error": step, "detail": "missing_fields"}
 
         # Step 2: Sign deposit transaction
+        step = "sign"
         signed_b64 = _sign_transaction(tx_b64)
         if not signed_b64:
-            return None
+            logger.warning("jupiter_trigger: %s failed for %s", step, ca[:12])
+            return {"error": step}
 
         # Step 3: Create stop-loss order
+        step = "create_order"
         expires_at_ms = int((time.time() + expiry_seconds) * 1000)
 
         resp2 = requests.post(
@@ -319,15 +349,15 @@ def place_stop_loss(
             timeout=TIMEOUT,
         )
         if resp2.status_code != 200:
-            logger.warning("jupiter_trigger: orders/price %d: %s", resp2.status_code, resp2.text[:500])
-            return None
+            logger.warning("jupiter_trigger: %s %d: %s (token=%s)", step, resp2.status_code, resp2.text[:500], ca[:12])
+            return {"error": step, "http": resp2.status_code}
         order = resp2.json()
 
         order_id = order.get("id") or order.get("orderId")
         if not order_id:
-            logger.warning("jupiter_trigger: order response missing id: %s",
-                           list(order.keys()))
-            return None
+            logger.warning("jupiter_trigger: %s missing id: %s (token=%s)",
+                           step, list(order.keys()), ca[:12])
+            return {"error": step, "detail": "missing_id"}
 
         logger.info(
             "TRIGGER ORDER PLACED: %s | SL=$%.8f | slip=%dbps | expiry=%ds | id=%s",
@@ -336,8 +366,8 @@ def place_stop_loss(
         return {"order_id": order_id}
 
     except Exception as e:
-        logger.warning("jupiter_trigger: place_stop_loss failed for %s: %s", ca[:12], e)
-        return None
+        logger.warning("jupiter_trigger: place_stop_loss exception at step=%s for %s: %s", step, ca[:12], e)
+        return {"error": step, "exception": str(e)}
 
 
 def update_sl_price(order_id: str, new_sl_price_usd: float) -> bool:

@@ -50,6 +50,9 @@ except ImportError:
 DEXSCREENER_BATCH_URL = "https://api.dexscreener.com/tokens/v1/solana/{addresses}"
 BATCH_SIZE = 30
 
+# v122: Track which addresses got Jupiter price override (for alert annotation)
+_jupiter_overridden: set[str] = set()
+
 # v88: Bot ML predictions — precomputed in GH Actions, read from Supabase
 _BOT_PREDICTIONS: dict = {}  # {(token_address, strategy): gate_mult}
 
@@ -636,6 +639,45 @@ def _fetch_prices_batch(addresses: list[str]) -> dict[str, float]:
                 gecko_recovered += 1
         if gecko_recovered:
             logger.info("paper_trader: GeckoTerminal fallback recovered %d/%d missing prices", gecko_recovered, len(missing))
+
+    # v122: Jupiter Price override for pump.fun bonding curve tokens.
+    # DexScreener spot price diverges from actual execution price on bonding curves.
+    # Jupiter Price API reflects the routing engine's view — closer to real fills.
+    _jupiter_overridden.clear()
+    pump_addrs = [a for a in addresses if a.endswith("pump")]
+    if pump_addrs:
+        # Only fetch for tokens with zero or very low liquidity on DexScreener
+        low_liq_pumps = []
+        for addr in pump_addrs:
+            extra = _last_dex_extra.get(addr, {})
+            liq = extra.get("liquidity_usd", 0) or 0
+            if liq < 10_000:  # Under $10K liquidity = bonding curve likely
+                low_liq_pumps.append(addr)
+        if low_liq_pumps:
+            try:
+                from enrich_jupiter import _fetch_jupiter_prices
+                jup_prices = _fetch_jupiter_prices(low_liq_pumps)
+            except Exception as e:
+                logger.debug("paper_trader: Jupiter price fetch failed: %s", e)
+                jup_prices = {}
+            jup_overrides = 0
+            for addr, jup_price in jup_prices.items():
+                dex_price = prices.get(addr)
+                if jup_price and jup_price > 0:
+                    if dex_price is None or dex_price <= 0:
+                        prices[addr] = jup_price
+                        _jupiter_overridden.add(addr)
+                        jup_overrides += 1
+                    elif abs(jup_price / dex_price - 1) > 0.10:
+                        # >10% divergence — prefer Jupiter for bonding curves
+                        prices[addr] = jup_price
+                        _jupiter_overridden.add(addr)
+                        jup_overrides += 1
+            if jup_overrides:
+                logger.info(
+                    "paper_trader: Jupiter price override for %d/%d low-liq pump.fun tokens",
+                    jup_overrides, len(low_liq_pumps),
+                )
 
     return prices
 
@@ -1840,6 +1882,7 @@ def check_paper_trades(client) -> dict:
                         open_count=portfolio["open_count"],
                         strategy_bankrolls=_strat_bals,
                         active_strategies=_active_strats,
+                        price_source="jupiter" if addr in _jupiter_overridden else "",
                     )
                 except Exception as e:
                     logger.warning("trade close alert failed: %s", e)
