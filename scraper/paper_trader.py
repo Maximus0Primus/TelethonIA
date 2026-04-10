@@ -934,7 +934,10 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
         if jup_entry and jup_entry > 0:
             entry_price = jup_entry
         else:
-            entry_price = raw_price * (1 + (buy_slip_bps + buy_fee_bps) / 10_000)
+            # v123: DexScreener fallback — use raw_price without slippage markup.
+            # Jupiter Ultra RFQ has near-zero slippage; simulated slippage caused
+            # 3-11% entry price divergence vs live execution.
+            entry_price = raw_price
         alloc_usd = token.get("_alloc_usd", budget_usd / top_n)
 
         # Common fields for all tranches of this token
@@ -1109,7 +1112,7 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
             if jup_entry and jup_entry > 0:
                 entry_price = jup_entry
             else:
-                entry_price = raw_price * (1 + (buy_slip_bps + buy_fee_bps) / 10_000)
+                entry_price = raw_price  # v123: no slippage markup (match live)
 
             shadow_base = {
                 "cycle_ts": cycle_ts.isoformat(),
