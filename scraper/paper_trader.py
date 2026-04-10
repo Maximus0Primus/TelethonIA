@@ -675,31 +675,21 @@ def _fetch_prices_batch(addresses: list[str]) -> dict[str, float]:
         for addr, jup_price in jup_prices.items():
             if jup_price and jup_price > 0:
                 _jupiter_prices_cache[addr] = jup_price
-        # Override paper pricing only for bonding curve tokens with low liquidity
+        # v123: Jupiter price as PRIMARY for ALL tokens (paper/live alignment).
+        # DexScreener is now fallback only. This eliminates the paper/live PnL
+        # divergence caused by DexScreener vs Jupiter price discrepancies on
+        # illiquid memecoins.
         jup_overrides = 0
         for addr in addresses:
-            if not addr.endswith("pump"):
-                continue
-            extra = _last_dex_extra.get(addr, {})
-            liq = extra.get("liquidity_usd", 0) or 0
-            if liq >= 10_000:
-                continue
             jup_price = jup_prices.get(addr)
-            if not jup_price or jup_price <= 0:
-                continue
-            dex_price = prices.get(addr)
-            if dex_price is None or dex_price <= 0:
-                prices[addr] = jup_price
-                _jupiter_overridden.add(addr)
-                jup_overrides += 1
-            elif abs(jup_price / dex_price - 1) > 0.10:
+            if jup_price and jup_price > 0:
                 prices[addr] = jup_price
                 _jupiter_overridden.add(addr)
                 jup_overrides += 1
         if jup_overrides:
             logger.info(
-                "paper_trader: Jupiter price override for %d bonding curve tokens (%d total Jupiter prices)",
-                jup_overrides, len(_jupiter_prices_cache),
+                "paper_trader: Jupiter price primary for %d/%d tokens (DexScreener fallback for rest)",
+                jup_overrides, len(addresses),
             )
 
     return prices
@@ -931,8 +921,13 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
         # Shallow liquidity → up to 3x base slippage; deep → 1x
         slip_mult = 1.0 + 2.0 * (1.0 - lds)  # 1.0 for lds=1.0, 3.0 for lds=0.0
         buy_slip_bps = int(buy_slip_bps_base * slip_mult)
-        # v94: entry_price includes slippage + Jupiter priority fee
-        entry_price = raw_price * (1 + (buy_slip_bps + buy_fee_bps) / 10_000)
+        # v123: Use Jupiter price as entry (matches live execution price).
+        # Fallback to DexScreener + simulated slippage if Jupiter unavailable.
+        jup_entry = _jupiter_prices_cache.get(addr)
+        if jup_entry and jup_entry > 0:
+            entry_price = jup_entry
+        else:
+            entry_price = raw_price * (1 + (buy_slip_bps + buy_fee_bps) / 10_000)
         alloc_usd = token.get("_alloc_usd", budget_usd / top_n)
 
         # Common fields for all tranches of this token
@@ -1102,7 +1097,12 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
             lds = max(0.1, min(1.0, lds)) if lds else 1.0
             slip_mult = 1.0 + 2.0 * (1.0 - lds)
             buy_slip_bps = int(buy_slip_bps_base * slip_mult)
-            entry_price = raw_price * (1 + (buy_slip_bps + buy_fee_bps) / 10_000)
+            # v123: Jupiter price as entry (same as main trades)
+            jup_entry = _jupiter_prices_cache.get(addr)
+            if jup_entry and jup_entry > 0:
+                entry_price = jup_entry
+            else:
+                entry_price = raw_price * (1 + (buy_slip_bps + buy_fee_bps) / 10_000)
 
             shadow_base = {
                 "cycle_ts": cycle_ts.isoformat(),
@@ -1837,7 +1837,8 @@ def check_paper_trades(client) -> dict:
             group_key = (addr, trade["strategy"], trade["cycle_ts"])
 
         is_cascade = group_key in sl_triggered
-        ev = _evaluate_trade_exit(trade, current_price, now, _sell_slip_factor, sl_cascade=is_cascade, sell_fee_bps=_sell_fee_bps)
+        # v123: sell_slip_factor=1.0 to match live (Jupiter Ultra RFQ = near-zero slippage)
+        ev = _evaluate_trade_exit(trade, current_price, now, 1.0, sl_cascade=is_cascade, sell_fee_bps=0)
         if ev is None:
             continue
 
@@ -2143,7 +2144,8 @@ def check_paper_trades_fast(client) -> dict:
         addr = trade["token_address"]
         current_price = prices.get(addr)
 
-        ev = _evaluate_trade_exit(trade, current_price, now, _sell_slip_factor, sell_fee_bps=_sell_fee_bps)
+        # v123: sell_slip_factor=1.0 to match live (Jupiter Ultra RFQ = near-zero slippage)
+        ev = _evaluate_trade_exit(trade, current_price, now, 1.0, sell_fee_bps=0)
         if ev is None:
             continue
 
