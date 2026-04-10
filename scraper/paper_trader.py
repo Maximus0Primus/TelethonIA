@@ -652,18 +652,15 @@ def _fetch_prices_batch(addresses: list[str]) -> dict[str, float]:
         if gecko_recovered:
             logger.info("paper_trader: GeckoTerminal fallback recovered %d/%d missing prices", gecko_recovered, len(missing))
 
-    # v122: Jupiter Price for ALL tokens — dual price series for tick-based sim.
-    # Fetch Jupiter prices (1 batch call), then:
-    #   1. Cache Jupiter prices for tick logging (source='jupiter')
-    #   2. Override paper pricing only for pump.fun bonding curves with <$10K liq + >10% divergence
-    # Rate limit aware: skip if last fetch was < 60s ago (fast check runs every 30s)
+    # v122→v123: Jupiter Price as PRIMARY for ALL tokens (paper/live alignment).
+    # Fetch Jupiter prices (1 batch call) with 14s cooldown, then override DexScreener.
+    # When cooldown is active, reuse cached Jupiter prices (don't fall back to DexScreener).
     _jupiter_overridden.clear()
     now_ts = _time_mod.time()
     _jup_fetch_cooldown = getattr(_fetch_prices_batch, "_last_jup_ts", 0)
-    _skip_jup = (now_ts - _jup_fetch_cooldown) < 14  # v122: 14s cooldown — matches live tick resolution (15s)
-    if not _skip_jup:
-        _jupiter_prices_cache.clear()
+    _skip_jup = (now_ts - _jup_fetch_cooldown) < 14  # 14s cooldown — matches live tick resolution (15s)
     if addresses and not _skip_jup:
+        _jupiter_prices_cache.clear()
         try:
             from enrich_jupiter import _fetch_jupiter_prices
             jup_prices = _fetch_jupiter_prices(addresses)
@@ -671,26 +668,27 @@ def _fetch_prices_batch(addresses: list[str]) -> dict[str, float]:
         except Exception as e:
             logger.debug("paper_trader: Jupiter price fetch failed: %s", e)
             jup_prices = {}
-        # Cache ALL Jupiter prices for tick logging
+        # Cache ALL Jupiter prices
         for addr, jup_price in jup_prices.items():
             if jup_price and jup_price > 0:
                 _jupiter_prices_cache[addr] = jup_price
-        # v123: Jupiter price as PRIMARY for ALL tokens (paper/live alignment).
-        # DexScreener is now fallback only. This eliminates the paper/live PnL
-        # divergence caused by DexScreener vs Jupiter price discrepancies on
-        # illiquid memecoins.
-        jup_overrides = 0
-        for addr in addresses:
-            jup_price = jup_prices.get(addr)
-            if jup_price and jup_price > 0:
-                prices[addr] = jup_price
-                _jupiter_overridden.add(addr)
-                jup_overrides += 1
-        if jup_overrides:
-            logger.info(
-                "paper_trader: Jupiter price primary for %d/%d tokens (DexScreener fallback for rest)",
-                jup_overrides, len(addresses),
-            )
+
+    # v123: ALWAYS apply Jupiter cache as primary (even during cooldown).
+    # This ensures paper_fast, live_monitor, and price_refresh all use Jupiter
+    # regardless of which loop fetched it.
+    jup_overrides = 0
+    for addr in addresses:
+        jup_price = _jupiter_prices_cache.get(addr)
+        if jup_price and jup_price > 0:
+            prices[addr] = jup_price
+            _jupiter_overridden.add(addr)
+            jup_overrides += 1
+    if jup_overrides:
+        _src = "fresh" if not _skip_jup else "cached"
+        logger.info(
+            "paper_trader: Jupiter price primary for %d/%d tokens (%s)",
+            jup_overrides, len(addresses), _src,
+        )
 
     return prices
 
@@ -922,8 +920,17 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
         slip_mult = 1.0 + 2.0 * (1.0 - lds)  # 1.0 for lds=1.0, 3.0 for lds=0.0
         buy_slip_bps = int(buy_slip_bps_base * slip_mult)
         # v123: Use Jupiter price as entry (matches live execution price).
-        # Fallback to DexScreener + simulated slippage if Jupiter unavailable.
+        # Fetch on-demand if not cached (new RT tokens aren't in the check-loop cache yet).
         jup_entry = _jupiter_prices_cache.get(addr)
+        if not jup_entry or jup_entry <= 0:
+            try:
+                from enrich_jupiter import _fetch_jupiter_prices
+                _jup = _fetch_jupiter_prices([addr])
+                jup_entry = _jup.get(addr)
+                if jup_entry and jup_entry > 0:
+                    _jupiter_prices_cache[addr] = jup_entry
+            except Exception:
+                jup_entry = None
         if jup_entry and jup_entry > 0:
             entry_price = jup_entry
         else:
