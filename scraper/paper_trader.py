@@ -53,6 +53,7 @@ BATCH_SIZE = 30
 # v122: Track which addresses got Jupiter price override (for alert annotation + tick logging)
 _jupiter_overridden: set[str] = set()
 _jupiter_prices_cache: dict[str, float] = {}  # v122: Jupiter prices for tick logging
+_dex_prices_cache: dict[str, float] = {}  # v123: DexScreener prices preserved for tick logging
 
 # v88: Bot ML predictions — precomputed in GH Actions, read from Supabase
 _BOT_PREDICTIONS: dict = {}  # {(token_address, strategy): gate_mult}
@@ -564,7 +565,10 @@ def _log_price_ticks(client, prices: dict[str, float], source: str = "check",
         if now - last < throttle:
             continue
         _last_tick_log[addr] = now
-        row = {"token_address": addr, "price_usd": price, "source": source}
+        # v123: Log DexScreener price (not Jupiter-overridden) as primary tick.
+        # Sim needs both DexScreener and Jupiter price series separately.
+        dex_price = _dex_prices_cache.get(addr, price)
+        row = {"token_address": addr, "price_usd": dex_price, "source": source}
         # v121: Enrich with volume/liquidity from DexScreener (same API call)
         extra = _last_dex_extra.get(addr)
         if extra:
@@ -672,6 +676,11 @@ def _fetch_prices_batch(addresses: list[str]) -> dict[str, float]:
         for addr, jup_price in jup_prices.items():
             if jup_price and jup_price > 0:
                 _jupiter_prices_cache[addr] = jup_price
+
+    # v123: Snapshot DexScreener prices BEFORE Jupiter override (for tick logging).
+    # Sim needs both DexScreener and Jupiter price series.
+    _dex_prices_cache.clear()
+    _dex_prices_cache.update(prices)
 
     # v123: ALWAYS apply Jupiter cache as primary (even during cooldown).
     # This ensures paper_fast, live_monitor, and price_refresh all use Jupiter
