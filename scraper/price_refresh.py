@@ -406,7 +406,7 @@ def refresh_top_tokens(n: int = REFRESH_TOP_N) -> int:
                     "score": new_score,
                     "score_conviction": new_conv,
                     "score_momentum": new_mom,
-                    "change_24h": round(new_change, 2) if new_change else 0,
+                    "change_24h": max(-999999.99, min(999999.99, round(new_change, 2))) if new_change else 0,
                 })
 
         updated += 1

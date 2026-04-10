@@ -383,7 +383,7 @@ def upsert_tokens(
                 "sentiment": t["sentiment"],
                 "trend": t["trend"],
                 "time_window": time_window,
-                "change_24h": t.get("change_24h", 0.0),
+                "change_24h": max(-999999.99, min(999999.99, t.get("change_24h", 0.0))),
                 # Pipeline-computed features
                 "conviction_weighted": round(t.get("avg_conviction", 0), 2),
                 "momentum": round(t.get("recency_score", 0), 3),
