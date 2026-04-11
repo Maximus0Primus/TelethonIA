@@ -2037,10 +2037,10 @@ def _tick_based_simulation(args):
 
     # 7. Grid search
     if args.grid_ticks:
+        eligible_trades = [t for t in sim_trades if t["id"] in sim_results]
+
         # Fetch on-chain features via token_address + time match
         features_by_trade = _fetch_snapshot_features_for_trades(eligible_trades)
-
-        eligible_trades = [t for t in sim_trades if t["id"] in sim_results]
 
         # Run grid for ALL trades first (main grid)
         print(f"\n{'=' * 120}")
