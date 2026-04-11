@@ -1359,6 +1359,12 @@ def _evaluate_trade_exit(trade: dict, current_price: float | None,
     tp_price = float(trade["tp_price"]) if trade.get("tp_price") is not None else None
     pos_usd = float(trade.get("position_usd") or 0)
 
+    # v124: For live trades, trail/BE activation should reference the market price at entry
+    # (dex_spot_price_at_entry), not the fill price (entry_price). The fill is always lower
+    # due to on-chain slippage (5-15% on memecoins), which would make activation too easy.
+    # Paper trades don't have this field, so they fall back to entry_price (which ≈ market).
+    market_ref_price = float(trade.get("dex_spot_price_at_entry") or 0) or entry_price
+
     # Derive base_bps from the flat sell_slip_factor passed by caller
     base_bps = int(round((1 - sell_slip_factor) * 10_000))
 
@@ -1393,9 +1399,9 @@ def _evaluate_trade_exit(trade: dict, current_price: float | None,
         #    BE strategies: once peak exceeded entry*(1+be_act), SL moves to entry price
         effective_sl = sl_price
         be_match = _BE_RE.match(trade.get("strategy", ""))
-        if be_match and entry_price > 0 and high_seen > 0:
+        if be_match and market_ref_price > 0 and high_seen > 0:
             be_act = int(be_match.group(1)) / 100  # e.g., BE20 → 0.20
-            if high_seen >= entry_price * (1 + be_act):
+            if high_seen >= market_ref_price * (1 + be_act):
                 # Breakeven activated — SL is now entry price
                 effective_sl = entry_price
 
@@ -1427,8 +1433,8 @@ def _evaluate_trade_exit(trade: dict, current_price: float | None,
     #     v110 DTRAIL: activates once peak > entry * (1 + activation_pct).
     if new_status is None and current_price is not None:
         trail_pct, activation_pct = _get_trail_config(trade)
-        if trail_pct is not None and high_seen > 0 and entry_price > 0:
-            activation_price = entry_price * (1 + activation_pct)
+        if trail_pct is not None and high_seen > 0 and market_ref_price > 0:
+            activation_price = market_ref_price * (1 + activation_pct)
             if high_seen >= activation_price:
                 trail_trigger = high_seen * (1 - trail_pct)
                 if current_price <= trail_trigger and trail_trigger > entry_price:
