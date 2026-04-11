@@ -94,6 +94,48 @@ def _parse_int(arg: str, default: int) -> int:
         return default
 
 
+def _parse_strategy(arg: str, sb) -> str | None:
+    """Fuzzy-match a strategy name from user input.
+    Returns canonical strategy name or None if no match.
+    Matches case-insensitively and supports partial prefixes like 'dtrail10'."""
+    if not arg:
+        return None
+    from strategies import STRATEGIES
+    arg_upper = arg.upper().strip()
+    # Exact match
+    if arg_upper in STRATEGIES:
+        return arg_upper
+    # Prefix match (e.g. 'dtrail10' matches 'DTRAIL10_ACT15_SL70')
+    # Only match within active strategies first, then all
+    active = _get_active_strategies(sb)
+    for pool in [active, list(STRATEGIES.keys())]:
+        matches = [s for s in pool if s.upper().startswith(arg_upper)]
+        if len(matches) == 1:
+            return matches[0]
+    # Substring match as fallback
+    for pool in [active, list(STRATEGIES.keys())]:
+        matches = [s for s in pool if arg_upper in s.upper()]
+        if len(matches) == 1:
+            return matches[0]
+    return None
+
+
+def _split_strategy_args(args: str, sb) -> tuple[str, str | None]:
+    """Split args into (remaining_args, strategy_name).
+    Tries each word as a potential strategy name.
+    Returns (other_args, matched_strategy or None)."""
+    if not args:
+        return "", None
+    parts = args.split()
+    # Try last word first (most natural: /trades 10 dtrail10)
+    for i in range(len(parts) - 1, -1, -1):
+        strat = _parse_strategy(parts[i], sb)
+        if strat:
+            remaining = " ".join(parts[:i] + parts[i+1:]).strip()
+            return remaining, strat
+    return args, None
+
+
 def _send(text: str) -> bool:
     if not _BOT_TOKEN or not _CHAT_ID:
         return False
@@ -311,31 +353,34 @@ def _handle_pos(sb, args: str) -> str:
 # ── /trades [N] ──
 
 def _handle_trades(sb, args: str) -> str:
-    n = _parse_int(args, 5)
+    remaining, strat = _split_strategy_args(args, sb)
+    n = _parse_int(remaining, 5) if remaining else 5
     try:
-        trades = _query_trades(sb, limit=n)
+        trades = _query_trades(sb, limit=n, strategy=strat or "")
     except Exception as e:
         return f"❌ Erreur: {e}"
 
     if not trades:
-        return "📭 Aucun trade fermé."
+        return f"📭 Aucun trade fermé{f' ({_short_strat(strat)})' if strat else ''}."
 
     total_pnl = sum(float(t.get("pnl_usd") or 0) for t in trades)
+    strat_label = f" — {_short_strat(strat)}" if strat else ""
     lines = []
     for t in trades:
         pnl_pct = float(t.get("pnl_pct") or 0)
         pnl_usd = float(t.get("pnl_usd") or 0)
         emoji = _exit_emoji(t.get("status", ""), pnl_pct)
         mins = int(t.get("exit_minutes") or 0)
+        strat_tag = "" if strat else f" [{_short_strat(t.get('strategy',''))}]"
         lines.append(
             f"  {emoji} <b>{t.get('symbol','?')}</b>"
             f" {pnl_pct*100:+.1f}% (${pnl_usd:+.2f})"
             f" | {t.get('kol_group','?')}"
-            f" | {mins}min"
+            f" | {mins}min{strat_tag}"
         )
 
     return (
-        f"📋 <b>{len(trades)} DERNIERS TRADES</b>\n"
+        f"📋 <b>{len(trades)} DERNIERS TRADES{strat_label}</b>\n"
         f"PnL: <b>${total_pnl:+.2f}</b>\n\n"
         + "\n".join(lines)
     )
@@ -344,9 +389,12 @@ def _handle_trades(sb, args: str) -> str:
 # ── /kol [period] ──
 
 def _handle_kol(sb, args: str) -> str:
-    hours, label = _parse_period(args) if args else (0, "All-time")
+    remaining, strat = _split_strategy_args(args, sb)
+    hours, label = _parse_period(remaining) if remaining else (0, "All-time")
+    if strat:
+        label += f" | {_short_strat(strat)}"
     try:
-        trades = _query_trades(sb, hours=hours)
+        trades = _query_trades(sb, hours=hours, strategy=strat or "")
     except Exception as e:
         return f"❌ Erreur: {e}"
 
@@ -392,15 +440,19 @@ def _handle_kol(sb, args: str) -> str:
 # ── /stats [period] ──
 
 def _handle_stats(sb, args: str) -> str:
-    if args:
-        hours, label = _parse_period(args)
-        trades = _query_trades(sb, hours=hours)
-        d = _compute_stats(trades)
-        return f"📊 <b>PERFORMANCE</b>\n\n{_fmt_stats(d, label)}"
+    remaining, strat = _split_strategy_args(args, sb)
+    s = strat or ""
+    strat_label = f" — {_short_strat(strat)}" if strat else ""
 
-    d1 = _compute_stats(_query_trades(sb, hours=24))
-    d7 = _compute_stats(_query_trades(sb, hours=168))
-    dall = _compute_stats(_query_trades(sb))
+    if remaining:
+        hours, label = _parse_period(remaining)
+        trades = _query_trades(sb, hours=hours, strategy=s)
+        d = _compute_stats(trades)
+        return f"📊 <b>PERFORMANCE{strat_label}</b>\n\n{_fmt_stats(d, label)}"
+
+    d1 = _compute_stats(_query_trades(sb, hours=24, strategy=s))
+    d7 = _compute_stats(_query_trades(sb, hours=168, strategy=s))
+    dall = _compute_stats(_query_trades(sb, strategy=s))
 
     sections = []
     if d1["count"] > 0 and d1["count"] < dall["count"]:
@@ -409,7 +461,7 @@ def _handle_stats(sb, args: str) -> str:
         sections.append(_fmt_stats(d7, "7 jours"))
     sections.append(_fmt_stats(dall, "All-time"))
 
-    return f"📊 <b>PERFORMANCE</b>\n\n" + "\n\n".join(sections)
+    return f"📊 <b>PERFORMANCE{strat_label}</b>\n\n" + "\n\n".join(sections)
 
 
 # ── /shadow [period] ──
@@ -628,14 +680,17 @@ def _handle_config(sb, args: str) -> str:
 # ── /pnl <KOL> ──
 
 def _handle_pnl(sb, args: str) -> str:
-    """PnL for a specific KOL. Usage: /pnl FrenzGems"""
+    """PnL for a specific KOL. Usage: /pnl FrenzGems [strategy]"""
     if not args:
-        return "Usage: /pnl <nom_du_KOL>\nExemple: /pnl FrenzGems"
+        return "Usage: /pnl <nom_du_KOL> [stratégie]\nExemple: /pnl FrenzGems dtrail10"
 
-    kol_name = args.strip()
+    remaining, strat = _split_strategy_args(args, sb)
+    kol_name = remaining.strip() if remaining else args.strip()
+    if not kol_name:
+        return "Usage: /pnl <nom_du_KOL> [stratégie]"
 
-    # v116: Query all trades for this KOL across all active strategies
-    strategies = _get_active_strategies(sb)
+    strategies = [strat] if strat else _get_active_strategies(sb)
+    strat_label = f" ({_short_strat(strat)})" if strat else ""
     try:
         result = (
             sb.table("paper_trades")
@@ -653,7 +708,7 @@ def _handle_pnl(sb, args: str) -> str:
         return f"❌ Erreur: {e}"
 
     if not trades:
-        return f"📭 Aucun trade trouvé pour « {kol_name} »"
+        return f"📭 Aucun trade trouvé pour « {kol_name} »{strat_label}"
 
     stats = _compute_stats(trades)
     wr = stats["wins"] / stats["count"] * 100 if stats["count"] > 0 else 0
@@ -683,8 +738,10 @@ def _handle_pnl(sb, args: str) -> str:
 # ── /best ──
 
 def _handle_best(sb, args: str) -> str:
-    """Best trade all-time across all active strategies."""
-    strategies = _get_active_strategies(sb)
+    """Best trade all-time. Optional: /best dtrail10"""
+    strat = _parse_strategy(args.strip(), sb) if args.strip() else None
+    strategies = [strat] if strat else _get_active_strategies(sb)
+    strat_label = f" ({_short_strat(strat)})" if strat else ""
     try:
         result = (
             sb.table("paper_trades")
@@ -698,14 +755,16 @@ def _handle_best(sb, args: str) -> str:
         return f"❌ Erreur: {e}"
 
     if not t:
-        return "📭 Aucun trade."
+        return f"📭 Aucun trade{strat_label}."
 
-    return _format_highlight_trade(t, "🏆 BEST TRADE")
+    return _format_highlight_trade(t, f"🏆 BEST TRADE{strat_label}")
 
 
 def _handle_worst(sb, args: str) -> str:
-    """Worst trade all-time across all active strategies."""
-    strategies = _get_active_strategies(sb)
+    """Worst trade all-time. Optional: /worst dtrail10"""
+    strat = _parse_strategy(args.strip(), sb) if args.strip() else None
+    strategies = [strat] if strat else _get_active_strategies(sb)
+    strat_label = f" ({_short_strat(strat)})" if strat else ""
     try:
         result = (
             sb.table("paper_trades")
@@ -719,9 +778,9 @@ def _handle_worst(sb, args: str) -> str:
         return f"❌ Erreur: {e}"
 
     if not t:
-        return "📭 Aucun trade."
+        return f"📭 Aucun trade{strat_label}."
 
-    return _format_highlight_trade(t, "💀 WORST TRADE")
+    return _format_highlight_trade(t, f"💀 WORST TRADE{strat_label}")
 
 
 def _format_highlight_trade(t: dict, title: str) -> str:
@@ -927,44 +986,53 @@ def _handle_livepos(sb, args: str) -> str:
 
 
 def _handle_livetrades(sb, args: str) -> str:
-    """Last N closed live trades."""
-    n = _parse_int(args, 10)
-    trades = (
+    """Last N closed live trades. Optional: /livetrades 10 dtrail10"""
+    remaining, strat = _split_strategy_args(args, sb)
+    n = _parse_int(remaining, 10) if remaining else 10
+    q = (
         sb.table("paper_trades")
         .select("symbol,strategy,pnl_pct,pnl_usd,status,exit_minutes,created_at,exit_at,position_sol")
         .eq("source", "rt_live")
         .neq("status", "open")
-        .order("exit_at", desc=True)
-        .limit(n)
-        .execute().data or []
     )
+    if strat:
+        q = q.eq("strategy", strat)
+    trades = q.order("exit_at", desc=True).limit(n).execute().data or []
+
+    strat_label = f" — {_short_strat(strat)}" if strat else ""
     if not trades:
-        return "📭 Aucun trade live fermé"
+        return f"📭 Aucun trade live fermé{strat_label}"
 
     total = sum(float(t.get("pnl_usd") or 0) for t in trades)
     wins = sum(1 for t in trades if float(t.get("pnl_usd") or 0) > 0)
-    lines = [f"📋 <b>Derniers {len(trades)} trades live</b> (PnL: ${total:+.2f}, {wins}W/{len(trades)-wins}L)\n"]
+    lines = [f"📋 <b>Derniers {len(trades)} trades live{strat_label}</b> (PnL: ${total:+.2f}, {wins}W/{len(trades)-wins}L)\n"]
     for t in trades:
         pnl = float(t.get("pnl_pct") or 0) * 100
         pnl_usd = float(t.get("pnl_usd") or 0)
         emoji = _exit_emoji(t.get("status", ""), pnl)
         age = _age_str(t.get("exit_at") or t["created_at"])
+        strat_tag = "" if strat else f" {_short_strat(t.get('strategy',''))}"
         lines.append(
-            f"  {emoji} {t['symbol']} {_short_strat(t.get('strategy',''))} "
+            f"  {emoji} {t['symbol']}{strat_tag} "
             f"<b>{pnl:+.1f}%</b> (${pnl_usd:+.2f}) {int(t.get('exit_minutes') or 0)}min — {age}"
         )
     return "\n".join(lines)
 
 
 def _handle_livepnl(sb, args: str) -> str:
-    """Live PnL by period."""
-    hours, label = _parse_period(args or "24h")
+    """Live PnL by period. Optional: /livepnl 7d dtrail10"""
+    remaining, strat = _split_strategy_args(args, sb)
+    hours, label = _parse_period(remaining or "24h")
+    if strat:
+        label += f" | {_short_strat(strat)}"
     q = (
         sb.table("paper_trades")
         .select("pnl_pct,pnl_usd,status,strategy,created_at")
         .eq("source", "rt_live")
         .neq("status", "open")
     )
+    if strat:
+        q = q.eq("strategy", strat)
     if hours > 0:
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
         q = q.gte("exit_at", cutoff)
@@ -977,22 +1045,23 @@ def _handle_livepnl(sb, args: str) -> str:
     wins = sum(1 for t in trades if float(t.get("pnl_usd") or 0) > 0)
     wr = wins / len(trades) * 100 if trades else 0
 
-    # Per strategy
-    by_strat = {}
-    for t in trades:
-        s = t.get("strategy", "?")
-        by_strat.setdefault(s, []).append(float(t.get("pnl_usd") or 0))
-
     emoji = "📈" if total >= 0 else "📉"
     lines = [
         f"{emoji} <b>Live PnL — {label}</b>\n",
         f"  💰 Total: <b>${total:+.2f}</b>",
         f"  📊 {len(trades)} trades | {wr:.0f}% WR ({wins}W/{len(trades)-wins}L)",
     ]
-    if by_strat:
-        lines.append(f"\n  <b>Par stratégie:</b>")
-        for s, pnls in sorted(by_strat.items(), key=lambda x: -sum(x[1])):
-            lines.append(f"    {_short_strat(s)}: ${sum(pnls):+.2f} ({len(pnls)} trades)")
+
+    # Per strategy breakdown (only if not filtered to a single strategy)
+    if not strat:
+        by_strat = {}
+        for t in trades:
+            s = t.get("strategy", "?")
+            by_strat.setdefault(s, []).append(float(t.get("pnl_usd") or 0))
+        if by_strat:
+            lines.append(f"\n  <b>Par stratégie:</b>")
+            for s, pnls in sorted(by_strat.items(), key=lambda x: -sum(x[1])):
+                lines.append(f"    {_short_strat(s)}: ${sum(pnls):+.2f} ({len(pnls)} trades)")
 
     return "\n".join(lines)
 
@@ -1179,21 +1248,21 @@ HELP_TEXT = (
     "  /pos — Positions ouvertes (paper)\n"
     "  /today — Résumé du jour\n"
     "\n<b>Trades:</b>\n"
-    "  /trades [N] — Derniers N trades (défaut 5)\n"
-    "  /best — Meilleur trade\n"
-    "  /worst — Pire trade\n"
+    "  /trades [N] [strat] — Derniers trades\n"
+    "  /best [strat] — Meilleur trade\n"
+    "  /worst [strat] — Pire trade\n"
     "\n<b>Analyse:</b>\n"
-    "  /stats [période] — Performance\n"
-    "  /kol [période] — Leaderboard KOL\n"
-    "  /pnl &lt;KOL&gt; — Stats d'un KOL\n"
+    "  /stats [période] [strat] — Performance\n"
+    "  /kol [période] [strat] — Leaderboard KOL\n"
+    "  /pnl &lt;KOL&gt; [strat] — Stats d'un KOL\n"
     "  /shadow [période] — Shadow vs main\n"
     "\n<b>💎 Live Trading:</b>\n"
     "  /live — Status live (wallet, positions, PnL)\n"
     "  /live on|off — Activer/désactiver le live\n"
     "  /wallet — Balance SOL du wallet\n"
     "  /livepos — Positions live ouvertes + PnL\n"
-    "  /livetrades [N] — Derniers N trades live\n"
-    "  /livepnl [période] — PnL live par période\n"
+    "  /livetrades [N] [strat] — Trades live\n"
+    "  /livepnl [période] [strat] — PnL live\n"
     "\n<b>⚙️ Config Live:</b>\n"
     "  /setpos &lt;SOL&gt; — Position max (ex: /setpos 0.2)\n"
     "  /setmax &lt;N&gt; — Max positions simultanées\n"
@@ -1205,7 +1274,8 @@ HELP_TEXT = (
     "\n<b>Système:</b>\n"
     "  /config — Config active\n"
     "  /help — Cette aide\n"
-    "\n<b>Périodes:</b> 1h 6h 24h 7d 14d 30d all"
+    "\n<b>Périodes:</b> 1h 6h 24h 7d 14d 30d all\n"
+    "<b>Filtre strat:</b> dtrail10, tp100, etc."
 )
 
 

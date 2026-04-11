@@ -29,7 +29,10 @@ for label, mcap_min in [("ALL", 0), ("MCAP>25K", 25000), ("MCAP>50K", 50000), ("
     n_pass_mcap = 0
     n_has_ticks = 0
     n_has_jup = 0
+    EXCLUDE_TOKENS = {"$PEEPA", "$SPERM"}
     for t in eligible:
+        if t.get("symbol") in EXCLUDE_TOKENS:
+            continue
         mcap_raw = t.get("entry_mcap")
         mcap = float(mcap_raw) if mcap_raw is not None else None
         if mcap is None and mcap_min > 0:

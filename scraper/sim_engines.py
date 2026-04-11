@@ -934,15 +934,389 @@ def simulate_dip_scale_out(candles: list[dict], entry_price: float, cfg: dict,
 
 
 # ---------------------------------------------------------------------------
+# v125: Unified simulation — uses production _evaluate_trade_exit()
+# ---------------------------------------------------------------------------
+
+def candles_to_synthetic_ticks(candles: list[dict], base_ts: int) -> list[dict]:
+    """Convert 15-min OHLCV candles into synthetic ticks for _evaluate_trade_exit().
+
+    For each candle, generates 4 price points:
+      - If close >= open (bullish): open → low → high → close
+      - If close < open (bearish): open → high → low → close
+    Timestamps spaced 225s apart within each candle's 15-min interval.
+
+    Returns list of dicts: {"price_usd": float, "fetched_at": str (ISO)}
+    """
+    from datetime import datetime, timezone
+    ticks = []
+    for c in candles:
+        ts = c["timestamp"]
+        o, h, l, cl = c["open"], c["high"], c["low"], c["close"]
+        if cl >= o:
+            prices = [o, l, h, cl]
+        else:
+            prices = [o, h, l, cl]
+        for i, price in enumerate(prices):
+            tick_ts = ts + i * 225  # 4 ticks × 225s = 900s = 15min
+            dt = datetime.fromtimestamp(tick_ts, tz=timezone.utc)
+            ticks.append({
+                "price_usd": price,
+                "fetched_at": dt.isoformat(),
+            })
+    return ticks
+
+
+def simulate_unified(candles: list[dict], entry_price: float, cfg: dict,
+                     context: dict | None = None) -> dict:
+    """OHLCV simulation using production _evaluate_trade_exit().
+
+    Converts candles to synthetic ticks, builds a fake trade dict from cfg,
+    then replays through _evaluate_trade_exit() — identical logic to tick sim
+    and live trading.
+
+    Slippage: 10bps base (Jupiter Ultra) + dynamic per exit type/liquidity.
+    Crash detection: automatic (trail_crash if >30% below trigger).
+    """
+    from datetime import datetime, timezone
+    from strategies import sim_cfg_to_fake_trade
+    from paper_trader import _evaluate_trade_exit
+
+    if not candles:
+        return {"exit_reason": "no_data", "pnl_pct": 0, "elapsed_min": 0}
+
+    base_ts = candles[0]["timestamp"]
+    ticks = candles_to_synthetic_ticks(candles, base_ts)
+
+    # Build fake trade from sim config
+    liq = (context or {}).get("liq", 50_000)
+    created_dt = datetime.fromtimestamp(base_ts, tz=timezone.utc)
+    created_at = created_dt.isoformat()
+
+    fake_trade = sim_cfg_to_fake_trade(cfg, entry_price, created_at,
+                                       liquidity_usd=liq)
+
+    # 10bps base slippage (Jupiter Ultra RFQ)
+    sell_slip = 1 - 10 / 10_000
+
+    for tick in ticks:
+        tick_time = datetime.fromisoformat(
+            tick["fetched_at"].replace("Z", "+00:00"))
+        tick_price = tick["price_usd"]
+        if tick_price <= 0:
+            continue
+
+        ev = _evaluate_trade_exit(fake_trade, tick_price, tick_time, sell_slip)
+        if ev is None:
+            continue
+
+        # Always update high_price_seen
+        if ev.get("high_price_seen") is not None:
+            new_high = ev["high_price_seen"]
+            if new_high > float(fake_trade.get("high_price_seen") or 0):
+                fake_trade["high_price_seen"] = new_high
+
+        # Exit triggered
+        if "status" in ev and ev["status"] is not None:
+            return {
+                "exit_reason": ev["status"],
+                "pnl_pct": ev.get("pnl_pct", 0),
+                "elapsed_min": ev.get("exit_minutes", 0),
+            }
+
+    # No exit — timeout at last candle
+    last_ts = candles[-1]["timestamp"]
+    elapsed = (last_ts - base_ts) / 60.0
+    last_price = candles[-1]["close"]
+    slip = SLIPPAGE_TRAIL  # fallback for data-end exit
+    net_price = last_price * (1 - slip)
+    return {
+        "exit_reason": "data_end",
+        "pnl_pct": net_price / entry_price - 1,
+        "elapsed_min": elapsed,
+    }
+
+
+def simulate_unified_multi(candles: list[dict], entry_price: float, cfg: dict,
+                           context: dict | None = None) -> dict:
+    """Unified sim for SPLIT strategies (2 tranches).
+
+    Creates 2 fake trades, replays both through _evaluate_trade_exit().
+    SL cascade: if one tranche SL hits, force-close the other.
+    """
+    from datetime import datetime, timezone
+    from strategies import sim_cfg_to_fake_trade, STRATEGIES
+    from paper_trader import _evaluate_trade_exit
+
+    if not candles:
+        return {"exit_reason": "no_data", "pnl_pct": 0, "elapsed_min": 0}
+
+    strat_name = cfg.get("name", "")
+    tranches = STRATEGIES.get(strat_name, [])
+    if len(tranches) < 2:
+        return simulate_unified(candles, entry_price, cfg, context)
+
+    base_ts = candles[0]["timestamp"]
+    ticks = candles_to_synthetic_ticks(candles, base_ts)
+    liq = (context or {}).get("liq", 50_000)
+    created_dt = datetime.fromtimestamp(base_ts, tz=timezone.utc)
+    created_at = created_dt.isoformat()
+    sell_slip = 1 - 10 / 10_000
+
+    # Build fake trades per tranche
+    fake_trades = []
+    for i, tr in enumerate(tranches):
+        tr_cfg = {
+            "name": strat_name,
+            "tp_mult": tr.get("tp_mult"),
+            "sl_mult": tr.get("sl_mult", 0.50),
+            "horizon": tr.get("horizon_min", 120),
+            "tranche_label": tr.get("label", f"t{i}"),
+        }
+        ft = sim_cfg_to_fake_trade(tr_cfg, entry_price, created_at,
+                                    liquidity_usd=liq,
+                                    trade_id=f"sim_{i}")
+        fake_trades.append((ft, tr.get("pct", 0.5), False))  # (trade, weight, closed)
+
+    results = [None] * len(tranches)
+
+    for tick in ticks:
+        tick_time = datetime.fromisoformat(
+            tick["fetched_at"].replace("Z", "+00:00"))
+        tick_price = tick["price_usd"]
+        if tick_price <= 0:
+            continue
+
+        # Check SL cascade from previous tick
+        sl_cascade = any(
+            results[j] is not None and results[j]["exit_reason"] == "sl_hit"
+            for j in range(len(tranches))
+        )
+
+        for i, (ft, weight, closed) in enumerate(fake_trades):
+            if closed:
+                continue
+
+            ev = _evaluate_trade_exit(ft, tick_price, tick_time, sell_slip,
+                                      sl_cascade=sl_cascade)
+            if ev is None:
+                continue
+
+            if ev.get("high_price_seen") is not None:
+                new_high = ev["high_price_seen"]
+                if new_high > float(ft.get("high_price_seen") or 0):
+                    ft["high_price_seen"] = new_high
+
+            if "status" in ev and ev["status"] is not None:
+                results[i] = {
+                    "exit_reason": ev["status"],
+                    "pnl_pct": ev.get("pnl_pct", 0),
+                    "elapsed_min": ev.get("exit_minutes", 0),
+                }
+                fake_trades[i] = (ft, weight, True)
+
+        if all(closed for _, _, closed in fake_trades):
+            break
+
+    # Compute weighted PnL
+    total_pnl = 0
+    total_weight = 0
+    last_reason = "data_end"
+    last_elapsed = 0
+    for i, (ft, weight, closed) in enumerate(fake_trades):
+        if results[i] is not None:
+            total_pnl += results[i]["pnl_pct"] * weight
+            total_weight += weight
+            last_reason = results[i]["exit_reason"]
+            last_elapsed = max(last_elapsed, results[i]["elapsed_min"])
+        else:
+            # Unclosed tranche — timeout at data end
+            last_price = candles[-1]["close"]
+            pnl = last_price / entry_price - 1
+            total_pnl += pnl * weight
+            total_weight += weight
+            last_elapsed = max(last_elapsed, (candles[-1]["timestamp"] - base_ts) / 60.0)
+
+    return {
+        "exit_reason": last_reason,
+        "pnl_pct": total_pnl,
+        "elapsed_min": last_elapsed,
+    }
+
+
+def simulate_unified_dip_buy(candles: list[dict], entry_price: float, cfg: dict,
+                              context: dict | None = None) -> dict:
+    """Unified sim for DIP_BUY strategies.
+
+    P1 opens immediately. Watches for dip + bounce to open P2.
+    Both positions evaluated independently through _evaluate_trade_exit().
+    """
+    from datetime import datetime, timezone
+    from strategies import sim_cfg_to_fake_trade
+    from paper_trader import _evaluate_trade_exit
+
+    if not candles:
+        return {"exit_reason": "no_data", "pnl_pct": 0, "elapsed_min": 0}
+
+    base_ts = candles[0]["timestamp"]
+    ticks = candles_to_synthetic_ticks(candles, base_ts)
+    liq = (context or {}).get("liq", 50_000)
+    created_dt = datetime.fromtimestamp(base_ts, tz=timezone.utc)
+    created_at = created_dt.isoformat()
+    sell_slip = 1 - 10 / 10_000
+
+    # DIP params from cfg
+    dip_pct = cfg.get("dip_pct", 0.30)
+    bounce_pct = cfg.get("bounce_pct", 0.05)
+    dip_size_mult = cfg.get("dip_size_mult", 1.0)
+
+    # P1 opens immediately
+    p1_cfg = dict(cfg)
+    p1_cfg["tranche_label"] = "dip_p1"
+    p1_trade = sim_cfg_to_fake_trade(p1_cfg, entry_price, created_at,
+                                      liquidity_usd=liq, trade_id="sim_p1")
+
+    # P2 state
+    p2_trade = None
+    p2_open = False
+    low_since_entry = entry_price
+    dip_triggered = False
+
+    p1_result = None
+    p2_result = None
+    p1_weight = 1.0 / (1.0 + dip_size_mult)
+    p2_weight = dip_size_mult / (1.0 + dip_size_mult)
+
+    for tick in ticks:
+        tick_time = datetime.fromisoformat(
+            tick["fetched_at"].replace("Z", "+00:00"))
+        tick_price = tick["price_usd"]
+        if tick_price <= 0:
+            continue
+
+        # Track low for dip detection
+        if tick_price < low_since_entry:
+            low_since_entry = tick_price
+
+        # Check dip + bounce for P2 entry
+        if not p2_open and not dip_triggered:
+            if low_since_entry <= entry_price * (1 - dip_pct):
+                dip_triggered = True
+
+        if dip_triggered and not p2_open:
+            if bounce_pct <= 0:
+                # Direct re-entry at dip level
+                p2_entry = low_since_entry * (1 + BUY_SLIPPAGE)
+                p2_cfg = dict(cfg)
+                p2_cfg["tranche_label"] = "dip_p2"
+                p2_trade = sim_cfg_to_fake_trade(p2_cfg, p2_entry,
+                                                  tick["fetched_at"],
+                                                  liquidity_usd=liq,
+                                                  trade_id="sim_p2")
+                p2_open = True
+            elif tick_price / low_since_entry - 1 >= bounce_pct:
+                p2_entry = low_since_entry * (1 + bounce_pct) * (1 + BUY_SLIPPAGE)
+                p2_cfg = dict(cfg)
+                p2_cfg["tranche_label"] = "dip_p2"
+                p2_trade = sim_cfg_to_fake_trade(p2_cfg, p2_entry,
+                                                  tick["fetched_at"],
+                                                  liquidity_usd=liq,
+                                                  trade_id="sim_p2")
+                p2_open = True
+
+        # Evaluate P1
+        if p1_result is None:
+            ev = _evaluate_trade_exit(p1_trade, tick_price, tick_time, sell_slip)
+            if ev is not None:
+                if ev.get("high_price_seen") is not None:
+                    new_h = ev["high_price_seen"]
+                    if new_h > float(p1_trade.get("high_price_seen") or 0):
+                        p1_trade["high_price_seen"] = new_h
+                if "status" in ev and ev["status"] is not None:
+                    p1_result = {"exit_reason": ev["status"],
+                                 "pnl_pct": ev.get("pnl_pct", 0),
+                                 "elapsed_min": ev.get("exit_minutes", 0)}
+
+        # Evaluate P2
+        if p2_open and p2_result is None and p2_trade is not None:
+            ev = _evaluate_trade_exit(p2_trade, tick_price, tick_time, sell_slip)
+            if ev is not None:
+                if ev.get("high_price_seen") is not None:
+                    new_h = ev["high_price_seen"]
+                    if new_h > float(p2_trade.get("high_price_seen") or 0):
+                        p2_trade["high_price_seen"] = new_h
+                if "status" in ev and ev["status"] is not None:
+                    p2_result = {"exit_reason": ev["status"],
+                                 "pnl_pct": ev.get("pnl_pct", 0),
+                                 "elapsed_min": ev.get("exit_minutes", 0)}
+
+        # Both done
+        if p1_result is not None and (p2_result is not None or not p2_open):
+            break
+
+    # Compute weighted result
+    total_pnl = 0
+    last_reason = "data_end"
+    last_elapsed = 0
+
+    if p1_result:
+        total_pnl += p1_result["pnl_pct"] * p1_weight
+        last_reason = p1_result["exit_reason"]
+        last_elapsed = p1_result["elapsed_min"]
+    else:
+        last_price = candles[-1]["close"]
+        total_pnl += (last_price / entry_price - 1) * p1_weight
+        last_elapsed = (candles[-1]["timestamp"] - base_ts) / 60.0
+
+    if p2_open and p2_result:
+        total_pnl += p2_result["pnl_pct"] * p2_weight
+        last_elapsed = max(last_elapsed, p2_result["elapsed_min"])
+    elif p2_open and p2_trade:
+        last_price = candles[-1]["close"]
+        p2_entry = float(p2_trade["entry_price"])
+        total_pnl += (last_price / p2_entry - 1) * p2_weight
+    else:
+        # P2 never opened — P1 gets full weight
+        if p1_result:
+            total_pnl = p1_result["pnl_pct"]
+        else:
+            last_price = candles[-1]["close"]
+            total_pnl = last_price / entry_price - 1
+
+    return {
+        "exit_reason": last_reason,
+        "pnl_pct": total_pnl,
+        "elapsed_min": last_elapsed,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Router
 # ---------------------------------------------------------------------------
 
+# Types that use unified path (production exit logic) by default
+_UNIFIED_TYPES = {"FIXED", "SCALP", "DTRAIL", "TRAIL", "BE", "DECAY"}
+
 def simulate(candles: list[dict], entry_price: float, cfg: dict,
-             context: dict | None = None) -> dict:
-    """Route to the correct simulation engine based on cfg['type']."""
+             context: dict | None = None, unified: bool = True) -> dict:
+    """Route to the correct simulation engine based on cfg['type'].
+
+    unified=True (default): use production _evaluate_trade_exit() for types
+    deployed in paper/live trading. unified=False: use legacy engines (for comparison).
+    """
     global _sim_liquidity_usd
     _sim_liquidity_usd = (context or {}).get("liq", 0)
     t = cfg["type"]
+
+    # Unified path for production strategy types
+    if unified:
+        if t in _UNIFIED_TYPES:
+            return simulate_unified(candles, entry_price, cfg, context)
+        if t == "SPLIT":
+            return simulate_unified_multi(candles, entry_price, cfg, context)
+        if t == "DIP_BUY":
+            return simulate_unified_dip_buy(candles, entry_price, cfg, context)
+
+    # Legacy path (sim-only experimental types, or --legacy-sim mode)
     if t in ("FIXED", "SCALP"):
         return simulate_fixed(candles, entry_price, cfg)
     elif t == "DTRAIL":

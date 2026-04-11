@@ -912,6 +912,13 @@ def _handle_trigger_fill(client_sb, trade: dict, order_status: dict, now) -> Non
     price_divergence_pct = None
     if paper_exit_price and paper_exit_price > 0 and exit_price and exit_price > 0:
         price_divergence_pct = round((exit_price / paper_exit_price) - 1, 4)
+    # v125: Structured divergence log
+    if price_divergence_pct is not None:
+        logger.info(
+            "DIVERGENCE trigger_fill: %s %s paper=$%.8f actual=$%.8f delta=%.2f%%",
+            trade.get("symbol"), trade.get("strategy"),
+            paper_exit_price, exit_price, price_divergence_pct * 100,
+        )
 
     # Update DB
     update = {
@@ -1289,6 +1296,13 @@ def check_live_trades(client_sb) -> dict:
             trade["symbol"], trade["strategy"], new_status,
             pnl_pct * 100, pnl_usd, div_str, sell_result["signature"][:16],
         )
+        # v125: Structured divergence log for analysis
+        if price_divergence_pct is not None:
+            logger.info(
+                "DIVERGENCE: %s %s exit_type=%s paper=$%.8f actual=$%.8f delta=%.2f%%",
+                trade["symbol"], trade["strategy"], new_status,
+                paper_exit_price or 0, exit_price or 0, price_divergence_pct * 100,
+            )
 
         # Alert via Telegram — v119: detailed sell alert
         try:

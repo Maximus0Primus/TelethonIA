@@ -32,7 +32,9 @@ logger = logging.getLogger(__name__)
 
 TRIGGER_BASE = "https://api.jup.ag/trigger/v2"
 WSOL_MINT = "So11111111111111111111111111111111111111112"
-TIMEOUT = 30  # v122: increased from 15s — deposit/craft can be slow on Jupiter
+TIMEOUT = 45  # v125: 45s — deposit/craft + create_order can be very slow
+RETRY_ATTEMPTS = 2  # v125: retry on timeout/504
+RETRY_DELAY = 3  # seconds between retries
 
 # ---------------------------------------------------------------------------
 # Module-level cached state (follows _rt_config pattern in safe_scraper.py)
@@ -293,19 +295,36 @@ def place_stop_loss(
     wallet = str(kp.pubkey())
 
     try:
-        # Step 1: Craft deposit transaction
+        # Step 1: Craft deposit transaction (v125: retry on timeout/504)
         step = "deposit_craft"
-        resp = requests.post(
-            f"{TRIGGER_BASE}/deposit/craft",
-            headers=headers,
-            json={
-                "inputMint": ca,
-                "outputMint": WSOL_MINT,
-                "userAddress": wallet,
-                "amount": str(amount_tokens),
-            },
-            timeout=TIMEOUT,
-        )
+        resp = None
+        for attempt in range(1, RETRY_ATTEMPTS + 1):
+            try:
+                resp = requests.post(
+                    f"{TRIGGER_BASE}/deposit/craft",
+                    headers=headers,
+                    json={
+                        "inputMint": ca,
+                        "outputMint": WSOL_MINT,
+                        "userAddress": wallet,
+                        "amount": str(amount_tokens),
+                    },
+                    timeout=TIMEOUT,
+                )
+                if resp.status_code not in (504, 502, 503):
+                    break
+                logger.info("jupiter_trigger: %s %d — retry %d/%d (token=%s)",
+                            step, resp.status_code, attempt, RETRY_ATTEMPTS, ca[:12])
+            except requests.exceptions.Timeout:
+                logger.info("jupiter_trigger: %s timeout — retry %d/%d (token=%s)",
+                            step, attempt, RETRY_ATTEMPTS, ca[:12])
+                resp = None
+            if attempt < RETRY_ATTEMPTS:
+                time.sleep(RETRY_DELAY)
+
+        if resp is None:
+            logger.warning("jupiter_trigger: %s all retries timed out (token=%s)", step, ca[:12])
+            return {"error": step, "detail": "timeout_all_retries"}
         if resp.status_code != 200:
             logger.warning("jupiter_trigger: %s %d: %s (token=%s)", step, resp.status_code, resp.text[:500], ca[:12])
             return {"error": step, "http": resp.status_code}
@@ -325,29 +344,47 @@ def place_stop_loss(
             logger.warning("jupiter_trigger: %s failed for %s", step, ca[:12])
             return {"error": step}
 
-        # Step 3: Create stop-loss order
+        # Step 3: Create stop-loss order (v125: retry on timeout/504)
         step = "create_order"
         expires_at_ms = int((time.time() + expiry_seconds) * 1000)
+        order_payload = {
+            "orderType": "single",
+            "depositRequestId": request_id,
+            "depositSignedTx": signed_b64,
+            "userPubkey": wallet,
+            "inputMint": ca,
+            "inputAmount": str(amount_tokens),
+            "outputMint": WSOL_MINT,
+            "triggerMint": ca,
+            "triggerCondition": "below",
+            "triggerPriceUsd": sl_price_usd,
+            "slippageBps": sl_slippage_bps,
+            "expiresAt": expires_at_ms,
+        }
 
-        resp2 = requests.post(
-            f"{TRIGGER_BASE}/orders/price",
-            headers=headers,
-            json={
-                "orderType": "single",
-                "depositRequestId": request_id,
-                "depositSignedTx": signed_b64,
-                "userPubkey": wallet,
-                "inputMint": ca,
-                "inputAmount": str(amount_tokens),
-                "outputMint": WSOL_MINT,
-                "triggerMint": ca,
-                "triggerCondition": "below",
-                "triggerPriceUsd": sl_price_usd,
-                "slippageBps": sl_slippage_bps,
-                "expiresAt": expires_at_ms,
-            },
-            timeout=TIMEOUT,
-        )
+        resp2 = None
+        for attempt in range(1, RETRY_ATTEMPTS + 1):
+            try:
+                resp2 = requests.post(
+                    f"{TRIGGER_BASE}/orders/price",
+                    headers=headers,
+                    json=order_payload,
+                    timeout=TIMEOUT,
+                )
+                if resp2.status_code not in (504, 502, 503):
+                    break
+                logger.info("jupiter_trigger: %s %d — retry %d/%d (token=%s)",
+                            step, resp2.status_code, attempt, RETRY_ATTEMPTS, ca[:12])
+            except requests.exceptions.Timeout:
+                logger.info("jupiter_trigger: %s timeout — retry %d/%d (token=%s)",
+                            step, attempt, RETRY_ATTEMPTS, ca[:12])
+                resp2 = None
+            if attempt < RETRY_ATTEMPTS:
+                time.sleep(RETRY_DELAY)
+
+        if resp2 is None:
+            logger.warning("jupiter_trigger: %s all retries timed out (token=%s)", step, ca[:12])
+            return {"error": step, "detail": "timeout_all_retries"}
         if resp2.status_code != 200:
             logger.warning("jupiter_trigger: %s %d: %s (token=%s)", step, resp2.status_code, resp2.text[:500], ca[:12])
             return {"error": step, "http": resp2.status_code}

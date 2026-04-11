@@ -856,6 +856,7 @@ def compute_metrics(pnl_list: list[float], n_days: int) -> dict:
 
 
 FLAT_POS_SIZE = 0  # 0 = use Kelly, >0 = fixed $ per trade (set by --flat-sizing)
+USE_UNIFIED_SIM = True  # v125: use production _evaluate_trade_exit() for OHLCV sim
 
 
 def simulate_bankroll(trade_results: list[dict]) -> dict:
@@ -2078,13 +2079,18 @@ def _tick_based_simulation(args):
         print("No trades with tick coverage. Exiting.")
         return
 
-    # Filter DTRAIL strategies (the ones we care about for tick sim)
-    dtrail_trades = [t for t in trades
-                     if "DTRAIL" in t.get("strategy", "") or "DIP" in t.get("strategy", "")]
-    print(f"DTRAIL/DIP trades: {len(dtrail_trades)} (of {len(trades)} total)")
+    # v125: Dedup by token_address — keep first trade per token (chronological).
+    # Without this, tokens with N active strategies appear N times, inflating results.
+    seen_addrs = set()
+    deduped = []
+    for t in trades:
+        addr = t["token_address"]
+        if addr not in seen_addrs:
+            seen_addrs.add(addr)
+            deduped.append(t)
+    print(f"After dedup by token: {len(deduped)} unique tokens (was {len(trades)})")
 
-    # Use all trades for sim, not just DTRAIL
-    sim_trades = trades
+    sim_trades = deduped
 
     # 2. Build token time ranges
     token_ranges: dict[str, tuple] = {}
@@ -2469,11 +2475,98 @@ def main():
                         help="Number of top strategies to test with dual-wallet (default: 30)")
     parser.add_argument("--dual-position", type=float, default=0,
                         help="Position size USD for slippage calc (default: Kelly-sized)")
+    parser.add_argument("--legacy-sim", action="store_true",
+                        help="Force legacy sim engines (flat 2.5%% slippage, duplicated exit logic)")
+    parser.add_argument("--no-ticks", action="store_true",
+                        help="Force OHLCV mode even when tick data is available")
+    parser.add_argument("--divergence-report", action="store_true",
+                        help="Show paper vs live exit price divergence summary from recent trades")
     args = parser.parse_args()
 
-    global FLAT_POS_SIZE
+    global FLAT_POS_SIZE, USE_UNIFIED_SIM
     if args.flat_sizing > 0:
         FLAT_POS_SIZE = args.flat_sizing
+    if args.legacy_sim:
+        USE_UNIFIED_SIM = False
+        print("LEGACY SIM: using old sim engines (flat 2.5% slippage, duplicated exit logic)")
+
+    # v125: --divergence-report: show paper vs live exit price divergence
+    if args.divergence_report:
+        print("=" * 80)
+        print("DIVERGENCE REPORT: Paper vs Live exit prices")
+        print("=" * 80)
+        params = [
+            ("select", "symbol,strategy,status,paper_exit_price,exit_price,price_divergence_pct,exit_at"),
+            ("source", "eq.rt_live"),
+            ("price_divergence_pct", "not.is.null"),
+            ("order", "exit_at.desc"),
+            ("limit", "500"),
+        ]
+        trades = sb_get("paper_trades", params)
+        if not trades:
+            print("No live trades with divergence data found.")
+            return
+
+        import statistics
+        all_divs = [abs(float(t["price_divergence_pct"])) for t in trades if t.get("price_divergence_pct")]
+        by_status = {}
+        by_strategy = {}
+        for t in trades:
+            div = abs(float(t["price_divergence_pct"]))
+            status = t.get("status", "unknown")
+            strat = t.get("strategy", "unknown")
+            by_status.setdefault(status, []).append(div)
+            by_strategy.setdefault(strat, []).append(div)
+
+        print(f"\nTotal trades with divergence data: {len(all_divs)}")
+        if all_divs:
+            print(f"Mean absolute divergence: {statistics.mean(all_divs):.2%}")
+            print(f"Median: {statistics.median(all_divs):.2%}")
+            print(f"Max: {max(all_divs):.2%}")
+
+        print(f"\n{'Exit Type':<15} {'N':>4} {'Mean Abs':>10} {'Median':>10} {'Max':>10}")
+        print("-" * 55)
+        for status, divs in sorted(by_status.items()):
+            print(f"{status:<15} {len(divs):>4} {statistics.mean(divs):>10.2%} "
+                  f"{statistics.median(divs):>10.2%} {max(divs):>10.2%}")
+
+        print(f"\n{'Strategy':<30} {'N':>4} {'Mean Abs':>10}")
+        print("-" * 50)
+        for strat, divs in sorted(by_strategy.items(), key=lambda x: -statistics.mean(x[1])):
+            print(f"{strat:<30} {len(divs):>4} {statistics.mean(divs):>10.2%}")
+
+        # Flag large divergences
+        large = [t for t in trades if abs(float(t.get("price_divergence_pct") or 0)) > 0.05]
+        if large:
+            print(f"\nTrades with >5% divergence: {len(large)}")
+            for t in large[:10]:
+                print(f"  {t['symbol']} {t['strategy']} {t['status']} "
+                      f"paper=${float(t.get('paper_exit_price') or 0):.8f} "
+                      f"actual=${float(t.get('exit_price') or 0):.8f} "
+                      f"div={float(t['price_divergence_pct']):.2%}")
+        return
+
+    # v125: Auto-switch to --from-ticks when >14 days of tick data available
+    if not args.from_ticks and not args.from_trades and not args.no_ticks and not args.grid_ticks:
+        try:
+            params = [
+                ("select", "fetched_at"),
+                ("order", "fetched_at.asc"),
+                ("limit", "1"),
+            ]
+            earliest = sb_get("price_ticks", params)
+            if earliest:
+                import datetime as _dt_mod
+                first_tick = _dt_mod.datetime.fromisoformat(
+                    earliest[0]["fetched_at"].replace("Z", "+00:00"))
+                days_of_data = (_dt_mod.datetime.now(_dt_mod.timezone.utc) - first_tick).days
+                if days_of_data >= 14:
+                    args.from_ticks = True
+                    print(f"Tick data available ({days_of_data} days). "
+                          f"Auto-switching to --from-ticks mode. "
+                          f"Use --no-ticks to force OHLCV.")
+        except Exception as e:
+            print(f"Tick coverage check failed ({e}), using OHLCV mode")
 
     # =====================================================================
     # FROM-TRADES MODE: use real paper trade PnL, skip OHLCV entirely
@@ -2817,7 +2910,8 @@ def main():
         pnl_list = []
         for te in trade_entries:
             candles = sim_store[te["candles_key"]]
-            res = simulate(candles, te["entry_price"], cfg, context=te.get("context"))
+            res = simulate(candles, te["entry_price"], cfg, context=te.get("context"),
+                          unified=USE_UNIFIED_SIM)
             res["token_address"] = te["token_address"]
             res["created_at"] = te["created_at"]
             res["kol_group"] = te["kol_group"]
@@ -3078,7 +3172,8 @@ def main():
                                 fast_interval_sec=fs,
                                 fast_window_min=fw)
                             res = simulate(resampled, te["entry_price"], cfg,
-                                          context=te.get("context"))
+                                          context=te.get("context"),
+                                          unified=USE_UNIFIED_SIM)
                             pnl_list.append(res["pnl_pct"])
 
                         avg_pnl = statistics.mean(pnl_list) * 100
@@ -3154,7 +3249,8 @@ def main():
                 pnl_list = []
                 for te in trade_entries:
                     candles = p_store[te["candles_key"]]
-                    res = simulate(candles, te["entry_price"], cfg, context=te.get("context"))
+                    res = simulate(candles, te["entry_price"], cfg, context=te.get("context"),
+                                  unified=USE_UNIFIED_SIM)
                     pnl_list.append(res["pnl_pct"])
 
                 if len(pnl_list) < MIN_TRADES:
