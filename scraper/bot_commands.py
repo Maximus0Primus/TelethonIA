@@ -1,19 +1,21 @@
 """
 Telegram bot command handler — polls getUpdates for /commands.
 
-Commands (all accept optional args):
-  /bank            — Bankroll, deployed, available
-  /pos             — Open positions (or last closed if none)
-  /trades [N]      — Last N closed trades (default 5)
-  /kol [period]    — KOL leaderboard
-  /stats [period]  — Performance summary
-  /shadow [period] — Top shadow strategies vs main
-  /today           — Today's summary
-  /config          — Current active config
-  /pnl <KOL>       — PnL for a specific KOL
-  /best            — Best trade all-time
-  /worst           — Worst trade all-time
-  /help            — List commands
+Paper commands:
+  /bank, /pos, /trades, /kol, /stats, /shadow, /today, /config, /pnl, /best, /worst
+
+Live trading commands (v124):
+  /live [on|off]   — Status / enable / disable live trading
+  /wallet          — SOL balance + token holdings
+  /livepos         — Open live positions with current PnL
+  /livetrades [N]  — Last N closed live trades
+  /livepnl [period]— Live PnL by period
+  /setpos <SOL>    — Set max position size
+  /setmax <N>      — Set max concurrent positions
+  /setlimit <period> <SOL> — Set loss limits
+  /setstrat <name> — Set active strategy
+  /sell <SYMBOL>   — Sell one position
+  /sellall confirm — Emergency sell ALL positions
 
 Periods: 1h 6h 24h 7d 14d 30d all
 """
@@ -749,9 +751,402 @@ def _format_highlight_trade(t: dict, title: str) -> str:
     )
 
 
+# ── Live trading commands ──
+
+def _handle_live(sb, args: str) -> str:
+    """Live trading status, enable/disable."""
+    args_lower = args.strip().lower()
+
+    # /live on — enable live trading
+    if args_lower in ("on", "enable", "start"):
+        try:
+            result = sb.table("scoring_config").select("rt_trade_config").eq("id", 1).execute()
+            cfg = result.data[0]["rt_trade_config"] if result.data else {}
+            cfg["enabled"] = True
+            sb.table("scoring_config").update({"rt_trade_config": cfg}).eq("id", 1).execute()
+            return "✅ <b>Live trading ACTIVÉ</b>\nLes prochains signaux ouvriront des trades on-chain."
+        except Exception as e:
+            return f"❌ Erreur activation live: {e}"
+
+    # /live off — disable live trading
+    if args_lower in ("off", "disable", "stop"):
+        try:
+            result = sb.table("scoring_config").select("rt_trade_config").eq("id", 1).execute()
+            cfg = result.data[0]["rt_trade_config"] if result.data else {}
+            cfg["enabled"] = False
+            sb.table("scoring_config").update({"rt_trade_config": cfg}).eq("id", 1).execute()
+            return "⛔ <b>Live trading DÉSACTIVÉ</b>\nLes positions ouvertes sont toujours monitorées."
+        except Exception as e:
+            return f"❌ Erreur désactivation live: {e}"
+
+    # /live — status
+    try:
+        from live_trader import get_wallet_balance
+        from safe_scraper import _rt_load_config, _rt_load_bankroll
+
+        config = _rt_load_config()
+        live_cfg = config.get("live_trading", {})
+        enabled = live_cfg.get("enabled", False)
+        max_pos_sol = live_cfg.get("max_position_sol", 0.5)
+        max_open = live_cfg.get("max_open_positions", 5)
+        daily_limit = live_cfg.get("daily_loss_limit_sol", 2.0)
+        weekly_limit = live_cfg.get("weekly_loss_limit_sol", 5.0)
+        strategy = live_cfg.get("rt_strategies", "all")
+
+        # Wallet balance
+        wallet = get_wallet_balance()
+        sol_bal = wallet["sol_balance"] if wallet else 0
+        n_tokens = len(wallet.get("token_balances", {})) if wallet else 0
+
+        # Open live trades
+        open_trades = sb.table("paper_trades").select(
+            "symbol,entry_price,position_usd,position_sol,created_at,strategy"
+        ).eq("status", "open").eq("source", "rt_live").execute().data or []
+
+        # Today's closed live trades
+        today_cutoff = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0).isoformat()
+        closed_today = sb.table("paper_trades").select(
+            "pnl_usd,pnl_pct,status"
+        ).eq("source", "rt_live").neq("status", "open").gte("exit_at", today_cutoff).execute().data or []
+
+        today_pnl = sum(float(t.get("pnl_usd") or 0) for t in closed_today)
+        today_n = len(closed_today)
+        today_wins = sum(1 for t in closed_today if float(t.get("pnl_usd") or 0) > 0)
+
+        # Bankroll
+        bk = _rt_load_bankroll()
+        strat_bk = bk.get("strategy_bankrolls", {})
+
+        status_emoji = "🟢" if enabled else "🔴"
+        lines = [
+            f"{status_emoji} <b>LIVE TRADING {'ACTIF' if enabled else 'INACTIF'}</b>\n",
+            f"<b>Wallet:</b>",
+            f"  💰 {sol_bal:.4f} SOL",
+            f"  🪙 {n_tokens} token(s) en portefeuille",
+            f"\n<b>Positions ouvertes:</b> {len(open_trades)}/{max_open}",
+        ]
+        for t in open_trades:
+            lines.append(f"  • {t['symbol']} — {float(t.get('position_sol') or 0):.3f} SOL (${float(t.get('position_usd') or 0):.1f})")
+
+        lines.append(f"\n<b>Aujourd'hui:</b>")
+        if today_n > 0:
+            lines.append(f"  {'📈' if today_pnl >= 0 else '📉'} PnL: <b>${today_pnl:+.2f}</b> ({today_n} trades, {today_wins}W)")
+        else:
+            lines.append(f"  Aucun trade live aujourd'hui")
+
+        lines.append(f"\n<b>Config:</b>")
+        lines.append(f"  📏 Max position: {max_pos_sol} SOL")
+        lines.append(f"  📊 Max open: {max_open}")
+        lines.append(f"  🛡 Loss limits: {daily_limit} SOL/jour, {weekly_limit} SOL/sem")
+        lines.append(f"  🎯 Stratégie: {strategy}")
+
+        if strat_bk:
+            lines.append(f"\n<b>Bankroll par stratégie:</b>")
+            for s, b in sorted(strat_bk.items(), key=lambda x: -x[1].get("balance", 0)):
+                bal = b.get("balance", 0)
+                peak = b.get("peak", 0)
+                dd = (1 - bal / peak) * 100 if peak > 0 else 0
+                lines.append(f"  {_short_strat(s)}: ${bal:.0f} (DD {dd:.0f}%)")
+
+        return "\n".join(lines)
+    except Exception as e:
+        return f"❌ Erreur live status: {e}"
+
+
+def _handle_wallet(sb, args: str) -> str:
+    """Wallet SOL balance + token holdings."""
+    try:
+        from live_trader import get_wallet_balance
+        wallet = get_wallet_balance()
+        if not wallet:
+            return "❌ Impossible de lire le wallet"
+
+        sol = wallet["sol_balance"]
+        tokens = wallet.get("token_balances", {})
+
+        lines = [f"💰 <b>Wallet</b>\n", f"  SOL: <b>{sol:.4f}</b>"]
+
+        if tokens:
+            lines.append(f"\n  <b>Tokens ({len(tokens)}):</b>")
+            for mint, info in tokens.items():
+                ui_amount = info.get("ui_amount", 0)
+                if ui_amount > 0:
+                    lines.append(f"  • {mint[:8]}... : {ui_amount:,.0f}")
+        else:
+            lines.append(f"\n  Aucun token")
+
+        return "\n".join(lines)
+    except Exception as e:
+        return f"❌ Erreur wallet: {e}"
+
+
+def _handle_livepos(sb, args: str) -> str:
+    """Open live positions with current PnL."""
+    try:
+        from paper_trader import _fetch_prices_batch
+        trades = sb.table("paper_trades").select(
+            "id,symbol,token_address,entry_price,position_usd,position_sol,"
+            "created_at,strategy,high_price_seen"
+        ).eq("status", "open").eq("source", "rt_live").execute().data or []
+
+        if not trades:
+            return "📭 Aucune position live ouverte"
+
+        # Fetch current prices
+        addrs = list({t["token_address"] for t in trades})
+        prices = _fetch_prices_batch(addrs)
+
+        lines = [f"📊 <b>{len(trades)} position(s) live</b>\n"]
+        total_pnl = 0
+        for t in trades:
+            addr = t["token_address"]
+            ep = float(t["entry_price"])
+            cp = prices.get(addr)
+            pos_usd = float(t.get("position_usd") or 0)
+            age = _age_str(t["created_at"])
+            high = float(t.get("high_price_seen") or 0)
+
+            if cp and ep > 0:
+                pnl_pct = (cp / ep - 1) * 100
+                pnl_usd = pos_usd * (cp / ep - 1)
+                peak_pct = (high / ep - 1) * 100 if high > 0 else 0
+                total_pnl += pnl_usd
+                emoji = "🟢" if pnl_pct > 0 else "🔴"
+                lines.append(
+                    f"  {emoji} <b>{t['symbol']}</b> ({_short_strat(t['strategy'])})\n"
+                    f"    PnL: <b>{pnl_pct:+.1f}%</b> (${pnl_usd:+.2f}) | Peak: +{peak_pct:.0f}%\n"
+                    f"    Pos: {float(t.get('position_sol') or 0):.3f} SOL | Age: {age}"
+                )
+            else:
+                lines.append(f"  ⚠️ <b>{t['symbol']}</b> — pas de prix")
+
+        lines.append(f"\n💰 PnL total unrealized: <b>${total_pnl:+.2f}</b>")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"❌ Erreur livepos: {e}"
+
+
+def _handle_livetrades(sb, args: str) -> str:
+    """Last N closed live trades."""
+    n = _parse_int(args, 10)
+    trades = (
+        sb.table("paper_trades")
+        .select("symbol,strategy,pnl_pct,pnl_usd,status,exit_minutes,created_at,exit_at,position_sol")
+        .eq("source", "rt_live")
+        .neq("status", "open")
+        .order("exit_at", desc=True)
+        .limit(n)
+        .execute().data or []
+    )
+    if not trades:
+        return "📭 Aucun trade live fermé"
+
+    total = sum(float(t.get("pnl_usd") or 0) for t in trades)
+    wins = sum(1 for t in trades if float(t.get("pnl_usd") or 0) > 0)
+    lines = [f"📋 <b>Derniers {len(trades)} trades live</b> (PnL: ${total:+.2f}, {wins}W/{len(trades)-wins}L)\n"]
+    for t in trades:
+        pnl = float(t.get("pnl_pct") or 0) * 100
+        pnl_usd = float(t.get("pnl_usd") or 0)
+        emoji = _exit_emoji(t.get("status", ""), pnl)
+        age = _age_str(t.get("exit_at") or t["created_at"])
+        lines.append(
+            f"  {emoji} {t['symbol']} {_short_strat(t.get('strategy',''))} "
+            f"<b>{pnl:+.1f}%</b> (${pnl_usd:+.2f}) {int(t.get('exit_minutes') or 0)}min — {age}"
+        )
+    return "\n".join(lines)
+
+
+def _handle_livepnl(sb, args: str) -> str:
+    """Live PnL by period."""
+    hours, label = _parse_period(args or "24h")
+    q = (
+        sb.table("paper_trades")
+        .select("pnl_pct,pnl_usd,status,strategy,created_at")
+        .eq("source", "rt_live")
+        .neq("status", "open")
+    )
+    if hours > 0:
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+        q = q.gte("exit_at", cutoff)
+    trades = q.order("exit_at", desc=True).execute().data or []
+
+    if not trades:
+        return f"📭 Aucun trade live ({label})"
+
+    total = sum(float(t.get("pnl_usd") or 0) for t in trades)
+    wins = sum(1 for t in trades if float(t.get("pnl_usd") or 0) > 0)
+    wr = wins / len(trades) * 100 if trades else 0
+
+    # Per strategy
+    by_strat = {}
+    for t in trades:
+        s = t.get("strategy", "?")
+        by_strat.setdefault(s, []).append(float(t.get("pnl_usd") or 0))
+
+    emoji = "📈" if total >= 0 else "📉"
+    lines = [
+        f"{emoji} <b>Live PnL — {label}</b>\n",
+        f"  💰 Total: <b>${total:+.2f}</b>",
+        f"  📊 {len(trades)} trades | {wr:.0f}% WR ({wins}W/{len(trades)-wins}L)",
+    ]
+    if by_strat:
+        lines.append(f"\n  <b>Par stratégie:</b>")
+        for s, pnls in sorted(by_strat.items(), key=lambda x: -sum(x[1])):
+            lines.append(f"    {_short_strat(s)}: ${sum(pnls):+.2f} ({len(pnls)} trades)")
+
+    return "\n".join(lines)
+
+
+def _handle_setpos(sb, args: str) -> str:
+    """Set max position size in SOL."""
+    try:
+        val = float(args.strip())
+    except (ValueError, TypeError):
+        return "❌ Usage: /setpos &lt;SOL&gt;\nEx: /setpos 0.2"
+    if val <= 0 or val > 10:
+        return "❌ Position doit être entre 0.01 et 10 SOL"
+
+    try:
+        result = sb.table("scoring_config").select("rt_trade_config").eq("id", 1).execute()
+        cfg = result.data[0]["rt_trade_config"] if result.data else {}
+        old = cfg.get("max_position_sol", "?")
+        cfg["max_position_sol"] = val
+        sb.table("scoring_config").update({"rt_trade_config": cfg}).eq("id", 1).execute()
+        return f"✅ Position max: <b>{old} → {val} SOL</b>"
+    except Exception as e:
+        return f"❌ Erreur: {e}"
+
+
+def _handle_setmax(sb, args: str) -> str:
+    """Set max open positions."""
+    try:
+        val = int(args.strip())
+    except (ValueError, TypeError):
+        return "❌ Usage: /setmax &lt;N&gt;\nEx: /setmax 3"
+    if val < 1 or val > 20:
+        return "❌ Max positions entre 1 et 20"
+
+    try:
+        result = sb.table("scoring_config").select("rt_trade_config").eq("id", 1).execute()
+        cfg = result.data[0]["rt_trade_config"] if result.data else {}
+        old = cfg.get("max_open_positions", "?")
+        cfg["max_open_positions"] = val
+        sb.table("scoring_config").update({"rt_trade_config": cfg}).eq("id", 1).execute()
+        return f"✅ Max positions: <b>{old} → {val}</b>"
+    except Exception as e:
+        return f"❌ Erreur: {e}"
+
+
+def _handle_setlimit(sb, args: str) -> str:
+    """Set loss limits (daily/weekly/monthly)."""
+    parts = args.strip().split()
+    if len(parts) != 2:
+        return "❌ Usage: /setlimit &lt;daily|weekly|monthly&gt; &lt;SOL&gt;\nEx: /setlimit daily 1.5"
+    period = parts[0].lower()
+    try:
+        val = float(parts[1])
+    except (ValueError, TypeError):
+        return "❌ Valeur SOL invalide"
+    if val <= 0 or val > 100:
+        return "❌ Limite entre 0.01 et 100 SOL"
+
+    key_map = {"daily": "daily_loss_limit_sol", "weekly": "weekly_loss_limit_sol", "monthly": "monthly_loss_limit_sol"}
+    if period not in key_map:
+        return "❌ Période: daily, weekly, ou monthly"
+
+    try:
+        result = sb.table("scoring_config").select("rt_trade_config").eq("id", 1).execute()
+        cfg = result.data[0]["rt_trade_config"] if result.data else {}
+        old = cfg.get(key_map[period], "?")
+        cfg[key_map[period]] = val
+        sb.table("scoring_config").update({"rt_trade_config": cfg}).eq("id", 1).execute()
+        return f"✅ Limite {period}: <b>{old} → {val} SOL</b>"
+    except Exception as e:
+        return f"❌ Erreur: {e}"
+
+
+def _handle_setstrat(sb, args: str) -> str:
+    """Set active live strategy."""
+    strat = args.strip()
+    if not strat:
+        return "❌ Usage: /setstrat &lt;strategy&gt;\nEx: /setstrat DTRAIL5_ACT10_SL40\nOu: /setstrat all"
+
+    try:
+        result = sb.table("scoring_config").select("rt_trade_config").eq("id", 1).execute()
+        cfg = result.data[0]["rt_trade_config"] if result.data else {}
+        old = cfg.get("rt_strategies", "all")
+        cfg["rt_strategies"] = strat
+        sb.table("scoring_config").update({"rt_trade_config": cfg}).eq("id", 1).execute()
+        return f"✅ Stratégie live: <b>{old} → {strat}</b>"
+    except Exception as e:
+        return f"❌ Erreur: {e}"
+
+
+def _handle_sell(sb, args: str) -> str:
+    """Sell a specific live position by symbol."""
+    symbol = args.strip().upper()
+    if not symbol:
+        return "❌ Usage: /sell &lt;SYMBOL&gt;\nEx: /sell $MOJO"
+    if not symbol.startswith("$"):
+        symbol = "$" + symbol
+
+    try:
+        # Find the open live trade
+        trades = sb.table("paper_trades").select(
+            "id,symbol,token_address,position_sol,entry_price"
+        ).eq("status", "open").eq("source", "rt_live").eq("symbol", symbol).execute().data or []
+
+        if not trades:
+            return f"❌ Aucune position live ouverte pour {symbol}"
+
+        trade = trades[0]
+        ca = trade["token_address"]
+
+        from live_trader import execute_sell
+        result = execute_sell(ca)
+
+        if result.get("success"):
+            sig = result.get("signature", "")[:16]
+            return f"✅ <b>SELL {symbol}</b> exécuté\nSignature: {sig}..."
+        else:
+            return f"❌ Sell {symbol} échoué: {result.get('error', 'unknown')}"
+    except Exception as e:
+        return f"❌ Erreur sell: {e}"
+
+
+def _handle_sellall(sb, args: str) -> str:
+    """Panic sell ALL live positions."""
+    # Safety: require confirmation word
+    if args.strip().lower() != "confirm":
+        return "⚠️ <b>PANIC SELL</b>\nVend TOUTES les positions live immédiatement.\n\nPour confirmer: /sellall confirm"
+
+    try:
+        trades = sb.table("paper_trades").select(
+            "id,symbol,token_address,position_sol"
+        ).eq("status", "open").eq("source", "rt_live").execute().data or []
+
+        if not trades:
+            return "📭 Aucune position live ouverte"
+
+        from live_trader import execute_sell
+        results = []
+        for t in trades:
+            try:
+                r = execute_sell(t["token_address"])
+                status = "✅" if r.get("success") else "❌"
+                results.append(f"  {status} {t['symbol']}")
+            except Exception as e:
+                results.append(f"  ❌ {t['symbol']}: {e}")
+
+        return f"🚨 <b>SELLALL — {len(trades)} positions</b>\n" + "\n".join(results)
+    except Exception as e:
+        return f"❌ Erreur sellall: {e}"
+
+
 # ── Command registry ──
 
 COMMANDS = {
+    # Paper
     "/bank": _handle_bank,
     "/pos": _handle_pos,
     "/trades": _handle_trades,
@@ -763,13 +1158,25 @@ COMMANDS = {
     "/pnl": _handle_pnl,
     "/best": _handle_best,
     "/worst": _handle_worst,
+    # Live
+    "/live": _handle_live,
+    "/wallet": _handle_wallet,
+    "/livepos": _handle_livepos,
+    "/livetrades": _handle_livetrades,
+    "/livepnl": _handle_livepnl,
+    "/setpos": _handle_setpos,
+    "/setmax": _handle_setmax,
+    "/setlimit": _handle_setlimit,
+    "/setstrat": _handle_setstrat,
+    "/sell": _handle_sell,
+    "/sellall": _handle_sellall,
 }
 
 HELP_TEXT = (
     "🤖 <b>Commandes</b>\n\n"
     "<b>Portfolio:</b>\n"
     "  /bank — Bankroll + portfolio\n"
-    "  /pos — Positions ouvertes\n"
+    "  /pos — Positions ouvertes (paper)\n"
     "  /today — Résumé du jour\n"
     "\n<b>Trades:</b>\n"
     "  /trades [N] — Derniers N trades (défaut 5)\n"
@@ -780,6 +1187,21 @@ HELP_TEXT = (
     "  /kol [période] — Leaderboard KOL\n"
     "  /pnl &lt;KOL&gt; — Stats d'un KOL\n"
     "  /shadow [période] — Shadow vs main\n"
+    "\n<b>💎 Live Trading:</b>\n"
+    "  /live — Status live (wallet, positions, PnL)\n"
+    "  /live on|off — Activer/désactiver le live\n"
+    "  /wallet — Balance SOL du wallet\n"
+    "  /livepos — Positions live ouvertes + PnL\n"
+    "  /livetrades [N] — Derniers N trades live\n"
+    "  /livepnl [période] — PnL live par période\n"
+    "\n<b>⚙️ Config Live:</b>\n"
+    "  /setpos &lt;SOL&gt; — Position max (ex: /setpos 0.2)\n"
+    "  /setmax &lt;N&gt; — Max positions simultanées\n"
+    "  /setlimit &lt;daily|weekly|monthly&gt; &lt;SOL&gt;\n"
+    "  /setstrat &lt;strategy&gt; — Stratégie live\n"
+    "\n<b>🚨 Actions:</b>\n"
+    "  /sell &lt;SYMBOL&gt; — Vendre une position\n"
+    "  /sellall confirm — PANIC SELL tout\n"
     "\n<b>Système:</b>\n"
     "  /config — Config active\n"
     "  /help — Cette aide\n"
