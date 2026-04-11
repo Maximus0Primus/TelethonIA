@@ -1099,6 +1099,511 @@ def simulate_bankroll_dual(trade_results_a: list[dict], trade_results_b: list[di
     }
 
 
+# ---------------------------------------------------------------------------
+# v124: FROM-TICKS — tick-level replay simulation
+# ---------------------------------------------------------------------------
+
+# Tick data start date (price_ticks table deployed v118 Apr 6)
+TICK_DATA_START = "2026-04-06"
+
+
+def _fetch_tick_trades(since: str) -> list[dict]:
+    """Fetch closed non-shadow RT paper trades that have tick coverage."""
+    params = [
+        ("select", "id,token_address,symbol,entry_price,sl_price,tp_price,"
+                   "strategy,horizon_minutes,tranche_label,tranche_pct,"
+                   "position_usd,status,created_at,exit_at,pnl_pct,pnl_usd,"
+                   "exit_minutes,high_price_seen,kol_group,rt_liquidity_usd,"
+                   "dex_spot_price_at_entry,source,exit_price"),
+        ("status", "in.(trail_stop,sl_hit,timeout,tp_hit)"),
+        ("source", "eq.rt"),
+        ("is_shadow", "eq.false"),
+        ("created_at", f"gte.{since}T00:00:00Z"),
+        ("order", "created_at.asc"),
+    ]
+    trades = sb_get("paper_trades", params)
+    print(f"Fetched {len(trades)} closed RT trades since {since}")
+    return trades
+
+
+def _fetch_ticks_for_tokens(token_ranges: dict[str, tuple]) -> dict[str, list[dict]]:
+    """Fetch price ticks for multiple tokens in bulk.
+    token_ranges: {token_address: (start_iso, end_iso)}
+    Returns: {token_address: [sorted ticks]}"""
+    ticks_by_token: dict[str, list[dict]] = {}
+
+    for addr, (t_start, t_end) in token_ranges.items():
+        params = [
+            ("select", "price_usd,fetched_at,source,volume_usd,liquidity_usd"),
+            ("token_address", f"eq.{addr}"),
+            ("fetched_at", f"gte.{t_start}"),
+            ("fetched_at", f"lte.{t_end}"),
+            ("order", "fetched_at.asc"),
+        ]
+        rows = sb_get("price_ticks", params)
+        if rows:
+            ticks_by_token[addr] = rows
+
+    total_ticks = sum(len(v) for v in ticks_by_token.values())
+    print(f"Fetched {total_ticks} ticks for {len(ticks_by_token)} tokens")
+    return ticks_by_token
+
+
+def _filter_ticks_by_source(ticks: list[dict], price_source: str) -> list[dict]:
+    """Filter/merge ticks based on price source preference."""
+    if price_source == "jupiter":
+        # Jupiter ticks only; fall back to DexScreener if no Jupiter tick at that time
+        jup = [t for t in ticks if t["source"] == "jupiter"]
+        if jup:
+            return jup
+        # No Jupiter ticks at all — fall back to DexScreener
+        return [t for t in ticks if t["source"] in ("fast", "full", "live")]
+
+    elif price_source == "dexscreener":
+        return [t for t in ticks if t["source"] in ("fast", "full", "live")]
+
+    else:  # "both" — merge, prefer Jupiter at each timestamp
+        dex_ticks = {t["fetched_at"]: t for t in ticks if t["source"] in ("fast", "full", "live")}
+        jup_ticks = {t["fetched_at"]: t for t in ticks if t["source"] == "jupiter"}
+        # Jupiter overrides DexScreener at same timestamp
+        merged = {**dex_ticks, **jup_ticks}
+        return sorted(merged.values(), key=lambda t: t["fetched_at"])
+
+
+def _build_fake_trade(trade: dict, strategy_override: str = None,
+                      sl_mult: float = None, horizon_min: int = None) -> dict:
+    """Build a trade dict compatible with _evaluate_trade_exit()."""
+    strategy = strategy_override or trade["strategy"]
+    entry_price = float(trade["entry_price"])
+
+    # Compute SL price from override or original
+    if sl_mult is not None:
+        computed_sl = entry_price * sl_mult
+    else:
+        computed_sl = float(trade["sl_price"])
+
+    # Compute TP price — DTRAIL/TRAIL strategies have no TP (None)
+    tp_price = float(trade["tp_price"]) if trade.get("tp_price") else None
+
+    return {
+        "id": trade["id"],
+        "entry_price": entry_price,
+        "sl_price": computed_sl,
+        "tp_price": tp_price,
+        "position_usd": float(trade.get("position_usd") or 10.0),
+        "strategy": strategy,
+        "tranche_label": trade.get("tranche_label", "main"),
+        "horizon_minutes": horizon_min or trade.get("horizon_minutes", 120),
+        "created_at": trade["created_at"],
+        "high_price_seen": entry_price,  # reset — sim tracks from entry
+        "rt_liquidity_usd": trade.get("rt_liquidity_usd"),
+        "dex_spot_price_at_entry": float(trade.get("dex_spot_price_at_entry") or 0),
+    }
+
+
+def _replay_trade_on_ticks(fake_trade: dict, ticks: list[dict],
+                           disable_lazy: bool = False) -> dict | None:
+    """Replay one trade through price ticks using production exit logic.
+    Returns sim result dict or None if no ticks."""
+    from paper_trader import _evaluate_trade_exit, _last_eval_ts, LAZY_STRATEGIES
+
+    if not ticks:
+        return None
+
+    # Reset LAZY state for this trade
+    trade_id = str(fake_trade["id"])
+    _last_eval_ts.pop(trade_id, None)
+
+    # Temporarily disable LAZY for grid search
+    saved_lazy = None
+    if disable_lazy:
+        saved_lazy = set(LAZY_STRATEGIES)
+        LAZY_STRATEGIES.clear()
+
+    sell_slip = 1 - 10 / 10_000  # 10 bps base (Jupiter Ultra)
+    entry_time = datetime.fromisoformat(
+        fake_trade["created_at"].replace("Z", "+00:00"))
+
+    try:
+        for tick in ticks:
+            tick_time = datetime.fromisoformat(
+                tick["fetched_at"].replace("Z", "+00:00"))
+
+            # Skip ticks before trade entry
+            if tick_time < entry_time:
+                continue
+
+            tick_price = float(tick["price_usd"])
+            if tick_price <= 0:
+                continue
+
+            ev = _evaluate_trade_exit(fake_trade, tick_price, tick_time, sell_slip)
+
+            if ev is None:
+                continue
+
+            # Always update high_price_seen
+            if ev.get("high_price_seen") is not None:
+                new_high = ev["high_price_seen"]
+                if new_high > float(fake_trade.get("high_price_seen") or 0):
+                    fake_trade["high_price_seen"] = new_high
+
+            # Exit triggered
+            if "status" in ev and ev["status"] not in (None,):
+                return {
+                    "exit_reason": ev["status"],
+                    "exit_price": ev.get("exit_price", 0),
+                    "pnl_pct": ev.get("pnl_pct", 0),
+                    "pnl_usd": ev.get("pnl_usd", 0),
+                    "exit_minutes": ev.get("exit_minutes", 0),
+                    "high_price_seen": fake_trade["high_price_seen"],
+                }
+
+        # No exit — timeout at last tick
+        last_tick = ticks[-1]
+        last_time = datetime.fromisoformat(
+            last_tick["fetched_at"].replace("Z", "+00:00"))
+        last_price = float(last_tick["price_usd"])
+        entry_price = float(fake_trade["entry_price"])
+        pnl_pct = round((last_price / entry_price) - 1, 4) if entry_price > 0 else 0
+        pos_usd = float(fake_trade.get("position_usd") or 10.0)
+
+        return {
+            "exit_reason": "timeout_eod",
+            "exit_price": last_price,
+            "pnl_pct": pnl_pct,
+            "pnl_usd": round(pos_usd * pnl_pct, 2),
+            "exit_minutes": int((last_time - entry_time).total_seconds() / 60),
+            "high_price_seen": fake_trade["high_price_seen"],
+        }
+    finally:
+        # Restore LAZY state
+        if saved_lazy is not None:
+            LAZY_STRATEGIES.clear()
+            LAZY_STRATEGIES.update(saved_lazy)
+        _last_eval_ts.pop(trade_id, None)
+
+
+def _tick_grid_search(trades: list[dict], ticks_by_token: dict[str, list[dict]],
+                      price_source: str, mc_sims: int = 500) -> list[dict]:
+    """Grid search DTRAIL parameters on tick data."""
+    import itertools
+
+    trail_pcts = [3, 5, 8, 10, 15, 20]
+    act_pcts = [5, 10, 15, 20, 30]
+    sl_pcts = [50, 60, 70]
+    horizons = [60, 120, 180, 240]
+
+    combos = list(itertools.product(trail_pcts, act_pcts, sl_pcts, horizons))
+    print(f"\nGrid search: {len(combos)} DTRAIL configs x {len(trades)} trades")
+
+    results = []
+    for i, (trail, act, sl, horizon) in enumerate(combos):
+        strat_name = f"DTRAIL{trail}_ACT{act}_SL{sl}"
+        sl_mult = 1 - sl / 100
+
+        pnl_list = []
+        trade_results = []
+
+        for trade in trades:
+            addr = trade["token_address"]
+            raw_ticks = ticks_by_token.get(addr)
+            if not raw_ticks:
+                continue
+            ticks = _filter_ticks_by_source(raw_ticks, price_source)
+            if not ticks:
+                continue
+
+            fake = _build_fake_trade(trade, strategy_override=strat_name,
+                                     sl_mult=sl_mult, horizon_min=horizon)
+            sim = _replay_trade_on_ticks(fake, ticks, disable_lazy=True)
+            if sim is None:
+                continue
+
+            pnl_list.append(sim["pnl_pct"])
+            trade_results.append({
+                "pnl_pct": sim["pnl_pct"],
+                "token_address": addr,
+                "created_at": trade["created_at"],
+            })
+
+        if len(pnl_list) < 5:
+            continue
+
+        n_days = max(1, (datetime.fromisoformat(trades[-1]["created_at"].replace("Z", "+00:00")) -
+                         datetime.fromisoformat(trades[0]["created_at"].replace("Z", "+00:00"))).days)
+        metrics = compute_metrics(pnl_list, n_days)
+        br = simulate_bankroll(sorted(trade_results, key=lambda x: x["created_at"]))
+
+        results.append({
+            "strategy": strat_name,
+            "horizon": horizon,
+            "trail": trail, "act": act, "sl": sl,
+            **metrics, **br,
+        })
+
+        if (i + 1) % 50 == 0:
+            print(f"  ... {i + 1}/{len(combos)} configs done")
+
+    results.sort(key=lambda x: -x.get("final_bankroll", 0))
+    print(f"Grid search complete: {len(results)} configs with enough trades")
+    return results
+
+
+def _tick_validation(trades: list[dict], sim_results: dict[int, dict]) -> dict:
+    """Compare tick sim vs actual paper results."""
+    divergent = []
+    pnl_errors = []
+    exit_mismatches = 0
+    sign_flips = 0
+
+    for trade in trades:
+        tid = trade["id"]
+        sim = sim_results.get(tid)
+        if sim is None:
+            continue
+
+        actual_pnl = float(trade.get("pnl_pct") or 0)
+        sim_pnl = sim["pnl_pct"]
+        delta = abs(sim_pnl - actual_pnl)
+        pnl_errors.append(delta)
+
+        actual_exit = trade.get("status", "")
+        sim_exit = sim["exit_reason"]
+        if actual_exit != sim_exit:
+            exit_mismatches += 1
+
+        if (actual_pnl > 0) != (sim_pnl > 0) and abs(actual_pnl) > 0.01:
+            sign_flips += 1
+
+        if delta > 0.05:  # >5% divergence
+            divergent.append({
+                "id": tid,
+                "symbol": trade.get("symbol", "?"),
+                "actual_pnl": round(actual_pnl, 4),
+                "sim_pnl": round(sim_pnl, 4),
+                "delta": round(delta, 4),
+                "actual_exit": actual_exit,
+                "sim_exit": sim_exit,
+                "actual_min": trade.get("exit_minutes"),
+                "sim_min": sim.get("exit_minutes"),
+            })
+
+    n = len(pnl_errors)
+    mae = statistics.mean(pnl_errors) if pnl_errors else 0
+
+    return {
+        "n_compared": n,
+        "mae": mae,
+        "exit_mismatch_rate": exit_mismatches / n if n else 0,
+        "sign_flips": sign_flips,
+        "n_divergent": len(divergent),
+        "divergent_trades": divergent,
+    }
+
+
+def _tick_based_simulation(args):
+    """FROM-TICKS: replay price ticks through _evaluate_trade_exit."""
+    print("=" * 90)
+    print("FROM-TICKS MODE: Tick-level replay simulation (30s resolution)")
+    print(f"Price source: {args.price_source}")
+    print("=" * 90)
+
+    since = max(args.since, TICK_DATA_START)
+
+    # 1. Fetch trades
+    trades = _fetch_tick_trades(since)
+    if not trades:
+        print("No trades with tick coverage. Exiting.")
+        return
+
+    # Filter DTRAIL strategies (the ones we care about for tick sim)
+    dtrail_trades = [t for t in trades
+                     if "DTRAIL" in t.get("strategy", "") or "DIP" in t.get("strategy", "")]
+    print(f"DTRAIL/DIP trades: {len(dtrail_trades)} (of {len(trades)} total)")
+
+    # Use all trades for sim, not just DTRAIL
+    sim_trades = trades
+
+    # 2. Build token time ranges
+    token_ranges: dict[str, tuple] = {}
+    for t in sim_trades:
+        addr = t["token_address"]
+        entry = t["created_at"]
+        # Buffer: horizon + 30 min after exit
+        horizon = t.get("horizon_minutes", 120)
+        entry_dt = datetime.fromisoformat(entry.replace("Z", "+00:00"))
+        end_dt = entry_dt + timedelta(minutes=horizon + 30)
+        end_iso = end_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        if addr not in token_ranges:
+            token_ranges[addr] = (entry, end_iso)
+        else:
+            old_start, old_end = token_ranges[addr]
+            token_ranges[addr] = (min(old_start, entry), max(old_end, end_iso))
+
+    # 3. Fetch ticks
+    ticks_by_token = _fetch_ticks_for_tokens(token_ranges)
+
+    # 4. Replay each trade
+    print(f"\nReplaying {len(sim_trades)} trades on ticks...")
+    sim_results: dict[int, dict] = {}  # trade_id -> sim result
+    by_strategy: dict[str, list[float]] = defaultdict(list)
+    by_strategy_trades: dict[str, list[dict]] = defaultdict(list)
+    skipped = 0
+
+    for trade in sim_trades:
+        addr = trade["token_address"]
+        raw_ticks = ticks_by_token.get(addr)
+        if not raw_ticks:
+            skipped += 1
+            continue
+
+        ticks = _filter_ticks_by_source(raw_ticks, args.price_source)
+        if not ticks:
+            skipped += 1
+            continue
+
+        fake = _build_fake_trade(trade)
+        sim = _replay_trade_on_ticks(fake, ticks)
+        if sim is None:
+            skipped += 1
+            continue
+
+        sim_results[trade["id"]] = sim
+        strat = trade["strategy"]
+        by_strategy[strat].append(sim["pnl_pct"])
+        by_strategy_trades[strat].append({
+            "pnl_pct": sim["pnl_pct"],
+            "token_address": addr,
+            "created_at": trade["created_at"],
+        })
+
+    print(f"Simulated: {len(sim_results)} trades  |  Skipped (no ticks): {skipped}")
+
+    # 5. Report — per strategy
+    dates = [t["created_at"][:10] for t in sim_trades if t["id"] in sim_results]
+    n_days = max(1, (datetime.strptime(max(dates), "%Y-%m-%d") -
+                     datetime.strptime(min(dates), "%Y-%m-%d")).days + 1) if dates else 1
+
+    ranked = []
+    for strat_name, pnl_list in by_strategy.items():
+        if len(pnl_list) < 3:
+            continue
+        metrics = compute_metrics(pnl_list, n_days)
+        br_trades = by_strategy_trades[strat_name]
+        br = simulate_bankroll(sorted(br_trades, key=lambda x: x["created_at"]))
+        ranked.append({"name": strat_name, **metrics, **br})
+
+    ranked.sort(key=lambda x: -x.get("final_bankroll", 0))
+
+    print(f"\n{'=' * 100}")
+    print(f"TICK SIM RESULTS — {args.price_source.upper()} price source, {len(sim_results)} trades, {n_days} days")
+    print(f"{'=' * 100}")
+    header = (f"{'Rank':>4s}  {'Strategy':40s} {'N':>5s} {'WR%':>5s} "
+              f"{'AvgPnL%':>8s} {'Sharpe':>7s} {'MaxDD%':>7s} {'Final$':>9s}")
+    print(header)
+    print("-" * len(header))
+    for i, r in enumerate(ranked):
+        print(f"{i+1:4d}  {r['name']:40s} {r['n_trades']:5d} {r['wr_pct']:4.0f}% "
+              f"{r['avg_pnl_pct']:+7.1f}% {r['sharpe']:7.2f} {r['max_dd_pct']:6.1f}% "
+              f"$ {r['final_bankroll']:8.0f}")
+
+    # Monte Carlo on top 3
+    print(f"\n{'=' * 100}")
+    print(f"MONTE CARLO (top 3, {args.mc_sims} sims)")
+    print(f"{'=' * 100}")
+    mc_header = f"{'Strategy':45s} {'Median$':>8s} {'P5$':>8s} {'P25$':>8s} {'P75$':>8s} {'P95$':>8s}"
+    print(mc_header)
+    print("-" * len(mc_header))
+    for r in ranked[:3]:
+        pnl_list = by_strategy.get(r["name"], [])
+        mc = monte_carlo(pnl_list, args.mc_sims, min(args.mc_trades, len(pnl_list)))
+        if mc:
+            print(f"{r['name']:45s} $ {mc['median']:6.0f} $ {mc['p5']:6.0f} "
+                  f"$ {mc['p25']:6.0f} $ {mc['p75']:6.0f} $ {mc['p95']:6.0f}")
+
+    # 6. Validation mode
+    if args.validate_ticks:
+        print(f"\n{'=' * 100}")
+        print("VALIDATION: Tick Sim vs Actual Paper Results")
+        print(f"{'=' * 100}")
+        val = _tick_validation(sim_trades, sim_results)
+        print(f"Trades compared: {val['n_compared']}")
+        print(f"MAE (pnl_pct):   {val['mae']:.4f} ({val['mae']*100:.1f}%)")
+        print(f"Exit mismatch:   {val['exit_mismatch_rate']*100:.1f}%")
+        print(f"Sign flips:      {val['sign_flips']}")
+        print(f"Divergent (>5%): {val['n_divergent']}")
+        if val["divergent_trades"]:
+            print(f"\n{'Symbol':12s} {'Actual':>8s} {'Sim':>8s} {'Delta':>7s} "
+                  f"{'ActExit':12s} {'SimExit':12s} {'ActMin':>7s} {'SimMin':>7s}")
+            print("-" * 80)
+            for d in val["divergent_trades"][:20]:
+                print(f"{d['symbol']:12s} {d['actual_pnl']:+7.3f} {d['sim_pnl']:+7.3f} "
+                      f"{d['delta']:6.3f}  {d['actual_exit']:12s} {d['sim_exit']:12s} "
+                      f"{str(d.get('actual_min','')):>7s} {str(d.get('sim_min','')):>7s}")
+
+    # 7. Grid search
+    if args.grid_ticks:
+        print(f"\n{'=' * 100}")
+        print("GRID SEARCH — DTRAIL params on tick data")
+        print(f"{'=' * 100}")
+        grid_results = _tick_grid_search(
+            [t for t in sim_trades if t["id"] in sim_results],
+            ticks_by_token, args.price_source, args.mc_sims)
+
+        # Print top 20
+        print(f"\n{'Rank':>4s}  {'Strategy':30s} {'H':>4s} {'N':>4s} {'WR%':>5s} "
+              f"{'AvgPnL%':>8s} {'Sharpe':>7s} {'MaxDD%':>7s} {'Final$':>9s}")
+        print("-" * 95)
+        for i, r in enumerate(grid_results[:20]):
+            print(f"{i+1:4d}  {r['strategy']:30s} {r['horizon']:4d} {r['n_trades']:4d} "
+                  f"{r['wr_pct']:4.0f}% {r['avg_pnl_pct']:+7.1f}% {r['sharpe']:7.2f} "
+                  f"{r['max_dd_pct']:6.1f}% $ {r['final_bankroll']:8.0f}")
+
+        # Save grid CSV
+        csv_path = SCRAPER_DIR / "grid_search_ticks.csv"
+        with open(csv_path, "w", newline="") as f:
+            if grid_results:
+                writer = csv.DictWriter(f, fieldnames=list(grid_results[0].keys()))
+                writer.writeheader()
+                writer.writerows(grid_results)
+        print(f"\nGrid CSV saved to: {csv_path}")
+
+    # 8. Per-trade CSV export
+    if args.tick_csv:
+        csv_path = Path(args.tick_csv)
+        rows = []
+        for trade in sim_trades:
+            sim = sim_results.get(trade["id"])
+            if sim is None:
+                continue
+            rows.append({
+                "id": trade["id"],
+                "symbol": trade.get("symbol", ""),
+                "strategy": trade["strategy"],
+                "entry_price": trade["entry_price"],
+                "actual_pnl": trade.get("pnl_pct"),
+                "sim_pnl": sim["pnl_pct"],
+                "actual_exit": trade.get("status"),
+                "sim_exit": sim["exit_reason"],
+                "actual_minutes": trade.get("exit_minutes"),
+                "sim_minutes": sim["exit_minutes"],
+                "sim_high": sim["high_price_seen"],
+                "actual_high": trade.get("high_price_seen"),
+                "created_at": trade["created_at"],
+            })
+        if rows:
+            with open(csv_path, "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+                writer.writeheader()
+                writer.writerows(rows)
+            print(f"\nPer-trade CSV saved to: {csv_path}")
+
+    print(f"\n{'=' * 100}")
+    print(f"Tick sim complete. {len(sim_results)} trades simulated, {skipped} skipped.")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Unified strategy simulator")
     parser.add_argument("--dry-run", action="store_true")
@@ -1130,6 +1635,17 @@ def main():
                         help="Fixed position size in USD (default: 0 = Kelly sizing). Use ~99 to match paper trader.")
     parser.add_argument("--from-trades", action="store_true",
                         help="Use real paper trade PnL instead of OHLCV simulation (ground truth mode)")
+    parser.add_argument("--from-ticks", action="store_true",
+                        help="Tick-replay simulation: replay real 30s price ticks through _evaluate_trade_exit")
+    parser.add_argument("--price-source", type=str, default="jupiter",
+                        choices=["jupiter", "dexscreener", "both"],
+                        help="Price source for --from-ticks (default: jupiter)")
+    parser.add_argument("--grid-ticks", action="store_true",
+                        help="Grid search DTRAIL params on tick data")
+    parser.add_argument("--validate-ticks", action="store_true",
+                        help="Compare tick sim results vs actual paper PnL")
+    parser.add_argument("--tick-csv", type=str, default=None,
+                        help="Export per-trade tick sim results to CSV")
     parser.add_argument("--dual-wallet", action="store_true",
                         help="Run dual-wallet analysis on top strategies")
     parser.add_argument("--dual-deltas", type=str, default="0,5,10,15,30",
@@ -1290,6 +1806,13 @@ def main():
 
         print(f"\nTotal ranked strategies: {len(ranked)}")
         return  # Skip OHLCV simulation path
+
+    # =====================================================================
+    # FROM-TICKS MODE: tick-level replay through _evaluate_trade_exit
+    # =====================================================================
+    if args.from_ticks:
+        _tick_based_simulation(args)
+        return
 
     # --- Grid ---
     grid = build_strategy_grid(args.strategies)
