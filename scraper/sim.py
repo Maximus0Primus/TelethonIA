@@ -1286,37 +1286,51 @@ def _replay_trade_on_ticks(fake_trade: dict, ticks: list[dict],
 
 def _tick_grid_search(trades: list[dict], ticks_by_token: dict[str, list[dict]],
                       price_source: str, mc_sims: int = 500) -> list[dict]:
-    """Grid search DTRAIL parameters on tick data."""
+    """Grid search DTRAIL parameters on tick data.
+    Tests each config with LAZY off (CURRENT) and LAZY on to find the true best."""
     import itertools
+    from paper_trader import LAZY_STRATEGIES
 
     trail_pcts = [3, 5, 8, 10, 15, 20]
     act_pcts = [5, 10, 15, 20, 30]
     sl_pcts = [50, 60, 70]
     horizons = [60, 120, 180, 240]
+    # Test both LAZY modes: trails <= 10% benefit from LAZY, wider trails don't
+    lazy_modes = [False, True]
 
-    combos = list(itertools.product(trail_pcts, act_pcts, sl_pcts, horizons))
-    print(f"\nGrid search: {len(combos)} DTRAIL configs x {len(trades)} trades")
+    combos = list(itertools.product(trail_pcts, act_pcts, sl_pcts, horizons, lazy_modes))
+    print(f"\nGrid search: {len(combos)} DTRAIL configs (incl LAZY on/off) x {len(trades)} trades")
+
+    # Pre-filter ticks per token once
+    filtered_ticks: dict[str, list[dict]] = {}
+    for addr, raw in ticks_by_token.items():
+        ft = _filter_ticks_by_source(raw, price_source)
+        if ft:
+            filtered_ticks[addr] = ft
 
     results = []
-    for i, (trail, act, sl, horizon) in enumerate(combos):
+    for i, (trail, act, sl, horizon, lazy) in enumerate(combos):
         strat_name = f"DTRAIL{trail}_ACT{act}_SL{sl}"
         sl_mult = 1 - sl / 100
+
+        # For LAZY mode: temporarily add this strategy to LAZY_STRATEGIES
+        if lazy:
+            LAZY_STRATEGIES.add(strat_name)
+        else:
+            LAZY_STRATEGIES.discard(strat_name)
 
         pnl_list = []
         trade_results = []
 
         for trade in trades:
             addr = trade["token_address"]
-            raw_ticks = ticks_by_token.get(addr)
-            if not raw_ticks:
-                continue
-            ticks = _filter_ticks_by_source(raw_ticks, price_source)
+            ticks = filtered_ticks.get(addr)
             if not ticks:
                 continue
 
             fake = _build_fake_trade(trade, strategy_override=strat_name,
                                      sl_mult=sl_mult, horizon_min=horizon)
-            sim = _replay_trade_on_ticks(fake, ticks, disable_lazy=True)
+            sim = _replay_trade_on_ticks(fake, ticks, disable_lazy=False)
             if sim is None:
                 continue
 
@@ -1327,6 +1341,9 @@ def _tick_grid_search(trades: list[dict], ticks_by_token: dict[str, list[dict]],
                 "created_at": trade["created_at"],
             })
 
+        # Restore LAZY state
+        LAZY_STRATEGIES.discard(strat_name)
+
         if len(pnl_list) < 5:
             continue
 
@@ -1335,14 +1352,16 @@ def _tick_grid_search(trades: list[dict], ticks_by_token: dict[str, list[dict]],
         metrics = compute_metrics(pnl_list, n_days)
         br = simulate_bankroll(sorted(trade_results, key=lambda x: x["created_at"]))
 
+        mode = "LAZY" if lazy else "CURRENT"
         results.append({
             "strategy": strat_name,
+            "mode": mode,
             "horizon": horizon,
             "trail": trail, "act": act, "sl": sl,
             **metrics, **br,
         })
 
-        if (i + 1) % 50 == 0:
+        if (i + 1) % 100 == 0:
             print(f"  ... {i + 1}/{len(combos)} configs done")
 
     results.sort(key=lambda x: -x.get("final_bankroll", 0))
@@ -1552,12 +1571,12 @@ def _tick_based_simulation(args):
             [t for t in sim_trades if t["id"] in sim_results],
             ticks_by_token, args.price_source, args.mc_sims)
 
-        # Print top 20
-        print(f"\n{'Rank':>4s}  {'Strategy':30s} {'H':>4s} {'N':>4s} {'WR%':>5s} "
+        # Print top 30
+        print(f"\n{'Rank':>4s}  {'Strategy':30s} {'Mode':7s} {'H':>4s} {'N':>4s} {'WR%':>5s} "
               f"{'AvgPnL%':>8s} {'Sharpe':>7s} {'MaxDD%':>7s} {'Final$':>9s}")
-        print("-" * 95)
-        for i, r in enumerate(grid_results[:20]):
-            print(f"{i+1:4d}  {r['strategy']:30s} {r['horizon']:4d} {r['n_trades']:4d} "
+        print("-" * 105)
+        for i, r in enumerate(grid_results[:30]):
+            print(f"{i+1:4d}  {r['strategy']:30s} {r.get('mode','?'):7s} {r['horizon']:4d} {r['n_trades']:4d} "
                   f"{r['wr_pct']:4.0f}% {r['avg_pnl_pct']:+7.1f}% {r['sharpe']:7.2f} "
                   f"{r['max_dd_pct']:6.1f}% $ {r['final_bankroll']:8.0f}")
 
