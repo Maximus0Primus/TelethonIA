@@ -759,6 +759,11 @@ def open_live_trade(client_sb, token_entry: dict, strategy: str,
         "buy_output_tokens": result.get("output_amount"),  # tokens received (raw)
         # v121: DexScreener spot price vs Jupiter fill for slippage calibration
         "dex_spot_price_at_entry": entry_price,  # DexScreener price BEFORE Jupiter fill
+        # v124: Initialize high_price_seen to market price (not fill price).
+        # Without this, the gap between fill price and market price (~5-15% on memecoins)
+        # fools DTRAIL into thinking price already pumped, activating trail immediately
+        # and exiting on the first pullback for a loss.
+        "high_price_seen": entry_price,  # DexScreener spot = true market price at buy time
         # v121: pair_address for OHLCV backtesting on live trades
         "pair_address": token_entry.get("_rt_pair_address"),
     }
