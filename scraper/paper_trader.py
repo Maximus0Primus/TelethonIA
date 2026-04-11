@@ -1197,13 +1197,18 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
 
 def _dynamic_sell_slip_factor(trade: dict, exit_type: str, base_bps: int = 10,
                               fee_bps: int = SELL_FEE_BPS) -> float:
-    """v121: Dynamic sell slippage calibrated from 33 live Jupiter Ultra RFQ trades.
+    """v124: Dynamic sell slippage calibrated from 70+ live Jupiter Ultra RFQ trades.
 
     Jupiter Ultra uses market-maker RFQ fills — near-zero slippage for normal exits.
-    Real data (33 trades):
+    Real data:
       trail_stop / tp_hit / timeout:   0-2 bps slippage (market maker fills tight)
-      sl_hit:                          varies — depends on dump speed + liquidity
-      trail_crash:                     2000-5500 bps — liquidity vanishes in crash
+      sl_hit:                          5-30 bps — moderate dump, RFQ still works
+      trail_crash (true rug/crash):    500-2000 bps — only when liquidity vanishes
+
+    v124: v119 crash slippage was too aggressive — classified 58% of trail exits as
+    "crash" (threshold 0.95) and applied 3-12% slippage on paper trades. In reality,
+    Jupiter RFQ fills tight even during fast pullbacks. Only true crashes (>30% below
+    trigger, ~5% of exits) warrant elevated slippage.
 
     base_bps = 10 (Jupiter Ultra 0.1% platform fee).
     Batch trades (no rt_liquidity_usd) fall back to 50K default."""
@@ -1212,20 +1217,20 @@ def _dynamic_sell_slip_factor(trade: dict, exit_type: str, base_bps: int = 10,
     # Liquidity multiplier: $50K+ = 1x, $5K = 2x, $1K = 4x
     liq_mult = max(1.0, min(4.0, 50_000 / max(liq_usd, 1_000)))
 
-    # v121: Exit type multiplier — crash exits have massive slippage,
-    # normal exits are near-zero with RFQ market makers.
+    # v124: Exit type multiplier — all normal exits are near-zero with Jupiter RFQ.
+    # Only true crashes (liquidity rug) warrant significant slippage.
     if exit_type == "trail_crash":
-        exit_mult = 30.0   # crash: base 10 * 30 = 300bps minimum, scales with liq
+        exit_mult = 5.0    # true crash: 50-200bps depending on liquidity
     elif exit_type == "sl_hit":
-        exit_mult = 15.0   # SL dump: base 10 * 15 = 150bps minimum
+        exit_mult = 3.0    # SL dump: 30-120bps — selling into downtrend
     elif exit_type == "trail_stop":
         exit_mult = 1.5    # normal pullback: ~15bps
     else:
         exit_mult = 1.0    # tp_hit, timeout: ~10bps (just the platform fee)
 
     adjusted_bps = int(base_bps * liq_mult * exit_mult) + fee_bps
-    # v121: Higher cap for crash (55%) vs normal (5%) — calibrated from live data
-    max_bps = 5500 if exit_type == "trail_crash" else 500
+    # v124: Reasonable caps — crash max 10% (was 55%), normal max 5%
+    max_bps = 1000 if exit_type == "trail_crash" else 500
     adjusted_bps = min(adjusted_bps, max_bps)
 
     return 1 - adjusted_bps / 10_000
@@ -1439,14 +1444,17 @@ def _evaluate_trade_exit(trade: dict, current_price: float | None,
                 trail_trigger = high_seen * (1 - trail_pct)
                 if current_price <= trail_trigger and trail_trigger > entry_price:
                     new_status = "trail_stop"
-                    # v119: Detect crash vs normal pullback using price-to-trigger ratio
-                    # If current_price is >5% below trail_trigger, it's a crash
+                    # v124: Detect true crash vs normal pullback.
+                    # With 30s check intervals, memecoins routinely swing 5-15% between
+                    # checks — that's normal volatility, not a crash. Only classify as
+                    # crash when price is >30% below trigger (liquidity rug / true dump).
+                    # v119 used 0.95 threshold which classified 58% of exits as "crash".
                     crash_ratio = current_price / trail_trigger if trail_trigger > 0 else 1.0
-                    if crash_ratio < 0.95:
-                        # Crash: price already well below trigger — use current_price as base
+                    if crash_ratio < 0.70:
+                        # True crash/rug: price >30% below trigger — liquidity gone
                         exit_price = current_price * _dynamic_sell_slip_factor(trade, "trail_crash", base_bps, sell_fee_bps)
                     else:
-                        # Normal pullback: use current_price with mild penalty
+                        # Normal trail exit: Jupiter RFQ fills tight
                         exit_price = current_price * _dynamic_sell_slip_factor(trade, "trail_stop", base_bps, sell_fee_bps)
     # 4) Timeout
     if new_status is None and elapsed_minutes >= horizon:
