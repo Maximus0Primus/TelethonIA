@@ -1422,17 +1422,63 @@ def _build_tick_grid() -> list[dict]:
 
 FEATURE_FILTERS = [
     ("ALL", lambda feat: True),
-    ("LIQ_HIGH", lambda feat: (feat.get("liquidity_usd") or 0) >= 10_000),
-    ("LIQ_LOW", lambda feat: 0 < (feat.get("liquidity_usd") or 0) < 10_000),
-    ("MCAP_MICRO", lambda feat: (feat.get("market_cap") or 0) < 50_000),
-    ("MCAP_SMALL", lambda feat: 50_000 <= (feat.get("market_cap") or 0) < 500_000),
-    ("MCAP_MID", lambda feat: (feat.get("market_cap") or 0) >= 500_000),
-    ("AGE_FRESH", lambda feat: (feat.get("token_age_hours") or 99) < 2),
-    ("AGE_MATURE", lambda feat: (feat.get("token_age_hours") or 0) >= 2),
+    # Liquidity bands
+    ("LIQ>20K", lambda feat: (feat.get("liquidity_usd") or 0) >= 20_000),
+    ("LIQ>10K", lambda feat: (feat.get("liquidity_usd") or 0) >= 10_000),
+    ("LIQ>5K", lambda feat: (feat.get("liquidity_usd") or 0) >= 5_000),
+    ("LIQ<5K", lambda feat: 0 < (feat.get("liquidity_usd") or 0) < 5_000),
+    ("LIQ<10K", lambda feat: 0 < (feat.get("liquidity_usd") or 0) < 10_000),
+    # Mcap bands
+    ("MCAP>500K", lambda feat: (feat.get("market_cap") or 0) >= 500_000),
+    ("MCAP>100K", lambda feat: (feat.get("market_cap") or 0) >= 100_000),
+    ("MCAP>50K", lambda feat: (feat.get("market_cap") or 0) >= 50_000),
+    ("MCAP>25K", lambda feat: (feat.get("market_cap") or 0) >= 25_000),
+    ("MCAP<25K", lambda feat: (feat.get("market_cap") or 0) < 25_000),
+    ("MCAP<50K", lambda feat: (feat.get("market_cap") or 0) < 50_000),
+    ("MCAP_25-100K", lambda feat: 25_000 <= (feat.get("market_cap") or 0) < 100_000),
+    ("MCAP_100-500K", lambda feat: 100_000 <= (feat.get("market_cap") or 0) < 500_000),
+    # Age bands
+    ("AGE>6h", lambda feat: (feat.get("token_age_hours") or 0) >= 6),
+    ("AGE>2h", lambda feat: (feat.get("token_age_hours") or 0) >= 2),
+    ("AGE>1h", lambda feat: (feat.get("token_age_hours") or 0) >= 1),
+    ("AGE>30m", lambda feat: (feat.get("token_age_hours") or 0) >= 0.5),
+    ("AGE<30m", lambda feat: (feat.get("token_age_hours") or 99) < 0.5),
+    ("AGE<1h", lambda feat: (feat.get("token_age_hours") or 99) < 1),
+    ("AGE<2h", lambda feat: (feat.get("token_age_hours") or 99) < 2),
+    ("AGE_1-6h", lambda feat: 1 <= (feat.get("token_age_hours") or 0) < 6),
+    # Pump.fun
     ("PUMP_FUN", lambda feat: feat.get("is_pump_fun") is True),
     ("NOT_PUMP", lambda feat: feat.get("is_pump_fun") is not True),
-    ("SCORE_HIGH", lambda feat: (feat.get("score_at_snapshot") or 0) >= 50),
-    ("SCORE_LOW", lambda feat: 0 < (feat.get("score_at_snapshot") or 0) < 50),
+    # Score bands
+    ("SCORE>60", lambda feat: (feat.get("score_at_snapshot") or 0) >= 60),
+    ("SCORE>50", lambda feat: (feat.get("score_at_snapshot") or 0) >= 50),
+    ("SCORE>40", lambda feat: (feat.get("score_at_snapshot") or 0) >= 40),
+    ("SCORE<40", lambda feat: 0 < (feat.get("score_at_snapshot") or 0) < 40),
+    ("SCORE<50", lambda feat: 0 < (feat.get("score_at_snapshot") or 0) < 50),
+    # On-chain quality
+    ("GINI<0.8", lambda feat: (feat.get("helius_gini") or 1) < 0.8),
+    ("WHALE>0", lambda feat: (feat.get("whale_new_entries") or 0) > 0),
+    ("BSR>1", lambda feat: (feat.get("buy_sell_ratio_24h") or 0) > 1),
+    ("BSR>1.5", lambda feat: (feat.get("buy_sell_ratio_24h") or 0) > 1.5),
+    ("HOLD>100", lambda feat: (feat.get("holder_count") or 0) > 100),
+    ("IMPACT<5%", lambda feat: (feat.get("jup_price_impact_1k") or 99) < 5),
+    # Combo filters
+    ("QUALITY", lambda feat: (
+        (feat.get("market_cap") or 0) >= 25_000
+        and (feat.get("token_age_hours") or 0) >= 1
+        and (feat.get("liquidity_usd") or 0) >= 5_000
+    )),
+    ("PREMIUM", lambda feat: (
+        (feat.get("market_cap") or 0) >= 50_000
+        and (feat.get("token_age_hours") or 0) >= 2
+        and (feat.get("liquidity_usd") or 0) >= 10_000
+    )),
+    ("ULTRA", lambda feat: (
+        (feat.get("market_cap") or 0) >= 100_000
+        and (feat.get("token_age_hours") or 0) >= 2
+        and (feat.get("liquidity_usd") or 0) >= 10_000
+        and (feat.get("holder_count") or 0) >= 100
+    )),
 ]
 
 
