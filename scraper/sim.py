@@ -1114,7 +1114,8 @@ def _fetch_tick_trades(since: str) -> list[dict]:
                    "strategy,horizon_minutes,tranche_label,tranche_pct,"
                    "position_usd,status,created_at,exit_at,pnl_pct,pnl_usd,"
                    "exit_minutes,high_price_seen,kol_group,rt_liquidity_usd,"
-                   "dex_spot_price_at_entry,source,exit_price"),
+                   "dex_spot_price_at_entry,source,exit_price,entry_mcap,"
+                   "snapshot_id,entry_score,rt_token_age_hours,rt_is_pump_fun"),
         ("status", "in.(trail_stop,sl_hit,timeout,tp_hit)"),
         ("source", "eq.rt"),
         ("is_shadow", "eq.false"),
