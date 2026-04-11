@@ -1601,6 +1601,110 @@ def _replay_with_trigger(fake_trade: dict, ticks: list[dict]) -> dict | None:
     }
 
 
+def _replay_with_trigger_sl_only(fake_trade: dict, ticks: list[dict],
+                                 lazy_fast_sec: int, lazy_fast_window: int,
+                                 lazy_slow_sec: int) -> dict | None:
+    """Hybrid: SL via on-chain trigger (instant fill), trail via polling.
+    Best of both worlds: instant SL protection + polling flexibility for trail."""
+    from paper_trader import _evaluate_trade_exit, _last_eval_ts, _get_trail_config
+
+    if not ticks:
+        return None
+
+    trade_id = str(fake_trade["id"])
+    _last_eval_ts.pop(trade_id, None)
+    entry_price = float(fake_trade["entry_price"])
+    entry_time = datetime.fromisoformat(fake_trade["created_at"].replace("Z", "+00:00"))
+    sl_price = float(fake_trade["sl_price"])
+    sell_slip = 1 - 10 / 10_000
+    is_lazy = lazy_fast_sec > 0
+    last_check_ts = 0.0
+    max_price_seen = entry_price
+
+    try:
+        for tick in ticks:
+            tick_time = datetime.fromisoformat(tick["fetched_at"].replace("Z", "+00:00"))
+            if tick_time < entry_time:
+                continue
+            tick_price = float(tick["price_usd"])
+            if tick_price <= 0:
+                continue
+
+            if tick_price > max_price_seen:
+                max_price_seen = tick_price
+
+            # INSTANT SL check (on-chain trigger fills immediately)
+            if tick_price <= sl_price:
+                elapsed = (tick_time - entry_time).total_seconds() / 60
+                pnl = round((sl_price / entry_price) - 1, 4)  # fill at SL price
+                return {
+                    "exit_reason": "sl_hit",
+                    "exit_price": sl_price,
+                    "pnl_pct": pnl,
+                    "pnl_usd": round(float(fake_trade.get("position_usd") or 10) * pnl, 2),
+                    "exit_minutes": int(elapsed),
+                    "high_price_seen": max_price_seen,
+                    "peak_from_entry": round(max_price_seen / entry_price - 1, 4),
+                    "peak_to_exit_drop": round(1 - sl_price / max_price_seen, 4) if max_price_seen > 0 else 0,
+                    "time_to_peak_min": 0,
+                    "exit_in_first_5min": elapsed < 5,
+                }
+
+            # POLLING for trail/TP/timeout (with interval throttle)
+            if is_lazy:
+                now_ts = tick_time.timestamp()
+                age_sec = (tick_time - entry_time).total_seconds()
+                interval = lazy_fast_sec if age_sec < lazy_fast_window else lazy_slow_sec
+                if last_check_ts > 0 and (now_ts - last_check_ts) < interval:
+                    if tick_price > float(fake_trade.get("high_price_seen") or 0):
+                        fake_trade["high_price_seen"] = tick_price
+                    continue
+                last_check_ts = now_ts
+
+            # Temporarily set SL very low so _evaluate_trade_exit only handles trail/TP/timeout
+            saved_sl = fake_trade["sl_price"]
+            fake_trade["sl_price"] = entry_price * 0.01  # effectively disable SL in eval
+            ev = _evaluate_trade_exit(fake_trade, tick_price, tick_time, sell_slip, sell_fee_bps=0)
+            fake_trade["sl_price"] = saved_sl  # restore
+
+            if ev is None:
+                continue
+            if ev.get("high_price_seen") is not None:
+                new_high = ev["high_price_seen"]
+                if new_high > float(fake_trade.get("high_price_seen") or 0):
+                    fake_trade["high_price_seen"] = new_high
+            if "status" in ev and ev["status"] is not None and ev["status"] != "sl_hit":
+                exit_price = ev.get("exit_price", 0)
+                elapsed = ev.get("exit_minutes", 0)
+                return {
+                    "exit_reason": ev["status"],
+                    "exit_price": exit_price,
+                    "pnl_pct": ev.get("pnl_pct", 0),
+                    "pnl_usd": ev.get("pnl_usd", 0),
+                    "exit_minutes": elapsed,
+                    "high_price_seen": fake_trade["high_price_seen"],
+                    "peak_from_entry": round(max_price_seen / entry_price - 1, 4),
+                    "peak_to_exit_drop": round(1 - exit_price / max_price_seen, 4) if max_price_seen > 0 else 0,
+                    "time_to_peak_min": 0,
+                    "exit_in_first_5min": elapsed < 5,
+                }
+
+        # Timeout
+        last_tick = ticks[-1]
+        last_price = float(last_tick["price_usd"])
+        pnl = round((last_price / entry_price) - 1, 4) if entry_price > 0 else 0
+        return {
+            "exit_reason": "timeout_eod", "exit_price": last_price,
+            "pnl_pct": pnl, "pnl_usd": round(float(fake_trade.get("position_usd") or 10) * pnl, 2),
+            "exit_minutes": int((datetime.fromisoformat(last_tick["fetched_at"].replace("Z","+00:00")) - entry_time).total_seconds() / 60),
+            "high_price_seen": max_price_seen,
+            "peak_from_entry": round(max_price_seen / entry_price - 1, 4),
+            "peak_to_exit_drop": 0, "time_to_peak_min": 0, "exit_in_first_5min": False,
+        }
+    finally:
+        _last_eval_ts.pop(trade_id, None)
+
+
 def _replay_with_intervals(fake_trade: dict, ticks: list[dict],
                            lazy_fast_sec: int, lazy_fast_window: int,
                            lazy_slow_sec: int) -> dict | None:
@@ -2076,184 +2180,134 @@ def _tick_based_simulation(args):
                       f"WR={r['wr_pct']:.0f}% AvgPnL={r['avg_pnl_pct']:+.1f}% "
                       f"Sharpe={r['sharpe']:.2f} Final=${r['final_bankroll']:.0f}")
 
-        # --- Feature impact analysis ---
-        if features_by_trade:
-            print(f"\n{'=' * 120}")
-            print("FEATURE IMPACT ANALYSIS — Best config per token filter")
-            print(f"{'=' * 120}")
-            best_strat = grid_results[0] if grid_results else None
-            if best_strat:
-                # Find interval params for best config
-                _interval_map = {
-                    "CURRENT": (0,0,0), "FAST_15": (15,60,60), "FAST_30": (30,120,120),
-                    "LAZY_FAST": (60,120,180), "LAZY_MED": (120,300,360),
-                    "LAZY_STD": (180,300,600), "LAZY_SLOW": (300,600,900),
-                    "LAZY_XSLOW": (600,900,1200),
+        # =================================================================
+        # PASS 2: Cross top 50 strategies × features × trigger modes
+        # =================================================================
+        _interval_map = {
+            "CURRENT": (0,0,0), "FAST_15": (15,60,60), "FAST_30": (30,120,120),
+            "LAZY_FAST": (60,120,180), "LAZY_MED": (120,300,360),
+            "LAZY_STD": (180,300,600), "LAZY_SLOW": (300,600,900),
+            "LAZY_XSLOW": (600,900,1200),
+        }
+        _re_mod = __import__("re")
+
+        top_n_cross = 50
+        top_configs = grid_results[:top_n_cross]
+
+        # --- Helper: replay a config on a set of trades ---
+        def _run_config_on_trades(cfg_r, trade_list, source, trigger_mode="polling"):
+            """Run one strategy config on a list of trades.
+            trigger_mode: 'polling' | 'trigger_sl' | 'trigger_trail' | 'trigger_sl_only'"""
+            _sl_m = _re_mod.search(r"SL(\d+)", cfg_r["strategy"])
+            _sl_v = int(_sl_m.group(1)) if _sl_m else 40
+            fs, fw, ss = _interval_map.get(cfg_r.get("mode", "CURRENT"), (0,0,0))
+            pnl_list = []
+            tr_list = []
+            for t in trade_list:
+                addr = t["token_address"]
+                raw = ticks_by_token.get(addr)
+                if not raw:
+                    continue
+                tks = _filter_ticks_by_source(raw, source)
+                if not tks:
+                    continue
+                ep = float(t["entry_price"])
+                fake = {
+                    "id": t["id"], "entry_price": ep,
+                    "sl_price": ep * (1 - _sl_v / 100),
+                    "tp_price": None,
+                    "position_usd": float(t.get("position_usd") or 10.0),
+                    "strategy": cfg_r["strategy"],
+                    "tranche_label": "main",
+                    "horizon_minutes": cfg_r["horizon"],
+                    "created_at": t["created_at"],
+                    "high_price_seen": ep,
+                    "rt_liquidity_usd": t.get("rt_liquidity_usd"),
+                    "dex_spot_price_at_entry": float(t.get("dex_spot_price_at_entry") or 0),
                 }
-                fs, fw, ss = _interval_map.get(best_strat["mode"], (0,0,0))
-
-                print(f"Testing {best_strat['strategy']} {best_strat['mode']} H={best_strat['horizon']} across filters:\n")
-                print(f"  {'Filter':15s} {'N':>4s} {'WR%':>5s} {'AvgPnL%':>8s} {'Final$':>8s}")
-                print(f"  {'-'*50}")
-                for fname, ffn in FEATURE_FILTERS:
-                    ftrades = []
-                    for t in eligible_trades:
-                        feat = features_by_trade.get(t["id"], {})
-                        if ffn(feat):
-                            ftrades.append(t)
-                    if len(ftrades) < 3:
-                        print(f"  {fname:15s} {len(ftrades):4d}  (too few)")
-                        continue
-                    pnl_list = []
-                    for t in ftrades:
-                        addr = t["token_address"]
-                        raw_ticks = ticks_by_token.get(addr)
-                        if not raw_ticks:
-                            continue
-                        ticks = _filter_ticks_by_source(raw_ticks, args.price_source)
-                        if not ticks:
-                            continue
-                        entry_price = float(t["entry_price"])
-                        # Extract SL from best strategy name
-                        _sl_match = __import__("re").search(r"SL(\d+)", best_strat["strategy"])
-                        _sl_pct = int(_sl_match.group(1)) if _sl_match else 40
-                        fake = {
-                            "id": t["id"], "entry_price": entry_price,
-                            "sl_price": entry_price * (1 - _sl_pct / 100),
-                            "tp_price": None,
-                            "position_usd": float(t.get("position_usd") or 10.0),
-                            "strategy": best_strat["strategy"],
-                            "tranche_label": "main",
-                            "horizon_minutes": best_strat["horizon"],
-                            "created_at": t["created_at"],
-                            "high_price_seen": entry_price,
-                            "rt_liquidity_usd": t.get("rt_liquidity_usd"),
-                            "dex_spot_price_at_entry": float(t.get("dex_spot_price_at_entry") or 0),
-                        }
-                        sim = _replay_with_intervals(fake, ticks, fs, fw, ss)
-                        if sim:
-                            pnl_list.append(sim["pnl_pct"])
-                    if pnl_list:
-                        wr = sum(1 for p in pnl_list if p > 0) / len(pnl_list) * 100
-                        avg_pnl = statistics.mean(pnl_list) * 100
-                        br = simulate_bankroll([{"pnl_pct": p, "token_address": "x",
-                                                 "created_at": "2026-01-01"} for p in pnl_list])
-                        print(f"  {fname:15s} {len(pnl_list):4d} {wr:4.0f}% {avg_pnl:+7.1f}% ${br['final_bankroll']:7.0f}")
-                    else:
-                        print(f"  {fname:15s}    0  (no tick data)")
-
-        # --- Jupiter vs DexScreener comparison ---
-        print(f"\n{'=' * 120}")
-        print("PRICE SOURCE COMPARISON — Jupiter vs DexScreener on best config")
-        print(f"{'=' * 120}")
-        if grid_results:
-            best = grid_results[0]
-            _interval_map2 = {
-                "CURRENT": (0,0,0), "FAST_15": (15,60,60), "FAST_30": (30,120,120),
-                "LAZY_FAST": (60,120,180), "LAZY_MED": (120,300,360),
-                "LAZY_STD": (180,300,600), "LAZY_SLOW": (300,600,900),
-                "LAZY_XSLOW": (600,900,1200),
-            }
-            fs2, fw2, ss2 = _interval_map2.get(best["mode"], (0,0,0))
-            _sl_m = __import__("re").search(r"SL(\d+)", best["strategy"])
-            _sl_p = int(_sl_m.group(1)) if _sl_m else 40
-
-            print(f"Config: {best['strategy']} {best['mode']} H={best['horizon']}\n")
-            print(f"  {'Source':15s} {'N':>4s} {'WR%':>5s} {'AvgPnL%':>8s} {'Sharpe':>7s} {'Final$':>8s}")
-            print(f"  {'-'*55}")
-
-            for src_name in ["jupiter", "dexscreener"]:
-                pnl_list = []
-                tr_list = []
-                for t in eligible_trades:
-                    addr = t["token_address"]
-                    raw_ticks = ticks_by_token.get(addr)
-                    if not raw_ticks:
-                        continue
-                    ticks = _filter_ticks_by_source(raw_ticks, src_name)
-                    if not ticks:
-                        continue
-                    entry_price = float(t["entry_price"])
-                    fake = {
-                        "id": t["id"], "entry_price": entry_price,
-                        "sl_price": entry_price * (1 - _sl_p / 100),
-                        "tp_price": None,
-                        "position_usd": float(t.get("position_usd") or 10.0),
-                        "strategy": best["strategy"],
-                        "tranche_label": "main",
-                        "horizon_minutes": best["horizon"],
-                        "created_at": t["created_at"],
-                        "high_price_seen": entry_price,
-                        "rt_liquidity_usd": t.get("rt_liquidity_usd"),
-                        "dex_spot_price_at_entry": float(t.get("dex_spot_price_at_entry") or 0),
-                    }
-                    sim = _replay_with_intervals(fake, ticks, fs2, fw2, ss2)
-                    if sim:
-                        pnl_list.append(sim["pnl_pct"])
-                        tr_list.append({"pnl_pct": sim["pnl_pct"], "token_address": addr,
-                                        "created_at": t["created_at"]})
-                if pnl_list:
-                    n_days_src = max(1, (datetime.fromisoformat(eligible_trades[-1]["created_at"].replace("Z","+00:00")) -
-                                         datetime.fromisoformat(eligible_trades[0]["created_at"].replace("Z","+00:00"))).days)
-                    m = compute_metrics(pnl_list, n_days_src)
-                    br = simulate_bankroll(sorted(tr_list, key=lambda x: x["created_at"]))
-                    print(f"  {src_name:15s} {len(pnl_list):4d} {m['wr_pct']:4.0f}% "
-                          f"{m['avg_pnl_pct']:+7.1f}% {m['sharpe']:7.2f} ${br['final_bankroll']:7.0f}")
+                if trigger_mode == "polling":
+                    sim = _replay_with_intervals(fake, tks, fs, fw, ss)
+                elif trigger_mode == "trigger_trail":
+                    sim = _replay_with_trigger(fake, tks)
+                elif trigger_mode == "trigger_sl_only":
+                    # Trigger for SL only (no trail PATCH), polling for trail
+                    sim = _replay_with_trigger_sl_only(fake, tks, fs, fw, ss)
                 else:
-                    print(f"  {src_name:15s}    0  (no ticks)")
+                    sim = _replay_with_intervals(fake, tks, fs, fw, ss)
+                if sim:
+                    pnl_list.append(sim["pnl_pct"])
+                    tr_list.append({"pnl_pct": sim["pnl_pct"], "token_address": addr,
+                                    "created_at": t["created_at"]})
+            if len(pnl_list) < 3:
+                return None
+            wr = sum(1 for p in pnl_list if p > 0) / len(pnl_list) * 100
+            avg = statistics.mean(pnl_list) * 100
+            br = simulate_bankroll(sorted(tr_list, key=lambda x: x["created_at"]))
+            return {"n": len(pnl_list), "wr": wr, "avg_pnl": avg,
+                    "final": br["final_bankroll"], "max_dd": br["max_dd_pct"]}
 
-        # --- Jupiter Trigger V2 simulation ---
-        print(f"\n{'=' * 120}")
-        print("JUPITER TRIGGER V2 — Instant fill vs Polling (on DTRAIL configs)")
-        print(f"{'=' * 120}")
-        # Test top 5 DTRAIL configs: polling (as-is) vs trigger (instant fill)
-        top_dtrails = [r for r in grid_results if r["type"] == "DTRAIL"][:5]
-        if top_dtrails:
-            print(f"\n  {'Strategy':28s} {'Mode':10s} {'Polling$':>9s} {'Trigger$':>9s} {'Delta':>7s} {'TrigWR%':>7s}")
-            print(f"  {'-'*80}")
-            for cfg_r in top_dtrails:
-                strat = cfg_r["strategy"]
-                _sl_t = __import__("re").search(r"SL(\d+)", strat)
-                _sl_v = int(_sl_t.group(1)) if _sl_t else 40
+        print(f"\n{'=' * 130}")
+        print(f"PASS 2: Top {top_n_cross} strategies × 12 filters × 4 trigger modes × 2 price sources")
+        print(f"{'=' * 130}")
 
-                # Trigger V2 replay
-                trig_pnl = []
-                trig_trades = []
-                for t in eligible_trades:
-                    addr = t["token_address"]
-                    raw_ticks = ticks_by_token.get(addr)
-                    if not raw_ticks:
-                        continue
-                    ticks = _filter_ticks_by_source(raw_ticks, args.price_source)
-                    if not ticks:
-                        continue
-                    entry_price = float(t["entry_price"])
-                    fake = {
-                        "id": t["id"], "entry_price": entry_price,
-                        "sl_price": entry_price * (1 - _sl_v / 100),
-                        "tp_price": None,
-                        "position_usd": float(t.get("position_usd") or 10.0),
-                        "strategy": strat,
-                        "tranche_label": "main",
-                        "horizon_minutes": cfg_r["horizon"],
-                        "created_at": t["created_at"],
-                        "high_price_seen": entry_price,
-                        "rt_liquidity_usd": t.get("rt_liquidity_usd"),
-                        "dex_spot_price_at_entry": float(t.get("dex_spot_price_at_entry") or 0),
-                    }
-                    sim = _replay_with_trigger(fake, ticks)
-                    if sim:
-                        trig_pnl.append(sim["pnl_pct"])
-                        trig_trades.append({"pnl_pct": sim["pnl_pct"], "token_address": addr,
-                                            "created_at": t["created_at"]})
+        # --- A. Feature × Strategy cross matrix ---
+        if features_by_trade:
+            print(f"\n--- A. STRATEGY × FEATURE FILTER CROSS ---")
+            print(f"\n{'Rank':>4s}  {'Strategy':28s} {'Mode':10s} {'Filter':15s} {'N':>4s} {'WR%':>5s} "
+                  f"{'AvgPnL%':>8s} {'Final$':>8s} {'DD%':>5s}")
+            print("-" * 110)
 
-                if len(trig_pnl) >= 5:
-                    trig_br = simulate_bankroll(sorted(trig_trades, key=lambda x: x["created_at"]))
-                    trig_wr = sum(1 for p in trig_pnl if p > 0) / len(trig_pnl) * 100
-                    delta = trig_br["final_bankroll"] - cfg_r["final_bankroll"]
-                    print(f"  {strat:28s} {cfg_r['mode']:10s} ${cfg_r['final_bankroll']:8.0f} "
-                          f"${trig_br['final_bankroll']:8.0f} {'+' if delta >= 0 else ''}{delta:6.0f} "
-                          f"{trig_wr:5.0f}%")
+            cross_results = []
+            for cfg_r in top_configs[:20]:  # top 20 × 12 filters = 240 combos
+                for fname, ffn in FEATURE_FILTERS:
+                    if fname == "ALL":
+                        continue  # already have this from pass 1
+                    ftrades = [t for t in eligible_trades
+                               if ffn(features_by_trade.get(t["id"], {}))]
+                    r = _run_config_on_trades(cfg_r, ftrades, args.price_source)
+                    if r:
+                        cross_results.append({
+                            "strategy": cfg_r["strategy"], "mode": cfg_r["mode"],
+                            "horizon": cfg_r["horizon"], "filter": fname, **r})
+
+            cross_results.sort(key=lambda x: -x["final"])
+            for i, r in enumerate(cross_results[:30]):
+                print(f"{i+1:4d}  {r['strategy']:28s} {r['mode']:10s} {r['filter']:15s} "
+                      f"{r['n']:4d} {r['wr']:4.0f}% {r['avg_pnl']:+7.1f}% "
+                      f"${r['final']:7.0f} {r['max_dd']:4.0f}%")
+
+        # --- B. Jupiter vs DexScreener on top 10 ---
+        print(f"\n--- B. PRICE SOURCE: Jupiter vs DexScreener (top 10) ---")
+        print(f"\n  {'Strategy':28s} {'Mode':10s} {'Jup$':>8s} {'Dex$':>8s} {'Delta':>7s} {'JupWR':>5s} {'DexWR':>5s}")
+        print(f"  {'-'*80}")
+        for cfg_r in top_configs[:10]:
+            rj = _run_config_on_trades(cfg_r, eligible_trades, "jupiter")
+            rd = _run_config_on_trades(cfg_r, eligible_trades, "dexscreener")
+            if rj and rd:
+                delta = rj["final"] - rd["final"]
+                print(f"  {cfg_r['strategy']:28s} {cfg_r['mode']:10s} "
+                      f"${rj['final']:7.0f} ${rd['final']:7.0f} "
+                      f"{'+'if delta>=0 else ''}{delta:6.0f} {rj['wr']:4.0f}% {rd['wr']:4.0f}%")
+
+        # --- C. Trigger V2 modes on top 10 DTRAIL ---
+        print(f"\n--- C. TRIGGER V2 MODES (top 10 DTRAIL) ---")
+        print(f"  Modes: polling (check+sell) | trigger_trail (SL+PATCH trail on-chain) | trigger_sl_only (SL on-chain, trail via polling)")
+        print(f"\n  {'Strategy':28s} {'Mode':10s} {'Polling$':>8s} {'TrigTrail$':>9s} {'TrigSL$':>9s} {'Best':>10s}")
+        print(f"  {'-'*90}")
+        top_dtrails = [r for r in grid_results if r["type"] == "DTRAIL"][:10]
+        for cfg_r in top_dtrails:
+            rp = _run_config_on_trades(cfg_r, eligible_trades, args.price_source, "polling")
+            rt = _run_config_on_trades(cfg_r, eligible_trades, args.price_source, "trigger_trail")
+            rs = _run_config_on_trades(cfg_r, eligible_trades, args.price_source, "trigger_sl_only")
+            if rp and rt and rs:
+                vals = {"polling": rp["final"], "trig_trail": rt["final"], "trig_sl": rs["final"]}
+                best_mode = max(vals, key=vals.get)
+                print(f"  {cfg_r['strategy']:28s} {cfg_r['mode']:10s} "
+                      f"${rp['final']:7.0f} ${rt['final']:8.0f} ${rs['final']:8.0f} "
+                      f"  {best_mode}")
+            elif rp and rt:
+                print(f"  {cfg_r['strategy']:28s} {cfg_r['mode']:10s} "
+                      f"${rp['final']:7.0f} ${rt['final']:8.0f}       —")
 
         # Save grid CSV
         csv_path = SCRAPER_DIR / "grid_search_ticks.csv"
