@@ -2201,27 +2201,72 @@ async def main():
             except Exception as e:
                 logger.error("live_trade_monitor error: %s", e)
 
-    # v92: Fast paper trade check for recent RT trades (30s interval)
-    PAPER_FAST_CHECK_INTERVAL = 30  # seconds
+    # v124: Unified check loop — paper + live in same iteration, same price fetch.
+    # Before v124: two separate loops (paper_fast 30s, live_monitor 30s) ran independently
+    # with 0-30s clock skew → paper and live saw different prices → PnL divergence.
+    UNIFIED_CHECK_INTERVAL = 30  # seconds
 
-    async def paper_fast_check_loop():
-        """Fast check loop for recently opened paper trades (last 30 min). 30s polling."""
+    async def unified_check_loop():
+        """v124: Combined paper + live check loop. Same iteration = same prices."""
+        _consecutive_empty_live = 0
         while True:
-            await asyncio.sleep(PAPER_FAST_CHECK_INTERVAL)
+            await asyncio.sleep(UNIFIED_CHECK_INTERVAL)
+
+            # --- Paper fast check ---
             try:
                 from paper_trader import check_paper_trades_fast
                 sb_pf = _get_supabase()
-                if not sb_pf:
-                    continue
-                result = await asyncio.get_event_loop().run_in_executor(
-                    None, check_paper_trades_fast, sb_pf
-                )
-                closed = result.get("closed", 0)
-                if closed > 0:
-                    logger.info("paper_fast_check: closed %d/%d recent trades",
-                                closed, result.get("checked", 0))
+                if sb_pf:
+                    result = await asyncio.get_event_loop().run_in_executor(
+                        None, check_paper_trades_fast, sb_pf
+                    )
+                    closed = result.get("closed", 0)
+                    if closed > 0:
+                        logger.info("paper_fast_check: closed %d/%d recent trades",
+                                    closed, result.get("checked", 0))
             except Exception as e:
                 logger.error("paper_fast_check error: %s", e)
+
+            # --- Live trade check (immediately after, same Jupiter cache) ---
+            try:
+                config = _rt_load_config()
+                live_cfg = config.get("live_trading", {})
+                if not live_cfg.get("enabled", False):
+                    _consecutive_empty_live = 0
+                else:
+                    from live_trader import check_live_trades
+                    sb_lt = _get_supabase()
+                    if sb_lt:
+                        live_result = await asyncio.get_event_loop().run_in_executor(
+                            None, check_live_trades, sb_lt
+                        )
+                        checked = live_result.get("checked", 0)
+                        closed = live_result.get("closed", 0)
+
+                        if checked == 0:
+                            _consecutive_empty_live += 1
+                            if _consecutive_empty_live % 30 == 1:
+                                logger.debug("live_trade_monitor: no open live trades")
+                        else:
+                            _consecutive_empty_live = 0
+                            if closed == 0:
+                                if not hasattr(unified_check_loop, '_open_log_ctr'):
+                                    unified_check_loop._open_log_ctr = 0
+                                unified_check_loop._open_log_ctr += 1
+                                if unified_check_loop._open_log_ctr % 6 == 1:
+                                    logger.info("LIVE MONITOR: %d open trades, no exit yet", checked)
+                            if closed > 0:
+                                logger.info(
+                                    "LIVE MONITOR: closed %d/%d trades (TP=%d SL=%d TO=%d) pnl=$%+.2f",
+                                    closed, checked,
+                                    live_result.get("tp", 0), live_result.get("sl", 0),
+                                    live_result.get("timeout", 0), live_result.get("pnl_usd", 0),
+                                )
+                                live_pnl = live_result.get("rt_pnl_usd", 0)
+                                if live_pnl != 0 or closed > 0:
+                                    _rt_update_bankroll(live_pnl, closed)
+            except Exception as e:
+                logger.error("live_trade_monitor error: %s", e)
 
     # v111: Telegram bot command listener (polls every 5s)
     BOT_CMD_INTERVAL = 5  # seconds
@@ -2245,10 +2290,8 @@ async def main():
     refresh_task = asyncio.create_task(price_refresh_loop())
     # v67: Start monitor loop
     monitor_task = asyncio.create_task(monitor_loop()) if _monitoring else None
-    # v72: Start live trade fast-poll loop
-    live_monitor_task = asyncio.create_task(live_trade_monitor_loop())
-    # v92: Start paper fast-check loop
-    paper_fast_task = asyncio.create_task(paper_fast_check_loop())
+    # v124: Unified paper+live check loop (replaces separate live_monitor + paper_fast)
+    unified_task = asyncio.create_task(unified_check_loop())
     # v111: Start bot command listener
     bot_cmd_task = asyncio.create_task(bot_command_loop())
 

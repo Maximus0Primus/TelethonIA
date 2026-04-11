@@ -1172,10 +1172,28 @@ def _filter_ticks_by_source(ticks: list[dict], price_source: str) -> list[dict]:
 
 
 def _build_fake_trade(trade: dict, strategy_override: str = None,
-                      sl_mult: float = None, horizon_min: int = None) -> dict:
-    """Build a trade dict compatible with _evaluate_trade_exit()."""
+                      sl_mult: float = None, horizon_min: int = None,
+                      sim_live_entry: bool = False) -> dict:
+    """Build a trade dict compatible with _evaluate_trade_exit().
+
+    sim_live_entry: if True, simulate Jupiter fill slippage on entry price.
+    Live fills are typically 3-5% worse than Jupiter quote on memecoins.
+    This makes the sim match live PnL more accurately."""
     strategy = strategy_override or trade["strategy"]
     entry_price = float(trade["entry_price"])
+
+    if sim_live_entry:
+        # Simulate buy slippage: entry_price becomes the "fill" (worse than quote).
+        # Use liquidity to estimate slippage: low liq = more slippage.
+        liq = float(trade.get("rt_liquidity_usd") or 50_000)
+        # Slippage model: 50K+ liq = 2%, 10K liq = 4%, 5K liq = 6%, 1K = 10%
+        slip_pct = max(0.02, min(0.10, 0.02 + 0.08 * (1 - min(liq, 50_000) / 50_000)))
+        fill_price = entry_price * (1 + slip_pct)  # fill is HIGHER (you pay more)
+        # dex_spot = market price at entry (for trail activation reference)
+        dex_spot = entry_price
+        entry_price = fill_price
+    else:
+        dex_spot = float(trade.get("dex_spot_price_at_entry") or 0)
 
     # Compute SL price from override or original
     if sl_mult is not None:
@@ -1196,9 +1214,9 @@ def _build_fake_trade(trade: dict, strategy_override: str = None,
         "tranche_label": trade.get("tranche_label", "main"),
         "horizon_minutes": horizon_min or trade.get("horizon_minutes", 120),
         "created_at": trade["created_at"],
-        "high_price_seen": entry_price,  # reset — sim tracks from entry
+        "high_price_seen": dex_spot if dex_spot > 0 else entry_price,
         "rt_liquidity_usd": trade.get("rt_liquidity_usd"),
-        "dex_spot_price_at_entry": float(trade.get("dex_spot_price_at_entry") or 0),
+        "dex_spot_price_at_entry": dex_spot,
     }
 
 
@@ -2107,7 +2125,7 @@ def _tick_based_simulation(args):
             skipped += 1
             continue
 
-        fake = _build_fake_trade(trade)
+        fake = _build_fake_trade(trade, sim_live_entry=args.sim_live_entry)
         sim = _replay_trade_on_ticks(fake, ticks)
         if sim is None:
             skipped += 1
@@ -2441,6 +2459,8 @@ def main():
                         help="Compare tick sim results vs actual paper PnL")
     parser.add_argument("--tick-csv", type=str, default=None,
                         help="Export per-trade tick sim results to CSV")
+    parser.add_argument("--sim-live-entry", action="store_true",
+                        help="Simulate live entry slippage (3-5%% worse entry price) in tick sim")
     parser.add_argument("--dual-wallet", action="store_true",
                         help="Run dual-wallet analysis on top strategies")
     parser.add_argument("--dual-deltas", type=str, default="0,5,10,15,30",
