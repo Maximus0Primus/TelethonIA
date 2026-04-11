@@ -1436,28 +1436,169 @@ FEATURE_FILTERS = [
 ]
 
 
-def _fetch_snapshot_features(trade_snapshot_ids: list[int]) -> dict[int, dict]:
-    """Fetch on-chain features from token_snapshots for feature-based filtering."""
-    if not trade_snapshot_ids:
-        return {}
+def _fetch_snapshot_features_for_trades(trades: list[dict]) -> dict[int, dict]:
+    """Fetch on-chain features from token_snapshots, matched by token_address + nearest time.
+    Returns: {trade_id: {features...}} for each trade."""
 
-    features_by_id: dict[int, dict] = {}
-    # Fetch in batches of 200
-    for i in range(0, len(trade_snapshot_ids), 200):
-        batch = trade_snapshot_ids[i:i+200]
-        id_list = ",".join(str(x) for x in batch)
+    # Group trades by token_address
+    by_token: dict[str, list[dict]] = defaultdict(list)
+    for t in trades:
+        if t.get("token_address"):
+            by_token[t["token_address"]].append(t)
+
+    features_by_trade_id: dict[int, dict] = {}
+    fetched = 0
+
+    for addr, token_trades in by_token.items():
+        # Get time range for this token
+        times = [t["created_at"] for t in token_trades]
+        min_t = min(times)
+        max_t = max(times)
+
         params = [
-            ("select", "id,liquidity_usd,market_cap,token_age_hours,is_pump_fun,"
+            ("select", "id,snapshot_at,liquidity_usd,market_cap,token_age_hours,is_pump_fun,"
                        "helius_gini,whale_new_entries,score_at_snapshot,jup_price_impact_1k,"
                        "buy_sell_ratio_24h,holder_count"),
-            ("id", f"in.({id_list})"),
+            ("token_address", f"eq.{addr}"),
+            ("snapshot_at", f"gte.{min_t[:10]}T00:00:00Z"),
+            ("order", "snapshot_at.desc"),
+            ("limit", "10"),
         ]
         rows = sb_get("token_snapshots", params)
-        for r in rows:
-            features_by_id[r["id"]] = r
+        if not rows:
+            continue
 
-    print(f"Fetched snapshot features for {len(features_by_id)}/{len(trade_snapshot_ids)} trades")
-    return features_by_id
+        # For each trade, find closest snapshot (within 60min)
+        for t in token_trades:
+            trade_dt = datetime.fromisoformat(t["created_at"].replace("Z", "+00:00"))
+            best_snap = None
+            best_delta = 9999999
+            for r in rows:
+                snap_dt = datetime.fromisoformat(r["snapshot_at"].replace("Z", "+00:00"))
+                delta = abs((snap_dt - trade_dt).total_seconds())
+                if delta < best_delta and delta < 3600:  # within 1h
+                    best_delta = delta
+                    best_snap = r
+            if best_snap:
+                features_by_trade_id[t["id"]] = best_snap
+                fetched += 1
+
+    print(f"Matched snapshot features for {fetched}/{len(trades)} trades")
+    return features_by_trade_id
+
+
+def _replay_with_trigger(fake_trade: dict, ticks: list[dict]) -> dict | None:
+    """Simulate Jupiter Trigger V2: on-chain stop-loss/trail that fills instantly.
+
+    How Trigger V2 works in reality:
+    - At trade open: place a limit sell order at SL price on Jupiter
+    - When trail activates: PATCH the order to trail_trigger price
+    - Fill is INSTANT when price crosses the order (no polling delay)
+    - Trade-off: the trigger price is set discretely (PATCH every ~30s),
+      so it can't react to sub-30s spikes
+
+    This sim compares trigger (instant fill at order price) vs polling
+    (detect at next check, execute with slippage)."""
+    from paper_trader import _get_trail_config
+
+    if not ticks:
+        return None
+
+    entry_price = float(fake_trade["entry_price"])
+    entry_time = datetime.fromisoformat(
+        fake_trade["created_at"].replace("Z", "+00:00"))
+    sl_price = float(fake_trade["sl_price"])
+    horizon = fake_trade.get("horizon_minutes", 120)
+    trail_pct, act_pct = _get_trail_config(fake_trade)
+
+    # State
+    high_seen = entry_price
+    trigger_price = sl_price  # initial trigger = SL
+    trail_activated = False
+    last_patch_ts = 0.0  # last time we "patched" the trigger order
+
+    for tick in ticks:
+        tick_time = datetime.fromisoformat(
+            tick["fetched_at"].replace("Z", "+00:00"))
+        if tick_time < entry_time:
+            continue
+
+        tick_price = float(tick["price_usd"])
+        if tick_price <= 0:
+            continue
+
+        elapsed_min = (tick_time - entry_time).total_seconds() / 60
+
+        # Update peak
+        if tick_price > high_seen:
+            high_seen = tick_price
+
+        # Check timeout
+        if elapsed_min >= horizon:
+            pnl = round((tick_price / entry_price) - 1, 4)
+            return {
+                "exit_reason": "timeout",
+                "exit_price": tick_price,
+                "pnl_pct": pnl,
+                "pnl_usd": round(float(fake_trade.get("position_usd") or 10) * pnl, 2),
+                "exit_minutes": int(elapsed_min),
+                "high_price_seen": high_seen,
+                "peak_from_entry": round(high_seen / entry_price - 1, 4),
+                "peak_to_exit_drop": round(1 - tick_price / high_seen, 4) if high_seen > 0 else 0,
+                "time_to_peak_min": 0,
+                "exit_in_first_5min": False,
+            }
+
+        # Trail activation check (every tick — Trigger V2 PATCHes at ~30s)
+        if trail_pct is not None and not trail_activated:
+            act_price = entry_price * (1 + act_pct)
+            if high_seen >= act_price:
+                trail_activated = True
+
+        # PATCH trigger price upward (every 30s, simulating PATCH latency)
+        now_ts = tick_time.timestamp()
+        if trail_activated and (now_ts - last_patch_ts) >= 30:
+            new_trigger = high_seen * (1 - trail_pct)
+            if new_trigger > trigger_price:
+                trigger_price = new_trigger
+            last_patch_ts = now_ts
+
+        # INSTANT FILL: if price crosses trigger (Trigger V2 fills on-chain)
+        if tick_price <= trigger_price:
+            # Fill at trigger_price (not tick_price — limit order fills at order price)
+            fill_price = trigger_price
+            pnl = round((fill_price / entry_price) - 1, 4)
+            exit_reason = "trail_stop" if trail_activated else "sl_hit"
+            return {
+                "exit_reason": exit_reason,
+                "exit_price": fill_price,
+                "pnl_pct": pnl,
+                "pnl_usd": round(float(fake_trade.get("position_usd") or 10) * pnl, 2),
+                "exit_minutes": int(elapsed_min),
+                "high_price_seen": high_seen,
+                "peak_from_entry": round(high_seen / entry_price - 1, 4),
+                "peak_to_exit_drop": round(1 - fill_price / high_seen, 4) if high_seen > 0 else 0,
+                "time_to_peak_min": 0,
+                "exit_in_first_5min": elapsed_min < 5,
+            }
+
+    # No exit → timeout at last tick
+    last_tick = ticks[-1]
+    last_price = float(last_tick["price_usd"])
+    pnl = round((last_price / entry_price) - 1, 4) if entry_price > 0 else 0
+    return {
+        "exit_reason": "timeout_eod",
+        "exit_price": last_price,
+        "pnl_pct": pnl,
+        "pnl_usd": round(float(fake_trade.get("position_usd") or 10) * pnl, 2),
+        "exit_minutes": int((datetime.fromisoformat(
+            last_tick["fetched_at"].replace("Z", "+00:00")) - entry_time).total_seconds() / 60),
+        "high_price_seen": high_seen,
+        "peak_from_entry": round(high_seen / entry_price - 1, 4),
+        "peak_to_exit_drop": round(1 - last_price / high_seen, 4) if high_seen > 0 else 0,
+        "time_to_peak_min": 0,
+        "exit_in_first_5min": False,
+    }
 
 
 def _replay_with_intervals(fake_trade: dict, ticks: list[dict],
@@ -1580,7 +1721,7 @@ def _tick_grid_search(trades: list[dict], ticks_by_token: dict[str, list[dict]],
 
     grid = _build_tick_grid()
 
-    # Apply feature filter to trades
+    # Apply feature filter to trades (features keyed by trade_id)
     if feature_filter_name != "ALL" and features_by_snapshot:
         filter_fn = None
         for fname, fn in FEATURE_FILTERS:
@@ -1590,8 +1731,7 @@ def _tick_grid_search(trades: list[dict], ticks_by_token: dict[str, list[dict]],
         if filter_fn:
             filtered_trades = []
             for t in trades:
-                sid = t.get("snapshot_id")
-                feat = features_by_snapshot.get(sid, {}) if sid else {}
+                feat = features_by_snapshot.get(t["id"], {})
                 if filter_fn(feat):
                     filtered_trades.append(t)
             print(f"Feature filter '{feature_filter_name}': {len(filtered_trades)}/{len(trades)} trades pass")
@@ -1897,11 +2037,8 @@ def _tick_based_simulation(args):
 
     # 7. Grid search
     if args.grid_ticks:
-        # Fetch on-chain features for feature-filtered grid
-        snapshot_ids = [t.get("snapshot_id") for t in sim_trades
-                        if t.get("snapshot_id") and t["id"] in sim_results]
-        snapshot_ids = [int(x) for x in snapshot_ids if x]
-        features_by_snap = _fetch_snapshot_features(snapshot_ids) if snapshot_ids else {}
+        # Fetch on-chain features via token_address + time match
+        features_by_trade = _fetch_snapshot_features_for_trades(eligible_trades)
 
         eligible_trades = [t for t in sim_trades if t["id"] in sim_results]
 
@@ -1911,7 +2048,7 @@ def _tick_based_simulation(args):
         print(f"{'=' * 120}")
         grid_results = _tick_grid_search(
             eligible_trades, ticks_by_token, args.price_source, args.mc_sims,
-            features_by_snap, "ALL")
+            features_by_trade, "ALL")
 
         # Print top 40 with exit analytics
         print(f"\n{'Rank':>4s}  {'Strategy':28s} {'Type':7s} {'Mode':10s} {'H':>4s} {'N':>4s} {'WR%':>5s} "
@@ -1939,28 +2076,34 @@ def _tick_based_simulation(args):
                       f"WR={r['wr_pct']:.0f}% AvgPnL={r['avg_pnl_pct']:+.1f}% "
                       f"Sharpe={r['sharpe']:.2f} Final=${r['final_bankroll']:.0f}")
 
-        # Feature impact analysis — run top strategy on each filter
-        if features_by_snap:
+        # --- Feature impact analysis ---
+        if features_by_trade:
             print(f"\n{'=' * 120}")
-            print("FEATURE IMPACT ANALYSIS — Best overall strategy per token filter")
+            print("FEATURE IMPACT ANALYSIS — Best config per token filter")
             print(f"{'=' * 120}")
             best_strat = grid_results[0] if grid_results else None
             if best_strat:
+                # Find interval params for best config
+                _interval_map = {
+                    "CURRENT": (0,0,0), "FAST_15": (15,60,60), "FAST_30": (30,120,120),
+                    "LAZY_FAST": (60,120,180), "LAZY_MED": (120,300,360),
+                    "LAZY_STD": (180,300,600), "LAZY_SLOW": (300,600,900),
+                    "LAZY_XSLOW": (600,900,1200),
+                }
+                fs, fw, ss = _interval_map.get(best_strat["mode"], (0,0,0))
+
                 print(f"Testing {best_strat['strategy']} {best_strat['mode']} H={best_strat['horizon']} across filters:\n")
                 print(f"  {'Filter':15s} {'N':>4s} {'WR%':>5s} {'AvgPnL%':>8s} {'Final$':>8s}")
                 print(f"  {'-'*50}")
                 for fname, ffn in FEATURE_FILTERS:
-                    # Filter trades
                     ftrades = []
                     for t in eligible_trades:
-                        sid = t.get("snapshot_id")
-                        feat = features_by_snap.get(int(sid), {}) if sid else {}
+                        feat = features_by_trade.get(t["id"], {})
                         if ffn(feat):
                             ftrades.append(t)
                     if len(ftrades) < 3:
                         print(f"  {fname:15s} {len(ftrades):4d}  (too few)")
                         continue
-                    # Replay best config on filtered trades
                     pnl_list = []
                     for t in ftrades:
                         addr = t["token_address"]
@@ -1971,9 +2114,12 @@ def _tick_based_simulation(args):
                         if not ticks:
                             continue
                         entry_price = float(t["entry_price"])
+                        # Extract SL from best strategy name
+                        _sl_match = __import__("re").search(r"SL(\d+)", best_strat["strategy"])
+                        _sl_pct = int(_sl_match.group(1)) if _sl_match else 40
                         fake = {
                             "id": t["id"], "entry_price": entry_price,
-                            "sl_price": entry_price * (1 - 40/100),  # use best config SL
+                            "sl_price": entry_price * (1 - _sl_pct / 100),
                             "tp_price": None,
                             "position_usd": float(t.get("position_usd") or 10.0),
                             "strategy": best_strat["strategy"],
@@ -1984,14 +2130,6 @@ def _tick_based_simulation(args):
                             "rt_liquidity_usd": t.get("rt_liquidity_usd"),
                             "dex_spot_price_at_entry": float(t.get("dex_spot_price_at_entry") or 0),
                         }
-                        # Find interval params from best config mode
-                        for prof_label, fs, fw, ss in [
-                            ("CURRENT",0,0,0),("FAST_15",15,60,60),("FAST_30",30,120,120),
-                            ("LAZY_FAST",60,120,180),("LAZY_MED",120,300,360),
-                            ("LAZY_STD",180,300,600),("LAZY_SLOW",300,600,900),
-                            ("LAZY_XSLOW",600,900,1200)]:
-                            if prof_label == best_strat["mode"]:
-                                break
                         sim = _replay_with_intervals(fake, ticks, fs, fw, ss)
                         if sim:
                             pnl_list.append(sim["pnl_pct"])
@@ -2003,6 +2141,119 @@ def _tick_based_simulation(args):
                         print(f"  {fname:15s} {len(pnl_list):4d} {wr:4.0f}% {avg_pnl:+7.1f}% ${br['final_bankroll']:7.0f}")
                     else:
                         print(f"  {fname:15s}    0  (no tick data)")
+
+        # --- Jupiter vs DexScreener comparison ---
+        print(f"\n{'=' * 120}")
+        print("PRICE SOURCE COMPARISON — Jupiter vs DexScreener on best config")
+        print(f"{'=' * 120}")
+        if grid_results:
+            best = grid_results[0]
+            _interval_map2 = {
+                "CURRENT": (0,0,0), "FAST_15": (15,60,60), "FAST_30": (30,120,120),
+                "LAZY_FAST": (60,120,180), "LAZY_MED": (120,300,360),
+                "LAZY_STD": (180,300,600), "LAZY_SLOW": (300,600,900),
+                "LAZY_XSLOW": (600,900,1200),
+            }
+            fs2, fw2, ss2 = _interval_map2.get(best["mode"], (0,0,0))
+            _sl_m = __import__("re").search(r"SL(\d+)", best["strategy"])
+            _sl_p = int(_sl_m.group(1)) if _sl_m else 40
+
+            print(f"Config: {best['strategy']} {best['mode']} H={best['horizon']}\n")
+            print(f"  {'Source':15s} {'N':>4s} {'WR%':>5s} {'AvgPnL%':>8s} {'Sharpe':>7s} {'Final$':>8s}")
+            print(f"  {'-'*55}")
+
+            for src_name in ["jupiter", "dexscreener"]:
+                pnl_list = []
+                tr_list = []
+                for t in eligible_trades:
+                    addr = t["token_address"]
+                    raw_ticks = ticks_by_token.get(addr)
+                    if not raw_ticks:
+                        continue
+                    ticks = _filter_ticks_by_source(raw_ticks, src_name)
+                    if not ticks:
+                        continue
+                    entry_price = float(t["entry_price"])
+                    fake = {
+                        "id": t["id"], "entry_price": entry_price,
+                        "sl_price": entry_price * (1 - _sl_p / 100),
+                        "tp_price": None,
+                        "position_usd": float(t.get("position_usd") or 10.0),
+                        "strategy": best["strategy"],
+                        "tranche_label": "main",
+                        "horizon_minutes": best["horizon"],
+                        "created_at": t["created_at"],
+                        "high_price_seen": entry_price,
+                        "rt_liquidity_usd": t.get("rt_liquidity_usd"),
+                        "dex_spot_price_at_entry": float(t.get("dex_spot_price_at_entry") or 0),
+                    }
+                    sim = _replay_with_intervals(fake, ticks, fs2, fw2, ss2)
+                    if sim:
+                        pnl_list.append(sim["pnl_pct"])
+                        tr_list.append({"pnl_pct": sim["pnl_pct"], "token_address": addr,
+                                        "created_at": t["created_at"]})
+                if pnl_list:
+                    n_days_src = max(1, (datetime.fromisoformat(eligible_trades[-1]["created_at"].replace("Z","+00:00")) -
+                                         datetime.fromisoformat(eligible_trades[0]["created_at"].replace("Z","+00:00"))).days)
+                    m = compute_metrics(pnl_list, n_days_src)
+                    br = simulate_bankroll(sorted(tr_list, key=lambda x: x["created_at"]))
+                    print(f"  {src_name:15s} {len(pnl_list):4d} {m['wr_pct']:4.0f}% "
+                          f"{m['avg_pnl_pct']:+7.1f}% {m['sharpe']:7.2f} ${br['final_bankroll']:7.0f}")
+                else:
+                    print(f"  {src_name:15s}    0  (no ticks)")
+
+        # --- Jupiter Trigger V2 simulation ---
+        print(f"\n{'=' * 120}")
+        print("JUPITER TRIGGER V2 — Instant fill vs Polling (on DTRAIL configs)")
+        print(f"{'=' * 120}")
+        # Test top 5 DTRAIL configs: polling (as-is) vs trigger (instant fill)
+        top_dtrails = [r for r in grid_results if r["type"] == "DTRAIL"][:5]
+        if top_dtrails:
+            print(f"\n  {'Strategy':28s} {'Mode':10s} {'Polling$':>9s} {'Trigger$':>9s} {'Delta':>7s} {'TrigWR%':>7s}")
+            print(f"  {'-'*80}")
+            for cfg_r in top_dtrails:
+                strat = cfg_r["strategy"]
+                _sl_t = __import__("re").search(r"SL(\d+)", strat)
+                _sl_v = int(_sl_t.group(1)) if _sl_t else 40
+
+                # Trigger V2 replay
+                trig_pnl = []
+                trig_trades = []
+                for t in eligible_trades:
+                    addr = t["token_address"]
+                    raw_ticks = ticks_by_token.get(addr)
+                    if not raw_ticks:
+                        continue
+                    ticks = _filter_ticks_by_source(raw_ticks, args.price_source)
+                    if not ticks:
+                        continue
+                    entry_price = float(t["entry_price"])
+                    fake = {
+                        "id": t["id"], "entry_price": entry_price,
+                        "sl_price": entry_price * (1 - _sl_v / 100),
+                        "tp_price": None,
+                        "position_usd": float(t.get("position_usd") or 10.0),
+                        "strategy": strat,
+                        "tranche_label": "main",
+                        "horizon_minutes": cfg_r["horizon"],
+                        "created_at": t["created_at"],
+                        "high_price_seen": entry_price,
+                        "rt_liquidity_usd": t.get("rt_liquidity_usd"),
+                        "dex_spot_price_at_entry": float(t.get("dex_spot_price_at_entry") or 0),
+                    }
+                    sim = _replay_with_trigger(fake, ticks)
+                    if sim:
+                        trig_pnl.append(sim["pnl_pct"])
+                        trig_trades.append({"pnl_pct": sim["pnl_pct"], "token_address": addr,
+                                            "created_at": t["created_at"]})
+
+                if len(trig_pnl) >= 5:
+                    trig_br = simulate_bankroll(sorted(trig_trades, key=lambda x: x["created_at"]))
+                    trig_wr = sum(1 for p in trig_pnl if p > 0) / len(trig_pnl) * 100
+                    delta = trig_br["final_bankroll"] - cfg_r["final_bankroll"]
+                    print(f"  {strat:28s} {cfg_r['mode']:10s} ${cfg_r['final_bankroll']:8.0f} "
+                          f"${trig_br['final_bankroll']:8.0f} {'+' if delta >= 0 else ''}{delta:6.0f} "
+                          f"{trig_wr:5.0f}%")
 
         # Save grid CSV
         csv_path = SCRAPER_DIR / "grid_search_ticks.csv"
