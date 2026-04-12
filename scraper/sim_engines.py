@@ -10,8 +10,11 @@ Slippage constants are applied at exit.
 # ---------------------------------------------------------------------------
 # Slippage constants
 # ---------------------------------------------------------------------------
-SLIPPAGE_TRAIL = 0.025   # 2.5% for trail/timeout/TP exits (matches live: 2% sell + 0.5% fee)
-SLIPPAGE_SL = 0.025      # 2.5% for SL exits (v113: was 3.5% — paper_trader uses same slippage for all exits)
+# v126: Legacy fallback only. _exit() now calls production _dynamic_sell_slip_factor
+# from paper_trader, matching live behavior (10bps base + liq/exit multipliers).
+# These constants remain for data-end exits and the DIP_BUY buy-side.
+SLIPPAGE_TRAIL = 0.025   # legacy fallback — 2.5% for trail/timeout/TP
+SLIPPAGE_SL = 0.025      # legacy fallback — 2.5% for SL
 BUY_SLIPPAGE = 0.015     # 1.5% for DIP_BUY re-entries (matches live: 1% buy + 0.5% fee)
 
 
@@ -48,11 +51,18 @@ _sim_liquidity_usd = 0  # Set per-simulation by simulate() from context
 
 def _exit(reason: str, exit_price: float, entry_price: float,
           elapsed_min: float, is_sl: bool = False) -> dict:
-    # Dynamic slippage available but empirically flat 2.5% matches paper trade
-    # reality better (candle close ≠ DexScreener spot price, difference absorbs
-    # the real slippage). Use dynamic only when explicitly enabled.
-    slip = SLIPPAGE_SL if is_sl else SLIPPAGE_TRAIL
-    net_price = exit_price * (1 - slip)
+    """v126: Use production _dynamic_sell_slip_factor (paper_trader) for legacy engines.
+    Matches live slippage exactly: 10bps base + liquidity mult + exit_type mult.
+    Falls back to flat 2.5% if production fn unavailable (import cycles/tests)."""
+    try:
+        from paper_trader import _dynamic_sell_slip_factor
+        fake_trade = {"rt_liquidity_usd": _sim_liquidity_usd or 50_000}
+        exit_type = reason if reason in ("sl_hit", "tp_hit", "trail_stop", "trail_crash", "timeout") else "timeout"
+        slip_factor = _dynamic_sell_slip_factor(fake_trade, exit_type)
+        net_price = exit_price * slip_factor
+    except Exception:
+        slip = SLIPPAGE_SL if is_sl else SLIPPAGE_TRAIL
+        net_price = exit_price * (1 - slip)
     return {
         "exit_reason": reason,
         "pnl_pct": net_price / entry_price - 1,

@@ -615,6 +615,12 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
             "momentum_mult": float(token["momentum_mult"]) if token.get("momentum_mult") else None,
             "portfolio_budget": budget_usd,
             "sol_price_at_entry": _get_sol_price(),  # v121: SOL context for USD comparison
+            # v126: Market-ref price mirrors live path (live_trader.py:761).
+            # DTRAIL/BE activation evaluates against market spot, not fill price —
+            # matters when entry_price==Jupiter fill (can be 5-15% above spot on
+            # memecoins). raw_price is DexScreener spot at message reception time.
+            "dex_spot_price_at_entry": raw_price,
+            "high_price_seen": raw_price,
         }
         # v96: Batch KOL attribution — propagate top_kol as kol_group + source="batch"
         if not token.get("_rt_source"):

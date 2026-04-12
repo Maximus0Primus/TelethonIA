@@ -2079,16 +2079,11 @@ def _tick_based_simulation(args):
         print("No trades with tick coverage. Exiting.")
         return
 
-    # v125: Dedup by token_address — keep first trade per token (chronological).
-    # Without this, tokens with N active strategies appear N times, inflating results.
-    seen_addrs = set()
-    deduped = []
-    for t in trades:
-        addr = t["token_address"]
-        if addr not in seen_addrs:
-            seen_addrs.add(addr)
-            deduped.append(t)
-    print(f"After dedup by token: {len(deduped)} unique tokens (was {len(trades)})")
+    # v126: Align dedup with paper/live cooldown (24h sliding window per token).
+    # v125 used a naive "first trade per token" which removed legitimate re-calls
+    # >24h apart. Now matches paper_trader dedup_cooldown_h=24 exactly.
+    deduped = dedup_first_call(trades)
+    print(f"After 24h cooldown dedup: {len(deduped)} unique token-calls (was {len(trades)})")
 
     sim_trades = deduped
 

@@ -934,6 +934,8 @@ def _handle_trigger_fill(client_sb, trade: dict, order_status: dict, now) -> Non
         # v122: Paper vs live divergence
         "paper_exit_price": paper_exit_price,
         "price_divergence_pct": price_divergence_pct,
+        # v126: Flag keeper-driven exits so analysis can isolate trigger vs polling
+        "exit_via_trigger": True,
     }
 
     try:
