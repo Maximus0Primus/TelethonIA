@@ -33,8 +33,11 @@ logger = logging.getLogger(__name__)
 TRIGGER_BASE = "https://api.jup.ag/trigger/v2"
 WSOL_MINT = "So11111111111111111111111111111111111111112"
 TIMEOUT = 45  # v125: 45s — deposit/craft + create_order can be very slow
-RETRY_ATTEMPTS = 2  # v125: retry on timeout/504
+RETRY_ATTEMPTS = 2  # v125: retry on timeout/504 (deposit_craft)
 RETRY_DELAY = 3  # seconds between retries
+# v126: create_order is the hot spot (100% of failures). Longer backoff + more attempts.
+CREATE_ORDER_ATTEMPTS = 5
+CREATE_ORDER_BACKOFF = [3, 6, 12, 20]  # seconds between retries (exponential-ish)
 
 # ---------------------------------------------------------------------------
 # Module-level cached state (follows _rt_config pattern in safe_scraper.py)
@@ -363,7 +366,7 @@ def place_stop_loss(
         }
 
         resp2 = None
-        for attempt in range(1, RETRY_ATTEMPTS + 1):
+        for attempt in range(1, CREATE_ORDER_ATTEMPTS + 1):
             try:
                 resp2 = requests.post(
                     f"{TRIGGER_BASE}/orders/price",
@@ -374,13 +377,13 @@ def place_stop_loss(
                 if resp2.status_code not in (504, 502, 503):
                     break
                 logger.info("jupiter_trigger: %s %d — retry %d/%d (token=%s)",
-                            step, resp2.status_code, attempt, RETRY_ATTEMPTS, ca[:12])
+                            step, resp2.status_code, attempt, CREATE_ORDER_ATTEMPTS, ca[:12])
             except requests.exceptions.Timeout:
                 logger.info("jupiter_trigger: %s timeout — retry %d/%d (token=%s)",
-                            step, attempt, RETRY_ATTEMPTS, ca[:12])
+                            step, attempt, CREATE_ORDER_ATTEMPTS, ca[:12])
                 resp2 = None
-            if attempt < RETRY_ATTEMPTS:
-                time.sleep(RETRY_DELAY)
+            if attempt < CREATE_ORDER_ATTEMPTS:
+                time.sleep(CREATE_ORDER_BACKOFF[min(attempt - 1, len(CREATE_ORDER_BACKOFF) - 1)])
 
         if resp2 is None:
             logger.warning("jupiter_trigger: %s all retries timed out (token=%s)", step, ca[:12])
