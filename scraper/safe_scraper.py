@@ -2204,7 +2204,11 @@ async def main():
     # v124: Unified check loop — paper + live in same iteration, same price fetch.
     # Before v124: two separate loops (paper_fast 30s, live_monitor 30s) ran independently
     # with 0-30s clock skew → paper and live saw different prices → PnL divergence.
-    UNIFIED_CHECK_INTERVAL = 30  # seconds
+    # v126: 30s → 10s to reduce paper-live price drift window. With avg 13 open trades
+    # and ~2 unique tokens, this puts us at ~6 Jupiter calls/min (1% of 600/min limit),
+    # ~259k Supabase queries/day (well within free tier). Expected divergence drop
+    # from -8.7% to -3 to -4% (linear with drift window).
+    UNIFIED_CHECK_INTERVAL = 10  # seconds
 
     async def unified_check_loop():
         """v124: Combined paper + live check loop. Same iteration = same prices."""
