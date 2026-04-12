@@ -579,26 +579,37 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
         # Shallow liquidity → up to 3x base slippage; deep → 1x
         slip_mult = 1.0 + 2.0 * (1.0 - lds)  # 1.0 for lds=1.0, 3.0 for lds=0.0
         buy_slip_bps = int(buy_slip_bps_base * slip_mult)
-        # v123: Use Jupiter price as entry (matches live execution price).
-        # Fetch on-demand if not cached (new RT tokens aren't in the check-loop cache yet).
-        jup_entry = _jupiter_prices_cache.get(addr)
-        if not jup_entry or jup_entry <= 0:
-            try:
-                from enrich_jupiter import _fetch_jupiter_prices
-                _jup = _fetch_jupiter_prices([addr])
-                jup_entry = _jup.get(addr)
-                if jup_entry and jup_entry > 0:
-                    _jupiter_prices_cache[addr] = jup_entry
-            except Exception:
-                jup_entry = None
-        if jup_entry and jup_entry > 0:
-            entry_price = jup_entry
-        else:
-            # v123: DexScreener fallback — use raw_price without slippage markup.
-            # Jupiter Ultra RFQ has near-zero slippage; simulated slippage caused
-            # 3-11% entry price divergence vs live execution.
-            entry_price = raw_price
         alloc_usd = token.get("_alloc_usd", budget_usd / top_n)
+        # v127: Jupiter Ultra RFQ quote as entry price — same source the live
+        # trader executes against. Paper and live now see identical fills for
+        # the same position size. No silent fallback: skip if quote unavailable
+        # (mixing Price API / DexScreener caused 5-30% paper/live divergence,
+        # e.g. $PAMP: paper -91% vs live).
+        sol_price_entry = _get_sol_price()
+        quote_sol = alloc_usd / sol_price_entry if sol_price_entry > 0 else 0.0
+        quote_lamports = int(max(0.0, quote_sol) * 1_000_000_000)
+        ultra_price = None
+        if quote_lamports > 0:
+            try:
+                from enrich_jupiter import fetch_ultra_quote_price
+                ultra_price = fetch_ultra_quote_price(addr, quote_lamports, sol_price_entry)
+            except Exception as e:
+                logger.debug("paper_trader: ultra quote failed for %s: %s", addr[:8], e)
+        if ultra_price and ultra_price > 0:
+            entry_price = ultra_price
+            entry_source = "ultra"
+            _jupiter_prices_cache[addr] = ultra_price  # warm cache for subsequent tracking
+        else:
+            # v127: DexScreener fallback — tagged via entry_source so analysis
+            # can filter (--from-trades stats should only trust entry_source='ultra').
+            # Fallback path exists for fresh tokens not yet routed by Jupiter,
+            # Helius rate-limits on decimals, and Jupiter API 5xx transients.
+            logger.info(
+                "paper_trader: Ultra quote unavailable for %s (%s) — DexScreener fallback",
+                token.get("symbol", "???"), addr[:8],
+            )
+            entry_price = raw_price
+            entry_source = "dexscreener"
 
         # Common fields for all tranches of this token
         base_row = {
@@ -621,6 +632,9 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
             # memecoins). raw_price is DexScreener spot at message reception time.
             "dex_spot_price_at_entry": raw_price,
             "high_price_seen": raw_price,
+            # v127: track entry price source ('ultra' | 'dexscreener') so
+            # --from-trades analysis can filter on trusted Ultra-based entries.
+            "entry_source": entry_source,
         }
         # v96: Batch KOL attribution — propagate top_kol as kol_group + source="batch"
         if not token.get("_rt_source"):
@@ -1707,10 +1721,14 @@ def correct_closed_prices(client) -> int:
     return corrected
 
 
-def check_paper_trades_fast(client) -> dict:
+def check_paper_trades_fast(client, prices: dict | None = None) -> dict:
     """v92: Fast 30s check for recent RT trades only (opened in last 30 min).
     Catches fast spikes that the 3-min full check would miss.
     Only checks SL/TP — no timeout (too young). No SL cascade (single-tranche RT).
+
+    v128: `prices` kwarg — pre-fetched {addr: price_usd} dict. When provided,
+    skips the internal _fetch_prices_batch so paper and live share IDENTICAL
+    price samples within a unified_check_loop iteration (no HTTP drift).
     """
     now = datetime.now(timezone.utc)
     cutoff = (now - timedelta(minutes=30)).isoformat()
@@ -1740,7 +1758,12 @@ def check_paper_trades_fast(client) -> dict:
     for (waddr, _) in _dip_watchlist:
         if waddr not in addresses:
             addresses.append(waddr)
-    prices = _fetch_prices_batch(addresses) if addresses else {}
+    # v128: Use pre-fetched shared prices if provided (paper/live coherence).
+    # Fall back to own fetch when called outside the unified loop.
+    if prices is None:
+        prices = _fetch_prices_batch(addresses) if addresses else {}
+    else:
+        prices = {a: p for a, p in prices.items() if a in set(addresses)}
     _log_price_ticks(client, prices, "fast")
 
     # v115: Process dip watchlist every 30s
