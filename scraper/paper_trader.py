@@ -169,9 +169,74 @@ _last_tick_log: dict[str, float] = {}  # token_address -> last log timestamp
 _last_dex_extra: dict[str, dict] = {}  # v121: token_address -> {volume_usd, liquidity_usd}
 _last_tick_liq: dict[str, float] = {}  # v121: token_address -> last liquidity_usd (for rug detection)
 
+# v132: Per-trade polling throttle (trade_id -> last_check_ts). In-memory only; reset on restart.
+_last_check_ts: dict[int, float] = {}
+# v132: EMA state per trade (trade_id -> ema_value) for ema_jupiter_N modes.
+_ema_state: dict[int, float] = {}
+
 # v121: Cached SOL price for paper trade USD context
 _cached_sol_price: float = 0.0
 _cached_sol_price_ts: float = 0.0
+
+
+# v132: Orchestration helpers
+_DEFAULT_ORCH = {"polling_sec": 30, "price_source": "jupiter", "ema_window": 3}
+
+def _strategy_orchestration(strategy: str, rt_config: dict | None) -> dict:
+    """Return orchestration config for a strategy. Falls back to defaults.
+    Config shape:  rt_trade_config.strategy_overrides.<STRAT> = {polling_sec, price_source, ema_window}
+    price_source: jupiter | ds | hybrid | confirm | ema
+    """
+    if not rt_config:
+        return dict(_DEFAULT_ORCH)
+    overrides = rt_config.get("strategy_overrides", {}) or {}
+    cfg = dict(_DEFAULT_ORCH)
+    cfg.update(overrides.get(strategy, {}) or {})
+    return cfg
+
+
+def _should_poll_trade(trade_id: int, polling_sec: int) -> bool:
+    """True if enough time elapsed since last check (v132 per-strategy polling)."""
+    now = _time_mod.time()
+    last = _last_check_ts.get(trade_id, 0)
+    if (now - last) >= polling_sec:
+        _last_check_ts[trade_id] = now
+        return True
+    return False
+
+
+def _decision_price(addr: str, strategy: str, trade_id: int, orch: dict) -> tuple[float | None, float | None]:
+    """Return (decision_price, exit_price_ref) based on strategy's price_source.
+    exit_price_ref is always Jupiter (or fallback current) since live exec = Jupiter.
+    """
+    jp = _jupiter_prices_cache.get(addr)
+    ds = _dex_prices_cache.get(addr)
+    src = orch.get("price_source", "jupiter")
+
+    if src == "jupiter":
+        return jp, jp
+    if src == "ds":
+        return ds, (jp if jp else ds)
+    if src == "hybrid":
+        # decision on DS, exit at Jupiter
+        return (ds if ds else jp), (jp if jp else ds)
+    if src == "confirm":
+        # Trigger only if DS AND Jupiter agree (use min of the two for conservative SL; max for TP)
+        # Simple model: if both available, use average; else use whichever exists.
+        if jp and ds:
+            return ((jp + ds) / 2), jp
+        return (jp or ds), (jp or ds)
+    if src == "ema":
+        # Exponential moving average on Jupiter stream
+        if not jp:
+            return None, (jp or ds)
+        window = int(orch.get("ema_window", 3))
+        alpha = 2 / (window + 1)
+        prev = _ema_state.get(trade_id, jp)
+        ema_val = alpha * jp + (1 - alpha) * prev
+        _ema_state[trade_id] = ema_val
+        return ema_val, jp
+    return jp, jp
 
 
 def _get_sol_price() -> float:
@@ -993,7 +1058,8 @@ def _override_exit_with_ultra_quote(client, trade: dict, ev: dict) -> dict:
 def _evaluate_trade_exit(trade: dict, current_price: float | None,
                          now: datetime, sell_slip_factor: float,
                          sl_cascade: bool = False,
-                         sell_fee_bps: int = SELL_FEE_BPS) -> dict | None:
+                         sell_fee_bps: int = SELL_FEE_BPS,
+                         decision_price: float | None = None) -> dict | None:
     """v94: Shared exit logic for check_paper_trades + check_paper_trades_fast.
 
     Checks in order: SL → TP → timeout.
@@ -1003,9 +1069,16 @@ def _evaluate_trade_exit(trade: dict, current_price: float | None,
     v118: LAZY mode — returns high_price_seen update only (no exit eval)
     when _should_evaluate_exit() says to skip.
 
+    v132: Orchestration support — decision_price (optional) overrides current_price for
+    TP/SL/trail trigger comparisons. current_price is still used for exit_price booking.
+    Enables price_source={ds,hybrid,confirm,ema3} without changing execution semantics.
+
     Returns dict with keys {status, exit_price, pnl_pct, pnl_usd, exit_minutes,
     high_price_seen} or None if no action. Caller handles DB update.
     """
+    # v132: If decision_price provided, use it for TP/SL/trail evaluation.
+    # current_price still used for exit_price (matches live Jupiter execution).
+    eval_price = decision_price if decision_price is not None else current_price
     entry_price = float(trade["entry_price"])
     sl_price = float(trade["sl_price"])
     tp_price = float(trade["tp_price"]) if trade.get("tp_price") is not None else None
@@ -1030,9 +1103,11 @@ def _evaluate_trade_exit(trade: dict, current_price: float | None,
     horizon = trade.get("horizon_minutes", 120)
 
     # Track high_price_seen (always, even in LAZY skip mode)
+    # v132: use eval_price (decision) for peak tracking so trail activation uses
+    # the same smoothed/DS source as trigger detection.
     high_seen = float(trade.get("high_price_seen") or 0)
-    if current_price is not None and current_price > high_seen:
-        high_seen = current_price
+    if eval_price is not None and eval_price > high_seen:
+        high_seen = eval_price
 
     # v118: LAZY mode — update high_price_seen but skip exit evaluation
     if not _should_evaluate_exit(trade, now):
@@ -1046,7 +1121,7 @@ def _evaluate_trade_exit(trade: dict, current_price: float | None,
         new_status = "sl_hit"
         exit_price = sl_price * _dynamic_sell_slip_factor(trade, "sl_hit", base_bps, sell_fee_bps)
 
-    elif current_price is not None:
+    elif eval_price is not None:
         # 2) SL check — with breakeven stop override
         #    BE strategies: once peak exceeded entry*(1+be_act), SL moves to entry price
         effective_sl = sl_price
@@ -1057,11 +1132,11 @@ def _evaluate_trade_exit(trade: dict, current_price: float | None,
                 # Breakeven activated — SL is now entry price
                 effective_sl = entry_price
 
-        if current_price <= effective_sl:
+        if eval_price <= effective_sl:
             new_status = "sl_hit"
             exit_price = effective_sl * _dynamic_sell_slip_factor(trade, "sl_hit", base_bps, sell_fee_bps)
         # 3) TP check (only tranches with TP target)
-        elif tp_price is not None and current_price >= tp_price:
+        elif tp_price is not None and eval_price >= tp_price:
             new_status = "tp_hit"
             exit_price = tp_price * _dynamic_sell_slip_factor(trade, "tp_hit", base_bps, sell_fee_bps)
         # 3b) v106: Time-decay TP — threshold decreases in second half of horizon
@@ -1076,20 +1151,20 @@ def _evaluate_trade_exit(trade: dict, current_price: float | None,
                 # Linear interpolation: tp_mult → tp_decay_end
                 decayed_mult = tp_mult - (tp_mult - tp_decay_end) * decay_progress
                 decayed_price = entry_price * decayed_mult
-                if current_price >= decayed_price:
+                if eval_price >= decayed_price:
                     new_status = "tp_hit"
                     # Exit at the decayed threshold, not the peak
                     exit_price = decayed_price * _dynamic_sell_slip_factor(trade, "tp_hit", base_bps, sell_fee_bps)
     # 3c) v106/v110: Trailing stop — exit when price drops trail_pct% from peak.
     #     v106 TRAIL: activates once peak > entry * (1 + trail_pct).
     #     v110 DTRAIL: activates once peak > entry * (1 + activation_pct).
-    if new_status is None and current_price is not None:
+    if new_status is None and eval_price is not None:
         trail_pct, activation_pct = _get_trail_config(trade)
         if trail_pct is not None and high_seen > 0 and market_ref_price > 0:
             activation_price = market_ref_price * (1 + activation_pct)
             if high_seen >= activation_price:
                 trail_trigger = high_seen * (1 - trail_pct)
-                if current_price <= trail_trigger and trail_trigger > entry_price:
+                if eval_price <= trail_trigger and trail_trigger > entry_price:
                     new_status = "trail_stop"
                     # v124: Detect true crash vs normal pullback.
                     # With 30s check intervals, memecoins routinely swing 5-15% between
@@ -1821,13 +1896,35 @@ def check_paper_trades_fast(client) -> dict:
         pass
     _sell_slip_factor = 1 - _sell_slip_bps / 10_000
 
+    # v132: Load rt_trade_config once for orchestration lookups
+    _rt_cfg_orch = {}
+    try:
+        from safe_scraper import _rt_load_config as _rt_load
+        _rt_cfg_orch = _rt_load() or {}
+    except Exception:
+        pass
+
     closed = 0
     for trade in recent_trades:
         addr = trade["token_address"]
+        strategy = trade.get("strategy", "")
+        trade_id = trade.get("id")
+        orch = _strategy_orchestration(strategy, _rt_cfg_orch)
+
+        # v132: Skip if polling interval not elapsed for this strategy
+        if not _should_poll_trade(trade_id, int(orch.get("polling_sec", 30))):
+            continue
+
         current_price = prices.get(addr)
+        # v132: Compute decision_price based on strategy's price_source.
+        decision_price, exit_ref = _decision_price(addr, strategy, trade_id, orch)
+        # exit_ref (Jupiter) preferred as current_price for exit booking
+        if exit_ref is not None:
+            current_price = exit_ref
 
         # v123: sell_slip_factor=1.0 to match live (Jupiter Ultra RFQ = near-zero slippage)
-        ev = _evaluate_trade_exit(trade, current_price, now, 1.0, sell_fee_bps=0)
+        ev = _evaluate_trade_exit(trade, current_price, now, 1.0, sell_fee_bps=0,
+                                  decision_price=decision_price)
         if ev is None:
             continue
         ev = _override_exit_with_ultra_quote(client, trade, ev)
