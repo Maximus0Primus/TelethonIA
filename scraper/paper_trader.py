@@ -313,7 +313,7 @@ def _fetch_prices_batch(addresses: list[str]) -> dict[str, float]:
     _jupiter_overridden.clear()
     now_ts = _time_mod.time()
     _jup_fetch_cooldown = getattr(_fetch_prices_batch, "_last_jup_ts", 0)
-    _skip_jup = (now_ts - _jup_fetch_cooldown) < 5  # v126: 14s→5s to match 10s unified loop (cache expires between iterations)
+    _skip_jup = (now_ts - _jup_fetch_cooldown) < 14  # 14s cooldown — matches live tick resolution (15s)
     if addresses and not _skip_jup:
         _jupiter_prices_cache.clear()
         try:
