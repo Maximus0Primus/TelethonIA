@@ -2211,80 +2211,18 @@ async def main():
     UNIFIED_CHECK_INTERVAL = 10  # seconds
 
     async def unified_check_loop():
-        """v124: Combined paper + live check loop. Same iteration = same prices.
-        v128: Single shared price fetch for the UNION of paper+live+watchlist addresses,
-        passed to both check_paper_trades_fast and check_live_trades. Guarantees
-        byte-identical `high_price_seen` samples — no HTTP drift between the two calls.
-        """
+        """v124: Combined paper + live check loop. Same iteration = same prices."""
         _consecutive_empty_live = 0
         while True:
             await asyncio.sleep(UNIFIED_CHECK_INTERVAL)
 
-            # v128: Pre-fetch shared prices for the union of addresses (paper + live + dip watchlist)
-            shared_prices: dict = {}
-            live_enabled = False
-            sb_shared = _get_supabase()
-            try:
-                config = _rt_load_config()
-                live_cfg = config.get("live_trading", {})
-                live_enabled = bool(live_cfg.get("enabled", False))
-            except Exception:
-                live_enabled = False
-
-            try:
-                if sb_shared:
-                    union_addrs: set = set()
-                    # Paper: recent trades + dip watchlist
-                    try:
-                        cutoff_iso = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
-                        pr = (
-                            sb_shared.table("paper_trades")
-                            .select("token_address")
-                            .eq("status", "open")
-                            .neq("source", "rt_live")
-                            .gte("created_at", cutoff_iso)
-                            .execute()
-                        )
-                        for r in (pr.data or []):
-                            if r.get("token_address"):
-                                union_addrs.add(r["token_address"])
-                        from paper_trader import _dip_watchlist
-                        for (waddr, _s) in _dip_watchlist:
-                            union_addrs.add(waddr)
-                    except Exception as _e_paper:
-                        logger.debug("unified_check_loop: paper addr collect failed: %s", _e_paper)
-                    # Live: open/closing rt_live
-                    if live_enabled:
-                        try:
-                            lr = (
-                                sb_shared.table("paper_trades")
-                                .select("token_address")
-                                .in_("status", ["open", "closing"])
-                                .eq("source", "rt_live")
-                                .execute()
-                            )
-                            for r in (lr.data or []):
-                                if r.get("token_address"):
-                                    union_addrs.add(r["token_address"])
-                        except Exception as _e_live:
-                            logger.debug("unified_check_loop: live addr collect failed: %s", _e_live)
-
-                    if union_addrs:
-                        from paper_trader import _fetch_prices_batch
-                        shared_prices = await asyncio.get_event_loop().run_in_executor(
-                            None, _fetch_prices_batch, list(union_addrs)
-                        )
-            except Exception as e:
-                logger.error("unified_check_loop: shared fetch error: %s", e)
-                shared_prices = {}
-
             # --- Paper fast check ---
             try:
                 from paper_trader import check_paper_trades_fast
-                sb_pf = sb_shared or _get_supabase()
+                sb_pf = _get_supabase()
                 if sb_pf:
                     result = await asyncio.get_event_loop().run_in_executor(
-                        None, lambda: check_paper_trades_fast(sb_pf, prices=shared_prices)
+                        None, check_paper_trades_fast, sb_pf
                     )
                     closed = result.get("closed", 0)
                     if closed > 0:
@@ -2293,16 +2231,18 @@ async def main():
             except Exception as e:
                 logger.error("paper_fast_check error: %s", e)
 
-            # --- Live trade check (shared prices = identical samples as paper) ---
+            # --- Live trade check (immediately after, same Jupiter cache) ---
             try:
-                if not live_enabled:
+                config = _rt_load_config()
+                live_cfg = config.get("live_trading", {})
+                if not live_cfg.get("enabled", False):
                     _consecutive_empty_live = 0
                 else:
                     from live_trader import check_live_trades
-                    sb_lt = sb_shared or _get_supabase()
+                    sb_lt = _get_supabase()
                     if sb_lt:
                         live_result = await asyncio.get_event_loop().run_in_executor(
-                            None, lambda: check_live_trades(sb_lt, prices=shared_prices)
+                            None, check_live_trades, sb_lt
                         )
                         checked = live_result.get("checked", 0)
                         closed = live_result.get("closed", 0)
