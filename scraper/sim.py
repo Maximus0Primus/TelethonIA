@@ -1251,6 +1251,23 @@ def _build_fake_trade(trade: dict, strategy_override: str = None,
     }
 
 
+def _load_live_strategy_overrides() -> dict:
+    """v132: Pull production strategy_overrides from scoring_config.rt_trade_config.
+    Returns {strategy_name: {polling_sec, price_source, ema_window}} or {} on failure.
+    """
+    try:
+        rows = sb_get("scoring_config", [("id", "eq.1"), ("select", "rt_trade_config")])
+        if rows and rows[0].get("rt_trade_config"):
+            cfg = rows[0]["rt_trade_config"]
+            if isinstance(cfg, str):
+                import json
+                cfg = json.loads(cfg)
+            return cfg.get("strategy_overrides", {}) or {}
+    except Exception as e:
+        print(f"[warn] failed to load live strategy_overrides: {e}")
+    return {}
+
+
 def _subsample_ticks(ticks: list[dict], poll_sec: int) -> list[dict]:
     """v132: keep only ticks spaced at least poll_sec apart."""
     if poll_sec <= 0 or not ticks:
@@ -2218,7 +2235,18 @@ def _tick_based_simulation(args):
     print("=" * 90)
     print("FROM-TICKS MODE: Tick-level replay simulation (30s resolution)")
     print(f"Price source: {args.price_source}")
+    if getattr(args, "from_live_config", False):
+        print("  [v132] --from-live-config: loading strategy_overrides from DB")
+    if getattr(args, "priority_fee_sol", 0) > 0:
+        print(f"  [v132] priority-fee-sol: {args.priority_fee_sol} SOL / round-trip "
+              f"(~${args.priority_fee_sol*150:.2f})")
     print("=" * 90)
+
+    # v132: Load live overrides once if requested
+    _live_overrides = _load_live_strategy_overrides() if getattr(args, "from_live_config", False) else {}
+    if _live_overrides:
+        for s, ov in _live_overrides.items():
+            print(f"    {s:30s} poll={ov.get('polling_sec','-'):>3}s  source={ov.get('price_source','-')}")
 
     since = max(args.since, TICK_DATA_START)
 
@@ -2277,21 +2305,41 @@ def _tick_based_simulation(args):
 
         fake = _build_fake_trade(trade, sim_live_entry=args.sim_live_entry)
 
-        # v132: Orchestration mode — separate DS/Jupiter streams, apply decision/exec split
-        if getattr(args, "orchestration", None):
+        # v132: --from-live-config — per-trade orchestration from prod DB
+        strat = trade.get("strategy", "")
+        if getattr(args, "from_live_config", False):
+            override = _live_overrides.get(strat, {}) if _live_overrides else {}
+            orch_mode = override.get("price_source")
+            poll_sec = int(override.get("polling_sec", 0) or 0)
+            ema_w = int(override.get("ema_window", 3) or 3)
+        else:
+            orch_mode = getattr(args, "orchestration", None)
+            poll_sec = int(getattr(args, "poll_sec", 0) or 0)
+            ema_w = int(getattr(args, "ema_window", 3) or 3)
+
+        if orch_mode:
             ds_ticks = _filter_ticks_by_source(raw_ticks, "dexscreener")
             jp_ticks = _filter_ticks_by_source(raw_ticks, "jupiter")
             sim = _replay_trade_orchestrated(
                 fake, ds_ticks, jp_ticks,
-                orchestration=args.orchestration,
-                poll_sec=int(getattr(args, "poll_sec", 0) or 0),
-                ema_window=int(getattr(args, "ema_window", 3) or 3),
+                orchestration=orch_mode,
+                poll_sec=poll_sec,
+                ema_window=ema_w,
             )
         else:
             sim = _replay_trade_on_ticks(fake, ticks)
         if sim is None:
             skipped += 1
             continue
+
+        # v132: Priority fee cost model (applied to closed trades only)
+        if getattr(args, "priority_fee_sol", 0) > 0:
+            sol_px = 150.0  # approx
+            fee_usd = float(args.priority_fee_sol) * sol_px
+            pos = float(fake.get("position_usd") or 10.0)
+            if pos > 0:
+                sim["pnl_pct"] = sim.get("pnl_pct", 0) - fee_usd / pos
+                sim["pnl_usd"] = sim.get("pnl_usd", 0) - fee_usd
 
         sim_results[trade["id"]] = sim
         strat = trade["strategy"]
@@ -2622,6 +2670,12 @@ def main():
                         help="v132: Subsample ticks to N-second polling interval (0=no subsampling)")
     parser.add_argument("--ema-window", type=int, default=3,
                         help="v132: EMA window for --orchestration ema")
+    parser.add_argument("--from-live-config", action="store_true",
+                        help="v132: Auto-load strategy_overrides from scoring_config.rt_trade_config "
+                             "so each trade replays with its production polling + price_source. "
+                             "Overrides --orchestration and --poll-sec when set.")
+    parser.add_argument("--priority-fee-sol", type=float, default=0.0,
+                        help="v132: Deduct priority fee per round-trip (default 0.0, typical Jupiter auto ~0.0005)")
     parser.add_argument("--grid-ticks", action="store_true",
                         help="Grid search DTRAIL params on tick data")
     parser.add_argument("--validate-ticks", action="store_true",
