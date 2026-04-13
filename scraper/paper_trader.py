@@ -475,27 +475,6 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
     sell_slip_bps = int(config.get("sell_slippage_bps", SELL_SLIPPAGE_BPS))
     buy_fee_bps = int(config.get("buy_fee_bps", BUY_FEE_BPS))
 
-    # v129: Ultra quote MUST use live's position size, not paper's portfolio
-    # allocation. Paper has N strategies × score-weighted budget ($10-60/token),
-    # live has a single fixed size (~0.15 SOL). Ultra RFQ routes differently
-    # across sizes on illiquid memecoins (1-5% fill delta) — quoting at live
-    # size guarantees paper's entry_price matches what live would actually fill.
-    # PnL% stays unchanged; only the denominator source is harmonized.
-    ultra_quote_sol = 0.15  # fallback = current live default
-    try:
-        _cfg_res = client.table("scoring_config").select("rt_trade_config").eq("id", 1).execute()
-        if _cfg_res.data and _cfg_res.data[0].get("rt_trade_config"):
-            _rt_cfg = _cfg_res.data[0]["rt_trade_config"]
-            if isinstance(_rt_cfg, str):
-                import json as _json
-                _rt_cfg = _json.loads(_rt_cfg)
-            _live_cfg = _rt_cfg.get("live_trading", {}) or {}
-            ultra_quote_sol = float(_live_cfg.get("max_position_sol", ultra_quote_sol))
-    except Exception as _e:
-        logger.debug("paper_trader: failed to load live position size, using %.3f SOL: %s",
-                     ultra_quote_sol, _e)
-    ultra_quote_lamports = int(ultra_quote_sol * 1_000_000_000)
-
     # Filter candidates
     base_filter = [
         t for t in ranking
@@ -601,14 +580,19 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
         slip_mult = 1.0 + 2.0 * (1.0 - lds)  # 1.0 for lds=1.0, 3.0 for lds=0.0
         buy_slip_bps = int(buy_slip_bps_base * slip_mult)
         alloc_usd = token.get("_alloc_usd", budget_usd / top_n)
-        # v127/v129: Jupiter Ultra RFQ quote at LIVE's position size (not paper alloc).
-        # Ensures same route/fill as live swap — no fill delta from size mismatch.
+        # v127: Jupiter Ultra RFQ quote as entry price — same source the live
+        # trader executes against. Paper and live now see identical fills for
+        # the same position size. No silent fallback: skip if quote unavailable
+        # (mixing Price API / DexScreener caused 5-30% paper/live divergence,
+        # e.g. $PAMP: paper -91% vs live).
         sol_price_entry = _get_sol_price()
+        quote_sol = alloc_usd / sol_price_entry if sol_price_entry > 0 else 0.0
+        quote_lamports = int(max(0.0, quote_sol) * 1_000_000_000)
         ultra_price = None
-        if ultra_quote_lamports > 0:
+        if quote_lamports > 0:
             try:
                 from enrich_jupiter import fetch_ultra_quote_price
-                ultra_price = fetch_ultra_quote_price(addr, ultra_quote_lamports, sol_price_entry)
+                ultra_price = fetch_ultra_quote_price(addr, quote_lamports, sol_price_entry)
             except Exception as e:
                 logger.debug("paper_trader: ultra quote failed for %s: %s", addr[:8], e)
         if ultra_price and ultra_price > 0:
