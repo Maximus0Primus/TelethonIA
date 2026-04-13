@@ -319,6 +319,72 @@ def fetch_ultra_quote_price(mint: str, amount_lamports: int, sol_price_usd: floa
         return None
 
 
+def fetch_ultra_sell_quote_price(mint: str, token_amount_raw: int, sol_price_usd: float) -> float | None:
+    """
+    v131: SELL-side symmetric of fetch_ultra_quote_price.
+    Quote mint -> WSOL via Jupiter Ultra /order at the actual token amount held,
+    returning effective sell price in USD. Used by paper_trader to compute
+    exit_price from the real Ultra route (not the slippage approximation formula).
+
+    Returns None on failure; caller falls back to _dynamic_sell_slip_factor.
+    """
+    if not sol_price_usd or sol_price_usd <= 0:
+        return None
+    if token_amount_raw <= 0:
+        return None
+    decimals = get_token_decimals(mint)
+    if decimals is None:
+        return None
+
+    headers = {}
+    api_key = _get_api_key()
+    if api_key:
+        headers["x-api-key"] = api_key
+
+    params = {
+        "inputMint": mint,
+        "outputMint": WSOL_MINT,
+        "amount": str(int(token_amount_raw)),
+    }
+    taker = _get_ultra_taker()
+    if taker:
+        params["taker"] = taker
+
+    try:
+        if _monitoring:
+            with _track_api_call("jupiter", "/ultra/order_sell") as _t:
+                resp = requests.get(
+                    "https://api.jup.ag/ultra/v1/order",
+                    params=params,
+                    headers=headers,
+                    timeout=10,
+                )
+                _t.set_response(resp)
+        else:
+            resp = requests.get(
+                "https://api.jup.ag/ultra/v1/order",
+                params=params,
+                headers=headers,
+                timeout=10,
+            )
+        if resp.status_code != 200:
+            logger.debug("ultra_sell_quote: %d for %s", resp.status_code, mint[:8])
+            return None
+        data = resp.json()
+        out_amount_raw = data.get("outAmount")
+        in_amount_raw = data.get("inAmount")
+        if not out_amount_raw or not in_amount_raw:
+            return None
+        out_sol = float(out_amount_raw) / 1_000_000_000  # WSOL out
+        in_tokens = float(in_amount_raw) / (10 ** decimals)
+        if in_tokens <= 0:
+            return None
+        return (out_sol * sol_price_usd) / in_tokens
+    except requests.RequestException as e:
+        logger.debug("ultra_sell_quote error for %s: %s", mint[:8], e)
+        return None
+
+
 # === Public API ===
 
 def _empty_jupiter_result() -> dict:

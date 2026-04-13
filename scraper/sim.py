@@ -1151,25 +1151,55 @@ def _fetch_ticks_for_tokens(token_ranges: dict[str, tuple]) -> dict[str, list[di
     return ticks_by_token
 
 
-def _filter_ticks_by_source(ticks: list[dict], price_source: str) -> list[dict]:
-    """Filter/merge ticks based on price source preference."""
+# v131 Gap #2: Subsample tick replay to match paper polling cadence (30s).
+# price_ticks table logs at ~15s (live) / ~30s (fast/full). Replaying every
+# tick means sim sees 2× the exit opportunities paper would catch → DTRAIL
+# and tight trails are over-evaluated. Subsample to ≥30s spacing to mirror
+# paper's check_paper_trades_fast cadence exactly.
+PAPER_POLL_INTERVAL_SEC = 30
+
+
+def _subsample_ticks(ticks: list[dict], interval_sec: int = PAPER_POLL_INTERVAL_SEC) -> list[dict]:
+    """Keep first tick + next tick ≥ interval_sec after the last kept one."""
+    if not ticks or interval_sec <= 0:
+        return ticks
+    kept = []
+    last_ts = None
+    for t in ticks:
+        try:
+            ts = datetime.fromisoformat(t["fetched_at"].replace("Z", "+00:00"))
+        except Exception:
+            continue
+        if last_ts is None or (ts - last_ts).total_seconds() >= interval_sec:
+            kept.append(t)
+            last_ts = ts
+    return kept
+
+
+def _filter_ticks_by_source(ticks: list[dict], price_source: str,
+                            subsample_sec: int = PAPER_POLL_INTERVAL_SEC) -> list[dict]:
+    """Filter/merge ticks by source preference, then subsample to paper cadence."""
     if price_source == "jupiter":
-        # Jupiter ticks only; fall back to DexScreener if no Jupiter tick at that time
         jup = [t for t in ticks if t["source"] == "jupiter"]
         if jup:
-            return jup
-        # No Jupiter ticks at all — fall back to DexScreener
-        return [t for t in ticks if t["source"] in ("fast", "full", "live")]
+            return _subsample_ticks(jup, subsample_sec)
+        return _subsample_ticks(
+            [t for t in ticks if t["source"] in ("fast", "full", "live")],
+            subsample_sec,
+        )
 
     elif price_source == "dexscreener":
-        return [t for t in ticks if t["source"] in ("fast", "full", "live")]
+        return _subsample_ticks(
+            [t for t in ticks if t["source"] in ("fast", "full", "live")],
+            subsample_sec,
+        )
 
     else:  # "both" — merge, prefer Jupiter at each timestamp
         dex_ticks = {t["fetched_at"]: t for t in ticks if t["source"] in ("fast", "full", "live")}
         jup_ticks = {t["fetched_at"]: t for t in ticks if t["source"] == "jupiter"}
-        # Jupiter overrides DexScreener at same timestamp
         merged = {**dex_ticks, **jup_ticks}
-        return sorted(merged.values(), key=lambda t: t["fetched_at"])
+        merged_sorted = sorted(merged.values(), key=lambda t: t["fetched_at"])
+        return _subsample_ticks(merged_sorted, subsample_sec)
 
 
 def _build_fake_trade(trade: dict, strategy_override: str = None,

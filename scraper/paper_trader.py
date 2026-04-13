@@ -946,6 +946,50 @@ def _should_evaluate_exit(trade: dict, now: datetime) -> bool:
     return True
 
 
+def _override_exit_with_ultra_quote(client, trade: dict, ev: dict) -> dict:
+    """
+    v131 Gap #1: Replace simulated exit_price with real Jupiter Ultra SELL quote.
+
+    Called after _evaluate_trade_exit returns a closing status. Quotes Ultra
+    at the actual token amount the paper trade would be selling. Recomputes
+    pnl_pct + pnl_usd. Falls back to the formula-based exit_price if the
+    Ultra quote fails (fresh token, Jupiter 5xx, decimals unavailable).
+
+    Returns the (possibly modified) ev dict.
+    """
+    if not ev or ev.get("status") is None:
+        return ev
+    # Shadow trades (pos_usd=0) skip Ultra quote — they're analysis-only
+    pos_usd = float(trade.get("position_usd") or 0)
+    entry_price = float(trade.get("entry_price") or 0)
+    if pos_usd <= 0 or entry_price <= 0:
+        return ev
+    # Only apply to Ultra-entered trades — DexScreener fallback entries use formula
+    if trade.get("entry_source") != "ultra":
+        return ev
+
+    addr = trade.get("token_address")
+    if not addr:
+        return ev
+
+    try:
+        from enrich_jupiter import fetch_ultra_sell_quote_price, get_token_decimals
+        decimals = get_token_decimals(addr)
+        if decimals is None:
+            return ev
+        token_amount = (pos_usd / entry_price) * (10 ** decimals)
+        sol_price = _get_sol_price()
+        ultra_exit = fetch_ultra_sell_quote_price(addr, int(token_amount), sol_price)
+        if ultra_exit and ultra_exit > 0:
+            ev["exit_price"] = ultra_exit
+            ev["pnl_pct"] = round((ultra_exit / entry_price) - 1, 4)
+            ev["pnl_usd"] = round(pos_usd * ev["pnl_pct"], 2)
+    except Exception as e:
+        logger.debug("paper ultra exit quote failed for %s: %s", addr[:8], e)
+
+    return ev
+
+
 def _evaluate_trade_exit(trade: dict, current_price: float | None,
                          now: datetime, sell_slip_factor: float,
                          sl_cascade: bool = False,
@@ -1477,6 +1521,7 @@ def check_paper_trades(client) -> dict:
         ev = _evaluate_trade_exit(trade, current_price, now, 1.0, sl_cascade=is_cascade, sell_fee_bps=0)
         if ev is None:
             continue
+        ev = _override_exit_with_ultra_quote(client, trade, ev)
 
         # Always update high_price_seen (even without exit)
         if ev.get("high_price_seen") is not None and ev["high_price_seen"] > float(trade.get("high_price_seen") or 0):
@@ -1576,6 +1621,7 @@ def check_paper_trades(client) -> dict:
         ev = _evaluate_trade_exit(trade, current_price, now, _sell_slip_factor, sl_cascade=True, sell_fee_bps=_sell_fee_bps)
         if ev is None or "status" not in ev:
             continue
+        ev = _override_exit_with_ultra_quote(client, trade, ev)
 
         pnl_usd = ev.get("pnl_usd")
         update = {k: ev[k] for k in ("status", "exit_price", "exit_at", "pnl_pct", "pnl_usd", "exit_minutes", "sol_price_at_exit") if k in ev}
@@ -1784,6 +1830,7 @@ def check_paper_trades_fast(client) -> dict:
         ev = _evaluate_trade_exit(trade, current_price, now, 1.0, sell_fee_bps=0)
         if ev is None:
             continue
+        ev = _override_exit_with_ultra_quote(client, trade, ev)
 
         # Update high_price_seen even without exit
         if ev.get("high_price_seen") is not None and ev["high_price_seen"] > float(trade.get("high_price_seen") or 0):
