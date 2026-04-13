@@ -1574,6 +1574,14 @@ def check_paper_trades(client) -> dict:
     # Track SL-triggered groups so we can cascade
     sl_triggered = set()
 
+    # v132: Load orchestration config for per-strategy polling + price source
+    _rt_cfg_orch = {}
+    try:
+        from safe_scraper import _rt_load_config as _rt_load
+        _rt_cfg_orch = _rt_load() or {}
+    except Exception:
+        pass
+
     # Sort so main/tp tranches come before moonbag (SL detection first)
     sorted_trades = sorted(open_trades, key=lambda t: (t.get("tranche_label", "") == "moonbag"))
     closed_ids = set()
@@ -1583,17 +1591,33 @@ def check_paper_trades(client) -> dict:
             continue
 
         addr = trade["token_address"]
+        strategy = trade.get("strategy", "")
+        trade_id = trade.get("id")
+        orch = _strategy_orchestration(strategy, _rt_cfg_orch)
+
+        # v132: Per-strategy polling skip (full-cycle check, ~3-15min interval)
+        # For the slow check we're far less aggressive about skipping since it
+        # already runs infrequently. Only skip if we polled very recently via fast check.
+        if not _should_poll_trade(trade_id, int(orch.get("polling_sec", 30))):
+            continue
+
         current_price = prices.get(addr)
+        # v132: Orchestration — decision_price from configured source, exec stays Jupiter
+        decision_price, exit_ref = _decision_price(addr, strategy, trade_id, orch)
+        if exit_ref is not None:
+            current_price = exit_ref
+
         # v115: DIP_BUY P1/P2 exit independently (no SL cascade between them)
         label = trade.get("tranche_label", "")
         if "dip_p" in label:
-            group_key = (addr, trade["strategy"], trade["cycle_ts"], label)
+            group_key = (addr, strategy, trade["cycle_ts"], label)
         else:
-            group_key = (addr, trade["strategy"], trade["cycle_ts"])
+            group_key = (addr, strategy, trade["cycle_ts"])
 
         is_cascade = group_key in sl_triggered
         # v123: sell_slip_factor=1.0 to match live (Jupiter Ultra RFQ = near-zero slippage)
-        ev = _evaluate_trade_exit(trade, current_price, now, 1.0, sl_cascade=is_cascade, sell_fee_bps=0)
+        ev = _evaluate_trade_exit(trade, current_price, now, 1.0, sl_cascade=is_cascade,
+                                   sell_fee_bps=0, decision_price=decision_price)
         if ev is None:
             continue
         ev = _override_exit_with_ultra_quote(client, trade, ev)
