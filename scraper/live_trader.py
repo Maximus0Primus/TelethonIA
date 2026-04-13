@@ -666,24 +666,34 @@ def open_live_trade(client_sb, token_entry: dict, strategy: str,
             pass
         return False
 
-    # v74: Compute actual fill price from Jupiter response
-    # execution_price = (SOL spent / tokens received) * SOL price
-    execution_price = entry_price  # fallback to estimated price
+    # v130: True fill price from outAmount + token decimals.
+    # Previously used fill_ratio = sol_spent/expected_sol (≈1.0 for exact-in),
+    # which left execution_price ≈ DexScreener spot — defeating the whole point.
+    # Now: execution_price = (SOL spent * SOL price USD) / tokens received.
+    execution_price = entry_price  # fallback: pre-trade spot
+    entry_source = "dexscreener"
     input_amt = result.get("input_amount")
     output_amt = result.get("output_amount")
     if input_amt and output_amt and output_amt > 0:
-        sol_spent = input_amt / LAMPORTS_PER_SOL
-        # We need token decimals to compute price. Use ratio vs estimated:
-        # actual_fill_ratio = (sol_spent / position_sol) — how much more/less SOL we spent
-        # Adjust entry_price proportionally
-        actual_sol_spent = sol_spent
-        expected_sol = position_sol
-        if expected_sol > 0:
-            fill_ratio = actual_sol_spent / expected_sol
-            execution_price = entry_price * fill_ratio
-            if abs(fill_ratio - 1.0) > 0.01:
-                logger.info("live_trader: fill price divergence for %s: %.2f%% (est=$%.8f, fill=$%.8f)",
-                            symbol, (fill_ratio - 1) * 100, entry_price, execution_price)
+        try:
+            from enrich_jupiter import get_token_decimals
+            decimals = get_token_decimals(ca)
+        except Exception:
+            decimals = None
+        if decimals is not None:
+            sol_spent = input_amt / LAMPORTS_PER_SOL
+            out_tokens = output_amt / (10 ** decimals)
+            if out_tokens > 0 and sol_price > 0:
+                execution_price = (sol_spent * sol_price) / out_tokens
+                entry_source = "ultra"
+                divergence_pct = (execution_price / entry_price - 1) * 100 if entry_price > 0 else 0
+                if abs(divergence_pct) > 1:
+                    logger.info(
+                        "live_trader: %s fill divergence %.2f%% (spot=$%.8f, fill=$%.8f)",
+                        symbol, divergence_pct, entry_price, execution_price,
+                    )
+        else:
+            logger.warning("live_trader: decimals unavailable for %s — execution_price falls back to spot", ca[:8])
 
     # Insert into paper_trades with source='rt_live'
     from paper_trader import STRATEGIES
@@ -757,13 +767,12 @@ def open_live_trade(client_sb, token_entry: dict, strategy: str,
         "buy_exec_ms": result.get("exec_ms"),
         "buy_input_lamports": result.get("input_amount"),  # SOL actually spent
         "buy_output_tokens": result.get("output_amount"),  # tokens received (raw)
-        # v121: DexScreener spot price vs Jupiter fill for slippage calibration
-        "dex_spot_price_at_entry": entry_price,  # DexScreener price BEFORE Jupiter fill
-        # v124: Initialize high_price_seen to market price (not fill price).
-        # Without this, the gap between fill price and market price (~5-15% on memecoins)
-        # fools DTRAIL into thinking price already pumped, activating trail immediately
-        # and exiting on the first pullback for a loss.
-        "high_price_seen": entry_price,  # DexScreener spot = true market price at buy time
+        # v130: Single-source anchor — all refs on execution_price (true Ultra fill).
+        # Matches paper_trader.py (v130): entry_price = dex_spot = high = one source.
+        # DTRAIL/BE gates evaluate against the same source across paper & live.
+        "dex_spot_price_at_entry": execution_price,
+        "high_price_seen": execution_price,
+        "entry_source": entry_source,
         # v121: pair_address for OHLCV backtesting on live trades
         "pair_address": token_entry.get("_rt_pair_address"),
     }

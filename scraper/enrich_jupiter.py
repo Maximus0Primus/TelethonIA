@@ -196,6 +196,129 @@ def _fetch_jupiter_prices(mints: list[str]) -> dict[str, float]:
         return {}
 
 
+# === v127: Token decimals + Ultra RFQ quote (paper/live coherence) ===
+
+_decimals_cache: dict[str, tuple[int, float]] = {}  # mint -> (decimals, cached_at)
+_DECIMALS_TTL = 24 * 3600  # decimals are immutable; cache generously
+
+
+def get_token_decimals(mint: str) -> int | None:
+    """
+    Fetch token decimals via Solana RPC getTokenSupply. 24h cache.
+    Tries Helius (if key set) then public RPC. Returns None on failure.
+    """
+    now = time.time()
+    cached = _decimals_cache.get(mint)
+    if cached and (now - cached[1]) < _DECIMALS_TTL:
+        return cached[0]
+
+    endpoints = []
+    helius_key = os.environ.get("HELIUS_API_KEY")
+    if helius_key:
+        endpoints.append(f"https://mainnet.helius-rpc.com/?api-key={helius_key}")
+    endpoints.append("https://api.mainnet-beta.solana.com")
+
+    for url in endpoints:
+        try:
+            resp = requests.post(
+                url,
+                json={"jsonrpc": "2.0", "id": 1, "method": "getTokenSupply", "params": [mint]},
+                timeout=8,
+            )
+            if resp.status_code != 200:
+                continue
+            data = resp.json()
+            decimals = data.get("result", {}).get("value", {}).get("decimals")
+            if decimals is not None:
+                decimals = int(decimals)
+                _decimals_cache[mint] = (decimals, now)
+                return decimals
+        except requests.RequestException:
+            continue
+    logger.warning("get_token_decimals: failed for %s", mint[:8])
+    return None
+
+
+def _get_ultra_taker() -> str | None:
+    """Derive taker pubkey from SOLANA_PRIVATE_KEY env if available (no signing)."""
+    pk_str = os.environ.get("SOLANA_PRIVATE_KEY", "")
+    if not pk_str:
+        return None
+    try:
+        from solders.keypair import Keypair as _Kp
+        import base58 as _b58
+        kp = _Kp.from_bytes(_b58.b58decode(pk_str))
+        return str(kp.pubkey())
+    except Exception:
+        return None
+
+
+def fetch_ultra_quote_price(mint: str, amount_lamports: int, sol_price_usd: float) -> float | None:
+    """
+    Quote WSOL -> mint via Jupiter Ultra /order and return effective fill price in USD.
+
+    Same endpoint the live trader executes against — ensures paper entries
+    match live fills for given position size (depth-accurate RFQ quote).
+
+    Returns None if quote fails or decimals unavailable.
+    """
+    if not sol_price_usd or sol_price_usd <= 0:
+        return None
+    if amount_lamports <= 0:
+        return None
+    decimals = get_token_decimals(mint)
+    if decimals is None:
+        return None
+
+    headers = {}
+    api_key = _get_api_key()
+    if api_key:
+        headers["x-api-key"] = api_key
+
+    params = {
+        "inputMint": WSOL_MINT,
+        "outputMint": mint,
+        "amount": str(amount_lamports),
+    }
+    taker = _get_ultra_taker()
+    if taker:
+        params["taker"] = taker
+
+    try:
+        if _monitoring:
+            with _track_api_call("jupiter", "/ultra/order") as _t:
+                resp = requests.get(
+                    "https://api.jup.ag/ultra/v1/order",
+                    params=params,
+                    headers=headers,
+                    timeout=10,
+                )
+                _t.set_response(resp)
+        else:
+            resp = requests.get(
+                "https://api.jup.ag/ultra/v1/order",
+                params=params,
+                headers=headers,
+                timeout=10,
+            )
+        if resp.status_code != 200:
+            logger.debug("ultra_quote: %d for %s", resp.status_code, mint[:8])
+            return None
+        data = resp.json()
+        out_amount_raw = data.get("outAmount")
+        in_amount_raw = data.get("inAmount")
+        if not out_amount_raw or not in_amount_raw:
+            return None
+        out_tokens = float(out_amount_raw) / (10 ** decimals)
+        in_sol = float(in_amount_raw) / 1_000_000_000
+        if out_tokens <= 0:
+            return None
+        return (in_sol * sol_price_usd) / out_tokens
+    except requests.RequestException as e:
+        logger.debug("ultra_quote error for %s: %s", mint[:8], e)
+        return None
+
+
 # === Public API ===
 
 def _empty_jupiter_result() -> dict:

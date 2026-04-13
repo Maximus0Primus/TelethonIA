@@ -475,6 +475,14 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
     sell_slip_bps = int(config.get("sell_slippage_bps", SELL_SLIPPAGE_BPS))
     buy_fee_bps = int(config.get("buy_fee_bps", BUY_FEE_BPS))
 
+    # v130: Quote Ultra at live's actual position size so paper's entry_price
+    # reflects the exact route/fill live will execute against. One quote per
+    # token per cycle (caller loop iterates tokens once), shared across all
+    # tranches/strategies of the same token.
+    _live_cfg = config.get("live_trading", {}) if isinstance(config.get("live_trading"), dict) else {}
+    _ultra_quote_sol = float(_live_cfg.get("max_position_sol", 0.15))
+    ultra_quote_lamports = int(_ultra_quote_sol * 1_000_000_000)
+
     # Filter candidates
     base_filter = [
         t for t in ranking
@@ -579,25 +587,30 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
         # Shallow liquidity → up to 3x base slippage; deep → 1x
         slip_mult = 1.0 + 2.0 * (1.0 - lds)  # 1.0 for lds=1.0, 3.0 for lds=0.0
         buy_slip_bps = int(buy_slip_bps_base * slip_mult)
-        # v123: Use Jupiter price as entry (matches live execution price).
-        # Fetch on-demand if not cached (new RT tokens aren't in the check-loop cache yet).
-        jup_entry = _jupiter_prices_cache.get(addr)
-        if not jup_entry or jup_entry <= 0:
+        # v130: Quote Jupiter Ultra /order at live's position size — same route/fill
+        # as the live swap. Single source of truth for entry_price, market_ref, and
+        # high_price_seen (no DexScreener/Ultra mixing like v127 had).
+        sol_price_entry = _get_sol_price()
+        ultra_price = None
+        if ultra_quote_lamports > 0 and sol_price_entry > 0:
             try:
-                from enrich_jupiter import _fetch_jupiter_prices
-                _jup = _fetch_jupiter_prices([addr])
-                jup_entry = _jup.get(addr)
-                if jup_entry and jup_entry > 0:
-                    _jupiter_prices_cache[addr] = jup_entry
-            except Exception:
-                jup_entry = None
-        if jup_entry and jup_entry > 0:
-            entry_price = jup_entry
+                from enrich_jupiter import fetch_ultra_quote_price
+                ultra_price = fetch_ultra_quote_price(addr, ultra_quote_lamports, sol_price_entry)
+            except Exception as e:
+                logger.debug("paper_trader: ultra quote failed for %s: %s", addr[:8], e)
+        if ultra_price and ultra_price > 0:
+            entry_price = ultra_price
+            entry_source = "ultra"
+            _jupiter_prices_cache[addr] = ultra_price  # warm for tracking symmetry
         else:
-            # v123: DexScreener fallback — use raw_price without slippage markup.
-            # Jupiter Ultra RFQ has near-zero slippage; simulated slippage caused
-            # 3-11% entry price divergence vs live execution.
+            # Fallback when Ultra API unavailable (fresh token, Helius rate limit,
+            # Jupiter 5xx). Tagged so --from-trades can filter on entry_source='ultra'.
+            logger.info(
+                "paper_trader: Ultra quote unavailable for %s (%s) — DexScreener fallback",
+                token.get("symbol", "???"), addr[:8],
+            )
             entry_price = raw_price
+            entry_source = "dexscreener"
         alloc_usd = token.get("_alloc_usd", budget_usd / top_n)
 
         # Common fields for all tranches of this token
@@ -614,13 +627,13 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
             "whale_new_entries": token.get("whale_new_entries"),
             "momentum_mult": float(token["momentum_mult"]) if token.get("momentum_mult") else None,
             "portfolio_budget": budget_usd,
-            "sol_price_at_entry": _get_sol_price(),  # v121: SOL context for USD comparison
-            # v126: Market-ref price mirrors live path (live_trader.py:761).
-            # DTRAIL/BE activation evaluates against market spot, not fill price —
-            # matters when entry_price==Jupiter fill (can be 5-15% above spot on
-            # memecoins). raw_price is DexScreener spot at message reception time.
-            "dex_spot_price_at_entry": raw_price,
-            "high_price_seen": raw_price,
+            "sol_price_at_entry": sol_price_entry,  # v121
+            # v130: ALL price refs anchored to entry_price (Ultra quote or raw fallback).
+            # Single source = no mixing bugs in DTRAIL/BE gates. entry_source tags
+            # which source was used so analysis can filter.
+            "dex_spot_price_at_entry": entry_price,
+            "high_price_seen": entry_price,
+            "entry_source": entry_source,
         }
         # v96: Batch KOL attribution — propagate top_kol as kol_group + source="batch"
         if not token.get("_rt_source"):
