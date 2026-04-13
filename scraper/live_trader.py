@@ -1000,8 +1000,19 @@ def check_live_trades(client_sb) -> dict:
     For exits: execute sell BEFORE updating DB.
     Returns {"checked": N, "closed": M, "tp": X, "sl": Y, "timeout": Z, "pnl_usd": total}.
     """
-    from paper_trader import _fetch_prices_batch, _evaluate_trade_exit
+    from paper_trader import (
+        _fetch_prices_batch, _evaluate_trade_exit,
+        _strategy_orchestration, _should_poll_trade, _decision_price,
+    )
     now = datetime.now(timezone.utc)
+
+    # v132: Load orchestration config once per check
+    _rt_cfg_orch = {}
+    try:
+        from safe_scraper import _rt_load_config as _rt_load
+        _rt_cfg_orch = _rt_load() or {}
+    except Exception:
+        pass
 
     result_counts = {
         "checked": 0, "closed": 0, "tp": 0, "sl": 0, "timeout": 0,
@@ -1058,6 +1069,8 @@ def check_live_trades(client_sb) -> dict:
 
     for trade in open_trades:
         addr = trade["token_address"]
+        strategy = trade.get("strategy", "")
+        trade_id = trade.get("id")
         current_price = prices.get(addr)
 
         # v121: Trade stuck in 'closing' from a previous failed sell — force sell immediately
@@ -1067,13 +1080,23 @@ def check_live_trades(client_sb) -> dict:
             # Build a minimal ev dict so the sell logic below works
             ev = {"status": "closing_retry", "exit_price": current_price or float(trade.get("entry_price") or 0)}
         else:
+            # v132: Per-strategy orchestration (polling + price source) — matches paper_trader
+            orch = _strategy_orchestration(strategy, _rt_cfg_orch)
+            if not _should_poll_trade(trade_id, int(orch.get("polling_sec", 30))):
+                continue
+
+            decision_price, exit_ref = _decision_price(addr, strategy, trade_id, orch)
+            if exit_ref is not None:
+                current_price = exit_ref
+
             # v120: Warn if price is None — trade can't exit without a price
             if current_price is None:
                 logger.warning("live_trader: no price for %s (%s) — exit eval skipped", trade["symbol"], addr[:8])
 
             # v113: Use paper_trader's full evaluation (DTRAIL, TRAIL, BE, DECAY, etc.)
             # sell_slip_factor=1.0 because live uses real Jupiter execution, not simulated slippage
-            ev = _evaluate_trade_exit(trade, current_price, now, sell_slip_factor=1.0, sell_fee_bps=0)
+            ev = _evaluate_trade_exit(trade, current_price, now, sell_slip_factor=1.0,
+                                       sell_fee_bps=0, decision_price=decision_price)
 
         if ev is None:
             continue
