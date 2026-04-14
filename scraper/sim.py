@@ -2904,6 +2904,11 @@ def _synthetic_strategy_sweep(args):
     # FAST_TP50_SL30 shadows cover every KOL call on every token post-Apr 13.
     trades = _fetch_tick_trades(since, include_shadows=True)
     trades = [t for t in trades if t.get("strategy") == "FAST_TP50_SL30"]
+    # Apply --until upper bound if set
+    until = getattr(args, "until", "") or ""
+    if until:
+        trades = [t for t in trades if t["created_at"][:10] < until]
+        print(f"Window: {since} to {until} (exclusive) = {len(trades)} raw trades")
     # Dedup per token (24h window)
     sorted_t = sorted(trades, key=lambda t: t["created_at"])
     seen: dict[str, datetime] = {}
@@ -3772,6 +3777,9 @@ def main():
     parser.add_argument("--synthetic-strats", type=str, default="",
                         help="Semicolon-separated specs, e.g. 'TP70_SL30:tp=70,sl=30,horizon=30;"
                              "BE20_TP70_SL30:tp=70,sl=30,horizon=30,be_act=20'")
+    parser.add_argument("--until", type=str, default="",
+                        help="ISO date upper bound for trade fetch (e.g. 2026-04-13) — used for "
+                             "windowed robustness tests")
     parser.add_argument("--validate-ticks", action="store_true",
                         help="Compare tick sim results vs actual paper PnL")
     parser.add_argument("--tick-csv", type=str, default=None,
