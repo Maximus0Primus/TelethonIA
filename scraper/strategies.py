@@ -160,8 +160,9 @@ STRATEGIES.update(_DECAY_STRATEGIES)
 SHADOW_STRATEGIES.extend(_DECAY_STRATEGIES.keys())
 
 # --- Fast timeout grids (v106) ---
+# v134: + (80, 25) and (100, 20) — candidates from synthetic-sweep robustness test
 _FAST_STRATEGIES = {}
-for _tp_f, _sl_f in [(100, 50), (50, 30), (50, 50), (70, 50), (40, 30)]:
+for _tp_f, _sl_f in [(100, 50), (50, 30), (50, 50), (70, 50), (40, 30), (80, 25), (100, 20)]:
     _fname = f"FAST_TP{_tp_f}_SL{_sl_f}"
     _FAST_STRATEGIES[_fname] = [
         {"pct": 1.0, "tp_mult": 1 + _tp_f / 100,
@@ -223,6 +224,14 @@ for _be_act in [15, 20, 30]:
         ]
 STRATEGIES.update(_BE_STRATEGIES)
 SHADOW_STRATEGIES.extend(_BE_STRATEGIES.keys())
+
+# v134: FAST-horizon BE variant — candidate from synthetic-sweep (#2 post-v132)
+# BE25 activates breakeven once peak ≥ entry*1.25, then SL moves to entry.
+STRATEGIES["BE25_TP80_SL30"] = [
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.25, "label": "main"},
+]
+SHADOW_STRATEGIES.append("BE25_TP80_SL30")
 
 # --- Trailing stop grid (v106) ---
 _TRAIL_STRATEGIES = {}
