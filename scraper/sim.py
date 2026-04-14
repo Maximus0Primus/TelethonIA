@@ -1108,23 +1108,26 @@ def simulate_bankroll_dual(trade_results_a: list[dict], trade_results_b: list[di
 TICK_DATA_START = "2026-04-06"
 
 
-def _fetch_tick_trades(since: str) -> list[dict]:
-    """Fetch closed non-shadow RT paper trades that have tick coverage."""
+def _fetch_tick_trades(since: str, include_shadows: bool = False) -> list[dict]:
+    """Fetch closed RT paper trades that have tick coverage.
+    include_shadows=True keeps is_shadow rows (for grid sweeps needing volume)."""
     params = [
         ("select", "id,token_address,symbol,entry_price,sl_price,tp_price,"
                    "strategy,horizon_minutes,tranche_label,tranche_pct,"
                    "position_usd,status,created_at,exit_at,pnl_pct,pnl_usd,"
                    "exit_minutes,high_price_seen,kol_group,rt_liquidity_usd,"
                    "dex_spot_price_at_entry,source,exit_price,entry_mcap,"
-                   "snapshot_id,entry_score,rt_token_age_hours,rt_is_pump_fun"),
+                   "snapshot_id,entry_score,rt_token_age_hours,rt_is_pump_fun,is_shadow"),
         ("status", "in.(trail_stop,sl_hit,timeout,tp_hit)"),
         ("source", "eq.rt"),
-        ("is_shadow", "eq.false"),
         ("created_at", f"gte.{since}T00:00:00Z"),
         ("order", "created_at.asc"),
     ]
+    if not include_shadows:
+        params.insert(3, ("is_shadow", "eq.false"))
     trades = sb_get("paper_trades", params)
-    print(f"Fetched {len(trades)} closed RT trades since {since}")
+    label = "RT+shadow" if include_shadows else "RT (non-shadow)"
+    print(f"Fetched {len(trades)} closed {label} trades since {since}")
     return trades
 
 
@@ -2865,11 +2868,16 @@ def _smoothing_sweep(args):
     since = max(args.since, TICK_DATA_START)
     target_strats = [s.strip() for s in args.smoothing_strats.split(",") if s.strip()]
 
-    trades = _fetch_tick_trades(since)
+    # Include shadow trades — they expand N (e.g. FAST 14 → ~900) without
+    # changing test fidelity since the sweep re-simulates exits tick-by-tick.
+    # Natural filter: tokens without ticks get dropped downstream.
+    trades = _fetch_tick_trades(since, include_shadows=True)
     if not trades:
         print("No trades with tick coverage. Exiting.")
         return
     trades = [t for t in trades if t.get("strategy") in target_strats]
+    n_shadow = sum(1 for t in trades if t.get("is_shadow"))
+    print(f"Trades for target strats: {len(trades)} ({n_shadow} shadow)")
 
     # Per-(strategy, token) 24h dedup — parallel strats on same token are independent
     sorted_t = sorted(trades, key=lambda t: t["created_at"])

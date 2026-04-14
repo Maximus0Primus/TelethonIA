@@ -27,6 +27,24 @@ Query type:
 -- puis moyenne/p50/p95 sur msg→ds, ds→pre_buy, buy_exec
 ```
 
+## Smoothing / price_source extension (v133 sweep)
+
+### À implémenter en paper d'abord (valider avant live)
+- [ ] **FAST_TP50_SL30 → DS/120s/median_5** — candidat winner post-sweep
+  - N=14, span=2j, WR=50%, avg_win=+40.2%, avg_loss=−22.7%, payoff 1.77
+  - Kelly full=21.7%, half=10.8% (trop agressif à N faible → start à 3-5%)
+  - Sizing 2j observé : $3→+$3.66, $10→+$12.19, $50→+$60.96, $100→+$121.91, $200→+$243.82
+  - **NE PAS DÉPLOYER LIVE TANT QUE N<50 en paper.**
+
+### Plan d'implémentation
+1. Étendre `paper_trader._decision_price` avec les 6 nouveaux modes : `median_3`, `median_5`, `winsor_p95`, `dual_confirm`, `ema_fast` (w=2), `ema_slow` (w=8), `hysteresis`, `volume_gated`. (Code testé en sim, à porter en prod + tests unitaires.)
+2. Push config DB `strategy_overrides` :
+   - FAST_TP50_SL30 → `{polling_sec: 120, price_source: ds, smoothing: median_5}` (paper-only initialement)
+   - DTRAIL3 → `{polling_sec: 120, price_source: ds, smoothing: ema_slow}` (shadow/paper)
+3. Observer 30-50 trades paper avant migration live.
+4. DTRAIL10 + DIP30 : **désactiver** (sweep confirme losing net même au best config — Kelly=0, ruin=100% MC).
+5. Re-run sweep incluant `is_shadow=true` pour avoir N>>14 sur FAST avant tuning définitif.
+
 ## Repo hygiene
 - [ ] Nettoyer commit `007db6b` qui a pushé 2400+ fichiers cache (`scraper/ohlcv_cache/`, `scraper/jupiter_candles_cache/`, `grid_search_*.csv`). Options : revert + force-push, ou ajouter au `.gitignore` et laisser.
 
