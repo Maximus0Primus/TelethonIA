@@ -2917,14 +2917,23 @@ def _smoothing_sweep(args):
             by_strat[t["strategy"]].append(t)
 
     all_rows: list[dict] = []
+    pnls_by_combo: dict[tuple, list[float]] = {}  # (strat, src, poll, mode) -> pnl_pct list
+    days_span: dict[str, int] = {}
     for strat in target_strats:
         strat_trades = by_strat.get(strat, [])
         if not strat_trades:
             print(f"[{strat}] no trades with ticks, skipped")
             continue
         print(f"\n=== {strat} ({len(strat_trades)} trades) ===")
+        # Compute date span for per-day aggregates
+        dates = [t["created_at"][:10] for t in strat_trades]
+        try:
+            d0 = datetime.strptime(min(dates), "%Y-%m-%d")
+            d1 = datetime.strptime(max(dates), "%Y-%m-%d")
+            days_span[strat] = max(1, (d1 - d0).days + 1)
+        except Exception:
+            days_span[strat] = 1
 
-        # Iterate grid
         for source in SOURCES:
             for poll in POLL_INTERVALS:
                 for mode in SMOOTHING_MODES:
@@ -2950,6 +2959,7 @@ def _smoothing_sweep(args):
                             wins += 1
                     if n == 0:
                         continue
+                    pnls_by_combo[(strat, source, poll, mode)] = pnls
                     all_rows.append({
                         "strategy": strat,
                         "source": source,
@@ -2998,6 +3008,86 @@ def _smoothing_sweep(args):
             sign = "+" if delta >= 0 else ""
             print(f"  {r['source']:<12s} {r['poll_sec']:>4d}  {r['mode']:<14s} {r['n']:>4d} "
                   f"{r['wr_pct']:>5.1f}% {r['avg_pnl_pct']:>6.2f}% {r['sum_pnl_usd']:>9.2f}$  {sign}{delta:>8.2f}")
+
+    # ---------- Position sizing / Kelly / Monte Carlo on the top-1 per strat ---
+    print("\n" + "=" * 100)
+    print("SIZING ANALYSIS — top-1 combo per strategy")
+    print("=" * 100)
+    POS_SIZES = [3, 10, 25, 50, 100, 200]
+
+    for strat, rows in by_strat_rows.items():
+        rows.sort(key=lambda r: -r["sum_pnl_usd"])
+        top = rows[0]
+        key = (strat, top["source"], top["poll_sec"], top["mode"])
+        pnls = pnls_by_combo.get(key, [])
+        if not pnls:
+            continue
+        n = len(pnls)
+        n_days = days_span.get(strat, 1)
+        wins = [p for p in pnls if p > 0]
+        losses = [p for p in pnls if p <= 0]
+        wr = len(wins) / n if n else 0
+        avg_win = statistics.mean(wins) if wins else 0
+        avg_loss = statistics.mean(losses) if losses else 0
+        # Kelly fraction: f = (b*p - q) / b, where b=avg_win_abs / avg_loss_abs, p=wr, q=1-wr
+        kelly = 0.0
+        if avg_loss < 0:
+            b = avg_win / abs(avg_loss) if abs(avg_loss) > 0 else 0
+            if b > 0:
+                kelly = (b * wr - (1 - wr)) / b
+        kelly = max(0.0, min(kelly, 1.0))
+        kelly_half = kelly / 2  # half-kelly (industry standard for noisy edges)
+
+        print(f"\n[{strat}]  best: src={top['source']} poll={top['poll_sec']}s mode={top['mode']}")
+        print(f"  N={n}  span={n_days}d  WR={wr*100:.1f}%  avg_win=+{avg_win*100:.2f}%  avg_loss={avg_loss*100:.2f}%")
+        print(f"  Kelly full={kelly*100:.1f}%   Kelly half={kelly_half*100:.1f}%")
+
+        # Daily gain at fixed position sizes (actual 6-day results scaled)
+        total_pnl_pct = sum(pnls)
+        print(f"  {'pos_usd':>8s}  {'total$':>10s}  {'$/day':>10s}  {'$/trade':>10s}")
+        for pos in POS_SIZES:
+            tot = pos * total_pnl_pct
+            per_day = tot / n_days
+            per_trade = tot / n
+            print(f"  ${pos:>6d}  {tot:>10.2f}  {per_day:>10.2f}  {per_trade:>10.2f}")
+
+        # Monte Carlo (bootstrap): simulate 200 trades, compound at position = Kelly-half * bankroll (cap $200)
+        if n >= 10:
+            import random as _r
+            n_sims = 1000
+            finals = []
+            ruins = 0
+            max_dds = []
+            bankroll0 = 1000.0
+            cap = 200.0
+            for _ in range(n_sims):
+                b = bankroll0
+                peak = b
+                dd = 0.0
+                bust = False
+                for _ in range(200):
+                    pnl = _r.choice(pnls)
+                    pos = min(b * kelly_half, cap)
+                    if pos < 1.0:
+                        bust = True
+                        break
+                    b += pos * pnl
+                    if b > peak:
+                        peak = b
+                    d = (peak - b) / peak
+                    if d > dd:
+                        dd = d
+                if bust:
+                    ruins += 1
+                finals.append(b)
+                max_dds.append(dd)
+            finals.sort()
+            p5 = finals[int(n_sims * 0.05)]
+            p50 = finals[n_sims // 2]
+            p95 = finals[int(n_sims * 0.95)]
+            print(f"  Monte Carlo (200 trades, half-Kelly, start=${bankroll0:.0f}): "
+                  f"p5=${p5:.0f}  p50=${p50:.0f}  p95=${p95:.0f}  "
+                  f"avg_max_dd={statistics.mean(max_dds)*100:.1f}%  ruin_rate={ruins/n_sims*100:.1f}%")
 
 
 def _tick_based_simulation(args):
