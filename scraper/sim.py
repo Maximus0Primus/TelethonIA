@@ -2838,17 +2838,29 @@ def _tick_validation(trades: list[dict], sim_results: dict[int, dict]) -> dict:
 
 
 def _smoothing_sweep(args):
-    """v133: Sweep all smoothing modes across a focused list of strategies.
-    Re-uses the tick-fetching + dedup infrastructure, then runs
-    _replay_with_intervals with each smoothing mode on the closed trades
-    for each target strategy. Outputs comparison table + CSV.
+    """v133: Grid sweep — smoothing × tick source × polling × strategy.
+    Outputs ranked CSV + best-combo-per-strategy summary, including the
+    current-prod config as a baseline row.
     """
     import csv
-    print("=" * 90)
-    print("SMOOTHING SWEEP (v133)")
-    print(f"Modes: {', '.join(SMOOTHING_MODES)}")
+    POLL_INTERVALS = [0, 30, 60, 120]   # 0 = every tick (~15-30s)
+    SOURCES = ["jupiter", "dexscreener", "both"]
+    PROD_CONFIG = {
+        "FAST_TP50_SL30": ("dexscreener", 60, "raw"),     # hybrid = DS decide
+        "DTRAIL10_ACT15_SL70": ("dexscreener", 120, "raw"),
+        "DTRAIL3_ACT5_SL60": ("jupiter", 120, "raw"),
+        "DIP30_B5_T5_A20_SL70_240m": ("jupiter", 30, "raw"),
+    }
+
+    print("=" * 100)
+    print("SMOOTHING GRID SWEEP (v133)")
+    print(f"Smoothing modes ({len(SMOOTHING_MODES)}): {', '.join(SMOOTHING_MODES)}")
+    print(f"Sources: {SOURCES}")
+    print(f"Poll intervals: {POLL_INTERVALS}")
     print(f"Strats: {args.smoothing_strats}")
-    print("=" * 90)
+    total = len(SMOOTHING_MODES) * len(SOURCES) * len(POLL_INTERVALS)
+    print(f"-> {total} configs per strategy")
+    print("=" * 100)
 
     since = max(args.since, TICK_DATA_START)
     target_strats = [s.strip() for s in args.smoothing_strats.split(",") if s.strip()]
@@ -2857,11 +2869,9 @@ def _smoothing_sweep(args):
     if not trades:
         print("No trades with tick coverage. Exiting.")
         return
-
     trades = [t for t in trades if t.get("strategy") in target_strats]
-    # Per-strategy dedup: each target strat trades the same token in parallel,
-    # so cross-strategy dedup (dedup_first_call) would drop 3 of the 4 strats
-    # for every shared token. Dedup by (strategy, token) 24h window instead.
+
+    # Per-(strategy, token) 24h dedup — parallel strats on same token are independent
     sorted_t = sorted(trades, key=lambda t: t["created_at"])
     seen: dict[tuple, datetime] = {}
     deduped = []
@@ -2874,7 +2884,7 @@ def _smoothing_sweep(args):
         seen[key] = dt
         deduped.append(t)
     trades = deduped
-    print(f"Trades (per-strat dedup, filtered to target strats): {len(trades)}")
+    print(f"Trades (per-strat dedup): {len(trades)}")
     if not trades:
         return
 
@@ -2892,70 +2902,65 @@ def _smoothing_sweep(args):
             lo, hi = token_ranges[addr]
             token_ranges[addr] = (min(lo, entry), max(hi, end_iso))
 
-    ticks_by_token = _fetch_ticks_for_tokens(token_ranges)
-
-    # Use merged stream (Jupiter preferred, DS fallback at each timestamp) so
-    # DTRAIL10/DIP strats (which have fewer Jupiter ticks) still get coverage.
-    for addr, raw in list(ticks_by_token.items()):
-        merged = _filter_ticks_by_source(raw, "both")
-        if merged:
-            ticks_by_token[addr] = merged
-        else:
-            ticks_by_token.pop(addr, None)
-    print(f"Tokens with ticks (merged jup+DS): {len(ticks_by_token)}")
+    raw_ticks_by_token = _fetch_ticks_for_tokens(token_ranges)
+    # Pre-compute streams per source for every token (avoid re-filtering in loop)
+    streams_by_token: dict[str, dict[str, list[dict]]] = {}
+    for addr, raw in raw_ticks_by_token.items():
+        streams_by_token[addr] = {
+            src: _filter_ticks_by_source(raw, src) for src in SOURCES
+        }
 
     # Group trades by strategy
     by_strat: dict[str, list[dict]] = defaultdict(list)
     for t in trades:
-        if t["token_address"] in ticks_by_token:
+        if t["token_address"] in streams_by_token:
             by_strat[t["strategy"]].append(t)
 
-    all_rows = []
-    print()
-    print(f"{'strategy':<32s} {'mode':<14s} {'n':>4s} {'wr%':>6s} {'avg%':>7s} {'med%':>7s} {'sumPnL$':>10s}")
-    print("-" * 90)
-
+    all_rows: list[dict] = []
     for strat in target_strats:
         strat_trades = by_strat.get(strat, [])
         if not strat_trades:
-            print(f"{strat:<32s} — no trades with ticks, skipped")
+            print(f"[{strat}] no trades with ticks, skipped")
             continue
+        print(f"\n=== {strat} ({len(strat_trades)} trades) ===")
 
-        for mode in SMOOTHING_MODES:
-            pnls = []
-            pnl_usds = []
-            wins = 0
-            n = 0
-            for t in strat_trades:
-                ticks = ticks_by_token.get(t["token_address"]) or []
-                if not ticks:
-                    continue
-                fake = _build_fake_trade(t)
-                sim = _replay_with_intervals(
-                    fake, ticks,
-                    lazy_fast_sec=0, lazy_fast_window=0, lazy_slow_sec=0,
-                    smoothing=mode,
-                )
-                if sim is None:
-                    continue
-                n += 1
-                pnls.append(sim["pnl_pct"])
-                pnl_usds.append(sim.get("pnl_usd", 0))
-                if sim["pnl_pct"] > 0:
-                    wins += 1
-
-            if n == 0:
-                continue
-            wr = wins / n * 100
-            avg = statistics.mean(pnls) * 100
-            med = statistics.median(pnls) * 100
-            sum_usd = sum(pnl_usds)
-            print(f"{strat:<32s} {mode:<14s} {n:>4d} {wr:>5.1f}% {avg:>6.2f}% {med:>6.2f}% {sum_usd:>9.2f}$")
-            all_rows.append({
-                "strategy": strat, "mode": mode, "n": n,
-                "wr_pct": round(wr, 1), "avg_pnl_pct": round(avg, 2),
-                "median_pnl_pct": round(med, 2), "sum_pnl_usd": round(sum_usd, 2),
-            })
+        # Iterate grid
+        for source in SOURCES:
+            for poll in POLL_INTERVALS:
+                for mode in SMOOTHING_MODES:
+                    pnls, pnl_usds, wins, n = [], [], 0, 0
+                    for t in strat_trades:
+                        ticks = streams_by_token[t["token_address"]].get(source) or []
+                        if not ticks:
+                            continue
+                        fake = _build_fake_trade(t)
+                        sim = _replay_with_intervals(
+                            fake, ticks,
+                            lazy_fast_sec=poll,
+                            lazy_fast_window=poll * 10 if poll > 0 else 0,
+                            lazy_slow_sec=poll,
+                            smoothing=mode,
+                        )
+                        if sim is None:
+                            continue
+                        n += 1
+                        pnls.append(sim["pnl_pct"])
+                        pnl_usds.append(sim.get("pnl_usd", 0))
+                        if sim["pnl_pct"] > 0:
+                            wins += 1
+                    if n == 0:
+                        continue
+                    all_rows.append({
+                        "strategy": strat,
+                        "source": source,
+                        "poll_sec": poll,
+                        "mode": mode,
+                        "n": n,
+                        "wr_pct": round(wins / n * 100, 1),
+                        "avg_pnl_pct": round(statistics.mean(pnls) * 100, 2),
+                        "median_pnl_pct": round(statistics.median(pnls) * 100, 2),
+                        "sum_pnl_usd": round(sum(pnl_usds), 2),
+                    })
 
     # Write CSV
     out_path = "scraper/smoothing_sweep_results.csv"
@@ -2965,24 +2970,34 @@ def _smoothing_sweep(args):
                 w = csv.DictWriter(f, fieldnames=list(all_rows[0].keys()))
                 w.writeheader()
                 w.writerows(all_rows)
-        print(f"\nWrote {out_path}")
+        print(f"\nWrote {out_path} ({len(all_rows)} rows)")
     except Exception as e:
         print(f"[warn] could not write CSV: {e}")
 
-    # Highlight best per strategy
-    print("\nBest smoothing per strategy (by sum_pnl_usd):")
+    # Summary: top-5 + prod baseline per strategy
+    print("\n" + "=" * 100)
+    print("RANKED — top 5 per strategy + prod baseline")
+    print("=" * 100)
     by_strat_rows: dict[str, list[dict]] = defaultdict(list)
     for r in all_rows:
         by_strat_rows[r["strategy"]].append(r)
+
     for strat, rows in by_strat_rows.items():
         rows.sort(key=lambda r: -r["sum_pnl_usd"])
-        top = rows[0]
-        raw = next((r for r in rows if r["mode"] == "raw"), None)
-        raw_pnl = raw["sum_pnl_usd"] if raw else 0
-        delta = top["sum_pnl_usd"] - raw_pnl
-        sign = "+" if delta >= 0 else ""
-        print(f"  {strat:<32s} {top['mode']:<14s} sum=${top['sum_pnl_usd']:>8.2f}  "
-              f"vs raw={raw_pnl:>8.2f} ({sign}{delta:.2f})")
+        prod_src, prod_poll, prod_mode = PROD_CONFIG.get(strat, ("jupiter", 0, "raw"))
+        prod_row = next(
+            (r for r in rows if r["source"] == prod_src and r["poll_sec"] == prod_poll
+             and r["mode"] == prod_mode),
+            None,
+        )
+        prod_pnl = prod_row["sum_pnl_usd"] if prod_row else 0.0
+        print(f"\n[{strat}]  prod: src={prod_src} poll={prod_poll}s mode={prod_mode}  ->  ${prod_pnl:.2f}")
+        print(f"  {'src':<12s} {'poll':>4s}s {'mode':<14s} {'n':>4s} {'wr%':>6s} {'avg%':>7s} {'sumPnL$':>10s}  {'d_vs_prod':>10s}")
+        for r in rows[:5]:
+            delta = r["sum_pnl_usd"] - prod_pnl
+            sign = "+" if delta >= 0 else ""
+            print(f"  {r['source']:<12s} {r['poll_sec']:>4d}  {r['mode']:<14s} {r['n']:>4d} "
+                  f"{r['wr_pct']:>5.1f}% {r['avg_pnl_pct']:>6.2f}% {r['sum_pnl_usd']:>9.2f}$  {sign}{delta:>8.2f}")
 
 
 def _tick_based_simulation(args):
