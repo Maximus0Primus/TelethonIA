@@ -1292,14 +1292,15 @@ def check_live_trades(client_sb) -> dict:
             pnl_sol = pnl_usd / sol_price if sol_price > 0 else 0
             _track_pnl(pnl_sol)
 
-            # v105: Compute sell slippage (actual SOL received vs expected)
+            # v133-C: Sell slippage = actual fill vs market spot at sell trigger.
+            # Prior formula compared usd_received vs pos_usd*(1+pnl_pct), but pnl_pct
+            # was itself derived from usd_received → always 0. Now: compare
+            # actual_fill (exit_price from Jupiter output) vs current_price (DS/Jupiter
+            # spot at decision moment) — the metric that actually measures execution cost.
             sol_price_at_exit = _get_sol_price_usd()
-            if sell_output and sell_output > 0 and pos_usd > 0:
-                sol_received = sell_output / LAMPORTS_PER_SOL
-                usd_received_actual = sol_received * sol_price_at_exit
-                expected_usd = pos_usd * (1 + pnl_pct)
-                if expected_usd > 0:
-                    sell_slippage_bps = round((1 - usd_received_actual / expected_usd) * 10000)
+            if exit_price and current_price and current_price > 0:
+                # Negative = fill worse than quote (slippage cost). Positive = price moved in our favor.
+                sell_slippage_bps = round((exit_price / current_price - 1) * 10000)
 
             # v105: Alert on high sell slippage
             if abs(sell_slippage_bps) > 1000:
@@ -1327,6 +1328,8 @@ def check_live_trades(client_sb) -> dict:
             "tx_signature_exit": sell_result["signature"],
             # v105: Fee tracking
             "sell_slippage_bps": sell_slippage_bps,
+            # v133-C: Round-trip real slippage (buy + sell), populated so monitoring works.
+            "slippage_actual_bps": int((trade.get("buy_slippage_bps") or 0)) + int(sell_slippage_bps or 0),
             "sol_price_at_exit": sol_price_at_exit,
             # v117: Extended sell tracking
             "sell_exec_ms": sell_result.get("exec_ms"),

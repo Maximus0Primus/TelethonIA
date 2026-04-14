@@ -7,6 +7,7 @@ Checkpoint 24h post-v132 deploy: 26 RT tokens → paper opened 26 FAST + 26 DTRA
 ### Fixes deployed
 - [x] **FIX 133-A**: dedup in `live_trader.open_live_trade` was matching any `rt_live` row for the CA, blocking the 2nd strategy in the hybrid allocation loop. Scoped to `same strategy`. Effect: each RT token now opens BOTH FAST and DTRAIL10 at $1.50 each ($3 total).
 - [x] **FIX 133-B**: `_evaluate_trade_exit` SL-check now uses `current_price` (exit_ref = Jupiter) instead of `eval_price` (decision = DS) in hybrid mode. TP/trail still use decision_price (DS catches pumps faster). Mirrors live execution semantics — paper and live now SL at same Jupiter quote.
+- [x] **FIX 133-C**: sell slippage monitoring — prior formula `(1 - usd_received / (pos_usd*(1+pnl_pct)))` was circular (pnl_pct derived from usd_received → always 0). Now `(exit_price / current_price - 1) * 10000` measures actual fill vs spot-at-trigger. Also populates `slippage_actual_bps` (round-trip buy+sell) which was dead column.
 
 ### Watch list (next 24-48h)
 - [ ] Confirm live opens DTRAIL10 alongside FAST (ratio ~1:1)
