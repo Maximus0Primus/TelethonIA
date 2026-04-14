@@ -640,16 +640,21 @@ def open_live_trade(client_sb, token_entry: dict, strategy: str,
     dedup_hours = int(config.get("dedup_cooldown_hours", 24))
     try:
         cutoff = (datetime.now(timezone.utc) - __import__("datetime").timedelta(hours=dedup_hours)).isoformat()
+        # v133: scope dedup to SAME strategy — otherwise the hybrid allocation loop
+        # (FAST then DTRAIL10 for the same token) blocks the 2nd strategy after the
+        # 1st row was inserted seconds earlier.
         dedup_res = (
             client_sb.table("paper_trades")
             .select("id", count="exact")
             .eq("token_address", ca)
             .eq("source", "rt_live")
+            .eq("strategy", strategy)
             .gte("created_at", cutoff)
             .execute()
         )
         if dedup_res.count and dedup_res.count > 0:
-            logger.info("live_trader: dedup cooldown — %s traded in last %dh, skipping", symbol, dedup_hours)
+            logger.info("live_trader: dedup cooldown — %s/%s traded in last %dh, skipping",
+                        symbol, strategy, dedup_hours)
             return False
     except Exception as e:
         logger.debug("live_trader: dedup check failed for %s: %s", symbol, e)
