@@ -64,6 +64,9 @@ EXCLUDED_TOKENS = {
     "USD", "USDT", "USDC", "BUSD", "DAI", "TUSD",
     # L1/L2 blue chips (not memecoins — these have their own markets)
     "SOL", "ETH", "BTC", "BNB", "XRP", "ADA", "DOT", "AVAX", "MATIC",
+    # Major Solana DEX/protocol tokens — legit projects, not memecoins.
+    # $ORCA leaked max_price_24h=$83 vs price_at_snapshot<$1 (SOL-scale OHLCV bleed).
+    "ORCA", "JUP", "RAY", "SRM", "MNGO", "PYTH", "JTO", "KMNO", "DRIFT",
     # Crypto abbreviations that are NEVER token names
     # (kept minimal — real tokens like $DEGEN, $COPE, $PUMP are allowed)
     "CA", "LP", "MC", "ATH", "ATL", "FDV", "TVL",
