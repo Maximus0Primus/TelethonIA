@@ -173,6 +173,10 @@ _last_tick_liq: dict[str, float] = {}  # v121: token_address -> last liquidity_u
 _last_check_ts: dict[int, float] = {}
 # v132: EMA state per trade (trade_id -> ema_value) for ema_jupiter_N modes.
 _ema_state: dict[int, float] = {}
+# v134: Smoothing state buffers per trade (trade_id -> opaque state dict).
+# Modes: median_3/5 (rolling buffer), winsor_p95 (prev price),
+#        dual_confirm (prev price + last breach), hysteresis (armed flags).
+_smooth_state: dict[int, dict] = {}
 
 # v121: Cached SOL price for paper trade USD context
 _cached_sol_price: float = 0.0
@@ -205,9 +209,16 @@ def _should_poll_trade(trade_id: int, polling_sec: int) -> bool:
     return False
 
 
-def _decision_price(addr: str, strategy: str, trade_id: int, orch: dict) -> tuple[float | None, float | None]:
+def _decision_price(addr: str, strategy: str, trade_id: int, orch: dict,
+                    trade: dict | None = None) -> tuple[float | None, float | None]:
     """Return (decision_price, exit_price_ref) based on strategy's price_source.
     exit_price_ref is always Jupiter (or fallback current) since live exec = Jupiter.
+
+    v134: Added smoothing modes ported from sim.py._smooth_decision:
+      median_3/5, winsor_p95, dual_confirm, ema_fast (w=2), ema_slow (w=8),
+      hysteresis. volume_gated NOT ported (prod cache lacks per-tick volume).
+    These modes all consume the Jupiter stream as input and return a smoothed
+    decision price; exit_ref stays Jupiter (matches live Ultra fill).
     """
     jp = _jupiter_prices_cache.get(addr)
     ds = _dex_prices_cache.get(addr)
@@ -221,13 +232,10 @@ def _decision_price(addr: str, strategy: str, trade_id: int, orch: dict) -> tupl
         # decision on DS, exit at Jupiter
         return (ds if ds else jp), (jp if jp else ds)
     if src == "confirm":
-        # Trigger only if DS AND Jupiter agree (use min of the two for conservative SL; max for TP)
-        # Simple model: if both available, use average; else use whichever exists.
         if jp and ds:
             return ((jp + ds) / 2), jp
         return (jp or ds), (jp or ds)
     if src == "ema":
-        # Exponential moving average on Jupiter stream
         if not jp:
             return None, (jp or ds)
         window = int(orch.get("ema_window", 3))
@@ -236,6 +244,87 @@ def _decision_price(addr: str, strategy: str, trade_id: int, orch: dict) -> tupl
         ema_val = alpha * jp + (1 - alpha) * prev
         _ema_state[trade_id] = ema_val
         return ema_val, jp
+
+    # --- v134 smoothing modes (Jupiter stream with per-trade state) ---
+    # All return (smoothed_decision, jp_exit_ref). Fall back to jp if stream empty.
+    if not jp:
+        return None, (jp or ds)
+
+    state = _smooth_state.setdefault(trade_id, {})
+
+    if src == "ema_fast" or src == "ema_slow":
+        window = 2 if src == "ema_fast" else 8
+        alpha = 2 / (window + 1)
+        prev = _ema_state.get(trade_id, jp)
+        ema_val = alpha * jp + (1 - alpha) * prev
+        _ema_state[trade_id] = ema_val
+        return ema_val, jp
+
+    if src == "median_3" or src == "median_5":
+        window = 3 if src == "median_3" else 5
+        hist = state.setdefault("hist", [])
+        hist.append(jp)
+        if len(hist) > window:
+            hist.pop(0)
+        if len(hist) < window:
+            return jp, jp  # warm-up: pass through
+        return sorted(hist)[len(hist) // 2], jp
+
+    if src == "winsor_p95":
+        prev = state.get("prev_p", jp)
+        delta = jp - prev
+        cap = prev * 0.18  # p95 tick-to-tick move
+        if delta > cap:
+            p = prev + cap
+        elif delta < -cap:
+            p = prev - cap
+        else:
+            p = jp
+        state["prev_p"] = p
+        return p, jp
+
+    if src == "dual_confirm":
+        # Require 2 consecutive ticks on the same side of SL/TP before triggering.
+        # Needs sl_price / tp_price from the trade dict.
+        if trade is None:
+            return jp, jp  # fall back to raw if trade context missing
+        sl_price = float(trade.get("sl_price") or 0)
+        tp_price = float(trade.get("tp_price") or 0) or None
+        prev = state.get("prev_p", jp)
+        state["prev_p"] = jp
+        # If only current tick breaches (prev did not) -> return prev to suppress trigger
+        if sl_price and jp <= sl_price and prev > sl_price:
+            return prev, jp
+        if tp_price and jp >= tp_price and prev < tp_price:
+            return prev, jp
+        return jp, jp
+
+    if src == "hysteresis":
+        if trade is None:
+            return jp, jp
+        sl_price = float(trade.get("sl_price") or 0)
+        tp_price = float(trade.get("tp_price") or 0) or None
+        armed_sl = state.setdefault("armed_sl", True)
+        armed_tp = state.setdefault("armed_tp", True)
+        # Re-arm after 2% retrace past the trigger
+        if not armed_sl and sl_price and jp >= sl_price * 1.02:
+            state["armed_sl"] = True
+            armed_sl = True
+        elif armed_sl and sl_price and jp <= sl_price:
+            state["armed_sl"] = False
+        if not armed_tp and tp_price and jp <= tp_price * 0.98:
+            state["armed_tp"] = True
+            armed_tp = True
+        elif armed_tp and tp_price and jp >= tp_price:
+            state["armed_tp"] = False
+        # If disarmed, serve a price that doesn't retrigger
+        if not state["armed_sl"] and sl_price and jp <= sl_price:
+            return sl_price * 1.001, jp
+        if not state["armed_tp"] and tp_price and jp >= tp_price:
+            return tp_price * 0.999, jp
+        return jp, jp
+
+    # Unknown mode: fall back to jupiter
     return jp, jp
 
 
@@ -1603,7 +1692,7 @@ def check_paper_trades(client) -> dict:
 
         current_price = prices.get(addr)
         # v132: Orchestration — decision_price from configured source, exec stays Jupiter
-        decision_price, exit_ref = _decision_price(addr, strategy, trade_id, orch)
+        decision_price, exit_ref = _decision_price(addr, strategy, trade_id, orch, trade=trade)
         if exit_ref is not None:
             current_price = exit_ref
 
@@ -1941,7 +2030,7 @@ def check_paper_trades_fast(client) -> dict:
 
         current_price = prices.get(addr)
         # v132: Compute decision_price based on strategy's price_source.
-        decision_price, exit_ref = _decision_price(addr, strategy, trade_id, orch)
+        decision_price, exit_ref = _decision_price(addr, strategy, trade_id, orch, trade=trade)
         # exit_ref (Jupiter) preferred as current_price for exit booking
         if exit_ref is not None:
             current_price = exit_ref
