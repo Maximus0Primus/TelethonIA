@@ -1580,6 +1580,16 @@ def _build_tick_grid() -> list[dict]:
                     "horizon": horizon,
                 })
 
+    # --- 6. DIP strategies — full grid (DIP_BUY tiers 1+2 + DIP_SCALE_OUT) ---
+    # Reuses the OHLCV sim's DIP builder so tick sim grades the exact same configs.
+    # DIP_BUY: tick-native replay via _replay_dip_buy_with_intervals.
+    # DIP_SCALE_OUT: tick→1min candle downgrade + legacy engine (approximation).
+    for dip_cfg in _build_dip_buy_grid():
+        configs.append({
+            **dip_cfg,
+            "horizon": dip_cfg["horizon_min"],  # tick grid uses "horizon" key
+        })
+
     # Deduplicate (grace period configs may overlap with base DTRAIL)
     seen = set()
     deduped = []
@@ -1602,6 +1612,227 @@ def _build_tick_grid() -> list[dict]:
             })
 
     return full_grid
+
+
+def _ticks_to_1min_candles(ticks: list[dict]) -> list[dict]:
+    """Downsample ticks to 1-min OHLC candles for legacy engines that need candles
+    (e.g. DIP_SCALE_OUT). Lossier than tick-native but good enough for grading."""
+    if not ticks:
+        return []
+    buckets: dict[int, list[float]] = {}
+    for tick in ticks:
+        try:
+            t = datetime.fromisoformat(tick["fetched_at"].replace("Z", "+00:00"))
+            price = float(tick["price_usd"])
+        except (KeyError, ValueError, TypeError):
+            continue
+        if price <= 0:
+            continue
+        minute = int(t.timestamp() // 60 * 60)
+        buckets.setdefault(minute, []).append(price)
+    candles = []
+    for minute in sorted(buckets):
+        prices = buckets[minute]
+        candles.append({
+            "timestamp": minute,
+            "open": prices[0],
+            "high": max(prices),
+            "low": min(prices),
+            "close": prices[-1],
+            "volume": 0,
+        })
+    return candles
+
+
+def _replay_dip_buy_with_intervals(fake_cfg: dict, ticks: list[dict],
+                                    entry_price: float, entry_time_iso: str,
+                                    lazy_fast_sec: int, lazy_fast_window: int,
+                                    lazy_slow_sec: int) -> dict | None:
+    """Tick-native DIP_BUY replay. Mirrors simulate_unified_dip_buy but uses
+    real ticks + interval throttling (like _replay_with_intervals).
+
+    P1 opens at entry. Watch for dip (price ≤ entry*(1-dip)) then bounce
+    (price ≥ low*(1+bounce)) to open P2 at bounce level. Both positions
+    evaluated independently via _evaluate_trade_exit tick-by-tick.
+
+    Supports split-param P1/P2 via cfg["p1_*"] / cfg["p2_*"] keys.
+    """
+    from paper_trader import _evaluate_trade_exit, _last_eval_ts
+    from strategies import sim_cfg_to_fake_trade
+
+    if not ticks:
+        return None
+
+    sell_slip = 1 - 10 / 10_000
+    entry_time = datetime.fromisoformat(entry_time_iso.replace("Z", "+00:00"))
+
+    # DIP params
+    dip_threshold = abs(cfg_val := fake_cfg.get("dip_threshold", -0.30))
+    if dip_threshold > 1:  # expressed as -30 (pct) rather than -0.30
+        dip_threshold = dip_threshold / 100.0
+    bounce_threshold = fake_cfg.get("bounce_threshold", 0) or 0
+    if bounce_threshold > 1:
+        bounce_threshold = bounce_threshold / 100.0
+    dip_size_mult = fake_cfg.get("dip_size_mult", 1.0)
+
+    # P1 trade — trail/act/sl resolved by _get_trail_config from strategy NAME,
+    # so we keep fake_cfg["name"] intact. tranche_label="dip_p1" (not "dip_p2")
+    # ensures split-param regex returns P1 params.
+    p1_cfg = dict(fake_cfg)
+    p1_cfg["tranche_label"] = "dip_p1"
+    p1_trade = sim_cfg_to_fake_trade(p1_cfg, entry_price, entry_time_iso,
+                                      trade_id=f"tick_p1_{id(fake_cfg)}")
+    _last_eval_ts.pop(p1_trade["id"], None)
+
+    # P2 state
+    p2_trade = None
+    p2_open = False
+    low_since_entry = entry_price
+    dip_triggered = False
+    p1_result = None
+    p2_result = None
+
+    p1_weight = 1.0 / (1.0 + dip_size_mult)
+    p2_weight = dip_size_mult / (1.0 + dip_size_mult)
+
+    is_lazy = lazy_fast_sec > 0
+    last_check_ts = 0.0
+
+    try:
+        for tick in ticks:
+            try:
+                tick_time = datetime.fromisoformat(
+                    tick["fetched_at"].replace("Z", "+00:00"))
+            except Exception:
+                continue
+            if tick_time < entry_time:
+                continue
+            tick_price = float(tick["price_usd"])
+            if tick_price <= 0:
+                continue
+
+            # Track low for dip detection (runs every tick, not throttled)
+            if tick_price < low_since_entry:
+                low_since_entry = tick_price
+            if not p2_open and not dip_triggered:
+                if low_since_entry <= entry_price * (1 - dip_threshold):
+                    dip_triggered = True
+            if dip_triggered and not p2_open:
+                if bounce_threshold <= 0:
+                    p2_entry = low_since_entry * 1.015  # BUY_SLIPPAGE
+                    p2_cfg = dict(fake_cfg)
+                    p2_cfg["tranche_label"] = "dip_p2"  # split regex returns P2 params
+                    # SL for P2 (split-param): use p2_sl if provided, else shared
+                    if "p2_sl" in fake_cfg:
+                        p2_cfg["sl_mult"] = 1 - fake_cfg["p2_sl"] / 100
+                    p2_trade = sim_cfg_to_fake_trade(p2_cfg, p2_entry,
+                                                      tick["fetched_at"],
+                                                      trade_id=f"tick_p2_{id(fake_cfg)}")
+                    _last_eval_ts.pop(p2_trade["id"], None)
+                    p2_open = True
+                elif tick_price / low_since_entry - 1 >= bounce_threshold:
+                    p2_entry = low_since_entry * (1 + bounce_threshold) * 1.015
+                    p2_cfg = dict(fake_cfg)
+                    p2_cfg["tranche_label"] = "dip_p2"  # split regex returns P2 params
+                    # SL for P2 (split-param): use p2_sl if provided, else shared
+                    if "p2_sl" in fake_cfg:
+                        p2_cfg["sl_mult"] = 1 - fake_cfg["p2_sl"] / 100
+                    p2_trade = sim_cfg_to_fake_trade(p2_cfg, p2_entry,
+                                                      tick["fetched_at"],
+                                                      trade_id=f"tick_p2_{id(fake_cfg)}")
+                    _last_eval_ts.pop(p2_trade["id"], None)
+                    p2_open = True
+
+            # Interval throttling applies to exit evaluation only
+            if is_lazy:
+                now_ts = tick_time.timestamp()
+                age_sec = (tick_time - entry_time).total_seconds()
+                interval = lazy_fast_sec if age_sec < lazy_fast_window else lazy_slow_sec
+                if last_check_ts > 0 and (now_ts - last_check_ts) < interval:
+                    continue
+                last_check_ts = now_ts
+
+            # Evaluate P1
+            if p1_result is None:
+                ev = _evaluate_trade_exit(p1_trade, tick_price, tick_time, sell_slip)
+                if ev is not None:
+                    if ev.get("high_price_seen") is not None:
+                        nh = ev["high_price_seen"]
+                        if nh > float(p1_trade.get("high_price_seen") or 0):
+                            p1_trade["high_price_seen"] = nh
+                    if ev.get("status") is not None:
+                        p1_result = {
+                            "exit_reason": ev["status"],
+                            "pnl_pct": ev.get("pnl_pct", 0),
+                            "exit_minutes": ev.get("exit_minutes", 0),
+                        }
+
+            # Evaluate P2
+            if p2_open and p2_result is None and p2_trade is not None:
+                ev = _evaluate_trade_exit(p2_trade, tick_price, tick_time, sell_slip)
+                if ev is not None:
+                    if ev.get("high_price_seen") is not None:
+                        nh = ev["high_price_seen"]
+                        if nh > float(p2_trade.get("high_price_seen") or 0):
+                            p2_trade["high_price_seen"] = nh
+                    if ev.get("status") is not None:
+                        p2_result = {
+                            "exit_reason": ev["status"],
+                            "pnl_pct": ev.get("pnl_pct", 0),
+                            "exit_minutes": ev.get("exit_minutes", 0),
+                        }
+
+            if p1_result is not None and (p2_result is not None or not p2_open):
+                break
+
+        # Compose weighted result
+        total_pnl = 0.0
+        last_reason = "timeout_eod"
+        last_elapsed = 0
+
+        if p1_result:
+            total_pnl += p1_result["pnl_pct"] * (p1_weight if p2_open else 1.0)
+            last_reason = p1_result["exit_reason"]
+            last_elapsed = p1_result["exit_minutes"]
+        else:
+            last_price = float(ticks[-1]["price_usd"])
+            total_pnl += (last_price / entry_price - 1) * (p1_weight if p2_open else 1.0)
+
+        if p2_open:
+            if p2_result:
+                total_pnl += p2_result["pnl_pct"] * p2_weight
+                last_elapsed = max(last_elapsed, p2_result["exit_minutes"])
+            elif p2_trade:
+                last_price = float(ticks[-1]["price_usd"])
+                total_pnl += (last_price / float(p2_trade["entry_price"]) - 1) * p2_weight
+
+        pos_usd = 10.0
+        return {
+            "exit_reason": last_reason,
+            "exit_price": 0,  # composite; not meaningful for analytics
+            "pnl_pct": round(total_pnl, 4),
+            "pnl_usd": round(pos_usd * total_pnl, 2),
+            "exit_minutes": last_elapsed,
+            "high_price_seen": max(
+                float(p1_trade.get("high_price_seen") or entry_price),
+                float((p2_trade or {}).get("high_price_seen") or 0),
+            ),
+            "peak_from_entry": round(
+                max(
+                    float(p1_trade.get("high_price_seen") or entry_price) / entry_price - 1,
+                    0.0,
+                ),
+                4,
+            ),
+            "peak_to_exit_drop": 0.0,
+            "time_to_peak_min": 0,
+            "exit_in_first_5min": last_elapsed < 5,
+            "p2_opened": p2_open,
+        }
+    finally:
+        _last_eval_ts.pop(p1_trade["id"], None)
+        if p2_trade:
+            _last_eval_ts.pop(p2_trade["id"], None)
 
 
 # --- On-chain feature filters ---
@@ -2109,29 +2340,66 @@ def _tick_grid_search(trades: list[dict], ticks_by_token: dict[str, list[dict]],
                 continue
 
             entry_price = float(trade["entry_price"])
-            fake = {
-                "id": trade["id"],
-                "entry_price": entry_price,
-                "sl_price": entry_price * sl_mult,
-                "tp_price": entry_price * tp_mult if tp_mult else None,
-                "position_usd": float(trade.get("position_usd") or 10.0),
-                "strategy": strat_name,
-                "tranche_label": "main",
-                "horizon_minutes": horizon,
-                "created_at": trade["created_at"],
-                "high_price_seen": entry_price,
-                "rt_liquidity_usd": trade.get("rt_liquidity_usd"),
-                "dex_spot_price_at_entry": float(trade.get("dex_spot_price_at_entry") or 0),
-            }
 
-            sim = _replay_with_intervals(
-                fake, ticks,
-                lazy_fast_sec=cfg["lazy_fast_sec"],
-                lazy_fast_window=cfg["lazy_fast_window"],
-                lazy_slow_sec=cfg["lazy_slow_sec"],
-            )
-            if sim is None:
-                continue
+            # Route DIP strategies through specialized replayers
+            if cfg["type"] == "DIP_BUY":
+                sim = _replay_dip_buy_with_intervals(
+                    cfg, ticks,
+                    entry_price=entry_price,
+                    entry_time_iso=trade["created_at"],
+                    lazy_fast_sec=cfg["lazy_fast_sec"],
+                    lazy_fast_window=cfg["lazy_fast_window"],
+                    lazy_slow_sec=cfg["lazy_slow_sec"],
+                )
+                if sim is None:
+                    continue
+            elif cfg["type"] == "DIP_SCALE_OUT":
+                # Tick→1min candle downgrade + legacy engine
+                candles = _ticks_to_1min_candles(ticks)
+                if not candles:
+                    continue
+                try:
+                    from sim_engines import simulate_dip_scale_out
+                except ImportError:
+                    continue
+                raw = simulate_dip_scale_out(candles, entry_price, cfg,
+                                             {"liq": trade.get("rt_liquidity_usd") or 50_000})
+                sim = {
+                    "exit_reason": raw.get("exit_reason", "timeout_eod"),
+                    "exit_price": 0,
+                    "pnl_pct": raw.get("pnl_pct", 0),
+                    "pnl_usd": round(10.0 * raw.get("pnl_pct", 0), 2),
+                    "exit_minutes": int(raw.get("elapsed_min", 0)),
+                    "high_price_seen": entry_price,
+                    "peak_from_entry": 0.0,
+                    "peak_to_exit_drop": 0.0,
+                    "time_to_peak_min": 0,
+                    "exit_in_first_5min": False,
+                }
+            else:
+                fake = {
+                    "id": trade["id"],
+                    "entry_price": entry_price,
+                    "sl_price": entry_price * sl_mult,
+                    "tp_price": entry_price * tp_mult if tp_mult else None,
+                    "position_usd": float(trade.get("position_usd") or 10.0),
+                    "strategy": strat_name,
+                    "tranche_label": "main",
+                    "horizon_minutes": horizon,
+                    "created_at": trade["created_at"],
+                    "high_price_seen": entry_price,
+                    "rt_liquidity_usd": trade.get("rt_liquidity_usd"),
+                    "dex_spot_price_at_entry": float(trade.get("dex_spot_price_at_entry") or 0),
+                }
+
+                sim = _replay_with_intervals(
+                    fake, ticks,
+                    lazy_fast_sec=cfg["lazy_fast_sec"],
+                    lazy_fast_window=cfg["lazy_fast_window"],
+                    lazy_slow_sec=cfg["lazy_slow_sec"],
+                )
+                if sim is None:
+                    continue
 
             pnl_list.append(sim["pnl_pct"])
             trade_results.append({
