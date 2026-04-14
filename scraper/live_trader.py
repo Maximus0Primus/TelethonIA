@@ -1121,7 +1121,7 @@ def check_live_trades(client_sb) -> dict:
             if not _should_poll_trade(trade_id, int(orch.get("polling_sec", 30))):
                 continue
 
-            decision_price, exit_ref = _decision_price(addr, strategy, trade_id, orch)
+            decision_price, exit_ref = _decision_price(addr, strategy, trade_id, orch, trade=trade)
             if exit_ref is not None:
                 current_price = exit_ref
 
