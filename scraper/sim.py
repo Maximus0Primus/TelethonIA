@@ -1582,8 +1582,8 @@ def _build_tick_grid() -> list[dict]:
 
     # --- 6. DIP strategies — full grid (DIP_BUY tiers 1+2 + DIP_SCALE_OUT) ---
     # Reuses the OHLCV sim's DIP builder so tick sim grades the exact same configs.
-    # DIP_BUY: tick-native replay via _replay_dip_buy_with_intervals.
-    # DIP_SCALE_OUT: tick→1min candle downgrade + legacy engine (approximation).
+    # Both routed through tick-native replayers (see _replay_dip_buy_with_intervals
+    # and _replay_dip_scale_out_with_intervals).
     for dip_cfg in _build_dip_buy_grid():
         configs.append({
             **dip_cfg,
@@ -1614,34 +1614,248 @@ def _build_tick_grid() -> list[dict]:
     return full_grid
 
 
-def _ticks_to_1min_candles(ticks: list[dict]) -> list[dict]:
-    """Downsample ticks to 1-min OHLC candles for legacy engines that need candles
-    (e.g. DIP_SCALE_OUT). Lossier than tick-native but good enough for grading."""
+def _replay_dip_scale_out_with_intervals(fake_cfg: dict, ticks: list[dict],
+                                          entry_price: float, entry_time_iso: str,
+                                          lazy_fast_sec: int, lazy_fast_window: int,
+                                          lazy_slow_sec: int,
+                                          liq_usd: float = 50_000) -> dict | None:
+    """Tick-native DIP_SCALE_OUT replay. Mirrors simulate_dip_scale_out
+    (sim_engines.py) but on real ticks with interval throttling.
+
+    Both P1 (original entry) and P2 (dip re-entry) use scale-out tranches:
+    sell sell_frac at each gain_pct TP, remainder rides the runner_trail.
+    """
+    from sim_engines import _exit, BUY_SLIPPAGE as _BUY_SLIP, SLIPPAGE_TRAIL as _SLIP_TRAIL
+    from sim_engines import _sim_liquidity_usd
+    import sim_engines as _se
+    _se._sim_liquidity_usd = liq_usd  # let _exit see the right liq for slippage
+
     if not ticks:
-        return []
-    buckets: dict[int, list[float]] = {}
+        return None
+
+    entry_time = datetime.fromisoformat(entry_time_iso.replace("Z", "+00:00"))
+
+    sl_pct = fake_cfg["sl"] / 100
+    trail_pct = fake_cfg.get("trail", 5) / 100
+    act_pct = fake_cfg.get("act", 20) / 100
+    horizon = fake_cfg["horizon_min"]
+    dip_threshold = abs(fake_cfg["dip_threshold"])
+    if dip_threshold > 1:
+        dip_threshold = dip_threshold / 100
+    bounce_threshold = fake_cfg.get("bounce_threshold", 0)
+    if bounce_threshold > 1:
+        bounce_threshold = bounce_threshold / 100
+    dip_size_mult = fake_cfg.get("dip_size_mult", 1.0)
+    tranches = fake_cfg["tranches"]
+    runner_trail = fake_cfg["runner_trail"] / 100
+    runner_act = fake_cfg.get("runner_act", 50) / 100
+
+    p1_weight = 1.0 / (1.0 + dip_size_mult)
+    p2_weight = dip_size_mult / (1.0 + dip_size_mult)
+
+    # Position 1 state
+    p1_entry = entry_price
+    p1_sl = p1_entry * (1 - sl_pct)
+    p1_remaining = 1.0
+    p1_pnl = 0.0
+    p1_tranche_sold = [False] * len(tranches)
+    p1_high = p1_entry
+    p1_runner_active = False
+    p1_closed = False
+
+    # Position 2 state
+    p2_opened = False
+    p2_entry = 0.0
+    p2_sl = 0.0
+    p2_remaining = 1.0
+    p2_pnl = 0.0
+    p2_tranche_sold = [False] * len(tranches)
+    p2_high = 0.0
+    p2_runner_active = False
+    p2_closed = False
+
+    low_since_entry = entry_price
+    dip_triggered = False
+    reentry_done = False
+
+    is_lazy = lazy_fast_sec > 0
+    last_check_ts = 0.0
+    last_tick_price = entry_price
+    last_mins = 0
+
     for tick in ticks:
         try:
-            t = datetime.fromisoformat(tick["fetched_at"].replace("Z", "+00:00"))
-            price = float(tick["price_usd"])
-        except (KeyError, ValueError, TypeError):
+            tick_time = datetime.fromisoformat(tick["fetched_at"].replace("Z", "+00:00"))
+        except Exception:
             continue
-        if price <= 0:
+        if tick_time < entry_time:
             continue
-        minute = int(t.timestamp() // 60 * 60)
-        buckets.setdefault(minute, []).append(price)
-    candles = []
-    for minute in sorted(buckets):
-        prices = buckets[minute]
-        candles.append({
-            "timestamp": minute,
-            "open": prices[0],
-            "high": max(prices),
-            "low": min(prices),
-            "close": prices[-1],
-            "volume": 0,
-        })
-    return candles
+        tick_price = float(tick["price_usd"])
+        if tick_price <= 0:
+            continue
+
+        mins = (tick_time - entry_time).total_seconds() / 60.0
+        last_tick_price = tick_price
+        last_mins = mins
+
+        # Dip tracking runs every tick (no throttle)
+        if tick_price < low_since_entry:
+            low_since_entry = tick_price
+
+        # Running peak for both positions (always updated)
+        if tick_price > p1_high:
+            p1_high = tick_price
+        if p2_opened and tick_price > p2_high:
+            p2_high = tick_price
+
+        # Throttle exit evaluation (but not dip detection / peak tracking)
+        if is_lazy:
+            now_ts = tick_time.timestamp()
+            age_sec = (tick_time - entry_time).total_seconds()
+            interval = lazy_fast_sec if age_sec < lazy_fast_window else lazy_slow_sec
+            if last_check_ts > 0 and (now_ts - last_check_ts) < interval:
+                continue
+            last_check_ts = now_ts
+
+        # === Position 1 ===
+        if not p1_closed:
+            if tick_price <= p1_sl:
+                sl_res = _exit("sl_hit", p1_sl, p1_entry, mins, is_sl=True)
+                p1_pnl += sl_res["pnl_pct"] * p1_remaining
+                p1_closed = True
+            else:
+                for i, (gain_pct, sell_frac) in enumerate(tranches):
+                    if p1_tranche_sold[i]:
+                        continue
+                    tp = p1_entry * (1 + gain_pct / 100)
+                    if tick_price >= tp:
+                        tp_res = _exit("tp_hit", tp, p1_entry, mins)
+                        actual = min(sell_frac, p1_remaining)
+                        p1_pnl += tp_res["pnl_pct"] * actual
+                        p1_remaining -= actual
+                        p1_tranche_sold[i] = True
+                if p1_remaining > 0.001:
+                    if not p1_runner_active and p1_high >= p1_entry * (1 + runner_act):
+                        p1_runner_active = True
+                    if p1_runner_active:
+                        trigger = p1_high * (1 - runner_trail)
+                        if trigger > p1_entry and tick_price <= trigger:
+                            tr_res = _exit("trail_stop", trigger, p1_entry, mins)
+                            p1_pnl += tr_res["pnl_pct"] * p1_remaining
+                            p1_remaining = 0
+                            p1_closed = True
+                elif p1_remaining <= 0.001:
+                    p1_closed = True
+
+        # === Dip detection + P2 entry ===
+        if not reentry_done and not p1_closed:
+            dip_level = entry_price * (1 - dip_threshold)
+            if low_since_entry <= dip_level:
+                dip_triggered = True
+            if dip_triggered:
+                if bounce_threshold <= 0:
+                    p2_opened = True
+                    reentry_done = True
+                    p2_entry = dip_level * (1 + _BUY_SLIP)
+                    p2_sl = p2_entry * (1 - sl_pct)
+                    p2_high = tick_price
+                else:
+                    if low_since_entry > 0 and (tick_price / low_since_entry - 1) >= bounce_threshold:
+                        p2_opened = True
+                        reentry_done = True
+                        p2_entry = low_since_entry * (1 + bounce_threshold) * (1 + _BUY_SLIP)
+                        p2_sl = p2_entry * (1 - sl_pct)
+                        p2_high = tick_price
+
+        # === Position 2 ===
+        if p2_opened and not p2_closed:
+            if tick_price <= p2_sl:
+                sl_res = _exit("sl_hit", p2_sl, p2_entry, mins, is_sl=True)
+                p2_pnl += sl_res["pnl_pct"] * p2_remaining
+                p2_closed = True
+            else:
+                for i, (gain_pct, sell_frac) in enumerate(tranches):
+                    if p2_tranche_sold[i]:
+                        continue
+                    tp = p2_entry * (1 + gain_pct / 100)
+                    if tick_price >= tp:
+                        tp_res = _exit("tp_hit", tp, p2_entry, mins)
+                        actual = min(sell_frac, p2_remaining)
+                        p2_pnl += tp_res["pnl_pct"] * actual
+                        p2_remaining -= actual
+                        p2_tranche_sold[i] = True
+                if p2_remaining > 0.001:
+                    if not p2_runner_active and p2_high >= p2_entry * (1 + runner_act):
+                        p2_runner_active = True
+                    if p2_runner_active:
+                        trigger = p2_high * (1 - runner_trail)
+                        if trigger > p2_entry and tick_price <= trigger:
+                            tr_res = _exit("trail_stop", trigger, p2_entry, mins)
+                            p2_pnl += tr_res["pnl_pct"] * p2_remaining
+                            p2_remaining = 0
+                            p2_closed = True
+                elif p2_remaining <= 0.001:
+                    p2_closed = True
+
+        # Early exit when both done
+        if p1_closed and (p2_closed or not p2_opened):
+            combined = p1_pnl * p1_weight + p2_pnl * p2_weight if p2_opened else p1_pnl
+            return {
+                "exit_reason": "trail_stop",
+                "exit_price": 0,
+                "pnl_pct": round(combined, 4),
+                "pnl_usd": round(10.0 * combined, 2),
+                "exit_minutes": int(mins),
+                "high_price_seen": max(p1_high, p2_high),
+                "peak_from_entry": round(p1_high / p1_entry - 1, 4),
+                "peak_to_exit_drop": 0.0,
+                "time_to_peak_min": 0,
+                "exit_in_first_5min": mins < 5,
+                "p2_opened": p2_opened,
+            }
+
+        # Horizon timeout
+        if mins >= horizon:
+            if not p1_closed and p1_remaining > 0:
+                to_res = _exit("timeout", tick_price, p1_entry, mins)
+                p1_pnl += to_res["pnl_pct"] * p1_remaining
+            if p2_opened and not p2_closed and p2_remaining > 0:
+                to_res = _exit("timeout", tick_price, p2_entry, mins)
+                p2_pnl += to_res["pnl_pct"] * p2_remaining
+            combined = p1_pnl * p1_weight + p2_pnl * p2_weight if p2_opened else p1_pnl
+            return {
+                "exit_reason": "timeout",
+                "exit_price": 0,
+                "pnl_pct": round(combined, 4),
+                "pnl_usd": round(10.0 * combined, 2),
+                "exit_minutes": int(mins),
+                "high_price_seen": max(p1_high, p2_high),
+                "peak_from_entry": round(p1_high / p1_entry - 1, 4),
+                "peak_to_exit_drop": 0.0,
+                "time_to_peak_min": 0,
+                "exit_in_first_5min": False,
+                "p2_opened": p2_opened,
+            }
+
+    # Data ended before horizon
+    if not p1_closed and p1_remaining > 0:
+        p1_pnl += (last_tick_price * (1 - _SLIP_TRAIL) / p1_entry - 1) * p1_remaining
+    if p2_opened and not p2_closed and p2_remaining > 0:
+        p2_pnl += (last_tick_price * (1 - _SLIP_TRAIL) / p2_entry - 1) * p2_remaining
+    combined = p1_pnl * p1_weight + p2_pnl * p2_weight if p2_opened else p1_pnl
+    return {
+        "exit_reason": "timeout_eod",
+        "exit_price": 0,
+        "pnl_pct": round(combined, 4),
+        "pnl_usd": round(10.0 * combined, 2),
+        "exit_minutes": int(last_mins),
+        "high_price_seen": max(p1_high, p2_high),
+        "peak_from_entry": round(p1_high / p1_entry - 1, 4),
+        "peak_to_exit_drop": 0.0,
+        "time_to_peak_min": 0,
+        "exit_in_first_5min": False,
+        "p2_opened": p2_opened,
+    }
 
 
 def _replay_dip_buy_with_intervals(fake_cfg: dict, ticks: list[dict],
@@ -2354,28 +2568,17 @@ def _tick_grid_search(trades: list[dict], ticks_by_token: dict[str, list[dict]],
                 if sim is None:
                     continue
             elif cfg["type"] == "DIP_SCALE_OUT":
-                # Tick→1min candle downgrade + legacy engine
-                candles = _ticks_to_1min_candles(ticks)
-                if not candles:
+                sim = _replay_dip_scale_out_with_intervals(
+                    cfg, ticks,
+                    entry_price=entry_price,
+                    entry_time_iso=trade["created_at"],
+                    lazy_fast_sec=cfg["lazy_fast_sec"],
+                    lazy_fast_window=cfg["lazy_fast_window"],
+                    lazy_slow_sec=cfg["lazy_slow_sec"],
+                    liq_usd=trade.get("rt_liquidity_usd") or 50_000,
+                )
+                if sim is None:
                     continue
-                try:
-                    from sim_engines import simulate_dip_scale_out
-                except ImportError:
-                    continue
-                raw = simulate_dip_scale_out(candles, entry_price, cfg,
-                                             {"liq": trade.get("rt_liquidity_usd") or 50_000})
-                sim = {
-                    "exit_reason": raw.get("exit_reason", "timeout_eod"),
-                    "exit_price": 0,
-                    "pnl_pct": raw.get("pnl_pct", 0),
-                    "pnl_usd": round(10.0 * raw.get("pnl_pct", 0), 2),
-                    "exit_minutes": int(raw.get("elapsed_min", 0)),
-                    "high_price_seen": entry_price,
-                    "peak_from_entry": 0.0,
-                    "peak_to_exit_drop": 0.0,
-                    "time_to_peak_min": 0,
-                    "exit_in_first_5min": False,
-                }
             else:
                 fake = {
                     "id": trade["id"],
