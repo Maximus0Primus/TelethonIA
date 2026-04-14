@@ -2840,6 +2840,220 @@ def _tick_validation(trades: list[dict], sim_results: dict[int, dict]) -> dict:
     }
 
 
+def _synthetic_strategy_sweep(args):
+    """v134: Test NEW synthetic strategies (not in shadow DB) on post-v132 ticks.
+
+    Takes a universe of post-Apr 13 token-calls (any existing strategy, 24h-dedup
+    per token) and replays user-defined synthetic strategies — with smoothing +
+    source + polling variants. Lets us grade TP70_SL30+median_5, BE20_TP70_SL30,
+    FAST_TP60_SL20, etc. without waiting for shadow data to accumulate.
+
+    Specs parsed from --synthetic-strats, each like:
+      'NAME:tp=70,sl=30,horizon=30,be_act=20'
+    Default horizon=120, be_act=0 (no BE).
+    """
+    import csv, re as _re
+
+    SOURCES = ["jupiter", "dexscreener", "both"]
+    POLL_INTERVALS = [60, 120]  # keep grid compact; 0/30 covered elsewhere
+    MODES = SMOOTHING_MODES
+
+    print("=" * 100)
+    print("SYNTHETIC STRATEGY SWEEP (v134)")
+    print("=" * 100)
+
+    # Parse synthetic strategy specs
+    specs: list[dict] = []
+    for raw in (args.synthetic_strats or "").split(";"):
+        raw = raw.strip()
+        if not raw:
+            continue
+        if ":" not in raw:
+            print(f"[warn] bad spec (expected NAME:tp=x,sl=y): {raw}")
+            continue
+        name, params = raw.split(":", 1)
+        cfg = {"name": name.strip(), "tp": None, "sl": None, "horizon": 120, "be_act": 0}
+        for kv in params.split(","):
+            if "=" in kv:
+                k, v = kv.split("=", 1)
+                k, v = k.strip(), v.strip()
+                if k in ("tp", "sl", "horizon", "be_act"):
+                    try:
+                        cfg[k] = int(v)
+                    except ValueError:
+                        pass
+        if cfg["tp"] is None or cfg["sl"] is None:
+            print(f"[warn] missing tp/sl in spec: {raw}")
+            continue
+        specs.append(cfg)
+
+    if not specs:
+        print("No valid synthetic strategies. Use --synthetic-strats 'NAME:tp=70,sl=30,horizon=30[;...]'")
+        return
+
+    print(f"Synthetic strategies ({len(specs)}):")
+    for s in specs:
+        be = f" be_act={s['be_act']}" if s['be_act'] else ""
+        print(f"  {s['name']:<30s} tp={s['tp']}% sl={s['sl']}% horizon={s['horizon']}min{be}")
+    print(f"Modes: {len(MODES)}  Sources: {SOURCES}  Polls: {POLL_INTERVALS}")
+    print(f"-> {len(specs) * len(MODES) * len(SOURCES) * len(POLL_INTERVALS)} configs total")
+
+    since = max(args.since, TICK_DATA_START)
+
+    # Pull the universe of post-v132 token-calls (any strategy — we'll override).
+    # FAST_TP50_SL30 shadows cover every KOL call on every token post-Apr 13.
+    trades = _fetch_tick_trades(since, include_shadows=True)
+    trades = [t for t in trades if t.get("strategy") == "FAST_TP50_SL30"]
+    # Dedup per token (24h window)
+    sorted_t = sorted(trades, key=lambda t: t["created_at"])
+    seen: dict[str, datetime] = {}
+    universe = []
+    for t in sorted_t:
+        addr = t["token_address"]
+        dt = datetime.fromisoformat(t["created_at"].replace("Z", "+00:00"))
+        last = seen.get(addr)
+        if last and (dt - last).total_seconds() < 86400:
+            continue
+        seen[addr] = dt
+        universe.append(t)
+    print(f"Universe of token-calls (post-{since}, dedup 24h): {len(universe)}")
+
+    # Fetch ticks
+    token_ranges: dict[str, tuple] = {}
+    for t in universe:
+        addr = t["token_address"]
+        entry = t["created_at"]
+        horizon = max(s["horizon"] for s in specs)
+        entry_dt = datetime.fromisoformat(entry.replace("Z", "+00:00"))
+        end_iso = (entry_dt + timedelta(minutes=horizon + 30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        if addr not in token_ranges:
+            token_ranges[addr] = (entry, end_iso)
+        else:
+            lo, hi = token_ranges[addr]
+            token_ranges[addr] = (min(lo, entry), max(hi, end_iso))
+    raw_ticks_by_token = _fetch_ticks_for_tokens(token_ranges)
+
+    streams_by_token: dict[str, dict[str, list[dict]]] = {}
+    for addr, raw in raw_ticks_by_token.items():
+        streams_by_token[addr] = {src: _filter_ticks_by_source(raw, src) for src in SOURCES}
+
+    # Run grid
+    all_rows: list[dict] = []
+    pnls_by_combo: dict[tuple, list[float]] = {}
+    for spec in specs:
+        # Synthetic strategy name must preserve BE regex match if be_act>0
+        strat_name = spec["name"]
+        print(f"\n=== {strat_name}  tp={spec['tp']}% sl={spec['sl']}% horizon={spec['horizon']}m"
+              f"{' be_act='+str(spec['be_act']) if spec['be_act'] else ''} ===")
+        for source in SOURCES:
+            for poll in POLL_INTERVALS:
+                for mode in MODES:
+                    pnls, wins, n = [], 0, 0
+                    for t in universe:
+                        ticks = streams_by_token.get(t["token_address"], {}).get(source) or []
+                        if not ticks:
+                            continue
+                        entry_price = float(t["entry_price"])
+                        tp_price = entry_price * (1 + spec["tp"] / 100)
+                        sl_price = entry_price * (1 - spec["sl"] / 100)
+                        fake = {
+                            "id": f"{strat_name}_{t['id']}",
+                            "entry_price": entry_price,
+                            "sl_price": sl_price,
+                            "tp_price": tp_price,
+                            "position_usd": 10.0,
+                            "strategy": strat_name,
+                            "tranche_label": "main",
+                            "horizon_minutes": spec["horizon"],
+                            "created_at": t["created_at"],
+                            "high_price_seen": entry_price,
+                            "rt_liquidity_usd": t.get("rt_liquidity_usd"),
+                            "dex_spot_price_at_entry": entry_price,
+                        }
+                        sim = _replay_with_intervals(
+                            fake, ticks,
+                            lazy_fast_sec=poll,
+                            lazy_fast_window=poll * 10,
+                            lazy_slow_sec=poll,
+                            smoothing=mode,
+                        )
+                        if sim is None:
+                            continue
+                        n += 1
+                        pnls.append(sim["pnl_pct"])
+                        if sim["pnl_pct"] > 0:
+                            wins += 1
+                    if n == 0:
+                        continue
+                    pnls_by_combo[(strat_name, source, poll, mode)] = pnls
+                    all_rows.append({
+                        "strategy": strat_name,
+                        "source": source,
+                        "poll_sec": poll,
+                        "mode": mode,
+                        "n": n,
+                        "wr_pct": round(wins / n * 100, 1),
+                        "avg_pnl_pct": round(statistics.mean(pnls) * 100, 2),
+                        "median_pnl_pct": round(statistics.median(pnls) * 100, 2),
+                        "sum_pnl_10usd": round(sum(pnls) * 10.0, 2),
+                    })
+
+    # Write CSV
+    out_path = "scraper/synthetic_strategy_results.csv"
+    try:
+        with open(out_path, "w", newline="", encoding="utf-8") as f:
+            if all_rows:
+                w = csv.DictWriter(f, fieldnames=list(all_rows[0].keys()))
+                w.writeheader()
+                w.writerows(all_rows)
+        print(f"\nWrote {out_path} ({len(all_rows)} rows)")
+    except Exception as e:
+        print(f"[warn] CSV write failed: {e}")
+
+    # Ranking — top per synthetic strategy by avg_pnl_pct (fair, size-independent)
+    print("\n" + "=" * 100)
+    print("RANKED by avg_pnl_pct — top 3 combos per synthetic strategy")
+    print("=" * 100)
+    by_strat: dict[str, list[dict]] = defaultdict(list)
+    for r in all_rows:
+        by_strat[r["strategy"]].append(r)
+    for strat, rows in by_strat.items():
+        rows.sort(key=lambda r: -r["avg_pnl_pct"])
+        print(f"\n[{strat}]")
+        print(f"  {'src':<12s} {'poll':>4s} {'mode':<14s} {'n':>4s} {'wr%':>6s} {'avg%':>7s} {'med%':>7s}")
+        for r in rows[:3]:
+            print(f"  {r['source']:<12s} {r['poll_sec']:>4d}  {r['mode']:<14s} {r['n']:>4d} "
+                  f"{r['wr_pct']:>5.1f}% {r['avg_pnl_pct']:>6.2f}% {r['median_pnl_pct']:>6.2f}%")
+
+    # Overall top-10 combos (all strategies mixed) by avg_pnl_pct
+    print("\n" + "=" * 100)
+    print("GLOBAL TOP 10 — all synthetic strategies × configs")
+    print("=" * 100)
+    all_rows.sort(key=lambda r: -r["avg_pnl_pct"])
+    print(f"{'strategy':<25s} {'src':<12s} {'poll':>4s} {'mode':<14s} {'n':>4s} {'wr%':>6s} {'avg%':>7s} {'med%':>7s}")
+    for r in all_rows[:10]:
+        print(f"{r['strategy']:<25s} {r['source']:<12s} {r['poll_sec']:>4d}  "
+              f"{r['mode']:<14s} {r['n']:>4d} {r['wr_pct']:>5.1f}% "
+              f"{r['avg_pnl_pct']:>6.2f}% {r['median_pnl_pct']:>6.2f}%")
+
+    # Quick sizing note on top-1
+    if all_rows:
+        top = all_rows[0]
+        pnls = pnls_by_combo.get((top["strategy"], top["source"], top["poll_sec"], top["mode"]), [])
+        wins = [p for p in pnls if p > 0]
+        losses = [p for p in pnls if p <= 0]
+        aw = statistics.mean(wins) if wins else 0
+        al = statistics.mean(losses) if losses else 0
+        kelly = 0.0
+        if al < 0:
+            b = aw / abs(al) if abs(al) > 0 else 0
+            if b > 0:
+                kelly = (b * (len(wins)/len(pnls)) - (1 - len(wins)/len(pnls))) / b
+        kelly = max(0.0, min(kelly, 1.0))
+        print(f"\nTop combo sizing: Kelly full={kelly*100:.1f}%  half={kelly*50:.1f}%  "
+              f"avg_win={aw*100:.1f}%  avg_loss={al*100:.1f}%")
+
+
 def _smoothing_sweep(args):
     """v133: Grid sweep — smoothing × tick source × polling × strategy.
     Outputs ranked CSV + best-combo-per-strategy summary, including the
@@ -3553,6 +3767,11 @@ def main():
     parser.add_argument("--smoothing-strats", type=str,
                         default="FAST_TP50_SL30,DTRAIL10_ACT15_SL70,DTRAIL3_ACT5_SL60,DIP30_B5_T5_A20_SL70_240m",
                         help="Comma-separated strategies to sweep in --smoothing-sweep")
+    parser.add_argument("--synthetic-sweep", action="store_true",
+                        help="v134: Test synthetic strategies (tp/sl/be_act/horizon specs) on post-v132 ticks")
+    parser.add_argument("--synthetic-strats", type=str, default="",
+                        help="Semicolon-separated specs, e.g. 'TP70_SL30:tp=70,sl=30,horizon=30;"
+                             "BE20_TP70_SL30:tp=70,sl=30,horizon=30,be_act=20'")
     parser.add_argument("--validate-ticks", action="store_true",
                         help="Compare tick sim results vs actual paper PnL")
     parser.add_argument("--tick-csv", type=str, default=None,
@@ -3805,6 +4024,13 @@ def main():
 
         print(f"\nTotal ranked strategies: {len(ranked)}")
         return  # Skip OHLCV simulation path
+
+    # =====================================================================
+    # SYNTHETIC STRATEGY SWEEP (v134): test NEW strategies not in shadow DB
+    # =====================================================================
+    if getattr(args, "synthetic_sweep", False):
+        _synthetic_strategy_sweep(args)
+        return
 
     # =====================================================================
     # SMOOTHING SWEEP (v133): grade 8 decision-price smoothing modes
