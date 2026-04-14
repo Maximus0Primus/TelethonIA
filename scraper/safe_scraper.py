@@ -1386,7 +1386,10 @@ def _rt_open_trades(ca: str, symbol: str, price: float, mcap: float,
         "_rt_kol_ml_pred": token_info.get("_rt_kol_ml_pred"),  # v78: KCO score (fix: was reading wrong key)
         # v121: Call reaction speed — message timestamp + price at message time
         "_rt_message_ts": msg.date.isoformat() if hasattr(msg, "date") and msg.date else None,
-        "_rt_price_at_message": token_info.get("price_usd"),  # DexScreener price fetched right after msg
+        "_rt_price_at_message": price,  # DexScreener price fetched right after msg (token_info lacks "price_usd" key)
+        # Latency profiling — propagated to live_trader for final timing breakdown
+        "_rt_t_msg": token_info.get("_rt_t_msg"),
+        "_rt_t_ds_done": token_info.get("_rt_t_ds_done"),
     }
 
     now = datetime.now(timezone.utc)
@@ -1647,12 +1650,16 @@ async def _rt_on_new_message(event: events.NewMessage.Event):
         _rt_in_flight.add(flight_key)
 
         try:
-            logger.info("RT detect: %s (CA: %s...) from %s (%s-tier)", symbol, ca[:8], username, tier)
+            _t_event = time.time()
+            _t_msg = msg.date.timestamp() if (hasattr(msg, "date") and msg.date) else _t_event
+            logger.info("RT detect: %s (CA: %s...) from %s (%s-tier) | msg→detect=%.2fs",
+                        symbol, ca[:8], username, tier, _t_event - _t_msg)
 
             # DexScreener fetch — only hard requirement: price must exist
             from enrich import _fetch_dexscreener_by_address
             loop = asyncio.get_event_loop()
             raw = await loop.run_in_executor(None, _fetch_dexscreener_by_address, ca)
+            _t_ds_done = time.time()
             if not raw or not raw.get("price_usd"):
                 logger.info("RT SKIP: %s — no price (only hard block)", ca[:8])
                 continue
@@ -1726,6 +1733,13 @@ async def _rt_on_new_message(event: events.NewMessage.Event):
                 f" confs={n_confs}" if n_confs else "",
                 f" {ml_label}" if ml_label else "",
             )
+
+            # Propagate timing for downstream live_trader log
+            token_info["_rt_t_msg"] = _t_msg
+            token_info["_rt_t_ds_done"] = _t_ds_done
+            _t_pre_open = time.time()
+            logger.info("RT timing: %s msg→detect=%.2fs detect→ds=%.2fs ds→open=%.2fs",
+                        symbol, _t_event - _t_msg, _t_ds_done - _t_event, _t_pre_open - _t_ds_done)
 
             # Open trades across all strategies
             opened = await loop.run_in_executor(

@@ -656,7 +656,9 @@ def open_live_trade(client_sb, token_entry: dict, strategy: str,
     slippage = int(config.get("slippage_buy_bps", 1000))
 
     # Execute the buy
+    _t_pre_buy = time.time()
     result = execute_buy(ca, lamports, slippage)
+    _t_post_buy = time.time()
     if not result["success"]:
         logger.warning("live_trader: buy failed for %s: %s", symbol, result.get("error"))
         try:
@@ -784,6 +786,14 @@ def open_live_trade(client_sb, token_entry: dict, strategy: str,
             "LIVE TRADE OPENED: %s %s @ $%.8f | %.4f SOL ($%.2f) | sig: %s",
             symbol, strategy, entry_price, position_sol, position_usd, result["signature"][:16],
         )
+        _t_msg = token_entry.get("_rt_t_msg")
+        _t_ds_done = token_entry.get("_rt_t_ds_done")
+        if _t_msg and _t_ds_done:
+            logger.info(
+                "LIVE LATENCY: %s total=%.2fs | msg→ds=%.2fs ds→pre_buy=%.2fs buy_exec=%.2fs",
+                symbol, _t_post_buy - _t_msg,
+                _t_ds_done - _t_msg, _t_pre_buy - _t_ds_done, _t_post_buy - _t_pre_buy,
+            )
 
         # v119: Place Jupiter trigger stop-loss order (on-chain protection)
         _trigger_variant = "polling"  # v122: default, overridden if trigger succeeds
