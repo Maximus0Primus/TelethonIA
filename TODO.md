@@ -59,6 +59,29 @@ Query type:
 - [ ] **Ne pas désactiver DTRAIL10/DIP30** — post-v132 elles redeviennent profitables (DTRAIL10 both/60s/ema_slow Kelly 5.4%, DIP30 both/60s/winsor_p95 Kelly 11.4%). Laisser tourner en paper, décision après N=100 par strat.
 - [ ] Attendre **N≥100/strat en régime actuel** avant tout tuning définitif (actuel N=30-41/strat).
 
+### Stratégies synthétiques testées (v134 sweep, N=30 post-Apr 13)
+
+**Top candidates consistent (WR ≥53%, médiane positive):**
+| Strat | Config | avg | WR | med | Note |
+|---|---|---|---|---|---|
+| **FAST_TP80_SL25** | Jup/120s/dual_confirm | +13.23% | 53.3% | +7.79% | **+3pp sur FAST_TP70_SL50** |
+| BE25_TP80_SL30 | Jup/120s/ema_fast | +13.40% | 53.3% | +7.79% | BE ratchet safety |
+| FAST_TP60_SL20 | Jup/60s/ema_slow | +11.69% | 53.3% | +3.10% | Ultra tight |
+| BE15_TP70_SL30 | Jup/120s/ema_slow | +11.52% | 53.3% | +7.79% | Conservative |
+
+**Top candidates home-run (avg haute, médiane négative):**
+| Strat | Config | avg | WR | med | Kelly |
+|---|---|---|---|---|---|
+| FAST_TP100_SL20 | DS/120s/raw | +16.36% | 50.0% | −2.01% | **31.6%** (!) |
+| BE30_TP100_SL30 | DS/120s/raw | +13.55% | 50.0% | +2.19% | — |
+
+### Plan pragmatique
+- [ ] **Ajouter FAST_TP80_SL25 à paper_trader.STRATEGIES** — candidate #1 consistent. Laisser tourner 1 semaine paper pour confirmer le +3pp vs FAST_TP70_SL50.
+- [ ] **Ajouter BE25_TP80_SL30** idem — test du BE ratchet.
+- [ ] Si validé en paper (N≥50), A/B live vs FAST_TP50_SL30 actuel.
+- [ ] FAST_TP100_SL20 → **prudence**. Le Kelly 31.6% est un piège à N=30, médiane négative = drawdown long. Ne tester que si on accepte volatilité.
+- [ ] Re-run synthetic-sweep dans 1 semaine avec N double pour trancher.
+
 ### Smoothing — conclusions
 - À N=133 mélangé : `raw` ≥ smoothed sur FAST (+2.03% vs +1.53%).
 - À N=30 post-v132 : `dual_confirm` > `raw` pour FAST (Kelly 17.2% vs moins), mais N trop petit pour trancher.
