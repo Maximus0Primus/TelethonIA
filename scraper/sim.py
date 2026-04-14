@@ -2859,8 +2859,22 @@ def _smoothing_sweep(args):
         return
 
     trades = [t for t in trades if t.get("strategy") in target_strats]
-    trades = dedup_first_call(trades)
-    print(f"Trades (after dedup, filtered to target strats): {len(trades)}")
+    # Per-strategy dedup: each target strat trades the same token in parallel,
+    # so cross-strategy dedup (dedup_first_call) would drop 3 of the 4 strats
+    # for every shared token. Dedup by (strategy, token) 24h window instead.
+    sorted_t = sorted(trades, key=lambda t: t["created_at"])
+    seen: dict[tuple, datetime] = {}
+    deduped = []
+    for t in sorted_t:
+        key = (t["strategy"], t["token_address"])
+        dt = datetime.fromisoformat(t["created_at"].replace("Z", "+00:00"))
+        last = seen.get(key)
+        if last and (dt - last).total_seconds() < 86400:
+            continue
+        seen[key] = dt
+        deduped.append(t)
+    trades = deduped
+    print(f"Trades (per-strat dedup, filtered to target strats): {len(trades)}")
     if not trades:
         return
 
@@ -2880,14 +2894,15 @@ def _smoothing_sweep(args):
 
     ticks_by_token = _fetch_ticks_for_tokens(token_ranges)
 
-    # Keep only Jupiter ticks for the smoothing sweep (production default + richest stream)
+    # Use merged stream (Jupiter preferred, DS fallback at each timestamp) so
+    # DTRAIL10/DIP strats (which have fewer Jupiter ticks) still get coverage.
     for addr, raw in list(ticks_by_token.items()):
-        jp = _filter_ticks_by_source(raw, "jupiter") or _filter_ticks_by_source(raw, "both")
-        if jp:
-            ticks_by_token[addr] = jp
+        merged = _filter_ticks_by_source(raw, "both")
+        if merged:
+            ticks_by_token[addr] = merged
         else:
             ticks_by_token.pop(addr, None)
-    print(f"Tokens with ticks: {len(ticks_by_token)}")
+    print(f"Tokens with ticks (merged jup+DS): {len(ticks_by_token)}")
 
     # Group trades by strategy
     by_strat: dict[str, list[dict]] = defaultdict(list)
