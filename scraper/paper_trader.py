@@ -1221,7 +1221,13 @@ def _evaluate_trade_exit(trade: dict, current_price: float | None,
                 # Breakeven activated — SL is now entry price
                 effective_sl = entry_price
 
-        if eval_price <= effective_sl:
+        # v133: SL check against exit_ref (Jupiter quote — what the sell would actually
+        # fill at) rather than decision_price. Fixes hybrid-mode divergence where DS
+        # noise dips trigger phantom SLs in paper while live Jupiter quote stays above.
+        # TP/trail still use eval_price (DS catches fast pumps faster).
+        sl_eval = current_price if current_price is not None else eval_price
+
+        if sl_eval <= effective_sl:
             new_status = "sl_hit"
             exit_price = effective_sl * _dynamic_sell_slip_factor(trade, "sl_hit", base_bps, sell_fee_bps)
         # 3) TP check (only tranches with TP target)

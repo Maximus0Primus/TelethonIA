@@ -1,3 +1,26 @@
+# Pipeline Status — Updated Apr 14, 2026 (v133)
+
+## v133 — Paper/Live Divergence Fixes (Apr 14 night)
+
+Checkpoint 24h post-v132 deploy: 26 RT tokens → paper opened 26 FAST + 26 DTRAIL10, live opened 21 FAST + **1 DTRAIL10** (broken). Divergence paper/live on FAST: avg |diff| = 10.8pp (target <2%), 3 outliers >37pp driven by paper SL firing on DS noise dips while live Jupiter quote stayed above.
+
+### Fixes deployed
+- [x] **FIX 133-A**: dedup in `live_trader.open_live_trade` was matching any `rt_live` row for the CA, blocking the 2nd strategy in the hybrid allocation loop. Scoped to `same strategy`. Effect: each RT token now opens BOTH FAST and DTRAIL10 at $1.50 each ($3 total).
+- [x] **FIX 133-B**: `_evaluate_trade_exit` SL-check now uses `current_price` (exit_ref = Jupiter) instead of `eval_price` (decision = DS) in hybrid mode. TP/trail still use decision_price (DS catches pumps faster). Mirrors live execution semantics — paper and live now SL at same Jupiter quote.
+
+### Watch list (next 24-48h)
+- [ ] Confirm live opens DTRAIL10 alongside FAST (ratio ~1:1)
+- [ ] Divergence FAST paper/live drops avg |diff| < 5pp (target was 2pp, realistic after latency+slippage = 3-4pp)
+- [ ] No new SL outliers >10pp on hybrid-mode strategies
+- [ ] `_strategy_orchestration` never returns None,None silently (defaults fallback verified OK)
+- [ ] DIP30 still at 0 trades — investigate gate separately if still blocked after 48h
+
+### Known residual
+- TP outlier (Cw9V +37pp) = real Ultra fill luck, not a bug. Accept as execution variance.
+- Shadow-sync (paper reuses live execution_price) deferred — keeps paper independent as a benchmark to detect live-only bugs.
+
+---
+
 # Pipeline Status — Updated Feb 28, 2026 (v74)
 
 ## Current State
