@@ -2382,9 +2382,132 @@ def _replay_with_trigger_sl_only(fake_trade: dict, ticks: list[dict],
         _last_eval_ts.pop(trade_id, None)
 
 
+# ---------------------------------------------------------------------------
+# Smoothing strategies for decision price (v133)
+# ---------------------------------------------------------------------------
+# Each mode transforms a raw tick_price into a "decision_price" used for
+# SL/TP/trail trigger evaluation. The exit execution price stays at the raw
+# tick_price (mirrors live behavior where Jupiter fills at instant price).
+#
+# Supported modes:
+#   raw           — no smoothing (baseline)
+#   median_3      — median of last 3 Jupiter ticks (kills spikes, ~30-60s lag)
+#   median_5      — median of last 5 ticks (smoother, ~60-120s lag)
+#   winsor_p95    — clip delta vs prev to ±18% (kills flash wicks)
+#   dual_confirm  — trigger requires 2 consecutive ticks on same side of SL/TP
+#   ema_fast      — EMA window=2 (reactive smoothing)
+#   ema_slow      — EMA window=8 (wide-trail smoothing)
+#   hysteresis    — once trigger crossed, needs 2% retrace before re-arming
+#   volume_gated  — skip ticks with volume_usd < 500 (ghost liquidity filter)
+#   max_hybrid    — decision = tick_price (proxy; full version needs DS stream)
+#
+# State is held per-trade in a dict. Caller resets it on new trade.
+SMOOTHING_MODES = [
+    "raw", "median_3", "median_5", "winsor_p95", "dual_confirm",
+    "ema_fast", "ema_slow", "hysteresis", "volume_gated",
+]
+
+
+def _smooth_decision(tick: dict, state: dict, mode: str,
+                     entry_price: float, sl_price: float,
+                     tp_price: float | None) -> float | None:
+    """Return smoothed decision price, or None to skip this tick entirely
+    (volume_gated). Mutates `state`."""
+    p = float(tick["price_usd"])
+    if mode == "raw":
+        return p
+
+    if mode == "median_3" or mode == "median_5":
+        window = 3 if mode == "median_3" else 5
+        hist = state.setdefault("hist", [])
+        hist.append(p)
+        if len(hist) > window:
+            hist.pop(0)
+        if len(hist) < window:
+            return p  # warm-up: pass through
+        return sorted(hist)[len(hist) // 2]
+
+    if mode == "winsor_p95":
+        prev = state.get("prev_p", p)
+        delta = p - prev
+        cap = prev * 0.18  # p95 tick-to-tick
+        if delta > cap:
+            p_cap = prev + cap
+        elif delta < -cap:
+            p_cap = prev - cap
+        else:
+            p_cap = p
+        state["prev_p"] = p_cap
+        return p_cap
+
+    if mode == "dual_confirm":
+        # Gate: only pass price through if it's "stable" vs prev (triggers
+        # will fire naturally in _evaluate_trade_exit). Here we require that
+        # 2 consecutive ticks agree on being below SL or above TP.
+        prev = state.get("prev_p", p)
+        was_breach = state.get("was_breach", None)
+        breach = None
+        if sl_price and p <= sl_price and prev <= sl_price:
+            breach = "sl"
+        elif tp_price and p >= tp_price and prev >= tp_price:
+            breach = "tp"
+        state["prev_p"] = p
+        state["was_breach"] = breach
+        # If single-tick breach not confirmed, return a safe price that doesn't trigger
+        if (sl_price and p <= sl_price and prev > sl_price) or \
+           (tp_price and p >= tp_price and prev < tp_price):
+            # Return prev (last non-breach) to skip the trigger this round
+            return prev
+        return p
+
+    if mode == "ema_fast" or mode == "ema_slow":
+        window = 2 if mode == "ema_fast" else 8
+        alpha = 2.0 / (window + 1)
+        prev_ema = state.get("ema")
+        if prev_ema is None:
+            state["ema"] = p
+            return p
+        new_ema = alpha * p + (1 - alpha) * prev_ema
+        state["ema"] = new_ema
+        return new_ema
+
+    if mode == "hysteresis":
+        # Once SL/TP crossed, require 2% retrace before re-checking.
+        prev_p = state.get("prev_p", p)
+        armed_sl = state.setdefault("armed_sl", True)
+        armed_tp = state.setdefault("armed_tp", True)
+        if not armed_sl:
+            # re-arm after 2% bounce up
+            if sl_price and p >= sl_price * 1.02:
+                state["armed_sl"] = True
+        elif sl_price and p <= sl_price:
+            state["armed_sl"] = False
+        if not armed_tp:
+            if tp_price and p <= tp_price * 0.98:
+                state["armed_tp"] = True
+        elif tp_price and p >= tp_price:
+            state["armed_tp"] = False
+        state["prev_p"] = p
+        # Serve a price that respects current armed state
+        if not state["armed_sl"] and sl_price and p <= sl_price:
+            return sl_price * 1.001  # slightly above SL to avoid re-trigger
+        if not state["armed_tp"] and tp_price and p >= tp_price:
+            return tp_price * 0.999
+        return p
+
+    if mode == "volume_gated":
+        vol = tick.get("volume_usd")
+        if vol is not None and vol < 500:
+            return None  # skip tick entirely
+        return p
+
+    return p
+
+
 def _replay_with_intervals(fake_trade: dict, ticks: list[dict],
                            lazy_fast_sec: int, lazy_fast_window: int,
-                           lazy_slow_sec: int) -> dict | None:
+                           lazy_slow_sec: int,
+                           smoothing: str = "raw") -> dict | None:
     """Replay trade with custom check interval throttling + exit analytics.
     If all intervals are 0, checks every tick (CURRENT mode).
     Otherwise simulates LAZY-style throttle at given intervals.
@@ -2410,6 +2533,11 @@ def _replay_with_intervals(fake_trade: dict, ticks: list[dict],
     max_price_seen = entry_price
     time_to_peak_min = 0
     tick_count = 0
+
+    # Smoothing state (per-trade)
+    smooth_state: dict = {}
+    sl_price_trade = float(fake_trade.get("sl_price") or 0)
+    tp_price_trade = float(fake_trade.get("tp_price") or 0) or None
 
     try:
         for tick in ticks:
@@ -2440,8 +2568,16 @@ def _replay_with_intervals(fake_trade: dict, ticks: list[dict],
                     continue
                 last_check_ts = now_ts
 
+            # Apply smoothing → decision_price (exit still at raw tick_price)
+            decision_p = _smooth_decision(tick, smooth_state, smoothing,
+                                          entry_price, sl_price_trade,
+                                          tp_price_trade)
+            if decision_p is None:  # volume_gated skip
+                continue
+
             ev = _evaluate_trade_exit(fake_trade, tick_price, tick_time,
-                                      sell_slip, sell_fee_bps=0)
+                                      sell_slip, sell_fee_bps=0,
+                                      decision_price=decision_p)
             if ev is None:
                 continue
 
@@ -2699,6 +2835,139 @@ def _tick_validation(trades: list[dict], sim_results: dict[int, dict]) -> dict:
         "n_divergent": len(divergent),
         "divergent_trades": divergent,
     }
+
+
+def _smoothing_sweep(args):
+    """v133: Sweep all smoothing modes across a focused list of strategies.
+    Re-uses the tick-fetching + dedup infrastructure, then runs
+    _replay_with_intervals with each smoothing mode on the closed trades
+    for each target strategy. Outputs comparison table + CSV.
+    """
+    import csv
+    print("=" * 90)
+    print("SMOOTHING SWEEP (v133)")
+    print(f"Modes: {', '.join(SMOOTHING_MODES)}")
+    print(f"Strats: {args.smoothing_strats}")
+    print("=" * 90)
+
+    since = max(args.since, TICK_DATA_START)
+    target_strats = [s.strip() for s in args.smoothing_strats.split(",") if s.strip()]
+
+    trades = _fetch_tick_trades(since)
+    if not trades:
+        print("No trades with tick coverage. Exiting.")
+        return
+
+    trades = [t for t in trades if t.get("strategy") in target_strats]
+    trades = dedup_first_call(trades)
+    print(f"Trades (after dedup, filtered to target strats): {len(trades)}")
+    if not trades:
+        return
+
+    # Token time ranges
+    token_ranges: dict[str, tuple] = {}
+    for t in trades:
+        addr = t["token_address"]
+        entry = t["created_at"]
+        horizon = t.get("horizon_minutes", 240)
+        entry_dt = datetime.fromisoformat(entry.replace("Z", "+00:00"))
+        end_iso = (entry_dt + timedelta(minutes=horizon + 30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        if addr not in token_ranges:
+            token_ranges[addr] = (entry, end_iso)
+        else:
+            lo, hi = token_ranges[addr]
+            token_ranges[addr] = (min(lo, entry), max(hi, end_iso))
+
+    ticks_by_token = _fetch_ticks_for_tokens(token_ranges)
+
+    # Keep only Jupiter ticks for the smoothing sweep (production default + richest stream)
+    for addr, raw in list(ticks_by_token.items()):
+        jp = _filter_ticks_by_source(raw, "jupiter") or _filter_ticks_by_source(raw, "both")
+        if jp:
+            ticks_by_token[addr] = jp
+        else:
+            ticks_by_token.pop(addr, None)
+    print(f"Tokens with ticks: {len(ticks_by_token)}")
+
+    # Group trades by strategy
+    by_strat: dict[str, list[dict]] = defaultdict(list)
+    for t in trades:
+        if t["token_address"] in ticks_by_token:
+            by_strat[t["strategy"]].append(t)
+
+    all_rows = []
+    print()
+    print(f"{'strategy':<32s} {'mode':<14s} {'n':>4s} {'wr%':>6s} {'avg%':>7s} {'med%':>7s} {'sumPnL$':>10s}")
+    print("-" * 90)
+
+    for strat in target_strats:
+        strat_trades = by_strat.get(strat, [])
+        if not strat_trades:
+            print(f"{strat:<32s} — no trades with ticks, skipped")
+            continue
+
+        for mode in SMOOTHING_MODES:
+            pnls = []
+            pnl_usds = []
+            wins = 0
+            n = 0
+            for t in strat_trades:
+                ticks = ticks_by_token.get(t["token_address"]) or []
+                if not ticks:
+                    continue
+                fake = _build_fake_trade(t)
+                sim = _replay_with_intervals(
+                    fake, ticks,
+                    lazy_fast_sec=0, lazy_fast_window=0, lazy_slow_sec=0,
+                    smoothing=mode,
+                )
+                if sim is None:
+                    continue
+                n += 1
+                pnls.append(sim["pnl_pct"])
+                pnl_usds.append(sim.get("pnl_usd", 0))
+                if sim["pnl_pct"] > 0:
+                    wins += 1
+
+            if n == 0:
+                continue
+            wr = wins / n * 100
+            avg = statistics.mean(pnls) * 100
+            med = statistics.median(pnls) * 100
+            sum_usd = sum(pnl_usds)
+            print(f"{strat:<32s} {mode:<14s} {n:>4d} {wr:>5.1f}% {avg:>6.2f}% {med:>6.2f}% {sum_usd:>9.2f}$")
+            all_rows.append({
+                "strategy": strat, "mode": mode, "n": n,
+                "wr_pct": round(wr, 1), "avg_pnl_pct": round(avg, 2),
+                "median_pnl_pct": round(med, 2), "sum_pnl_usd": round(sum_usd, 2),
+            })
+
+    # Write CSV
+    out_path = "scraper/smoothing_sweep_results.csv"
+    try:
+        with open(out_path, "w", newline="", encoding="utf-8") as f:
+            if all_rows:
+                w = csv.DictWriter(f, fieldnames=list(all_rows[0].keys()))
+                w.writeheader()
+                w.writerows(all_rows)
+        print(f"\nWrote {out_path}")
+    except Exception as e:
+        print(f"[warn] could not write CSV: {e}")
+
+    # Highlight best per strategy
+    print("\nBest smoothing per strategy (by sum_pnl_usd):")
+    by_strat_rows: dict[str, list[dict]] = defaultdict(list)
+    for r in all_rows:
+        by_strat_rows[r["strategy"]].append(r)
+    for strat, rows in by_strat_rows.items():
+        rows.sort(key=lambda r: -r["sum_pnl_usd"])
+        top = rows[0]
+        raw = next((r for r in rows if r["mode"] == "raw"), None)
+        raw_pnl = raw["sum_pnl_usd"] if raw else 0
+        delta = top["sum_pnl_usd"] - raw_pnl
+        sign = "+" if delta >= 0 else ""
+        print(f"  {strat:<32s} {top['mode']:<14s} sum=${top['sum_pnl_usd']:>8.2f}  "
+              f"vs raw={raw_pnl:>8.2f} ({sign}{delta:.2f})")
 
 
 def _tick_based_simulation(args):
@@ -3149,6 +3418,13 @@ def main():
                         help="v132: Deduct priority fee per round-trip (default 0.0, typical Jupiter auto ~0.0005)")
     parser.add_argument("--grid-ticks", action="store_true",
                         help="Grid search DTRAIL params on tick data")
+    parser.add_argument("--smoothing-sweep", action="store_true",
+                        help="v133: Run tick sim once per smoothing mode (raw, median_3, "
+                             "median_5, winsor_p95, dual_confirm, ema_fast, ema_slow, "
+                             "hysteresis, volume_gated) on a focused list of live strategies.")
+    parser.add_argument("--smoothing-strats", type=str,
+                        default="FAST_TP50_SL30,DTRAIL10_ACT15_SL70,DTRAIL3_ACT5_SL60,DIP30_B5_T5_A20_SL70_240m",
+                        help="Comma-separated strategies to sweep in --smoothing-sweep")
     parser.add_argument("--validate-ticks", action="store_true",
                         help="Compare tick sim results vs actual paper PnL")
     parser.add_argument("--tick-csv", type=str, default=None,
@@ -3401,6 +3677,13 @@ def main():
 
         print(f"\nTotal ranked strategies: {len(ranked)}")
         return  # Skip OHLCV simulation path
+
+    # =====================================================================
+    # SMOOTHING SWEEP (v133): grade 8 decision-price smoothing modes
+    # =====================================================================
+    if getattr(args, "smoothing_sweep", False):
+        _smoothing_sweep(args)
+        return
 
     # =====================================================================
     # FROM-TICKS MODE: tick-level replay through _evaluate_trade_exit
