@@ -126,12 +126,22 @@ def _get_ultra_client():
         return None
 
 
-def get_wallet_balance() -> dict | None:
+_WALLET_BALANCE_CACHE: dict = {"ts": 0.0, "value": None}
+_WALLET_BALANCE_TTL_SEC = 10.0
+
+
+def get_wallet_balance(force_refresh: bool = False) -> dict | None:
     """
     Fetch wallet SOL + token balances via Jupiter Ultra /holdings endpoint.
     Returns {"sol_balance": float, "token_balances": {mint: {"amount": int, "ui_amount": float}}}
-    or None on failure.
+    or None on failure. Cached 10s to keep buy path fast (Jupiter holdings
+    takes ~500-1500ms).
     """
+    now = time.time()
+    if not force_refresh and _WALLET_BALANCE_CACHE["value"] is not None \
+            and (now - _WALLET_BALANCE_CACHE["ts"]) < _WALLET_BALANCE_TTL_SEC:
+        return _WALLET_BALANCE_CACHE["value"]
+
     client = _get_ultra_client()
     if not client:
         return None
@@ -190,7 +200,10 @@ def get_wallet_balance() -> dict | None:
                             "ui_amount": float(info.get("uiAmount", 0)),
                         }
 
-        return {"sol_balance": sol_balance, "token_balances": token_balances}
+        result = {"sol_balance": sol_balance, "token_balances": token_balances}
+        _WALLET_BALANCE_CACHE["ts"] = time.time()
+        _WALLET_BALANCE_CACHE["value"] = result
+        return result
     except Exception as e:
         logger.error("live_trader: holdings fetch failed: %s", e)
         return None
@@ -459,8 +472,17 @@ def _close_token_account(ca: str) -> bool:
         return False
 
 
+_SOL_PRICE_CACHE: dict = {"ts": 0.0, "value": 0.0}
+_SOL_PRICE_TTL_SEC = 5.0
+
+
 def _get_sol_price_usd() -> float:
-    """Fetch current SOL/USD price from DexScreener."""
+    """Fetch current SOL/USD price from DexScreener. Cached 5s — SOL moves
+    <1% in 5s so this is safe, and removes a ~300-800ms blocker on the
+    critical buy path."""
+    now = time.time()
+    if _SOL_PRICE_CACHE["value"] > 0 and (now - _SOL_PRICE_CACHE["ts"]) < _SOL_PRICE_TTL_SEC:
+        return _SOL_PRICE_CACHE["value"]
     try:
         resp = requests.get(
             "https://api.dexscreener.com/tokens/v1/solana/So11111111111111111111111111111111111111112",
@@ -474,6 +496,8 @@ def _get_sol_price_usd() -> float:
                 best = max(pairs, key=lambda p: float(p.get("volume", {}).get("h24", 0) or 0))
                 price = best.get("priceUsd")
                 if price:
+                    _SOL_PRICE_CACHE["ts"] = time.time()
+                    _SOL_PRICE_CACHE["value"] = float(price)
                     return float(price)
     except Exception as e:
         logger.warning("live_trader: SOL price fetch failed: %s", e)
@@ -486,6 +510,8 @@ def _get_sol_price_usd() -> float:
         if resp2.status_code == 200:
             price = resp2.json().get("solana", {}).get("usd")
             if price:
+                _SOL_PRICE_CACHE["ts"] = time.time()
+                _SOL_PRICE_CACHE["value"] = float(price)
                 return float(price)
     except Exception:
         pass
