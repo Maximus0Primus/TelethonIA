@@ -27,23 +27,43 @@ Query type:
 -- puis moyenne/p50/p95 sur msg→ds, ds→pre_buy, buy_exec
 ```
 
-## Smoothing / price_source extension (v133 sweep)
+## Stratégies post-v132 (Apr 13+, régime actuel)
 
-### À implémenter en paper d'abord (valider avant live)
-- [ ] **FAST_TP50_SL30 → DS/120s/median_5** — candidat winner post-sweep
-  - N=14, span=2j, WR=50%, avg_win=+40.2%, avg_loss=−22.7%, payoff 1.77
-  - Kelly full=21.7%, half=10.8% (trop agressif à N faible → start à 3-5%)
-  - Sizing 2j observé : $3→+$3.66, $10→+$12.19, $50→+$60.96, $100→+$121.91, $200→+$243.82
-  - **NE PAS DÉPLOYER LIVE TANT QUE N<50 en paper.**
+### Découvertes clés du sweep 2026-04-14
+- **+11pp de WR depuis Apr 13** — attribué majoritairement aux modifs code (v130-v132: source cohérence, polling per-strat, hybrid) — pas à un "régime marché" pur. Tendance graduelle avant v132 ~+2pp/sem.
+- Kelly + MC extrapolés à N<50 = overfit garanti. Traiter toute proj avec CI±5pp sur WR.
+- **Le sweep sur N=133 mélangeant shadows pré/post-v132 a produit des conclusions fausses** (notamment "désactiver DTRAIL10 et DIP30"). Post-v132 uniquement, ces strats redeviennent profitables. Ne pas désactiver avant plus de données.
 
-### Plan d'implémentation
-1. Étendre `paper_trader._decision_price` avec les 6 nouveaux modes : `median_3`, `median_5`, `winsor_p95`, `dual_confirm`, `ema_fast` (w=2), `ema_slow` (w=8), `hysteresis`, `volume_gated`. (Code testé en sim, à porter en prod + tests unitaires.)
-2. Push config DB `strategy_overrides` :
-   - FAST_TP50_SL30 → `{polling_sec: 120, price_source: ds, smoothing: median_5}` (paper-only initialement)
-   - DTRAIL3 → `{polling_sec: 120, price_source: ds, smoothing: ema_slow}` (shadow/paper)
-3. Observer 30-50 trades paper avant migration live.
-4. DTRAIL10 + DIP30 : **désactiver** (sweep confirme losing net même au best config — Kelly=0, ruin=100% MC).
-5. Re-run sweep incluant `is_shadow=true` pour avoir N>>14 sur FAST avant tuning définitif.
+### Classement top strats post-Apr 13 (N=30/strat, shadows inclus)
+
+**Profil "consistent" (WR haut, médiane positive, drawdown contenu):**
+| Rank | Strategy | avg | WR | med |
+|---|---|---|---|---|
+| 5 | **FAST_TP70_SL50** | +10.14% | **56.7%** | +8.97% |
+| 6 | TP70_SL70 | +10.06% | 50.0% | +10.84% |
+| 12 | FAST_TP100_SL50 | +8.55% | 53.3% | +8.02% |
+| **16** | **FAST_TP50_SL30 (LIVE actuel)** | **+8.42%** | 53.3% | +6.86% |
+
+**Profil "home-run" (avg élevée mais médiane négative = > 50% losers):**
+| Rank | Strategy | avg | WR | med |
+|---|---|---|---|---|
+| 1 | TP70_SL30 | +12.25% | 43.3% | **−20.30%** |
+| 2 | TP80_SL30 | +11.92% | 40.0% | −27.89% |
+| 3 | TP90_SL30 | +10.92% | 36.7% | −30.00% |
+
+→ Pas recommandés pour live : drawdown long, Kelly réel faible malgré avg.
+
+### À faire — exploration strat
+- [ ] **A/B paper FAST_TP50_SL30 (live actuel) vs FAST_TP70_SL50** — 2 semaines, allocation 50/50. FAST_TP70_SL50 a WR 56.7% vs 53.3% et +1.72pp d'edge sur N=30.
+- [ ] Re-run sweep smoothing sur **top-10 strats consistent** (pas juste les 4 actuelles) pour voir si le gain smoothing est stable inter-strats.
+- [ ] **Ne pas désactiver DTRAIL10/DIP30** — post-v132 elles redeviennent profitables (DTRAIL10 both/60s/ema_slow Kelly 5.4%, DIP30 both/60s/winsor_p95 Kelly 11.4%). Laisser tourner en paper, décision après N=100 par strat.
+- [ ] Attendre **N≥100/strat en régime actuel** avant tout tuning définitif (actuel N=30-41/strat).
+
+### Smoothing — conclusions
+- À N=133 mélangé : `raw` ≥ smoothed sur FAST (+2.03% vs +1.53%).
+- À N=30 post-v132 : `dual_confirm` > `raw` pour FAST (Kelly 17.2% vs moins), mais N trop petit pour trancher.
+- **Verdict honnête : pas de gain prouvé du smoothing. Laisser FAST en `hybrid/60s/raw` (prod actuelle) jusqu'à plus de données.**
+- [ ] Si smoothing validé plus tard : étendre `paper_trader._decision_price` avec `median_3/5, winsor_p95, dual_confirm, ema_fast/slow, hysteresis, volume_gated`.
 
 ## Repo hygiene
 - [ ] Nettoyer commit `007db6b` qui a pushé 2400+ fichiers cache (`scraper/ohlcv_cache/`, `scraper/jupiter_candles_cache/`, `grid_search_*.csv`). Options : revert + force-push, ou ajouter au `.gitignore` et laisser.
