@@ -1,9 +1,10 @@
 """Analyze shadow trade performance over last 4 days (since March 15, 2026)."""
+import os
 import requests
 from collections import defaultdict
 
-SUPABASE_URL = 'https://xbcasrywqqmnotknzbpg.supabase.co'
-SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhiY2Fzcnl3cXFtbm90a256YnBnIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3MDQxNjg5NCwiZXhwIjoyMDg1OTkyODk0fQ.W8Ziw6nfB9da9oXFRh_Z_SwGRPH5sRj-YKUwpmaHhRQ'
+SUPABASE_URL = os.environ.get('SUPABASE_URL', 'https://xbcasrywqqmnotknzbpg.supabase.co')
+SUPABASE_KEY = os.environ['SUPABASE_SERVICE_ROLE_KEY']
 
 headers = {'apikey': SUPABASE_KEY, 'Authorization': f'Bearer {SUPABASE_KEY}'}
 
