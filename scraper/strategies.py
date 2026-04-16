@@ -233,6 +233,16 @@ STRATEGIES["BE25_TP80_SL30"] = [
 ]
 SHADOW_STRATEGIES.append("BE25_TP80_SL30")
 
+# v136: BE25 A/B variant — identical exit rules, different price_source config.
+# BE25_TP80_SL30     → ema_fast (original, +$217 accumulated pnl on $1000 baseline)
+# BE25_TP80_SL30_DS  → ds/raw   (v135 sweep winner, Kelly 22% vs ~19%)
+# Both run in parallel to resolve the config preference empirically.
+STRATEGIES["BE25_TP80_SL30_DS"] = [
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.25, "label": "main"},
+]
+SHADOW_STRATEGIES.append("BE25_TP80_SL30_DS")
+
 # --- Trailing stop grid (v106) ---
 _TRAIL_STRATEGIES = {}
 for _trail_pct in [10, 15, 20, 25]:
