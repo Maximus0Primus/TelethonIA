@@ -1242,8 +1242,14 @@ def check_live_trades(client_sb) -> dict:
             except Exception:
                 pass  # Best effort — market sell proceeds regardless
 
-        # Execute sell BEFORE updating DB
-        sell_result = execute_sell(addr)
+        # v133-D: Sell only THIS strategy's tokens — hybrid allocation (FAST+DTRAIL on same
+        # token) shares one ATA. Prior code called execute_sell(addr) without amount → fell
+        # through to full wallet balance (live_trader.py:335) → drained both siblings. The
+        # winning leg showed ~2× inflated exit_price/pnl; the losing leg got auto-closed as
+        # reconciled at −100%. Passing buy_output_tokens caps each sell to that trade's share.
+        # Fallback to None (full balance) only for legacy rows missing buy_output_tokens.
+        sell_amount = int(trade.get("buy_output_tokens") or 0) or None
+        sell_result = execute_sell(addr, amount_tokens=sell_amount)
         if not sell_result["success"]:
             # v121: Revert status from 'closing' back to 'open' so next cycle retries
             # Increment sell_attempts counter for congestion tracking
@@ -1415,6 +1421,80 @@ def check_live_trades(client_sb) -> dict:
     return result_counts
 
 
+def _find_sibling_exit(client_sb, token_ca: str, exclude_trade_id, window_minutes: int = 15) -> dict | None:
+    """v133-D: Return the most recent live sibling exit for this token within `window_minutes`.
+    Used by reconcile_positions to recover pnl when a hybrid-allocation sibling drained the
+    shared ATA. Requires sell_input_tokens + sell_sol_received to compute SOL-per-token.
+    """
+    from datetime import timedelta
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=window_minutes)).isoformat()
+    try:
+        resp = (
+            client_sb.table("paper_trades")
+            .select("id, entry_price, position_usd, exit_price, exit_at, "
+                    "buy_output_tokens, sell_input_tokens, sell_output_lamports, "
+                    "sell_sol_received, sol_price_at_exit, tx_signature_exit, pnl_pct, status")
+            .eq("source", "rt_live")
+            .eq("token_address", token_ca)
+            .neq("id", exclude_trade_id)
+            .gte("exit_at", cutoff)
+            .not_.is_("tx_signature_exit", "null")
+            .order("exit_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        rows = resp.data or []
+        if not rows:
+            return None
+        s = rows[0]
+        # Need both input tokens + output SOL to derive sol-per-token.
+        if not s.get("sell_input_tokens") or not (s.get("sell_output_lamports") or s.get("sell_sol_received")):
+            return None
+        return s
+    except Exception as e:
+        logger.debug("_find_sibling_exit failed for %s: %s", token_ca[:12], e)
+        return None
+
+
+def _reconcile_close_payload(trade: dict, sibling: dict | None) -> dict:
+    """v133-D: Build DB update for a reconciled trade.
+    With sibling: derive exit_price from sibling's SOL-per-token × this trade's
+    buy_output_tokens. Without: close neutrally (pnl=0) rather than hardcoding -100%,
+    which was poisoning aggregate paper-vs-live analytics.
+    """
+    now_iso = datetime.now(timezone.utc).isoformat()
+    base = {"status": "reconciled", "exit_at": now_iso}
+    entry_price = float(trade.get("entry_price") or 0)
+    pos_usd = float(trade.get("position_usd") or 0)
+    our_tokens = int(trade.get("buy_output_tokens") or 0)
+
+    if sibling and entry_price > 0 and pos_usd > 0 and our_tokens > 0:
+        sibling_tokens = int(sibling.get("sell_input_tokens") or 0)
+        sibling_sol = float(sibling.get("sell_sol_received") or 0)
+        if not sibling_sol and sibling.get("sell_output_lamports"):
+            sibling_sol = float(sibling["sell_output_lamports"]) / LAMPORTS_PER_SOL
+        sol_price = float(sibling.get("sol_price_at_exit") or 0) or _get_sol_price_usd()
+        if sibling_tokens > 0 and sibling_sol > 0 and sol_price > 0:
+            sol_per_token = sibling_sol / sibling_tokens
+            our_sol = our_tokens * sol_per_token
+            our_usd = our_sol * sol_price
+            exit_price = entry_price * (our_usd / pos_usd)
+            pnl_pct = round((exit_price / entry_price) - 1, 4)
+            pnl_usd = round(pos_usd * pnl_pct, 2)
+            base.update({
+                "exit_price": exit_price,
+                "pnl_pct": pnl_pct,
+                "pnl_usd": pnl_usd,
+                "sell_sol_received": round(our_sol, 6),
+                "sol_price_at_exit": sol_price,
+            })
+            return base
+
+    # Fallback: no sibling or missing data. Close neutral rather than phantom -100%.
+    base.update({"pnl_pct": 0.0, "pnl_usd": 0.0})
+    return base
+
+
 def reconcile_positions(client_sb) -> dict:
     """
     v74: Verify on-chain token balances match DB open positions.
@@ -1430,9 +1510,11 @@ def reconcile_positions(client_sb) -> dict:
 
     try:
         # v121: Also check 'closing' trades (sell may have succeeded but DB update crashed)
+        # v133-D: Include buy_output_tokens to detect sibling-sold case.
         resp = (
             client_sb.table("paper_trades")
-            .select("id, symbol, token_address, entry_price, position_usd, created_at, status")
+            .select("id, symbol, token_address, entry_price, position_usd, "
+                    "buy_output_tokens, created_at, status")
             .in_("status", ["open", "closing"])
             .eq("source", "rt_live")
             .execute()
@@ -1451,28 +1533,40 @@ def reconcile_positions(client_sb) -> dict:
             continue
 
         if ca not in on_chain_mints:
-            # DB says open, but no on-chain balance → position was sold externally or failed
+            # DB says open, but no on-chain balance → possibilities:
+            # (1) sibling strategy already sold the shared ATA (hybrid allocation pre-v133-D),
+            # (2) user sold manually, (3) rug/freeze, (4) genuine failure.
+            # v133-D: try to find a sibling exit that explains (1) before booking a phantom -100%.
             result["mismatches"] += 1
+            sibling = _find_sibling_exit(client_sb, ca, trade["id"])
+            update_row = _reconcile_close_payload(trade, sibling)
+            issue = "db_open_but_no_balance_via_sibling" if sibling else "db_open_but_no_balance"
             detail = {
                 "id": trade["id"],
                 "symbol": trade["symbol"],
                 "ca": ca,
-                "issue": "db_open_but_no_balance",
+                "issue": issue,
+                "pnl_pct": update_row.get("pnl_pct"),
+                "pnl_usd": update_row.get("pnl_usd"),
             }
             result["details"].append(detail)
-            logger.warning(
-                "RECONCILE MISMATCH: %s (%s) open in DB but 0 on-chain balance. "
-                "Auto-closing as 'reconciled'.",
-                trade["symbol"], ca[:12],
-            )
-            # Auto-close as reconciled — we can't sell what we don't have
+            if sibling:
+                logger.warning(
+                    "RECONCILE SIBLING: %s (%s) drained by prior sell tx=%s — closing at "
+                    "pnl=%.2f%% (%.2f$) from sibling's realized SOL-per-token.",
+                    trade["symbol"], ca[:12],
+                    (sibling.get("tx_signature_exit") or "")[:16],
+                    (update_row.get("pnl_pct") or 0) * 100,
+                    update_row.get("pnl_usd") or 0,
+                )
+            else:
+                logger.warning(
+                    "RECONCILE MISMATCH: %s (%s) open in DB but 0 on-chain balance and no "
+                    "sibling exit found — closing neutral (pnl=0) for manual investigation.",
+                    trade["symbol"], ca[:12],
+                )
             try:
-                client_sb.table("paper_trades").update({
-                    "status": "reconciled",
-                    "exit_at": datetime.now(timezone.utc).isoformat(),
-                    "pnl_pct": -1.0,  # Assume total loss
-                    "pnl_usd": -float(trade.get("position_usd") or 0),
-                }).eq("id", trade["id"]).execute()
+                client_sb.table("paper_trades").update(update_row).eq("id", trade["id"]).execute()
                 result["auto_closed"] += 1
             except Exception as e:
                 logger.error("reconcile: failed to close trade %s: %s", trade["id"], e)
