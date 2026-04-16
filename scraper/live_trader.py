@@ -1568,6 +1568,18 @@ def reconcile_positions(client_sb) -> dict:
             try:
                 client_sb.table("paper_trades").update(update_row).eq("id", trade["id"]).execute()
                 result["auto_closed"] += 1
+                # v136.2: update rt_bankroll on auto-close to keep ledger coherent.
+                # Prior behavior: reconcile closed trades silently without touching bankroll
+                # → total_pnl drifted from paper_trades ground truth by the reconciled amount.
+                try:
+                    from safe_scraper import _rt_update_bankroll
+                    _rt_update_bankroll(
+                        float(update_row.get("pnl_usd") or 0),
+                        1,
+                        strategy="",  # live path doesn't touch strategy_bankrolls
+                    )
+                except Exception as be:
+                    logger.debug("reconcile: bankroll update failed for %s: %s", trade["id"], be)
             except Exception as e:
                 logger.error("reconcile: failed to close trade %s: %s", trade["id"], e)
 
