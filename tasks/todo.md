@@ -122,6 +122,29 @@ Si `high_price_seen >= tp_price` mais exit fires sur timeout/SL/trail, exit rét
 **Trading :** Paper slip dynamic, live Jupiter Ultra RFQ ~10bps, position reconciliation sibling-aware (v133-D), loss limit 0.5 SOL/jour.
 **Alerting :** ML disabled, RT listener uncapped, GH Actions failures, daily summary 8am UTC.
 
+## Workflow sweep (v140 unified in sim.py)
+
+**Mega sweep full matrix** (strategies × filters × sources × smoothings × polling) :
+```
+python scraper/sim.py --mega-sweep
+# optional flags:
+#   --mega-workers N  (default min(12, cpu-2))
+#   --mega-csv-out PATH
+#   --mega-since YYYY-MM-DDTHH:MM:SSZ  (default: post-v132)
+```
+~134K configs, ~30-45 min avec 12 workers. Utilise `_evaluate_trade_exit` avec v138.5 slip.
+
+**Focused sweep** (single config grid) :
+```
+python scraper/sim.py --from-ticks --since 2026-04-13 --top 30
+```
+
+**Ground truth** (real PnL) :
+```
+python scraper/sim.py --from-trades --since 2026-04-13
+python scraper/sim.py --from-eval-history --since 2026-04-17  # 0% bias (v138 trades)
+```
+
 ## Historique récent (sessions Apr 17)
 
 - **v140** ✅ Full mega sweep 136K configs, 12 workers, 22min. Découverte `hysteresis+lazy` domine top 10. 8 nouvelles strats ajoutées + bankroll reset 18×$1000=$18K. `_BE_RE` regex relaxé pour accepter suffixes (_HYST/_NZ/_S30).

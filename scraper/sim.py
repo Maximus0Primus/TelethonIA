@@ -3913,6 +3913,374 @@ def _tick_based_simulation(args):
     print(f"Tick sim complete. {len(sim_results)} trades simulated, {skipped} skipped.")
 
 
+# ---------------------------------------------------------------------------
+# v140: MEGA SWEEP — strategies × filters × sources × smoothings × polling.
+# Uses multiprocessing to scale 134K configs in ~30-45min.
+# Per-worker loads ticks from temp JSON file, runs _evaluate_trade_exit
+# with v138.5-calibrated dynamic slippage.
+# ---------------------------------------------------------------------------
+_MEGA_TOP_KOLS = {"FrenzGems", "jadendegens", "gubbinscalls", "Archerrgambles",
+                  "ChadleyGambles123", "zcallz"}
+
+# NEW v139/v140 strategy variants beyond STRATEGIES dict (TP200/TP300/TP500)
+_MEGA_NEW_STRATS = {
+    "TP150_SL40_2H":      (2.50, 0.60, 120, None),
+    "TP150_SL40_4H":      (2.50, 0.60, 240, None),
+    "TP200_SL30_2H":      (3.00, 0.70, 120, None),
+    "TP200_SL30_4H":      (3.00, 0.70, 240, None),
+    "TP200_SL40_2H":      (3.00, 0.60, 120, None),
+    "TP200_SL40_4H_v":    (3.00, 0.60, 240, None),
+    "TP200_SL50_4H":      (3.00, 0.50, 240, None),
+    "TP300_SL40_4H":      (4.00, 0.60, 240, None),
+    "TP300_SL50_4H":      (4.00, 0.50, 240, None),
+    "TP500_SL50_4H":      (6.00, 0.50, 240, None),
+    "FAST_TP200_SL40":    (3.00, 0.60, 60,  None),
+    "BE15_TP200_SL40_4H": (3.00, 0.60, 240, 0.15),
+    "BE25_TP200_SL40_4H": (3.00, 0.60, 240, 0.25),
+    "BE50_TP200_SL30_4H": (3.00, 0.70, 240, 0.50),
+    "BE15_TP300_SL50_4H": (4.00, 0.50, 240, 0.15),
+}
+
+_MEGA_SOURCES = ["jupiter", "dexscreener"]
+_MEGA_SMOOTHINGS = ["raw", "ema_fast", "ema_slow", "median_3", "median_5",
+                    "winsor_p95", "dual_confirm", "hysteresis"]
+_MEGA_POLLING_MODES = ["fast", "static_60", "static_120", "static_240", "lazy"]
+_MEGA_FILTERS = ["NONE", "NOZEROLIQ", "SCORE30", "SCORE40", "MCAP_MID",
+                 "TOPKOL", "NOZEROLIQ_SCORE30"]
+
+_MEGA_LOOP_SEC = 30
+_MEGA_LAZY_FAST_SEC = 180
+_MEGA_LAZY_FAST_WINDOW = 300
+_MEGA_LAZY_SLOW_SEC = 600
+
+# Worker-global ticks cache (loaded by _mega_init_worker from JSON)
+_MEGA_TICKS = None
+
+
+def _mega_init_worker(ticks_path):
+    """multiprocessing initializer — loads ticks JSON once per worker process."""
+    import json
+    global _MEGA_TICKS
+    with open(ticks_path) as f:
+        _MEGA_TICKS = json.load(f)
+
+
+def _mega_poll_offsets(polling_mode, horizon_sec):
+    LOOP = _MEGA_LOOP_SEC
+    if polling_mode == "fast":
+        return list(range(LOOP, horizon_sec + 1, LOOP))
+    if polling_mode.startswith("static_"):
+        poll_sec = int(polling_mode.split("_")[1])
+        out, last, t = [], -10**9, LOOP
+        while t <= horizon_sec:
+            if (t - last) >= poll_sec:
+                out.append(t); last = t
+            t += LOOP
+        return out
+    if polling_mode == "lazy":
+        out, last, t = [], -10**9, LOOP
+        while t <= horizon_sec:
+            interval = _MEGA_LAZY_FAST_SEC if t < _MEGA_LAZY_FAST_WINDOW else _MEGA_LAZY_SLOW_SEC
+            if (t - last) >= interval:
+                out.append(t); last = t
+            t += LOOP
+        return out
+    return []
+
+
+class _MegaSmState:
+    __slots__ = ("ema", "hist", "prev_p", "armed_sl", "armed_tp")
+    def __init__(self):
+        self.ema = None; self.hist = []; self.prev_p = None
+        self.armed_sl = True; self.armed_tp = True
+
+
+def _mega_smooth(st, p, mode, sl_price, tp_price):
+    if mode == "raw": return p
+    if mode == "ema_fast":
+        a = 2/3
+        st.ema = p if st.ema is None else a*p + (1-a)*st.ema
+        return st.ema
+    if mode == "ema_slow":
+        a = 2/9
+        st.ema = p if st.ema is None else a*p + (1-a)*st.ema
+        return st.ema
+    if mode == "median_3":
+        st.hist.append(p)
+        if len(st.hist) > 3: st.hist.pop(0)
+        return sorted(st.hist)[len(st.hist)//2] if len(st.hist) >= 3 else p
+    if mode == "median_5":
+        st.hist.append(p)
+        if len(st.hist) > 5: st.hist.pop(0)
+        return sorted(st.hist)[len(st.hist)//2] if len(st.hist) >= 5 else p
+    if mode == "winsor_p95":
+        if st.prev_p is None: st.prev_p = p; return p
+        cap = st.prev_p * 0.18
+        delta = p - st.prev_p
+        out = st.prev_p + max(-cap, min(cap, delta))
+        st.prev_p = out; return out
+    if mode == "dual_confirm":
+        if st.prev_p is None: st.prev_p = p; return p
+        prev = st.prev_p; st.prev_p = p
+        if sl_price and p <= sl_price and prev > sl_price: return prev
+        if tp_price and p >= tp_price and prev < tp_price: return prev
+        return p
+    if mode == "hysteresis":
+        if not st.armed_sl and sl_price and p >= sl_price * 1.02: st.armed_sl = True
+        elif st.armed_sl and sl_price and p <= sl_price: st.armed_sl = False
+        if not st.armed_tp and tp_price and p <= tp_price * 0.98: st.armed_tp = True
+        elif st.armed_tp and tp_price and p >= tp_price: st.armed_tp = False
+        if not st.armed_sl and sl_price and p <= sl_price: return sl_price * 1.001
+        if not st.armed_tp and tp_price and p >= tp_price: return tp_price * 0.999
+        return p
+    return p
+
+
+def _mega_latest_at_or_before(sorted_ticks, t_iso):
+    last = None
+    for tk in sorted_ticks:
+        if tk["fetched_at"] <= t_iso:
+            p = float(tk["price_usd"])
+            if p > 0: last = p
+        else: break
+    return last
+
+
+def _mega_apply_filter(u, fname):
+    if fname == "NONE": return True
+    if fname == "NOZEROLIQ": return (u.get("rt_liquidity_usd") or 0) > 0
+    if fname == "SCORE30": return (u.get("rt_score") or 0) >= 30
+    if fname == "SCORE40": return (u.get("rt_score") or 0) >= 40
+    if fname == "MCAP_MID": return 30_000 <= (u.get("entry_mcap") or 0) <= 500_000
+    if fname == "TOPKOL": return (u.get("kol_group") or "") in _MEGA_TOP_KOLS
+    if fname == "NOZEROLIQ_SCORE30":
+        return (u.get("rt_liquidity_usd") or 0) > 0 and (u.get("rt_score") or 0) >= 30
+    return True
+
+
+_MEGA_SELL_SLIP_BASE = 1 - 10/10_000
+
+
+def _mega_replay_one(tp_mult, sl_mult, horizon_min, be_act,
+                    jp_sorted, ds_sorted, entry_price, entry_time_iso,
+                    source, smoothing, polling_mode, rt_liq_usd):
+    from paper_trader import _evaluate_trade_exit, _last_eval_ts
+    entry_time = datetime.fromisoformat(entry_time_iso.replace("Z", "+00:00"))
+    trade_id = f"mega_{id(jp_sorted)}"
+    _last_eval_ts.pop(trade_id, None)
+    horizon_sec = horizon_min * 60
+    poll_offsets = _mega_poll_offsets(polling_mode, horizon_sec)
+    if not poll_offsets: return None
+    sl_price = entry_price * sl_mult
+    tp_price = entry_price * tp_mult if tp_mult else None
+    fake_trade = {
+        "id": trade_id, "entry_price": entry_price,
+        "sl_price": sl_price, "tp_price": tp_price,
+        "position_usd": 10.0,
+        "strategy": f"BE{int(be_act*100)}_TP80_SL30" if be_act else "TP80_SL30",
+        "tranche_label": "main", "horizon_minutes": horizon_min,
+        "created_at": entry_time_iso,
+        "high_price_seen": entry_price,
+        "rt_liquidity_usd": rt_liq_usd,
+        "dex_spot_price_at_entry": entry_price,
+    }
+    st = _MegaSmState()
+    last_exec = None
+    for offset in poll_offsets:
+        poll_time = entry_time + timedelta(seconds=offset)
+        poll_iso = poll_time.isoformat().replace("+00:00", "Z")
+        jp = _mega_latest_at_or_before(jp_sorted, poll_iso)
+        ds = _mega_latest_at_or_before(ds_sorted, poll_iso)
+        if source == "jupiter":
+            base = jp; exec_p = jp
+        else:
+            base = ds; exec_p = jp if jp is not None else ds
+        if base is None or exec_p is None: continue
+        last_exec = exec_p
+        dec_p = _mega_smooth(st, base, smoothing, sl_price, tp_price)
+        ev = _evaluate_trade_exit(fake_trade, exec_p, poll_time, _MEGA_SELL_SLIP_BASE,
+                                  sell_fee_bps=0, decision_price=dec_p)
+        if ev is None: continue
+        if ev.get("high_price_seen") is not None:
+            h = ev["high_price_seen"]
+            if h > float(fake_trade.get("high_price_seen") or 0):
+                fake_trade["high_price_seen"] = h
+        if "status" in ev and ev["status"]:
+            return ev.get("pnl_pct", 0)
+    if last_exec is None: return None
+    return round((last_exec / entry_price) - 1, 4) if entry_price else 0
+
+
+def _mega_process_config(args):
+    import numpy as np
+    (strat_name, tp_mult, sl_mult, horizon_min, be_act,
+     fname, source, smoothing, polling_mode, universe) = args
+    pnls = []
+    for u in universe:
+        if not _mega_apply_filter(u, fname): continue
+        addr = u["token_address"]
+        td = _MEGA_TICKS.get(addr)
+        if not td: continue
+        entry_ts = datetime.fromisoformat(u["created_at"].replace("Z", "+00:00"))
+        t_end = (entry_ts + timedelta(minutes=horizon_min)).isoformat().replace("+00:00", "Z")
+        jp = [t for t in td["jp"] if u["created_at"] <= t["fetched_at"] <= t_end]
+        ds = [t for t in td["ds"] if u["created_at"] <= t["fetched_at"] <= t_end]
+        if len(jp) < 3 and len(ds) < 3: continue
+        pnl = _mega_replay_one(tp_mult, sl_mult, horizon_min, be_act,
+                              jp, ds, float(u["entry_price"]), u["created_at"],
+                              source, smoothing, polling_mode,
+                              u.get("rt_liquidity_usd"))
+        if pnl is not None: pnls.append(pnl)
+    n = len(pnls)
+    if n < 10: return None
+    arr = np.array(pnls)
+    wr = float((arr > 0).mean()) * 100
+    avg = float(arr.mean()) * 100
+    med = float(np.median(arr)) * 100
+    std = float(arr.std(ddof=1)) * 100 if n > 1 else 0
+    sharpe = (avg / std) if std > 0 else 0
+    eq = np.cumprod(1 + arr)
+    peaks = np.maximum.accumulate(eq)
+    dd = float(((eq - peaks) / peaks).min()) * 100
+    n_pass = sum(1 for u in universe if _mega_apply_filter(u, fname))
+    trade_rate = n_pass / max(1, len(universe)) * 18
+    dollars_day = 50 * (avg / 100) * trade_rate
+    return {
+        "strategy": strat_name, "filter": fname, "source": source,
+        "smoothing": smoothing, "polling_mode": polling_mode,
+        "n_pass": n_pass, "n": n, "wr_pct": round(wr, 2),
+        "avg_pnl_pct": round(avg, 3), "median_pnl_pct": round(med, 3),
+        "sharpe": round(sharpe, 4), "max_dd_pct": round(dd, 2),
+        "dollars_per_day": round(dollars_day, 2), "horizon_min": horizon_min,
+    }
+
+
+def _mega_sweep_run(args):
+    """v140: full mega sweep entry point. Multiprocessing grid sweep."""
+    import multiprocessing as mp
+    import json as _json
+    import time as _time
+    import pandas as pd
+    import re as _re
+
+    csv_out = args.mega_csv_out or os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "_mega_sweep_full.csv")
+    n_workers = args.mega_workers or min(12, mp.cpu_count() - 2)
+    since = args.mega_since
+
+    print(f"\n{'#'*90}\n# v140 MEGA SWEEP {datetime.now().isoformat()[:19]}\n{'#'*90}\n")
+    t0 = _time.time()
+
+    from strategies import STRATEGIES as _STRATS
+    full_pool = {}
+    for name, tranches in _STRATS.items():
+        tr0 = tranches[0]
+        tp = tr0.get("tp_mult")
+        sl = tr0.get("sl_mult", 0.50)
+        h = tr0.get("horizon_min", 120) or 120
+        be_m = _re.match(r"^BE(\d+)_TP", name)
+        be_act = int(be_m.group(1)) / 100 if be_m else None
+        full_pool[name] = (tp, sl, h, be_act)
+    full_pool.update(_MEGA_NEW_STRATS)
+    print(f"Strategies: {len(full_pool)} (incl. {len(_MEGA_NEW_STRATS)} new TP200+ variants)")
+
+    rows = []; off = 0
+    while True:
+        params = [
+            ("select", "id,token_address,created_at,entry_price,rt_liquidity_usd,"
+                       "rt_score,kol_group,entry_mcap"),
+            ("source", "eq.rt"),
+            ("created_at", f"gte.{since}"),
+            ("order", "created_at"),
+        ]
+        r = sb_get("paper_trades", params, range_lo=off, range_hi=off+999)
+        if not r: break
+        rows.extend(r)
+        if len(r) < 1000: break
+        off += 1000
+    by_token = {}
+    for r in rows:
+        if r["token_address"] not in by_token:
+            by_token[r["token_address"]] = r
+    universe = list(by_token.values())
+    print(f"Universe: {len(universe)} unique tokens since {since}")
+
+    print("Fetching ticks...")
+    ticks = {}
+    end = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    start = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat()
+    for i, u in enumerate(universe):
+        addr = u["token_address"]
+        params = [
+            ("select", "price_usd,fetched_at,source"),
+            ("token_address", f"eq.{addr}"),
+            ("fetched_at", f"gte.{start}"),
+            ("fetched_at", f"lte.{end}"),
+            ("order", "fetched_at"),
+        ]
+        rs = sb_get("price_ticks", params)
+        if rs:
+            jp = sorted([t for t in rs if t["source"] == "jupiter"], key=lambda t: t["fetched_at"])
+            ds = sorted([t for t in rs if t["source"] in ("fast", "full", "live")], key=lambda t: t["fetched_at"])
+            ticks[addr] = {"jp": jp, "ds": ds}
+        if (i+1) % 20 == 0: print(f"  {i+1}/{len(universe)}", flush=True)
+    print(f"  {len(ticks)} with ticks ({_time.time()-t0:.0f}s)")
+
+    ticks_path = os.path.join(os.path.dirname(csv_out), "_mega_ticks_tmp.json")
+    with open(ticks_path, "w") as f:
+        _json.dump(ticks, f)
+    print(f"  ticks JSON: {ticks_path} ({os.path.getsize(ticks_path)/1e6:.1f} MB)")
+
+    jobs = []
+    for strat_name, (tp, sl, h, be) in full_pool.items():
+        for fname in _MEGA_FILTERS:
+            for src in _MEGA_SOURCES:
+                for smooth in _MEGA_SMOOTHINGS:
+                    for poll in _MEGA_POLLING_MODES:
+                        jobs.append((strat_name, tp, sl, h, be, fname, src, smooth, poll, universe))
+    total = len(jobs)
+    print(f"\nTotal configs: {total}")
+    print(f"Launching {n_workers} workers...\n")
+    results = []
+    t_start = _time.time()
+    with mp.Pool(n_workers, initializer=_mega_init_worker, initargs=(ticks_path,)) as pool:
+        for i, r in enumerate(pool.imap_unordered(_mega_process_config, jobs, chunksize=50)):
+            if r is not None: results.append(r)
+            if (i+1) % 2000 == 0:
+                pct = 100 * (i+1) / total
+                el = _time.time() - t_start
+                eta = el / (i+1) * (total - i - 1)
+                print(f"  {i+1}/{total} ({pct:.1f}%) in {el:.0f}s, ETA {eta:.0f}s", flush=True)
+
+    try: os.remove(ticks_path)
+    except Exception: pass
+
+    df = pd.DataFrame(results)
+    df.to_csv(csv_out, index=False)
+    print(f"\n{len(df)} valid rows / {total} configs → {csv_out}")
+    print(f"Total time: {_time.time()-t0:.0f}s")
+
+    df = df.sort_values("dollars_per_day", ascending=False)
+    print("\n" + "=" * 120)
+    print("TOP 40 BY $/DAY")
+    print("=" * 120)
+    print(df.head(40)[["strategy","filter","source","smoothing","polling_mode",
+                       "n","wr_pct","avg_pnl_pct","median_pnl_pct","dollars_per_day"]].to_string(index=False))
+    print("\n" + "=" * 120)
+    print("BEST PER STRATEGY (any filter) — top 30")
+    print("=" * 120)
+    bs = df.drop_duplicates(subset=["strategy"], keep="first").head(30)
+    print(bs[["strategy","filter","source","smoothing","polling_mode",
+              "n","avg_pnl_pct","dollars_per_day"]].to_string(index=False))
+    print("\n" + "=" * 120)
+    print("BEST PER FILTER")
+    print("=" * 120)
+    bf = df.drop_duplicates(subset=["filter"], keep="first")
+    print(bf[["filter","strategy","source","smoothing","polling_mode",
+              "n","avg_pnl_pct","dollars_per_day"]].to_string(index=False))
+    print("\nDONE.")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Unified strategy simulator")
     parser.add_argument("--dry-run", action="store_true")
@@ -4005,6 +4373,16 @@ def main():
                         help="Force OHLCV mode even when tick data is available")
     parser.add_argument("--divergence-report", action="store_true",
                         help="Show paper vs live exit price divergence summary from recent trades")
+    # v140: full mega sweep — strategies × filters × sources × smoothings × polling
+    parser.add_argument("--mega-sweep", action="store_true",
+                        help="v140: Full mega sweep — all STRATEGIES + new TP200 variants × 7 filters × "
+                             "2 sources × 8 smoothings × 5 polling modes. Multiprocessing. ~30-45min.")
+    parser.add_argument("--mega-workers", type=int, default=0,
+                        help="Workers for --mega-sweep (default: min(12, cpu_count-2))")
+    parser.add_argument("--mega-csv-out", type=str, default=None,
+                        help="Output CSV for --mega-sweep (default: scraper/_mega_sweep_full.csv)")
+    parser.add_argument("--mega-since", type=str, default="2026-04-13T20:00:00Z",
+                        help="Universe cutoff for --mega-sweep (default: post-v132)")
     args = parser.parse_args()
 
     global FLAT_POS_SIZE, USE_UNIFIED_SIM
@@ -4250,6 +4628,14 @@ def main():
     # =====================================================================
     if getattr(args, "smoothing_sweep", False):
         _smoothing_sweep(args)
+        return
+
+    # =====================================================================
+    # MEGA SWEEP (v140): full strategies × filters × sources × smoothings × polling
+    # multiprocessing grid sweep. Uses _evaluate_trade_exit (v138.5 slip).
+    # =====================================================================
+    if getattr(args, "mega_sweep", False):
+        _mega_sweep_run(args)
         return
 
     # =====================================================================
@@ -5056,4 +5442,7 @@ def main():
 
 
 if __name__ == "__main__":
+    # v140: needed for multiprocessing on Windows (--mega-sweep mode)
+    import multiprocessing as _mp
+    _mp.freeze_support()
     main()
