@@ -1202,6 +1202,12 @@ def _rt_compute_score(kol_username: str, ca: str, kol_info: dict,
     """
     Compute RT score (0-100). Drives position sizing, NOT entry/exit.
     4 components: KOL quality, token safety, momentum, confirmation.
+
+    v141: additive bonuses data-driven (backfill audit on N=74 closed trades):
+      +8 if 0.3h < age < 1.3h (sweet spot: Q2/Q3 age = +18% avg; <0.3h = -18% rug)
+      +8 if bsr > 0.7 (strong buy pressure: Q4 bsr = +17.87% avg)
+      -5 if liq = 0 (pump.fun pre-grad toxic: measured -$19.82/jour drag)
+    Measured corr +0.207 → +0.236 (+14%). Filter≥30 avg +12.45% → +19.01% (+53%).
     """
     weights = config.get("score_weights", {
         "kol_quality": 0.35, "token_safety": 0.30,
@@ -1219,6 +1225,18 @@ def _rt_compute_score(kol_username: str, ca: str, kol_info: dict,
     w_confirm = float(weights.get("confirmation", 0.15))
 
     rt_score = kol_q * w_kol + safety * w_safety + momentum * w_momentum + confirmation * w_confirm
+
+    # v141 additive bonuses — data-driven, tested via _rt_score_v2_audit.py
+    age_h = float(token_info.get("token_age_hours") or 0)
+    bsr = float(token_info.get("buy_sell_ratio") or 0.5)
+    liq = float(token_info.get("liquidity_usd") or 0)
+    if 0.3 < age_h < 1.3:
+        rt_score += 8  # sweet spot: fresh but past rug window
+    if bsr > 0.7:
+        rt_score += 8  # strong buy pressure
+    if liq <= 0:
+        rt_score -= 5  # pump.fun pre-grad penalty
+
     return round(max(0, min(100, rt_score)), 1)
 
 
