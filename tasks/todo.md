@@ -122,28 +122,32 @@ Si `high_price_seen >= tp_price` mais exit fires sur timeout/SL/trail, exit rét
 **Trading :** Paper slip dynamic, live Jupiter Ultra RFQ ~10bps, position reconciliation sibling-aware (v133-D), loss limit 0.5 SOL/jour.
 **Alerting :** ML disabled, RT listener uncapped, GH Actions failures, daily summary 8am UTC.
 
-## Workflow sweep (v140 unified in sim.py)
+## Workflow sim (v140 unifié dans sim.py)
 
-**Mega sweep full matrix** (strategies × filters × sources × smoothings × polling) :
-```
-python scraper/sim.py --mega-sweep
-# optional flags:
-#   --mega-workers N  (default min(12, cpu-2))
-#   --mega-csv-out PATH
-#   --mega-since YYYY-MM-DDTHH:MM:SSZ  (default: post-v132)
-```
-~134K configs, ~30-45 min avec 12 workers. Utilise `_evaluate_trade_exit` avec v138.5 slip.
+| Mode | Flag | Use case |
+|---|---|---|
+| Grid focused | `--from-ticks` | Ranking rapide par strategy |
+| Ground truth | `--from-trades` | Vérité terrain historique |
+| 0% bias | `--from-eval-history` | Perfect replay post-v138 |
+| **Mega sweep** | `--mega-sweep` | **Full matrix 134K configs** |
 
-**Focused sweep** (single config grid) :
-```
+**Commandes :**
+```bash
+# Ranking rapide
 python scraper/sim.py --from-ticks --since 2026-04-13 --top 30
+
+# Vérité terrain
+python scraper/sim.py --from-trades --since 2026-04-13
+
+# 0% biais mathématique (trades post-v138 uniquement)
+python scraper/sim.py --from-eval-history --since 2026-04-17
+
+# Full matrix (134K configs, ~30-45 min, 12 workers)
+python scraper/sim.py --mega-sweep
+#   flags optionnels : --mega-workers N, --mega-csv-out PATH, --mega-since ISO
 ```
 
-**Ground truth** (real PnL) :
-```
-python scraper/sim.py --from-trades --since 2026-04-13
-python scraper/sim.py --from-eval-history --since 2026-04-17  # 0% bias (v138 trades)
-```
+Mega sweep utilise `_evaluate_trade_exit` avec slip v138.5 calibré (sl_hit 435bps, trail 250bps, tp +300bps positif).
 
 ## Historique récent (sessions Apr 17)
 
