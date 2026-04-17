@@ -84,6 +84,33 @@ Seul dip : ≥40 bucket dilué par les bonuses qui gonflent certains mid-scores 
   
   **Orthogonal à la question bonding** : Trigger V2 fixerait (A) polling lag sur liq >$25K non-bonding, mais ne résout pas (B) slippage exec ni les bondings (hors graphe Jupiter). À avancer en parallèle du recueil de data liq buckets.
 
+## 🔬 Audit divergences sim/paper/live (Apr 17 16:00-20:00 UTC) — à confirmer avec N plus grand
+
+Window : 4h post-deploy 18 strats. N(live closed)=10, N(paper closed)=68, N(shadow)=1091. Snapshot pré-v141 pour la plupart. **Ne pas agir sur ces findings avant N≥30 par strat / N≥15 par liq_bucket**.
+
+### 🔴 Problèmes actionnables (confirmés sur N=10 mais N trop faible)
+
+- [ ] **P1 — Inversion TP/SL paper vs live sur même token/strat**. $ELONMUSK BE15_TP100_SL50 : live=tp_hit +2.07%, paper=sl_hit −0.08% (inversion totale). Entry_price paper=2.514e-5 vs live=2.635e-5 (−4.58%). 1/10 paires live+paper divergent sur le status. → paper et live voient des séquences de prix différentes. **Data need** : 20+ paires live+paper post-v141 pour confirmer taux d'inversion. **Fix possible** : shadow-sync paper reuses live's entry_price (décision v130-v131 deferred, à remettre sur la table).
+- [ ] **P3 — Slippage live très au-dessus du modèle sim 10 bps**. Live buy_slip mean **+805 bps** (med 141, max **+3240 bps = 32%** sur $ELONMUSK). Par bucket : bonding buy_slip **+1165 bps**, liq >$50K −188 bps ✅. Sim paper assume 10 bps partout → modèle faux pour bondings. **Paper ne store aucun slippage** (`buy/sell_slippage_bps` NULL sur 72 paper trades). **Data need** : N≥30 live par liq_bucket pour calibrer une fonction slippage par bucket. **Fix possible** : recalibrer `_dynamic_sell_slip_factor` avec tables par liq_bucket.
+- [ ] **P4 — Entry_price paper vs live diverge ±9% même token**. $DRAGON BE15 +8.99%, $QUACK BE25 −7.73%. Gap 4-27s entre les 2 inserts → 2 fetch DexScreener indépendants, prix bouge 5-10% en 10s sur bonding. **Cause racine** : double pipeline entry (live + paper) non-synchronisés. **Data need** : confirmer sur 20+ paires. **Fix possible** : shadow-sync (même fix que P1).
+
+### 🟠 Suspects (à retester avec plus de data)
+
+- [ ] **S1 — Top 4 HYST du sweep v140 perdent toutes en réel**. Sur N=4 par strat : FAST_TP100_SL20_HYST $25 sim → **−$43 réel** (ratio −1.7), idem FAST_TP80_SL25_HYST −2.0, BE25_TP80_SL30_HYST −1.8, FAST_TP50_SL30_HYST −2.1. **Pendant ce temps FAST_TP40_SL30 sim $8 → +$173 réel (ratio +21) 🎯**. N=4 trop faible → shot noise ou sim biais hysteresis. **Data need** : N≥15 par strat HYST (~4-7 jours). Si ratio reste <0 → hysteresis smoothing sauve le sim mais pas la réalité, revenir à vanilla.
+- [ ] **S3 — `exit_price` live ≠ vrai prix de vente**. Gap `pnl_pct` vs `(exit_price/entry − 1)` jusqu'à −205% sur $ELONMUSK tp_hit, +60% sur $DFV sl_hit. `exit_price` stocké = dernier tick DS observé, pas le net Jupiter sell. **Impact** : reconstitution naïve de PnL via `exit_price` fausse, analyses post-hoc unreliables. **Data need** : aucune, c'est un bug structurel. **Fix possible** : soit `exit_price` = vrai net de vente (sell_sol_received × sol_price / token_amount), soit renommer en `last_observed_price_at_exit` et ajouter une colonne `exit_price_net`. Corréler `pnl_usd / position_usd` vs raw_return stored pour valider.
+- [ ] **S4 — Bankroll +$117 réel, pas +$722 comme noté**. Peak $18,722 = instantané à un moment donné. Net Apr 17 16:00 → 20:00 = `current_balance $18,117 − $18,000 = +$117`. Somme paper closed +$120.64 + live closed +$1.31 = $121.95 (cohérent avec $117 à $4 près). **Action** : nettoyer la section "Current state" du todo pour ne plus mentionner $722 (trompeur), remplacer par net actuel.
+- [ ] **S5 — Bondings gagnent, high-liq perdent (contre-intuitif)**. Paper PnL par bucket sur 4h : liq 0-100$ (bonding) 40 trades WR 49% **+$439**, liq 10-50K 15 trades WR 0% **−$144**, liq >50K 14 trades WR 0% **−$174**. **Si ça tient**, les filtres `NOZEROLIQ` / `HIGHSCORE≥30` sabotent le seul segment rentable. **Data need** : N≥50 par bucket (fenêtre 4h = shot noise probable). Retester dans 48h.
+
+### ⚪ Non-testables tant qu'il n'y a pas plus de data
+
+- [ ] **v141 data** : 0 live trades post-19:58 UTC dans le snapshot audité. ETA Apr 19-20 pour N≥15. Toute analyse `price_divergence_pct` avant = biaisée.
+- [ ] **Paper slippage** : colonnes `buy/sell_slippage_bps` sont **NULL structurellement** côté paper (paper_trader ne les populate pas). v141 ne fixe PAS ça. Fix nécessite d'ajouter le write dans paper_trader `check_paper_trades` quand ev ferme. Low priority tant qu'on sait juste que paper = 0 slip assumé.
+- [ ] **Trigger V2 fills** : 0 keeper fills historiques, non interrogé dans cet audit (déjà couvert puce debug Trigger V2 ci-dessus).
+
+### 🧹 Nettoyage
+
+- [ ] Delete `scraper/_audit2.py` et `scraper/_audit3.py` (scripts one-shot du subagent Apr 17). Le script permanent `scraper/analyze_divergence_by_liq.py` couvre le besoin récurrent.
+
 ## 🟡 Active Exploration
 
 ### Latence live trade — diagnostic A.2 ✅ (Apr 17)
