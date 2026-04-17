@@ -33,6 +33,28 @@
 
 LAZY mode = 180s pendant 5min puis 600s. Hardcoded dans `strategies.py:LAZY_STRATEGIES`.
 
+## rt_score V141 — taux WR par threshold (N=74 closed MAIN post-v132)
+
+| Filter | Trades/jour proj | WR | avg | $/jour @$50 |
+|---|---|---|---|---|
+| Aucun (overall) | ~18 | 37.8% | +4.21% | +$38 |
+| **≥30** (filter prod actuel) | ~9 | **51.3%** | **+19.01%** | **+$85** ⭐ |
+| ≥40 | ~4.6 | 57.9% | +19.13% | +$44 |
+| ≥50 | ~3.2 | **69.2%** | +32.49% | +$52 |
+| ≥60 (ultra-sélectif) | ~1.9 | **75.0%** | +38.80% | +$37 |
+
+**Gains v141 vs v1 stored (au filter ≥30)** :
+- N pass : 38 → 39 (+2.6%)
+- **WR : 44.7% → 51.3%** (+6.5pp)
+- **avg : +12.45% → +19.01%** (+53%)
+- corr pnl_pct : +0.207 → +0.236 (+14%)
+
+**Quartiles V141** — signal monotonic :
+- Q1 (score 4-20) : WR 27.8% / avg -5.13%
+- Q4 (score 40-84) : WR 57.9% / avg +19.13%
+
+Seul dip : ≥40 bucket dilué par les bonuses qui gonflent certains mid-scores 32-38 vers 40-46. Pas impactant car prod use ≥30.
+
 ## Sim biais mesuré (ratios réel/sim sur historique pré-v140)
 
 | Strat | Ratio | Note |
