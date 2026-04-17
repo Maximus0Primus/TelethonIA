@@ -1105,8 +1105,9 @@ def check_live_trades(client_sb) -> dict:
     prices = _fetch_prices_batch(addresses)
 
     # v121: Log price ticks at 15s resolution for live trades
-    from paper_trader import _log_price_ticks
+    from paper_trader import _log_price_ticks, _log_cache_snapshot
     _log_price_ticks(client_sb, prices, "live", live_tokens=set(addresses))
+    _log_cache_snapshot(client_sb)  # v138 D: snapshot full cache state from live loop too
 
     for trade in open_trades:
         addr = trade["token_address"]
@@ -1133,6 +1134,11 @@ def check_live_trades(client_sb) -> dict:
             # v120: Warn if price is None — trade can't exit without a price
             if current_price is None:
                 logger.warning("live_trader: no price for %s (%s) — exit eval skipped", trade["symbol"], addr[:8])
+
+            # v138: record this poll BEFORE eval (live trades — captures every decision)
+            from paper_trader import _record_eval_poll
+            _record_eval_poll(trade_id, now, decision_price, current_price,
+                              float(trade.get("high_price_seen") or 0))
 
             # v113: Use paper_trader's full evaluation (DTRAIL, TRAIL, BE, DECAY, etc.)
             # sell_slip_factor=1.0 because live uses real Jupiter execution, not simulated slippage
@@ -1346,6 +1352,11 @@ def check_live_trades(client_sb) -> dict:
             "paper_exit_price": paper_exit_price,
             "price_divergence_pct": price_divergence_pct,
         }
+        # v138: persist accumulated poll history alongside close fields
+        from paper_trader import _flush_eval_history
+        hist = _flush_eval_history(trade["id"])
+        if hist:
+            update["eval_history"] = hist
 
         # DB update with retry — sell already executed, must not leave trade as 'open'
         db_updated = False

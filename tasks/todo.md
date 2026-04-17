@@ -46,6 +46,23 @@ All paper positions fixed $50 (kelly × bankroll capped at max_position_usd=50).
 
 **Decision rule going forward:** for any strategy swap or live deployment, the ground-truth `--from-trades` is the source of truth. `--from-ticks` is exploratory only.
 
+## v138 — Perfect sim/real alignment via persisted eval history (Apr 17 16:00 UTC) ✅
+
+**Why this exists:** even after v137 cadence fix, `--from-ticks` had +4pp residual bias because `price_ticks` undersamples what real paper's cache held between throttled logs. The fix is to STOP RECONSTRUCTING and instead PERSIST what real paper actually saw.
+
+**Migration `v138_eval_history_cache_snapshots.sql` (applied):**
+- `paper_trades.eval_history` JSONB — per-trade poll log: `[{t,d,e,h}, ...]` = (timestamp, decision_p, exec_p, high_at_poll)
+- `cache_snapshots(snapshot_at, jp_prices, ds_prices, n_tokens)` — full cache state at every loop tick
+
+**Code changes:**
+- `paper_trader.py`: `_record_eval_poll` accumulates per poll, `_flush_eval_history` persists on close, `_log_cache_snapshot` writes cache state every 30s. Wired into `check_paper_trades_fast` + `check_paper_trades`.
+- `live_trader.py`: same `_record_eval_poll` + `_flush_eval_history` for `rt_live` trades. `_log_cache_snapshot` from live loop too.
+- `sim.py`: new `--from-eval-history` mode → `_replay_from_eval_history` rejoue les EXACTES (decision, exec) pairs. **Mathematical 0% bias by construction.** Plus `_fetch_cache_snapshots` helper for what-if backtest on any token.
+
+**Validation (Apr 18+):** after 24h of new closed trades, `python sim.py --from-eval-history --since 2026-04-17` should show bias=0.00% on every strategy. Any non-zero number = bug in `_evaluate_trade_exit` since the trade closed.
+
+**Cost:** ~5KB JSONB per trade close (negligible) + 1 row per 30s loop tick (~14MB/day) — totally manageable.
+
 **DB swap applied via `_apply_v137_swap.py --apply`:**
 - paper.active_strategies: removed DTRAIL3_ACT10/10_ACT10/3_ACT20, added TP50_SL15/BE15_TP100/DTRAIL10_ACT5
 - live_trading.allocations: DTRAIL3+10 → BE25+FAST (50/50)

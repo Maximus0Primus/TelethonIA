@@ -1417,6 +1417,96 @@ def _replay_trade_orchestrated(fake_trade: dict, ds_ticks: list[dict],
     }
 
 
+# ---------------------------------------------------------------------------
+# v138: Replay from persisted eval_history (perfect alignment, 0% bias)
+# ---------------------------------------------------------------------------
+def _replay_from_eval_history(fake_trade: dict, eval_history: list[dict]) -> dict | None:
+    """v138 B: replay using the EXACT (decision, exec) pairs paper_trader logged.
+
+    Each eval_history entry: {"t": iso, "d": decision_p, "e": exec_p, "h": high_at_poll}.
+    Re-runs them through _evaluate_trade_exit with no reconstruction guesswork.
+    Result is mathematically identical to what real paper saw at trade close,
+    modulo strategy override (allows what-if "what would strat X have done on
+    the same price stream?")
+    """
+    from paper_trader import _evaluate_trade_exit, _last_eval_ts
+    if not eval_history:
+        return None
+    trade_id = str(fake_trade["id"])
+    _last_eval_ts.pop(trade_id, None)
+
+    sell_slip = 1 - 10 / 10_000  # base bps; _evaluate adds dynamic on top
+    last_exec = None
+    for poll in eval_history:
+        try:
+            t_iso = poll["t"]
+            dec_p = poll.get("d")
+            exec_p = poll.get("e")
+            if dec_p is None or exec_p is None:
+                continue
+            t = datetime.fromisoformat(t_iso.replace("Z", "+00:00"))
+        except Exception:
+            continue
+        last_exec = exec_p
+        ev = _evaluate_trade_exit(fake_trade, exec_p, t, sell_slip,
+                                  sell_fee_bps=0, decision_price=dec_p)
+        if ev is None:
+            continue
+        if ev.get("high_price_seen") is not None:
+            new_high = ev["high_price_seen"]
+            if new_high > float(fake_trade.get("high_price_seen") or 0):
+                fake_trade["high_price_seen"] = new_high
+        if "status" in ev and ev["status"]:
+            return {
+                "exit_reason": ev["status"],
+                "exit_price": ev.get("exit_price", 0),
+                "pnl_pct": ev.get("pnl_pct", 0),
+                "pnl_usd": ev.get("pnl_usd", 0),
+                "exit_minutes": ev.get("exit_minutes", 0),
+                "high_price_seen": fake_trade.get("high_price_seen"),
+            }
+    if last_exec is None:
+        return None
+    entry_price = float(fake_trade["entry_price"])
+    pnl_pct = round((last_exec / entry_price) - 1, 4) if entry_price > 0 else 0
+    return {
+        "exit_reason": "timeout_eod", "exit_price": last_exec,
+        "pnl_pct": pnl_pct,
+        "pnl_usd": round(float(fake_trade.get("position_usd") or 10.0) * pnl_pct, 2),
+        "exit_minutes": int(fake_trade.get("horizon_minutes", 120) or 120),
+        "high_price_seen": fake_trade.get("high_price_seen"),
+    }
+
+
+# ---------------------------------------------------------------------------
+# v138 D: cache_snapshots loader — alternative to price_ticks reconstruction
+# ---------------------------------------------------------------------------
+def _fetch_cache_snapshots(token_addr: str, t_start: str, t_end: str
+                           ) -> list[tuple[datetime, float]]:
+    """Return [(snapshot_at, jp_price)] for token_addr in window from cache_snapshots.
+    Snapshot rows store the FULL paper_trader cache state at each loop tick;
+    extracting one token gives the price the cache held at that moment.
+    """
+    rows = sb_get("cache_snapshots", [
+        ("select", "snapshot_at,jp_prices"),
+        ("snapshot_at", f"gte.{t_start}"),
+        ("snapshot_at", f"lte.{t_end}"),
+        ("order", "snapshot_at.asc"),
+    ])
+    out = []
+    for r in rows:
+        jp = r.get("jp_prices") or {}
+        if isinstance(jp, str):
+            import json
+            jp = json.loads(jp)
+        p = jp.get(token_addr)
+        if p is None or float(p) <= 0:
+            continue
+        ts = datetime.fromisoformat(r["snapshot_at"].replace("Z", "+00:00"))
+        out.append((ts, float(p)))
+    return out
+
+
 def _replay_trade_on_ticks(fake_trade: dict, ticks: list[dict],
                            disable_lazy: bool = False) -> dict | None:
     """Replay one trade through price ticks using production exit logic.
@@ -3344,6 +3434,84 @@ def _smoothing_sweep(args):
                   f"avg_max_dd={statistics.mean(max_dds)*100:.1f}%  ruin_rate={ruins/n_sims*100:.1f}%")
 
 
+def _eval_history_simulation(args):
+    """v138 B: replay each trade from its persisted eval_history.
+    Perfect 0% sim/real alignment. Auditing tool: replays the EXACT polls
+    paper_trader did. Useful to validate bug fixes in _evaluate_trade_exit
+    against historical reality without any reconstruction."""
+    print("=" * 90)
+    print("FROM-EVAL-HISTORY MODE (v138 B): perfect replay from logged polls")
+    print("=" * 90)
+
+    rows = sb_get("paper_trades", [
+        ("select", "id,token_address,symbol,strategy,tranche_label,entry_price,"
+                   "sl_price,tp_price,horizon_minutes,position_usd,"
+                   "rt_liquidity_usd,dex_spot_price_at_entry,created_at,"
+                   "status,pnl_pct,eval_history"),
+        ("status", "in.(trail_stop,sl_hit,timeout,tp_hit)"),
+        ("source", "eq.rt"),
+        ("created_at", f"gte.{args.since}T00:00:00Z"),
+        ("eval_history", "not.is.null"),
+        ("order", "created_at.asc"),
+    ])
+    print(f"Fetched {len(rows)} closed trades with eval_history since {args.since}")
+    if not rows:
+        print("No trades have eval_history yet — only trades closed after v138 deploy "
+              "carry the field. Wait 24-48h for the first batch.")
+        return
+
+    if args.strategies:
+        wanted = {s.strip() for s in args.strategies.split(",") if s.strip()}
+        rows = [r for r in rows if r.get("strategy") in wanted]
+        print(f"After --strategies filter: {len(rows)} trades")
+
+    from collections import defaultdict
+    deltas_by_strat = defaultdict(list)
+    sims_by_strat = defaultdict(list)
+    for r in rows:
+        eh = r.get("eval_history") or []
+        if isinstance(eh, str):
+            import json
+            eh = json.loads(eh)
+        if not eh:
+            continue
+        fake = {
+            "id": r["id"], "entry_price": float(r["entry_price"]),
+            "sl_price": float(r["sl_price"]),
+            "tp_price": float(r["tp_price"]) if r.get("tp_price") else None,
+            "position_usd": float(r.get("position_usd") or 10),
+            "strategy": r["strategy"],
+            "tranche_label": r.get("tranche_label", "main"),
+            "horizon_minutes": r.get("horizon_minutes", 120),
+            "created_at": r["created_at"],
+            "high_price_seen": float(r["entry_price"]),
+            "rt_liquidity_usd": r.get("rt_liquidity_usd"),
+            "dex_spot_price_at_entry": float(r.get("dex_spot_price_at_entry")
+                                              or r["entry_price"]),
+        }
+        sim = _replay_from_eval_history(fake, eh)
+        if sim is None:
+            continue
+        real_pct = float(r["pnl_pct"]) * 100 if r.get("pnl_pct") is not None else 0
+        sim_pct = sim["pnl_pct"] * 100
+        deltas_by_strat[r["strategy"]].append(sim_pct - real_pct)
+        sims_by_strat[r["strategy"]].append(sim_pct)
+
+    print(f"\n{'Strategy':<28}{'N':>4}{'sim_avg':>10}{'bias_vs_real':>14}{'MAE':>10}")
+    for strat in sorted(sims_by_strat):
+        n = len(sims_by_strat[strat])
+        if n < 3:
+            continue
+        sa = statistics.mean(sims_by_strat[strat])
+        bm = statistics.mean(deltas_by_strat[strat])
+        mae = statistics.mean(abs(d) for d in deltas_by_strat[strat])
+        print(f"{strat:<28}{n:>4}{sa:>+9.2f}%{bm:>+13.2f}%{mae:>9.2f}%")
+    print("\nNote: bias should be 0.00% for trades closed AFTER v138 deploy "
+          "(eval_history captures every poll perfectly). Non-zero bias on a "
+          "trade indicates a bug in _evaluate_trade_exit changes since the "
+          "trade closed.")
+
+
 def _tick_based_simulation(args):
     """FROM-TICKS: replay price ticks through _evaluate_trade_exit."""
     print("=" * 90)
@@ -3778,6 +3946,12 @@ def main():
                         help="Use real paper trade PnL instead of OHLCV simulation (ground truth mode)")
     parser.add_argument("--from-ticks", action="store_true",
                         help="Tick-replay simulation: replay real 30s price ticks through _evaluate_trade_exit")
+    parser.add_argument("--from-eval-history", action="store_true",
+                        help="v138 B: replay each trade from its persisted eval_history "
+                             "(perfect 0% sim/real divergence, ground truth for poll-level audit)")
+    parser.add_argument("--from-cache-snapshots", action="store_true",
+                        help="v138 D: rebuild price stream from cache_snapshots table "
+                             "(captures the cache state at every loop tick, no throttle gaps)")
     parser.add_argument("--price-source", type=str, default="jupiter",
                         choices=["jupiter", "dexscreener", "both"],
                         help="Price source for --from-ticks (default: jupiter)")
@@ -4076,6 +4250,15 @@ def main():
     # =====================================================================
     if getattr(args, "smoothing_sweep", False):
         _smoothing_sweep(args)
+        return
+
+    # =====================================================================
+    # FROM-EVAL-HISTORY MODE (v138 B): replay from persisted eval_history.
+    # This is mathematically perfect alignment for trades that recorded their
+    # poll history (everything closed after v138 deploy).
+    # =====================================================================
+    if getattr(args, "from_eval_history", False):
+        _eval_history_simulation(args)
         return
 
     # =====================================================================

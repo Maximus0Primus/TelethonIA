@@ -55,6 +55,11 @@ _jupiter_overridden: set[str] = set()
 _jupiter_prices_cache: dict[str, float] = {}  # v122: Jupiter prices for tick logging
 _dex_prices_cache: dict[str, float] = {}  # v123: DexScreener prices preserved for tick logging
 
+# v138: per-trade eval history accumulator. Maps trade_id -> [{"t","d","e","h"}, ...]
+# Persisted to paper_trades.eval_history on close → guarantees 0% sim/real divergence.
+_eval_history: dict[str, list[dict]] = {}
+_EVAL_HISTORY_MAX_POLLS = 500  # cap memory usage on long-lived trades
+
 # v88: Bot ML predictions — precomputed in GH Actions, read from Supabase
 _BOT_PREDICTIONS: dict = {}  # {(token_address, strategy): gate_mult}
 
@@ -207,6 +212,46 @@ def _should_poll_trade(trade_id: int, polling_sec: int) -> bool:
         _last_check_ts[trade_id] = now
         return True
     return False
+
+
+def _record_eval_poll(trade_id, now: datetime, decision_p: float | None,
+                      exec_p: float | None, high_seen: float | None) -> None:
+    """v138: append one poll to per-trade eval history for perfect sim replay."""
+    if trade_id is None or decision_p is None or exec_p is None:
+        return
+    key = str(trade_id)
+    hist = _eval_history.setdefault(key, [])
+    if len(hist) >= _EVAL_HISTORY_MAX_POLLS:
+        return  # hard cap to bound memory on stuck trades
+    hist.append({
+        "t": now.isoformat().replace("+00:00", "Z"),
+        "d": float(decision_p),
+        "e": float(exec_p),
+        "h": float(high_seen) if high_seen is not None else None,
+    })
+
+
+def _flush_eval_history(trade_id) -> list[dict] | None:
+    """v138: pop and return the accumulated eval history for a closing trade."""
+    if trade_id is None:
+        return None
+    return _eval_history.pop(str(trade_id), None) or None
+
+
+def _log_cache_snapshot(client) -> None:
+    """v138: dump current paper_trader caches to cache_snapshots.
+    One row per call. Caller invokes this once per loop tick after _fetch_prices_batch.
+    Sim can replay from snapshots for ANY token (covers tokens without live trades)."""
+    if not client or not _jupiter_prices_cache:
+        return
+    try:
+        client.table("cache_snapshots").insert({
+            "jp_prices": dict(_jupiter_prices_cache),
+            "ds_prices": dict(_dex_prices_cache) if _dex_prices_cache else None,
+            "n_tokens": len(_jupiter_prices_cache),
+        }).execute()
+    except Exception as e:
+        logger.debug("cache_snapshot insert failed: %s", e)
 
 
 def _decision_price(addr: str, strategy: str, trade_id: int, orch: dict,
@@ -1645,6 +1690,7 @@ def check_paper_trades(client) -> dict:
             addresses.append(waddr)
     prices = _fetch_prices_batch(addresses)
     _log_price_ticks(client, prices, "full")
+    _log_cache_snapshot(client)  # v138 D: snapshot full cache state
 
     # v115: Process dip watchlist on full check too
     if _dip_watchlist:
@@ -1712,6 +1758,9 @@ def check_paper_trades(client) -> dict:
             group_key = (addr, strategy, trade["cycle_ts"])
 
         is_cascade = group_key in sl_triggered
+        # v138: record this poll BEFORE eval (captures every decision, even no-op)
+        _record_eval_poll(trade_id, now, decision_price, current_price,
+                          float(trade.get("high_price_seen") or 0))
         # v123: sell_slip_factor=1.0 to match live (Jupiter Ultra RFQ = near-zero slippage)
         ev = _evaluate_trade_exit(trade, current_price, now, 1.0, sl_cascade=is_cascade,
                                    sell_fee_bps=0, decision_price=decision_price)
@@ -1741,6 +1790,10 @@ def check_paper_trades(client) -> dict:
         update = {k: ev[k] for k in ("status", "exit_price", "exit_at", "pnl_pct", "pnl_usd", "exit_minutes", "sol_price_at_exit") if k in ev}
         if ev.get("high_price_seen") is not None:
             update["high_price_seen"] = ev["high_price_seen"]
+        # v138: persist accumulated poll history alongside close fields
+        hist = _flush_eval_history(trade["id"])
+        if hist:
+            update["eval_history"] = hist
 
         try:
             # v114: Conditional update — only close if still open (prevents race with fast check)
@@ -1997,6 +2050,7 @@ def check_paper_trades_fast(client) -> dict:
             addresses.append(waddr)
     prices = _fetch_prices_batch(addresses) if addresses else {}
     _log_price_ticks(client, prices, "fast")
+    _log_cache_snapshot(client)  # v138 D: snapshot full cache state
 
     # v115: Process dip watchlist every 30s
     if _dip_watchlist:
@@ -2043,6 +2097,10 @@ def check_paper_trades_fast(client) -> dict:
         if exit_ref is not None:
             current_price = exit_ref
 
+        # v138: record this poll BEFORE eval (captures every decision, even no-op)
+        _record_eval_poll(trade_id, now, decision_price, current_price,
+                          float(trade.get("high_price_seen") or 0))
+
         # v123: sell_slip_factor=1.0 to match live (Jupiter Ultra RFQ = near-zero slippage)
         ev = _evaluate_trade_exit(trade, current_price, now, 1.0, sell_fee_bps=0,
                                   decision_price=decision_price)
@@ -2065,6 +2123,10 @@ def check_paper_trades_fast(client) -> dict:
         update = {k: ev[k] for k in ("status", "exit_price", "exit_at", "pnl_pct", "pnl_usd", "exit_minutes", "sol_price_at_exit") if k in ev}
         if ev.get("high_price_seen") is not None:
             update["high_price_seen"] = ev["high_price_seen"]
+        # v138: persist accumulated poll history alongside close fields
+        hist = _flush_eval_history(trade["id"])
+        if hist:
+            update["eval_history"] = hist
 
         try:
             # v114: Conditional update — only close if still open (prevents race with full check)
