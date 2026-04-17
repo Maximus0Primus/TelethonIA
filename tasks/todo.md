@@ -36,6 +36,8 @@ All paper positions fixed $50 (kelly × bankroll capped at max_position_usd=50).
 
 **Sweep workflow going forward:** `python scraper/sim.py --from-ticks --since YYYY-MM-DD --top 30` (no more standalone sweep scripts — all logic lives in sim.py).
 
+**⚠️ Residual DTRAIL bias** — sim still over-estimates trail_stop PnL by **+5pp on average** (status match 96% but PnL MAE 22%). Cause: cadence variance — even with 30s grid + look-back, real polling drifts due to loop iteration time, missing some peaks the sim catches. **Rule: always cross-check DTRAIL recommendations with `--from-trades` (ground truth). Trust `--from-ticks` only for relative ranking within FAST/BE families.**
+
 **DB swap applied via `_apply_v137_swap.py --apply`:**
 - paper.active_strategies: removed DTRAIL3_ACT10/10_ACT10/3_ACT20, added TP50_SL15/BE15_TP100/DTRAIL10_ACT5
 - live_trading.allocations: DTRAIL3+10 → BE25+FAST (50/50)
