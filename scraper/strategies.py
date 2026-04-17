@@ -117,6 +117,11 @@ STRATEGY_FILTERS = {
     "HIGHSCORE_TP200_SL40": {
         "min_rt_score": 30,
     },
+    # v140 filtered variants
+    "BE25_TP80_SL30_S30_HYST": {"min_rt_score": 30},
+    "BE15_TP70_SL50_NZ": {"min_liquidity_usd": 1.0},
+    "BE25_TP80_SL30_NZS30_HYST": {"min_liquidity_usd": 1.0, "min_rt_score": 30},
+    "BE15_TP300_SL50_MCAP": {"min_mcap": 30_000, "max_mcap": 500_000},
 }
 
 # --- Grid strategies (v93) ---
@@ -273,6 +278,57 @@ STRATEGIES["HIGHSCORE_TP200_SL40"] = [
 ]
 SHADOW_STRATEGIES.append("HIGHSCORE_TP200_SL40")
 
+# ============================================================
+# v140 — full mega sweep winners (hysteresis + lazy dominates)
+# A/B test variants vs existing strats, each gets $1000 bankroll
+# ============================================================
+# Top 10 (NONE filter, hysteresis/lazy) — the big surprise
+STRATEGIES["FAST_TP100_SL20_HYST"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.80, "horizon_min": 30, "label": "main"},
+]
+SHADOW_STRATEGIES.append("FAST_TP100_SL20_HYST")
+
+STRATEGIES["FAST_TP80_SL25_HYST"] = [
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.75, "horizon_min": 30, "label": "main"},
+]
+SHADOW_STRATEGIES.append("FAST_TP80_SL25_HYST")
+
+STRATEGIES["BE25_TP80_SL30_HYST"] = [
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.25, "label": "main"},
+]
+SHADOW_STRATEGIES.append("BE25_TP80_SL30_HYST")
+
+STRATEGIES["FAST_TP50_SL30_HYST"] = [
+    {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.70, "horizon_min": 30, "label": "main"},
+]
+SHADOW_STRATEGIES.append("FAST_TP50_SL30_HYST")
+
+# Best per filter — each combo tests different (filter, config) point
+STRATEGIES["BE25_TP80_SL30_S30_HYST"] = [  # SCORE30 filter + hysteresis/static_240
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.25, "label": "main"},
+]
+SHADOW_STRATEGIES.append("BE25_TP80_SL30_S30_HYST")
+
+STRATEGIES["BE15_TP70_SL50_NZ"] = [  # NOZEROLIQ filter + jupiter/raw/static_240
+    {"pct": 1.0, "tp_mult": 1.70, "sl_mult": 0.50, "horizon_min": 120,
+     "be_activation": 0.15, "label": "main"},
+]
+SHADOW_STRATEGIES.append("BE15_TP70_SL50_NZ")
+
+STRATEGIES["BE25_TP80_SL30_NZS30_HYST"] = [  # NOZEROLIQ+SCORE30 + hysteresis/static_240
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.25, "label": "main"},
+]
+SHADOW_STRATEGIES.append("BE25_TP80_SL30_NZS30_HYST")
+
+STRATEGIES["BE15_TP300_SL50_MCAP"] = [  # MCAP_MID filter + ds/raw/fast
+    {"pct": 1.0, "tp_mult": 4.00, "sl_mult": 0.50, "horizon_min": 240,
+     "be_activation": 0.15, "label": "main"},
+]
+SHADOW_STRATEGIES.append("BE15_TP300_SL50_MCAP")
+
 # --- Trailing stop grid (v106) ---
 _TRAIL_STRATEGIES = {}
 for _trail_pct in [10, 15, 20, 25]:
@@ -352,7 +408,7 @@ _DIP_RE = re.compile(r"^DIP(\d+)_B(\d+)_T(\d+)_A(\d+)_SL(\d+)_(\d+)m$")
 _DIP_SPLIT_RE = re.compile(
     r"^DIP(\d+)_B(\d+)_P1T(\d+)A(\d+)S(\d+)_P2T(\d+)A(\d+)S(\d+)_(\d+)m$"
 )
-_BE_RE = re.compile(r"^BE(\d+)_TP\d+_SL\d+(?:_\d+m)?$")
+_BE_RE = re.compile(r"^BE(\d+)_TP\d+_SL\d+")  # v140: no end anchor → accepts any suffix (_HYST, _NZ, _S30, etc.)
 
 # Cache for _get_trail_config() to avoid regex per-tick in sim
 _trail_config_cache: dict[str, tuple] = {}
@@ -416,17 +472,19 @@ def _get_trail_config_uncached(strat: str, label: str) -> tuple[float | None, fl
 # LAZY check mode (v118)
 # ---------------------------------------------------------------------------
 LAZY_STRATEGIES: set[str] = {
-    # v138.2: mega-sweep showed lazy mode (180s/600s adaptive) dominates static
-    # polling for these strats. All ranked top-30 in 9040-config grid.
-    # v138.3: BE25_TP80_SL30 removed — re-rank by avg_pnl_pct showed
-    #          median_5/static_240 is better (+0.95pp avg) than ds/lazy.
+    # v138.2: lazy dominates static on these.
     "BE25_TP80_SL30_DS",
     "FAST_TP100_SL20",
     "FAST_TP80_SL25",
     "FAST_TP50_SL30",
     "FAST_TP40_SL30",
     "TP50_SL15",
-    # legacy (now deprecated strats, kept for any in-flight close)
+    # v140: new hysteresis+lazy variants (full sweep top 10)
+    "FAST_TP100_SL20_HYST",
+    "FAST_TP80_SL25_HYST",
+    "BE25_TP80_SL30_HYST",
+    "FAST_TP50_SL30_HYST",
+    # legacy
     "DTRAIL3_ACT5_SL60",
     "DTRAIL5_ACT10_SL60",
     "DIP30_B5_T5_A20_SL70_240m",

@@ -4,7 +4,30 @@
 
 **Live (50/50)** — `BE25_TP80_SL30 (median_5/static_240)` + `BE15_TP100_SL50 (ds/fast)`. Position ~$1.70/trade, max 3 open.
 
-**Paper Telegram (10 strats × $1000 bankroll, $10K total post-v139)**:
+**Paper Telegram (18 strats × $1000 bankroll, $18K total post-v140) — A/B comparison board**:
+
+| Strat | Filter | Source | Smoothing | Polling | Sim $/j | Real est (×0.55) | Status |
+|---|---|---|---|---|---|---|---|
+| **BE25_TP80_SL30** | — | jupiter | median_5 | static 240 | ~$92 | ~$50 | v138 baseline, real +3.89% |
+| **BE25_TP80_SL30_DS** | — | ds | raw | lazy | ~$94 | ~$52 | A/B DS variant |
+| **FAST_TP100_SL20** | — | ds | raw | lazy | ~$101 | ~$56 | real +1.01% (divergence haute) |
+| **FAST_TP80_SL25** | — | ds | raw | lazy | ~$95 | ~$52 | real +3.54% |
+| **FAST_TP50_SL30** | — | jupiter | median_3 | lazy | ~$60 | ~$33 | real -3.12% (plombe) |
+| **FAST_TP40_SL30** | — | jupiter | hysteresis | lazy | ~$50 | ~$28 | real -1.93% (plombe) |
+| **TP50_SL15** | — | jupiter | raw | lazy | ~$65 | ~$36 | real +4.09% |
+| **BE15_TP100_SL50** | — | ds | raw | fast 30s | ~$50 | ~$35 | real +4.61% (sim sous-estime) |
+| **NOZEROLIQ_TP200_SL40** | liq>0 | jupiter | raw | static 120 | $83 | ~$45 | NEW v139, test only |
+| **HIGHSCORE_TP200_SL40** | score≥30 | jupiter | raw | static 120 | $69 | ~$38 | NEW v139, test only |
+| **FAST_TP100_SL20_HYST** | — | hysteresis | — | lazy | **$151** | **~$83** | v140 top sweep ⭐ |
+| **FAST_TP80_SL25_HYST** | — | hysteresis | — | lazy | **$140** | **~$77** | v140 top 2 ⭐ |
+| **BE25_TP80_SL30_HYST** | — | hysteresis | — | lazy | **$139** | **~$76** | v140 top 3 ⭐ |
+| **FAST_TP50_SL30_HYST** | — | hysteresis | — | lazy | **$135** | **~$74** | v140 top 5 ⭐ |
+| **BE25_TP80_SL30_S30_HYST** | score≥30 | hysteresis | — | static 240 | $95 | ~$52 | v140 best SCORE30 |
+| **BE15_TP70_SL50_NZ** | liq>0 | jupiter | raw | static 240 | $87 | ~$48 | v140 best NOZEROLIQ |
+| **BE25_TP80_SL30_NZS30_HYST** | liq>0+score≥30 | hysteresis | — | static 240 | $86 | ~$48 | v140 avg **+25.67%** N=27 ⭐ |
+| **BE15_TP300_SL50_MCAP** | 30K<mcap<500K | ds | raw | fast 30s | $85 | ~$47 | v140 best MCAP_MID |
+
+Total sim projection : ~**+$1700/jour**. Réaliste (0.55x) : **~$900/jour**. Tous à $1000 bankroll fresh pour A/B équitable.
 
 | Strat | Config | Sweep avg | Mode |
 |---|---|---|---|
