@@ -1,17 +1,15 @@
-# Pipeline Status — Updated Apr 17, 2026 (v137)
+# Pipeline Status — Updated Apr 17, 2026 (v138.1)
 
 ## Current state (live config)
 
-**Live (50/50):** `BE25_TP80_SL30` + `FAST_TP100_SL20` (both jupiter/120s). Position ~$1.70/trade, max 3 open. Swapped from DTRAIL3+DTRAIL10 after v136 realistic sim + ground-truth `--from-trades` rerank both confirmed DTRAIL_ACT10_SL70 unprofitable (-$33/trade live, -$5/trade paper avg).
+**Live (50/50):** `BE25_TP80_SL30` + `BE15_TP100_SL50` (both jupiter/120s). Position ~$1.70/trade, max 3 open. v138.1 swap: replaced FAST_TP100_SL20 (real +1.6%, marginal) with BE15_TP100_SL50 (real +6.0%, #2 ground truth) for higher edge.
 
-**Paper Telegram (7 strats):**
-- DTRAIL5_ACT10_SL60 (jupiter/120s) — kept (best DTRAIL post-v136)
-- DTRAIL10_ACT5_SL50 (jupiter/120s) — added (best-of-DTRAIL ground truth)
-- BE25_TP80_SL30 (ema_fast/120s, historical balance $1217.65)
+**Paper Telegram (5 strats):** v138.1 dropped 2 losing DTRAIL after ground-truth analysis showed neither DTRAIL5_ACT10_SL60 (-1.88%) nor DTRAIL10_ACT5_SL50 (-2%) profitable.
+- BE25_TP80_SL30 (ema_fast/120s, real +4.2%)
 - BE25_TP80_SL30_DS (ds/120s) — A/B variant
-- FAST_TP100_SL20 (ds/120s)
-- TP50_SL15 (jupiter/60s) — added (#1 ground truth $853 5d)
-- BE15_TP100_SL50 (jupiter/120s) — added (#2 ground truth $814 5d)
+- FAST_TP100_SL20 (ds/120s, real +1.6% — control group, also drag-test)
+- TP50_SL15 (jupiter/60s, real +5.5% — #1 ground truth)
+- BE15_TP100_SL50 (jupiter/120s, real +6.0% — #2 ground truth)
 
 All paper positions fixed $50 (kelly × bankroll capped at max_position_usd=50).
 
