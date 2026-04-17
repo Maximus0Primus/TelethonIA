@@ -27,7 +27,9 @@
 | **BE25_TP80_SL30_NZS30_HYST** | liq>0+score≥30 | hysteresis | — | static 240 | $86 | ~$48 | v140 avg **+25.67%** N=27 ⭐ |
 | **BE15_TP300_SL50_MCAP** | 30K<mcap<500K | ds | raw | fast 30s | $85 | ~$47 | v140 best MCAP_MID |
 
-**Total sim projection** : ~**+$1700/jour**. Réaliste (×0.55) : **~$900/jour**. Tous à $1000 bankroll fresh pour A/B équitable.
+**Total sim projection** : ~**+$1700/jour**. Réaliste (×0.55) : **~$900/jour**.
+
+**Bankroll live** : **$18,722** (starting $18K + $722 gain depuis 16h UTC, 16 trades fermés). Call $ELONMUSK/ReaperGems 16h03 a fait **+$819** sur 6 strats ($FAST_TP40 timeout +247, $BE25_DS tp +134, etc.). Trade $DFV/caniscooks 17h19 a perdu -$194.
 
 LAZY mode = 180s pendant 5min puis 600s. Hardcoded dans `strategies.py:LAZY_STRATEGIES`.
 
