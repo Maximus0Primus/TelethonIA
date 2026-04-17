@@ -37,25 +37,32 @@ Sim biais mesuré sur historique (ratio réel/sim) :
 - [ ] **Validation FAST family** — sim dit #1 mais historique réel = +1.01%. Si après 48h les 4 FAST génèrent < +2% avg réel → swap out
 - [ ] **`--from-eval-history`** — confirmer biais=0% sur trades fermés post-v138 deploy (eval_history maintenant persisté)
 - [ ] Live BE25 + BE15 : >$0.50/trade avg sur N≥10 trades
-- [ ] **A.2.1/2/3 latence live trade** — implémenter async DS fetch + gather enrichments (cf section Active Exploration) — gain potentiel **~30s/trade**
+- [ ] **Validation latence post-A.2.1** (24h post-deploy) : si `msg→ds` mean baisse de 24s → 15-18s sous charge, le batch shadow fix a aussi désengorgé l'executor (effet attendu)
 
 ## 🟡 Active Exploration
 
-### Latence live trade — diagnostic A.2 ✅ (Apr 17, N=50 buys Apr 15-17)
+### Latence live trade — diagnostic A.2 ✅ (Apr 17)
 
+**Avant fix (N=50 buys Apr 15-17) :**
 | Phase | p50 | p95 | mean | % total |
 |---|---|---|---|---|
-| msg→ds | 14.3s | 59.4s | 24.0s | **59%** |
-| ds→pre_buy | 12.2s | 33.4s | 15.5s | **38%** |
+| msg→ds | 14.3s | 59.4s | 24.0s | 59% |
+| ds→pre_buy | 12.2s | 33.4s | 15.5s | **38%** ← bottleneck |
 | buy_exec | 0.9s | 1.5s | 1.0s | 2.4% |
 | **TOTAL** | **35.6s** | **93.4s** | **40.4s** | — |
 
-44% des trades ont msg→ds > 20s. Max observé : 127s.
+**Vrai bottleneck identifié** : `paper_trader.py:1051` faisait 217 inserts shadow séquentiels (~50ms HTTP × 217 = 10-20s par RT call). Les composants détaillés mesurés via RT timing : `detect→ds=0.04s`, `ds→open=0.10s` — les autres phases sont déjà optimales.
 
-**À faire (par ordre d'impact):**
-- [ ] **A.2.1 — Async DS fetch** : kick off `_fetch_prices_batch([token_addr])` async dès arrivée message Telegram, parallèle aux pre-checks. Cible : msg→ds passe de 24s → <5s mean.
-- [ ] **A.2.2 — `asyncio.gather` enrichments pre-buy** : Helius/RugCheck/Bubblemaps en parallèle au lieu de sync. Cible : ds→pre_buy passe de 15.5s → <5s mean.
-- [ ] **A.2.3 — Skip non-essentiels live** : auditer `open_live_trade` pour enlever ce qui n'est pas requis pour décision (RugCheck déjà cached souvent, Bubblemaps optionnel).
+**A.2.1 ✅ DEPLOYED (commit `8a7a4c1`)** : batch shadow inserts → 1 HTTP call au lieu de 217. Cible : ds→pre_buy 15s → ~3s, et indirectement msg→ds réduit (executor moins congestionné sous charge).
+
+**À valider** : 
+- [ ] Re-mesurer LIVE LATENCY dans 24h post-deploy. Si on voit `msg→ds` passer de 24s à 15-18s mean sous charge → confirmé. Sinon, le bottleneck est ailleurs.
+- [ ] Vérifier que les spikes `msg→detect > 50s` disparaissent (effet désengorgement executor)
+
+**Restant (faible ROI à $1.70/trade, à reconsidérer si on scale-up) :**
+- [ ] **A.2.2** — augmenter `ThreadPoolExecutor max_workers` (défaut ~8-16 → forcer 32-64) si encore des spikes sous charge
+- [ ] **A.2.3** — paralléliser les 2 `open_live_trade` calls (BE25 + BE15) via ThreadPoolExecutor. Risque : race condition sur `max_open_positions` check. Bénéfice : ~2-3s. À faire si stratégies live > 3.
+- [ ] **A.2.4** — paralléliser les 8 `open_paper_trades` calls hybrid. Bénéfice : ~5-8s sur les MAIN paper inserts. Code change moyen, à faire après validation A.2.1.
 
 ### Validation cadence v137
 - [ ] Vérifier que la 30s throttle double bien les ticks `source='fast'`/`'full'` dans `price_ticks`
