@@ -75,6 +75,14 @@ Seul dip : ≥40 bucket dilué par les bonuses qui gonflent certains mid-scores 
 - [ ] **`--from-eval-history`** : biais=0% sur trades fermés post-v138 (eval_history persisté)
 - [ ] Live BE25 + BE15 : >$0.50/trade avg sur N≥10 trades
 - [ ] **Latence A.2.1** : `msg→ds` mean 24s → 15-18s sous charge confirmé ?
+- [ ] **v141 — fix mesure `paper_exit_price`** (DÉPLOYÉ mais pas encore push VPS). Avant v141, `paper_exit_price` stocké par live_trader = niveau SL brut (slip=1, fee=0), mélangeant 3 effets dans `price_divergence_pct`. v141 calcule un 2ᵉ `ev` dédié mesure avec dynamic slip + SELL_FEE_BPS + Ultra SELL quote override — mirrors paper_trader exactement. Décision live inchangée (toujours slip=1). Données pré-v141 biaisées à filtrer par `created_at >= v141_deploy_ts` avant analyse. **Deploy :** git add/commit/push + redeploy VPS service.
+- [ ] **Divergence paper→live par liq bucket** — une fois v141 deployé, attendre N ≥ 15 par bucket avec le vrai `paper_exit_price`. Script : `scraper/analyze_divergence_by_liq.py --days 7`. Décompose (A) polling lag (LIVE MONITOR 3-11min, gap paper→live 60-78s sur $DFV) vs (B) slippage exec Jupiter sur curve illiquide via `corr(delay_sec, |div|)` et `|div|@delay<30s vs >120s`. Hypothèse courante : bonding/liq=$0 → div >20% mais attention ces 3 observations Apr 17 étaient biaisées par le bug de mesure, repartir de zéro. ETA Apr 22-24. **Ne rien modifier côté prod entre-temps**, garder exposition bonding pour collecter signal propre.
+- [ ] **Debug Jupiter Trigger V2 — 0 keeper fills historiques** (memory v121). Les triggers `place_stop_loss` placent un `trigger_order_id` mais jamais exécutés par keeper. Investigation en 3 étapes :
+  1. **Query `trigger_events` table** depuis v121 : compter `placed` / `cancelled_by_polling` / `keeper_filled` / `failed`. Si 0 filled → problème côté Jupiter (vault auth, keeper routing, token non-routable). Si filled mais polling cancel avant → polling trop agressif, à desync.
+  2. **Tester sur trade éligible avec min=$5** — baisser `trigger_min_usd` de $10 → $5 dans `rt_trade_config.live_trading` JSONB côté Supabase (1 UPDATE query). Live pos actuel ~$1.80 donc encore sous le seuil — il faut aussi bumper position_usd à $5+ pour au moins 1 strat pour observer le flow complet. Candidat : `BE25_TP80_SL30` uniquement, pos $5, 1h d'obs.
+  3. **Filter non-bonding pour trigger** — ajouter gate `if is_bonding_curve: skip trigger` dans `live_trader.py:836`. Les keepers Jupiter ne routent pas pumpfun bondings → fail certain. Évite le bruit dans trigger_events. Script SQL query + hypothesis : `SELECT COUNT(*), event_type FROM trigger_events WHERE ... GROUP BY event_type`.
+  
+  **Orthogonal à la question bonding** : Trigger V2 fixerait (A) polling lag sur liq >$25K non-bonding, mais ne résout pas (B) slippage exec ni les bondings (hors graphe Jupiter). À avancer en parallèle du recueil de data liq buckets.
 
 ## 🟡 Active Exploration
 

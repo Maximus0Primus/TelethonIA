@@ -1116,6 +1116,7 @@ def check_live_trades(client_sb) -> dict:
         current_price = prices.get(addr)
 
         # v121: Trade stuck in 'closing' from a previous failed sell — force sell immediately
+        _paper_sim_ev = None  # v141: default (closing_retry path has no paper simulation)
         if trade.get("status") == "closing":
             logger.info("live_trader: retrying sell for stuck 'closing' trade %s (%s)", trade["symbol"], trade["id"])
             # Skip evaluation — this trade already decided to exit, just needs the sell
@@ -1144,6 +1145,33 @@ def check_live_trades(client_sb) -> dict:
             # sell_slip_factor=1.0 because live uses real Jupiter execution, not simulated slippage
             ev = _evaluate_trade_exit(trade, current_price, now, sell_slip_factor=1.0,
                                        sell_fee_bps=0, decision_price=decision_price)
+
+            # v141: Compute a second, simulation-accurate ev for divergence measurement ONLY.
+            # Prior to v141, paper_exit_price persisted to DB was the SL trigger level (slip=1,
+            # fee=0) — not what paper_trader actually would have booked. On sl_hit with BE
+            # activated, this stored entry * ~1.0 instead of entry * slip_factor (~0.36),
+            # making DIVERGENCE logs mix 3 effects (paper slip omitted, price drift during
+            # gap, live exec slippage) into a single number. This second ev mirrors
+            # paper_trader's exact pipeline: dynamic slip + SELL_FEE_BPS + Ultra SELL quote
+            # override. Decision ev above is untouched — live still decides on raw price.
+            _paper_sim_ev = None
+            try:
+                from paper_trader import (
+                    SELL_FEE_BPS as _PT_SELL_FEE_BPS,
+                    SELL_SLIPPAGE_BPS as _PT_SELL_SLIP_BPS,
+                    _override_exit_with_ultra_quote as _pt_ultra_override,
+                )
+                _paper_slip_factor = 1 - _PT_SELL_SLIP_BPS / 10_000
+                _paper_sim_ev = _evaluate_trade_exit(
+                    trade, current_price, now,
+                    sell_slip_factor=_paper_slip_factor,
+                    sell_fee_bps=_PT_SELL_FEE_BPS,
+                    decision_price=decision_price,
+                )
+                if _paper_sim_ev is not None:
+                    _paper_sim_ev = _pt_ultra_override(client_sb, trade, _paper_sim_ev)
+            except Exception as _e:
+                logger.debug("paper_sim_ev compute failed for %s: %s", trade.get("symbol"), _e)
 
         if ev is None:
             continue
@@ -1196,7 +1224,14 @@ def check_live_trades(client_sb) -> dict:
             continue
 
         exit_price = ev.get("exit_price")
-        paper_exit_price = exit_price  # v122: Save DexScreener-based price before Jupiter override
+        # v141: paper_exit_price reflects what paper_trader ACTUALLY would have booked
+        # (dynamic slip + fee + Ultra SELL quote). Falls back to decision-ev exit_price
+        # on closing_retry path or if Ultra quote unavailable.
+        paper_exit_price = (
+            _paper_sim_ev.get("exit_price")
+            if (_paper_sim_ev and _paper_sim_ev.get("exit_price"))
+            else exit_price
+        )
         entry_price = float(trade.get("entry_price") or 0)
         elapsed_minutes = ev.get("exit_minutes", 0)
         if not elapsed_minutes:
