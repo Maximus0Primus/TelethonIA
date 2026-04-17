@@ -4,7 +4,7 @@
 
 **Live (50/50)** — `BE25_TP80_SL30 (median_5/static_240)` + `BE15_TP100_SL50 (ds/fast)`. Position ~$1.70/trade, max 3 open.
 
-**Paper Telegram (8 strats × $1000 fresh bankroll, $8000 total post-v138.3 reset)**:
+**Paper Telegram (10 strats × $1000 bankroll, $10K total post-v139)**:
 
 | Strat | Config | Sweep avg | Mode |
 |---|---|---|---|
@@ -16,6 +16,25 @@
 | FAST_TP50_SL30 | median_3 | +7.31% | LAZY |
 | BE15_TP100_SL50 | ds | +7.14% | static 30s (fast) |
 | TP50_SL15 | jupiter | +6.28% | LAZY |
+| **NOZEROLIQ_TP200_SL40** | jupiter | (test +14.91%) | static 120s — **NEW v139** |
+| **HIGHSCORE_TP200_SL40** | jupiter | (test +14.42%) | static 120s — **NEW v139** |
+
+## v139 — TP200 asymmetric strategies (Apr 17 17:30 UTC)
+
+Tested 19 candidate strategies on 71 post-v132 tokens (`scripts/_test_new_strategies.py`).
+Top 2 added to paper portfolio:
+- **NOZEROLIQ_TP200_SL40** : skip pump.fun pre-grad tokens (liq=0). N=44, WR 48%, avg +14.91%, $/jour proj +$83.
+- **HIGHSCORE_TP200_SL40** : rt_score ≥ 30 gate. N=38, WR 50%, avg +14.42%, proj +$69.
+
+Insights de la batterie de tests :
+1. TP200_SL40 (3x TP, 0.6 SL, 4h horizon) > BE25_TP80_SL30 baseline systématiquement
+2. `liq=0` (pump.fun bonding) = -$19.82/jour drag — skip = +9pp avg
+3. `rt_score` PRÉDIT (revoir notre opinion "scoring on s'en fout") — score≥40 donne 65% WR median +22%
+4. EARLY_DUMP cut DÉGRADE (coupe des winners qui auraient récupéré)
+5. TOPKOLS whitelist : modeste gain (+$32 vs +$28)
+
+Code: `STRATEGY_FILTERS` étendus avec `min_liquidity_usd` + `min_rt_score` + `min_mcap`.
+Bankroll : 10 strats × $1000 = $10000 starting capital.
 
 LAZY = 180s during first 5min, 600s after. Hardcoded in `strategies.py:LAZY_STRATEGIES`.
 

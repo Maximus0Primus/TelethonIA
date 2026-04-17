@@ -106,6 +106,17 @@ STRATEGY_FILTERS = {
         "min_score": 10, "max_score": 49,
         "min_kol_freshness": 0.01, "max_mcap": 5_000_000,
     },
+    # v139: skip pump.fun pre-graduation tokens (liq=0 in DexScreener) —
+    # measured -19.82$/jour drag on baseline. Filter cuts 38% of universe
+    # but boosts avg PnL by +9pp on TP200_SL40.
+    "NOZEROLIQ_TP200_SL40": {
+        "min_liquidity_usd": 1.0,  # any non-zero liquidity
+    },
+    # v139: gate on rt_score >= 30. Tested 50% WR vs 41% baseline,
+    # avg +14.42% vs +5.88%. Score signal IS predictive at 30+ threshold.
+    "HIGHSCORE_TP200_SL40": {
+        "min_rt_score": 30,
+    },
 }
 
 # --- Grid strategies (v93) ---
@@ -242,6 +253,25 @@ STRATEGIES["BE25_TP80_SL30_DS"] = [
      "be_activation": 0.25, "label": "main"},
 ]
 SHADOW_STRATEGIES.append("BE25_TP80_SL30_DS")
+
+# v139: Asymmetric payoff bets — TP200 (3x) with 4h horizon, gated by quality filters.
+# Tested on 71 post-v132 tokens: NOZEROLIQ +14.91%/48% WR, HIGHSCORE +14.42%/50% WR
+# vs BASELINE +5.88%/41% WR. Skip toxic flow (liq=0) + use score signal = clear edge.
+STRATEGIES["TP200_SL40_4H"] = [
+    {"pct": 1.0, "tp_mult": 3.00, "sl_mult": 0.60, "horizon_min": 240, "label": "main"},
+]
+SHADOW_STRATEGIES.append("TP200_SL40_4H")
+
+# Filtered variants — same exit but different entry gates
+STRATEGIES["NOZEROLIQ_TP200_SL40"] = [
+    {"pct": 1.0, "tp_mult": 3.00, "sl_mult": 0.60, "horizon_min": 240, "label": "main"},
+]
+SHADOW_STRATEGIES.append("NOZEROLIQ_TP200_SL40")
+
+STRATEGIES["HIGHSCORE_TP200_SL40"] = [
+    {"pct": 1.0, "tp_mult": 3.00, "sl_mult": 0.60, "horizon_min": 240, "label": "main"},
+]
+SHADOW_STRATEGIES.append("HIGHSCORE_TP200_SL40")
 
 # --- Trailing stop grid (v106) ---
 _TRAIL_STRATEGIES = {}

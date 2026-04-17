@@ -142,11 +142,21 @@ def _passes_strategy_filter(token: dict, strategy_name: str) -> bool:
     mcap = float(token.get("market_cap") or 0)
     if filt.get("max_mcap") and mcap > filt["max_mcap"]:
         return False
+    if filt.get("min_mcap") and mcap < filt["min_mcap"]:
+        return False
     kf = float(token.get("kol_freshness") or 0)
     if kf < filt.get("min_kol_freshness", 0):
         return False
     mm = float(token.get("momentum_mult") or 1.0)
     if mm < filt.get("min_momentum_mult", 0):
+        return False
+    # v139: liquidity + rt_score gates (RT-side fields, set in safe_scraper)
+    liq = float(token.get("_rt_liquidity_usd") or token.get("rt_liquidity_usd")
+                or token.get("liquidity_usd") or 0)
+    if liq < filt.get("min_liquidity_usd", 0):
+        return False
+    rt_score = float(token.get("_rt_score") or token.get("rt_score") or 0)
+    if rt_score < filt.get("min_rt_score", 0):
         return False
     return True
 
