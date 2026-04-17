@@ -1,234 +1,114 @@
-# Pipeline Status — Updated Apr 17, 2026 (v138.2)
+# Pipeline Status — Updated Apr 17, 2026 (v138.3)
 
-## Current state (live config)
+## Current state
 
-**Live (50/50):** `BE25_TP80_SL30 (ds/lazy)` + `BE15_TP100_SL50 (ds/fast)`. Position ~$1.70/trade, max 3 open. Configs upgraded per mega-sweep optimal (LAZY mode for BE25, FAST for BE15).
+**Live (50/50)** — `BE25_TP80_SL30 (median_5/static_240)` + `BE15_TP100_SL50 (ds/fast)`. Position ~$1.70/trade, max 3 open.
 
-**Paper Telegram (8 strats post-v138.2):** mega-sweep top winners by Kelly (production-valid configs only).
-- BE25_TP80_SL30 (**median_5/static_240**) — v138.3 tweak: avg +10.09% (vs ds/lazy +9.14%, +0.95pp gain after rerank by avg_pnl_pct)
-- BE25_TP80_SL30_DS (ds/**lazy**) — sweep kelly 19.99, avg +8.64%
-- FAST_TP100_SL20 (ds/**lazy**) — sweep kelly **24.14** (#1), avg +11.27%
-- FAST_TP80_SL25 (ds/**lazy**) — kelly 21.29 — **NEW v138.2**
-- FAST_TP50_SL30 (median_3/**lazy**) — kelly 19.07 — **NEW v138.2**
-- FAST_TP40_SL30 (hysteresis/**lazy**) — kelly 19.04 — **NEW v138.2**
-- TP50_SL15 (jupiter/**lazy**) — kelly 14.63
-- BE15_TP100_SL50 (ds/**fast=30s**, no lazy) — kelly 7.88
+**Paper Telegram (8 strats × $1000 fresh bankroll, $8000 total post-v138.3 reset)**:
 
-LAZY = 180s for first 5min, 600s after. Set in code (strategies.py LAZY_STRATEGIES).
+| Strat | Config | Sweep avg | Mode |
+|---|---|---|---|
+| FAST_TP100_SL20 | ds | +11.27% | LAZY |
+| BE25_TP80_SL30 | median_5 | +10.09% | static 240s |
+| FAST_TP80_SL25 | ds | +9.46% | LAZY |
+| BE25_TP80_SL30_DS | ds | +8.64% | LAZY (A/B vs ema_fast) |
+| FAST_TP40_SL30 | hysteresis | +7.96% | LAZY |
+| FAST_TP50_SL30 | median_3 | +7.31% | LAZY |
+| BE15_TP100_SL50 | ds | +7.14% | static 30s (fast) |
+| TP50_SL15 | jupiter | +6.28% | LAZY |
 
-## v138.2 — Mega-sweep promotion + LAZY mode (Apr 17 16:30 UTC)
+LAZY = 180s during first 5min, 600s after. Hardcoded in `strategies.py:LAZY_STRATEGIES`.
 
-**Mega sweep**: 9040 configs (113 strats × 2 src × 8 smooth × 5 poll-mode). LAZY mode dominates static polling on BE/FAST families. Best configs use ds source + raw or median smoothing.
+## $/jour projeté vs réel attendu
 
-**Code change**: 7 strats added to `LAZY_STRATEGIES` set in strategies.py:
-BE25_TP80_SL30, BE25_TP80_SL30_DS, FAST_TP100_SL20, FAST_TP80_SL25,
-FAST_TP50_SL30, FAST_TP40_SL30, TP50_SL15.
+Sim biais mesuré sur historique (ratio réel/sim) :
+- TP50_SL15 : 0.71 (fiable)
+- BE15_TP100_SL50 : 1.25 (sim sous-estime, sera meilleur)
+- BE25_TP80_SL30 : 0.54 (sim 2x optimiste)
+- FAST_TP100_SL20 : **0.12** (sim 8x optimiste 🚨)
+- 3 nouvelles FAST + BE25_DS : N trop petit, projection théorique
 
-**$/jour PROJETÉ (sim avg × 0.55 discount × $50/trade × ~18 trades/j)** :
-| Strat | sim avg | proj $/jour |
-|---|---|---|
-| FAST_TP100_SL20 | +11.27% | +$55.80 |
-| FAST_TP80_SL25 | +9.46% | +$46.80 |
-| BE25_TP80_SL30 | +9.14% | +$45.27 |
-| BE25_TP80_SL30_DS | +8.64% | +$42.75 |
-| FAST_TP40_SL30 | +7.96% | +$39.42 |
-| FAST_TP50_SL30 | +7.31% | +$36.20 |
-| BE15_TP100_SL50 | +7.14% | +$35.37 |
-| TP50_SL15 | +6.28% | +$31.05 |
-| **TOTAL paper** | | **~+$332/jour** |
-| **TOTAL live** ($1.70/trade) | | **~+$11/jour** |
+**Total projeté brut (sim)** : ~+$340/jour paper, ~+$11/jour live ($1.70/trade)
+**Total réaliste avec ratios** : **~+$200-280/jour paper**, ~+$5-8/jour live
 
-Discount 55% basé sur ratio observé sur BE25 (sim 7.71% / real 4.22% = 0.55). Actual real numbers will vary; validate via `--from-eval-history` after 24-48h.
+## 🔴 Priorités immédiates (Apr 17-19)
 
-## v138.3 — BE25 tweak + bankroll reset (Apr 17 16:50 UTC)
+- [ ] Validation 24-48h post-v138.3 : `current_balance > $8000` ? Si oui combien de gain réel
+- [ ] **Validation FAST family** — sim dit #1 mais historique réel = +1.01%. Si après 48h les 4 FAST génèrent < +2% avg réel → swap out
+- [ ] **`--from-eval-history`** — confirmer biais=0% sur trades fermés post-v138 deploy (eval_history maintenant persisté)
+- [ ] Live BE25 + BE15 : >$0.50/trade avg sur N≥10 trades
+- [ ] **A.2.1/2/3 latence live trade** — implémenter async DS fetch + gather enrichments (cf section Active Exploration) — gain potentiel **~30s/trade**
 
-**Bankroll RESET**: rt_bankroll → 8 strats × $1000 = **$8000 starting capital**, total_pnl=$0, trades=0, peak=$8000. All historical PnL wiped (was -$679 cumulative). Removed deprecated DTRAIL strats from strategy_bankrolls.
+## 🟡 Active Exploration
 
-**BE25 config tweak**: `ds/lazy` → `median_5/static_240`. Sweep showed +0.95pp avg_pnl gain. Code: removed BE25_TP80_SL30 from LAZY_STRATEGIES set.
+### Latence live trade — diagnostic A.2 ✅ (Apr 17, N=50 buys Apr 15-17)
 
-**Impact projeté** : ~+$8/jour additionnel pour BE25 → **~+$340/jour total paper** (vs $332 v138.2).
+| Phase | p50 | p95 | mean | % total |
+|---|---|---|---|---|
+| msg→ds | 14.3s | 59.4s | 24.0s | **59%** |
+| ds→pre_buy | 12.2s | 33.4s | 15.5s | **38%** |
+| buy_exec | 0.9s | 1.5s | 1.0s | 2.4% |
+| **TOTAL** | **35.6s** | **93.4s** | **40.4s** | — |
 
-All paper positions fixed $50 (kelly × bankroll capped at max_position_usd=50).
+44% des trades ont msg→ds > 20s. Max observé : 127s.
 
-## v137 — Cadence Fix + Strategy Swap (Apr 17 14:30 UTC) ✅
+**À faire (par ordre d'impact):**
+- [ ] **A.2.1 — Async DS fetch** : kick off `_fetch_prices_batch([token_addr])` async dès arrivée message Telegram, parallèle aux pre-checks. Cible : msg→ds passe de 24s → <5s mean.
+- [ ] **A.2.2 — `asyncio.gather` enrichments pre-buy** : Helius/RugCheck/Bubblemaps en parallèle au lieu de sync. Cible : ds→pre_buy passe de 15.5s → <5s mean.
+- [ ] **A.2.3 — Skip non-essentiels live** : auditer `open_live_trade` pour enlever ce qui n'est pas requis pour décision (RugCheck déjà cached souvent, Bubblemaps optionnel).
 
-**Root cause of DTRAIL sim overestimation:**
-1. Sim's tick-driven subsample picked "next tick after gap" → real paper uses "latest cached tick before poll" (paper_trader._jupiter_prices_cache lookup semantics)
-2. Sim used fixed 10bps slip; real uses dynamic 30-250bps via `_dynamic_sell_slip_factor` depending on exit type (already routed through `_evaluate_trade_exit`, was correct)
-3. `_log_price_ticks` throttled paper-only tokens to 60s while real cache updates every 30s — sim missed half the prices real paper used
+### Validation cadence v137
+- [ ] Vérifier que la 30s throttle double bien les ticks `source='fast'`/`'full'` dans `price_ticks`
 
-**Bias measured (sim before → sim after, vs real paper PnL):**
-- DTRAIL3_ACT10_SL70: +19.80% → +4.24% (-78%)
-- DTRAIL10_ACT10_SL70: +17.22% → +3.37% (-80%)
-- BE25_TP80_SL30: +6.57% → +4.42% (-33%)
-- FAST_TP100_SL20: +10.68% → +4.19% (-61%)
+## 🟢 Deferred — `tp_touched` exit mode
 
-**Code changes (everything in sim.py — no standalone scripts):**
-- [x] `paper_trader.py:369` throttle 60s → 30s for paper-only tokens
-- [x] `sim.py:_replay_trade_orchestrated` — replaced tick-driven subsample with deterministic 30s grid + cache look-back via new `_latest_tick_at_or_before` helper
-- [x] `sim.py:LOOP_SEC=30` constant aligned with paper_trader.unified_check_loop
-- [x] `scripts/_apply_v137_swap.py` — atomic DB swap (one-off, kept for audit)
+Si `high_price_seen >= tp_price` mais exit fires sur timeout/SL/trail, exit rétro à `tp_price`. Analyse post-v133-D : +$1.55/sem live (sous threshold).
 
-**Sweep workflow going forward:** `python scraper/sim.py --from-ticks --since YYYY-MM-DD --top 30` (no more standalone sweep scripts — all logic lives in sim.py).
+**Re-evaluate when ANY :**
+- High-TP strat live (TP80+)
+- Live volume ×3
+- Jupiter Trigger V2 keepers 0 fill 7j
 
-**⚠️ Residual sim bias is STRUCTURAL** — investigated v137.1 (filtering jupiter stream to paper-logged ticks only): made MAE WORSE (17%→30%) because sparser ticks meant look-back picked up stale prices. Reverted. The +4pp bias on trail-heavy strategies comes from `price_ticks` undersampling (60s throttle pre-v137 vs 30s real fetch cadence) — sim can only see logged ticks, not what real paper's cache actually held between logs. The throttle 60→30s patch (now deployed) will halve this bias for new trades over the next 24-48h. For HISTORICAL data the bias is locked.
+## 🧹 Housekeeping (non urgent)
 
-**Sim alignment status per family:**
-- FIXED, BE: sim bias ~+4%, ranking reliable ✓
-- FAST: sim bias ~+4%, ranking reliable ✓
-- DTRAIL/TRAIL: sim bias +4% with HIGH MAE (~20% per-trade) → sim says break-even when real loses → **NEVER decide on these from `--from-ticks`, always cross-check with `--from-trades`**
-- DIP: untested, treat like DTRAIL (trail-heavy mechanics)
+- [ ] `.gitignore` cache files (commit 007db6b a pushé 2400+ fichiers)
+- [ ] Jupiter LDS sous-fill (35% vs seuil 70%)
+- [ ] Holders sous-fill (27%)
+- [ ] CA resolution 71.9% (sous seuil 75%)
+- [ ] Backlog labels : 24h=774, 7d=2346
+- [ ] Bug `reconcile_positions` bypass bankroll (cosmétique)
+- [ ] DIP30 entry gate cassé (désactivé en v136, pas urgent)
 
-**Decision rule going forward:** for any strategy swap or live deployment, the ground-truth `--from-trades` is the source of truth. `--from-ticks` is exploratory only.
+## 🔵 Low-priority
 
-## v138 — Perfect sim/real alignment via persisted eval history (Apr 17 16:00 UTC) ✅
+- [ ] Birdeye TOP_N 20→50+ (whale_new_entries NULL 80%)
+- [ ] PA computation gate sur `SCORING_PARAMS["price_action"] > 0`
+- [ ] gate_mult dead compute (RugCheck always 1.0)
+- [ ] v53 features (holder_turnover, kol_cooccurrence) <6% fill
 
-**Why this exists:** even after v137 cadence fix, `--from-ticks` had +4pp residual bias because `price_ticks` undersamples what real paper's cache held between throttled logs. The fix is to STOP RECONSTRUCTING and instead PERSIST what real paper actually saw.
+## Sim ↔ Live/Paper coherence (reference)
 
-**Migration `v138_eval_history_cache_snapshots.sql` (applied):**
-- `paper_trades.eval_history` JSONB — per-trade poll log: `[{t,d,e,h}, ...]` = (timestamp, decision_p, exec_p, high_at_poll)
-- `cache_snapshots(snapshot_at, jp_prices, ds_prices, n_tokens)` — full cache state at every loop tick
+**Bias hierarchy stable :**
+- `--from-eval-history` (v138) = 0% mathématique pour trades post-deploy
+- `--from-trades` = ground truth historique
+- `--from-ticks jupiter` (v137) = +4pp residual sur trail-heavy
+- `--from-ticks dexscreener` = correct proxy entry, faux pour tracking
 
-**Code changes:**
-- `paper_trader.py`: `_record_eval_poll` accumulates per poll, `_flush_eval_history` persists on close, `_log_cache_snapshot` writes cache state every 30s. Wired into `check_paper_trades_fast` + `check_paper_trades`.
-- `live_trader.py`: same `_record_eval_poll` + `_flush_eval_history` for `rt_live` trades. `_log_cache_snapshot` from live loop too.
-- `sim.py`: new `--from-eval-history` mode → `_replay_from_eval_history` rejoue les EXACTES (decision, exec) pairs. **Mathematical 0% bias by construction.** Plus `_fetch_cache_snapshots` helper for what-if backtest on any token.
+**Per-family tool :** FAST/BE → from-ticks OK, DTRAIL/TRAIL → from-trades obligatoire
 
-**Validation (Apr 18+):** after 24h of new closed trades, `python sim.py --from-eval-history --since 2026-04-17` should show bias=0.00% on every strategy. Any non-zero number = bug in `_evaluate_trade_exit` since the trade closed.
-
-**Cost:** ~5KB JSONB per trade close (negligible) + 1 row per 30s loop tick (~14MB/day) — totally manageable.
-
-**DB swap applied via `_apply_v137_swap.py --apply`:**
-- paper.active_strategies: removed DTRAIL3_ACT10/10_ACT10/3_ACT20, added TP50_SL15/BE15_TP100/DTRAIL10_ACT5
-- live_trading.allocations: DTRAIL3+10 → BE25+FAST (50/50)
-- hybrid_strategy.allocations + strategy_overrides synced
-- removed strats moved to deprecated_strategies
-
-## v133-D — Hybrid Sell Pollution Fix (Apr 16 18:17 UTC) ✅
-
-Hybrid (FAST + DTRAIL same token) shared one ATA. `execute_sell(addr)` without `amount_tokens` drained full wallet → winner 2× inflated pnl, loser phantom −100%.
-
-- [x] FIX: `live_trader.py:1246` passes `amount_tokens=buy_output_tokens`
-- [x] FIX reconciler: `_find_sibling_exit` + `_reconcile_close_payload` uses sibling SOL-per-token instead of phantom −100%
-- [x] Cleanup: `scripts/cleanup_hybrid_sell_pollution.py` corrected 30 rows (net delta −$2.99)
-
-Validated on $INCOME pair post-deploy (ratio 1.000 both legs).
-
-## v136 — Strategy Swap (Apr 16 21:30 UTC) ✅
-
-All via DB (no code change). Based on v135 full sweep: 224 strats × 48 configs × 59 post-v132 tokens = 10,752 combos.
-
-**Swapped out:** FAST_TP50_SL30, FAST_TP80_SL25, DTRAIL10_ACT15_SL70, DTRAIL3_ACT5_SL60, 4× DIP30 variants.
-
-**Cleanup:** removed dead `strategy_multipliers` from rt_trade_config (never read, was Optuna-only output).
-
-### Watch list (Apr 17-21)
-- [ ] Live DTRAIL3_ACT10 + DTRAIL10_ACT10 generate >$1 avg on N≥10 trades each
-- [ ] **BE25 A/B resolution**: `BE25_TP80_SL30` (ema_fast, $1217.65) vs `BE25_TP80_SL30_DS` (ds/raw, $1000). After N≥30 trades each, promote winner and delete loser.
-- [ ] No residual opens on removed strats (config cache refreshed <60s)
-- [ ] **Apr 17-21 sim vs real check**: real daily pnl within ±40% of theoretical → sim aligned; else → sim overfit, re-sweep with larger N
-
-### Watch list (Apr 17-21)
-- [ ] Live BE25 + FAST generate >$0.50 avg/trade on N≥10 trades each (vs v136 sim +8.81% / +8.90% best avg)
-- [ ] **BE25 A/B resolution**: ema_fast vs ds variant (existing test, continues)
-- [ ] Verify cache cadence fix: post-v137 throttle change should yield ~2x more `source='fast'` ticks per token
-- [ ] If real bias persists >10pp on BE/FAST → investigate residual (KOL filter / dedup not modeled in sim)
-
-### Real ground-truth ranking (sim/sim_v136/realistic/from-trades cross-validation)
-**5-day from-trades top 10 (real PnL):**
-1. TP50_SL15 (+5.5% / 33% WR / $853)
-2. BE15_TP100_SL50 (+6.0% / 26% / $814)
-3. TP80_SL30 (+5.0% / 35% / $732)
-4-9. BE15_TP70_SL50, TP90/70/30, BE20_TP100, FAST_TP100_SL50, FAST_TP70_SL50 ($600-720)
-25. BE25_TP80_SL30 (currently active) — +4.2% / 34% / $572
-
-**v137 sim --from-ticks top winners** (re-run any time via `sim.py --from-ticks --since 2026-04-13`):
-- BE: BE25_TP80_SL30 — +7.3% / 30% WR / $753 (5d, N=53)
-- FAST: FAST_TP50_SL30 — -0.1% / 44% WR / $494 (deprecated, residual main trades)
-- DTRAIL: DTRAIL5_ACT10_SL50 in v136 cross-product (kelly 13.13, SL50 not SL70)
-- TP: TP30_SL10 in v136 cross-product (kelly 13.92)
-
-## Active Exploration
-
-### Latence live trade (Plan A — msg→buy delay)
-
-Contexte: buys live entrent avec 20-60s de retard sur le call KOL → front-running. Voir session 2026-04-14.
-
-**Fait:**
-- [x] B — fix `_rt_price_at_message` (bug clé de dict)
-- [x] A.1 — instrumentation `RT timing:` + `LIVE LATENCY:` logs
-- [x] A.3 — cache SOL price 5s + wallet balance 10s
-
-**À faire:**
-- [ ] **A.2** — analyser logs `LIVE LATENCY:` après N≥10 buys (msg→ds / ds→pre_buy / buy_exec) → localiser bottleneck
-- [ ] A.2 — cibler 2-3 bloqueurs. Hypothèses : DS fetch sync, enrichment synchrone pré-buy, checks séquentiels open_live_trade
-
-Command: `ssh vps "journalctl -u kol-scraper | grep 'LIVE LATENCY'"` → p50/p95.
-
-### Deferred — tp_touched exit mode
-
-Idea: si `high_price_seen >= tp_price` pendant horizon mais exit fires sur timeout/SL/trail, rétroactivement exit à `tp_price` (paper) ou tick-fire execute_sell (live). Analyse post-v133-D : **+$1.55/week uplift live** (5× sous threshold). 2 "missed peaks" détectés = artefacts pollution, pas réel miss. Max peak/tp ratio FAST_TP50 timeout/SL = 0.95 → TP jamais touché. Paper-only casserait alignement sim/paper/live.
-
-**Re-evaluate when ANY:**
-- [ ] High-TP strategy en live (TP80+) — FAST_TP100_SL20 paper montre +$47/14d uplift potentiel
-- [ ] Live volume ×3 (actuel ~20/sem → seuil ~60/sem)
-- [ ] Jupiter Trigger V2 keepers toujours 0 fill après 7j → self-built fast-path regains value
-
-**Build path (si re-trigger):**
-1. `_check_tick_tp_cross()` in paper_trader (walks price_ticks since last poll)
-2. `_evaluate_trade_exit` override to tp_hit if cross detected
-3. `live_trader.check_live_trades` subscribe price_ticks or 5s-poll between regular polls
-4. Sim same helper on `--from-ticks` → alignment preserved
-5. Re-run `verify_sim_live_alignment.py` <3pp
-
-## Housekeeping
-
-### Repo hygiene
-- [ ] Commit `007db6b` a pushé 2400+ fichiers cache. Options : revert + force-push, ou ajouter au `.gitignore` et laisser.
-
-### Data quality (/check-data Apr 14)
-- [ ] Jupiter LDS sous-fill (35% vs seuil 70%) — quotas API / silent errors
-- [ ] Holders sous-fill (27%) — idem
-- [ ] CA resolution 71.9% (sous seuil 75%) — resolver messages récents
-- [ ] Backlog labels 24h = 774, 7d = 2346 — outcome_tracker cadence
-
-### Bugs connus non-fixés (non urgents)
-- [ ] Reconcile bypass bankroll — `reconcile_positions` auto-close saute `_rt_update_bankroll`. Drift silencieux sur `rt_bankroll.total_pnl`. Impact cosmétique, pas runtime.
-- [ ] DIP30 entry gate cassé — 0 trades post-v132. Désactivé de paper en v136. Si on veut le réactiver plus tard : investiguer `STRATEGY_FILTERS["DIP30_..."]`.
-
-### Sim ↔ Live/Paper coherence — reference
-
-**Bias hierarchy (stable):**
-- `--from-trades` = ground truth (perfect coherence)
-- Sim `--from-ticks jupiter` = coherent with prod tracking, entry bias ~3-5% vs Ultra RFQ
-- Sim `--from-ticks dexscreener` = correct proxy for Ultra entry, wrong for tracking
-- Sim OHLCV = 5-15% bias on trails (candles ≠ real ticks)
-
-**Per-family tool:**
-- FAST family → OHLCV backtest acceptable
-- DTRAIL / hybrid → tick-replay required, OHLCV lies
-- Tight trails <10% → tick-replay only (OHLCV overestimates)
-
-**Thresholds:**
-- Paper/live per-pair divergence: realistic <5pp, >10pp = bug signal
-- Live/sim edge: `|live − sim| < 50% of expected edge`
-- Entry calibration Ultra-vs-PriceAPI : recheck Apr 27 (~2w post-v130 `entry_source=ultra`)
-
-## Still Pending (low priority)
-
-- [ ] **Birdeye top N expansion** — `BIRDEYE_TOP_N = 20` means whale_new_entries NULL for 80%+. Increase to 50+ (costs CUs)
-- [ ] **PA computation gated** — PA weight=0% mais OHLCV fetched. Gate on `SCORING_PARAMS["price_action"] > 0`
-- [ ] **gate_mult dead compute** — RugCheck/wash-trading executed despite result always 1.0
-- [ ] **v53 features** — holder_turnover, kol_cooccurrence computed mais excluded from ML (<6% fill)
+**Thresholds :** divergence per-pair <5pp normal, >10pp = bug. Live/sim edge <50% expected edge.
 
 ## Architecture summary
 
-**Scoring:** 40.5/13.5/40.5/5.4 (consensus/conviction/breadth/PA), 16-multiplier chain, Optuna ~48 params walk-forward.
+**Scoring :** 40.5/13.5/40.5/5.4 (consensus/conviction/breadth/PA), 16-multiplier chain.
+**Trading :** Paper slip dynamic, live Jupiter Ultra RFQ ~10bps, position reconciliation sibling-aware (v133-D), loss limit 0.5 SOL/jour.
+**Alerting :** ML disabled, RT listener uncapped, GH Actions failures, daily summary 8am UTC.
 
-**Trading:**
-- Paper slippage: dynamic from liquidity_depth_score (base 100/200bps buy/sell)
-- Live slippage: Jupiter Ultra RFQ ~10bps real
-- Position reconciliation: sibling-aware (v133-D)
-- Loss limits: 0.5 SOL/day
+## Historique récent (sessions Apr 17)
 
-**Alerting:** ML disabled, RT listener down (uncapped), GH Actions failures, write-ahead log, daily summary 8am UTC.
+- **v137** ✅ cadence fix `_replay_trade_orchestrated` (next-tick-after-gap → look-back), throttle 60→30s
+- **v138** ✅ eval_history JSONB + cache_snapshots table + `--from-eval-history` mode (0% bias par construction)
+- **v138.1** ✅ swap live FAST→BE15, drop 2 DTRAIL paper (perdaient -$160/j)
+- **v138.2** ✅ mega-sweep 9040 configs → 8 paper actives + LAZY mode + 3 nouvelles FAST
+- **v138.3** ✅ BE25 → median_5/static_240 (rerank par avg_pnl_pct), bankroll reset $1000×8
+- **v133-D** (Apr 16) ✅ hybrid sell pollution fix
