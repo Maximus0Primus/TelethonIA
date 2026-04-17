@@ -365,8 +365,10 @@ def _log_price_ticks(client, prices: dict[str, float], source: str = "check",
         if price <= 0:
             continue
         last = _last_tick_log.get(addr, 0)
-        # v121: 15s throttle for tokens with open live trades, 60s for paper-only
-        throttle = 15 if (live_tokens and addr in live_tokens) else 60
+        # v137: paper-only throttle 60->30s to align price_ticks resolution with
+        # the actual unified_check_loop cadence (30s). Closes the cadence gap that
+        # made the v135 sim over-estimate DTRAIL by 5-10pp.
+        throttle = 15 if (live_tokens and addr in live_tokens) else 30
         if now - last < throttle:
             continue
         _last_tick_log[addr] = now
