@@ -1023,6 +1023,11 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
             # all_real_strategies: full list of strategies opened as real (across all calls)
             # In RT hybrid mode, this includes all hybrid allocations (not just this call's active_strategies)
             real_strats = set(config.get("all_real_strategies", active_strategies))
+
+            # v138.4: BATCH shadow inserts. Was: 217 sequential inserts × ~50ms HTTP RT
+            # = 10-20s of ds→pre_buy latency that delayed live trade execution. Now:
+            # 1 HTTP roundtrip per call. Cuts measured ds→pre_buy from ~15s to ~3s.
+            shadow_rows: list[dict] = []
             for strat_name in SHADOW_STRATEGIES:
                 if strat_name in real_strats:
                     continue  # opened as real trade (this call or sibling call)
@@ -1037,8 +1042,7 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
                 for tranche in tranches:
                     tp_price = entry_price * tranche["tp_mult"] if tranche.get("tp_mult") else None
                     sl_price = entry_price * tranche["sl_mult"]
-
-                    row = {
+                    shadow_rows.append({
                         **shadow_base,
                         "strategy": strat_name,
                         "tp_price": tp_price,
@@ -1046,15 +1050,26 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
                         "horizon_minutes": tranche["horizon_min"],
                         "tranche_pct": tranche["pct"],
                         "tranche_label": tranche["label"],
-                    }
-                    try:
-                        client.table("paper_trades").insert(row).execute()
-                        shadow_opened += 1
-                    except Exception as e:
-                        logger.error("paper_trader: shadow insert failed %s/%s/%s: %s",
-                                     token.get("symbol"), strat_name, tranche["label"], e)
+                    })
                 # v108: Mark as opened so subsequent tokens in this call don't re-insert
                 open_combos.add((addr, strat_name))
+
+            # Single batch insert (Supabase supports list payload). Falls back to
+            # per-row inserts if the batch fails so partial success is possible.
+            if shadow_rows:
+                try:
+                    client.table("paper_trades").insert(shadow_rows).execute()
+                    shadow_opened = len(shadow_rows)
+                except Exception as e:
+                    logger.warning("paper_trader: batch shadow insert failed (%d rows): %s — falling back to per-row",
+                                   len(shadow_rows), e)
+                    for r in shadow_rows:
+                        try:
+                            client.table("paper_trades").insert(r).execute()
+                            shadow_opened += 1
+                        except Exception as e2:
+                            logger.error("paper_trader: shadow row insert failed %s/%s: %s",
+                                         token.get("symbol"), r.get("strategy"), e2)
 
     allocs = [f"{t.get('symbol','?')}=${t.get('_alloc_usd',0):.1f}" for t in candidates]
     logger.info(
