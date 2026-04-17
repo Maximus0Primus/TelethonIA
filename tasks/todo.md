@@ -1,15 +1,44 @@
-# Pipeline Status — Updated Apr 17, 2026 (v138.1)
+# Pipeline Status — Updated Apr 17, 2026 (v138.2)
 
 ## Current state (live config)
 
-**Live (50/50):** `BE25_TP80_SL30` + `BE15_TP100_SL50` (both jupiter/120s). Position ~$1.70/trade, max 3 open. v138.1 swap: replaced FAST_TP100_SL20 (real +1.6%, marginal) with BE15_TP100_SL50 (real +6.0%, #2 ground truth) for higher edge.
+**Live (50/50):** `BE25_TP80_SL30 (ds/lazy)` + `BE15_TP100_SL50 (ds/fast)`. Position ~$1.70/trade, max 3 open. Configs upgraded per mega-sweep optimal (LAZY mode for BE25, FAST for BE15).
 
-**Paper Telegram (5 strats):** v138.1 dropped 2 losing DTRAIL after ground-truth analysis showed neither DTRAIL5_ACT10_SL60 (-1.88%) nor DTRAIL10_ACT5_SL50 (-2%) profitable.
-- BE25_TP80_SL30 (ema_fast/120s, real +4.2%)
-- BE25_TP80_SL30_DS (ds/120s) — A/B variant
-- FAST_TP100_SL20 (ds/120s, real +1.6% — control group, also drag-test)
-- TP50_SL15 (jupiter/60s, real +5.5% — #1 ground truth)
-- BE15_TP100_SL50 (jupiter/120s, real +6.0% — #2 ground truth)
+**Paper Telegram (8 strats post-v138.2):** mega-sweep top winners by Kelly (production-valid configs only).
+- BE25_TP80_SL30 (ds/**lazy**) — sweep kelly 20.86, avg +9.14%
+- BE25_TP80_SL30_DS (ds/**lazy**) — sweep kelly 19.99, avg +8.64%
+- FAST_TP100_SL20 (ds/**lazy**) — sweep kelly **24.14** (#1), avg +11.27%
+- FAST_TP80_SL25 (ds/**lazy**) — kelly 21.29 — **NEW v138.2**
+- FAST_TP50_SL30 (median_3/**lazy**) — kelly 19.07 — **NEW v138.2**
+- FAST_TP40_SL30 (hysteresis/**lazy**) — kelly 19.04 — **NEW v138.2**
+- TP50_SL15 (jupiter/**lazy**) — kelly 14.63
+- BE15_TP100_SL50 (ds/**fast=30s**, no lazy) — kelly 7.88
+
+LAZY = 180s for first 5min, 600s after. Set in code (strategies.py LAZY_STRATEGIES).
+
+## v138.2 — Mega-sweep promotion + LAZY mode (Apr 17 16:30 UTC)
+
+**Mega sweep**: 9040 configs (113 strats × 2 src × 8 smooth × 5 poll-mode). LAZY mode dominates static polling on BE/FAST families. Best configs use ds source + raw or median smoothing.
+
+**Code change**: 7 strats added to `LAZY_STRATEGIES` set in strategies.py:
+BE25_TP80_SL30, BE25_TP80_SL30_DS, FAST_TP100_SL20, FAST_TP80_SL25,
+FAST_TP50_SL30, FAST_TP40_SL30, TP50_SL15.
+
+**$/jour PROJETÉ (sim avg × 0.55 discount × $50/trade × ~18 trades/j)** :
+| Strat | sim avg | proj $/jour |
+|---|---|---|
+| FAST_TP100_SL20 | +11.27% | +$55.80 |
+| FAST_TP80_SL25 | +9.46% | +$46.80 |
+| BE25_TP80_SL30 | +9.14% | +$45.27 |
+| BE25_TP80_SL30_DS | +8.64% | +$42.75 |
+| FAST_TP40_SL30 | +7.96% | +$39.42 |
+| FAST_TP50_SL30 | +7.31% | +$36.20 |
+| BE15_TP100_SL50 | +7.14% | +$35.37 |
+| TP50_SL15 | +6.28% | +$31.05 |
+| **TOTAL paper** | | **~+$332/jour** |
+| **TOTAL live** ($1.70/trade) | | **~+$11/jour** |
+
+Discount 55% basé sur ratio observé sur BE25 (sim 7.71% / real 4.22% = 0.55). Actual real numbers will vary; validate via `--from-eval-history` after 24-48h.
 
 All paper positions fixed $50 (kelly × bankroll capped at max_position_usd=50).
 

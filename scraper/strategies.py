@@ -386,6 +386,16 @@ def _get_trail_config_uncached(strat: str, label: str) -> tuple[float | None, fl
 # LAZY check mode (v118)
 # ---------------------------------------------------------------------------
 LAZY_STRATEGIES: set[str] = {
+    # v138.2: mega-sweep showed lazy mode (180s/600s adaptive) dominates static
+    # polling for these strats. All ranked top-30 in 9040-config grid.
+    "BE25_TP80_SL30",
+    "BE25_TP80_SL30_DS",
+    "FAST_TP100_SL20",
+    "FAST_TP80_SL25",
+    "FAST_TP50_SL30",
+    "FAST_TP40_SL30",
+    "TP50_SL15",
+    # legacy (now deprecated strats, kept for any in-flight close)
     "DTRAIL3_ACT5_SL60",
     "DTRAIL5_ACT10_SL60",
     "DIP30_B5_T5_A20_SL70_240m",
