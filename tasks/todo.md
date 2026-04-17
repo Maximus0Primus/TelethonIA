@@ -36,7 +36,15 @@ All paper positions fixed $50 (kelly × bankroll capped at max_position_usd=50).
 
 **Sweep workflow going forward:** `python scraper/sim.py --from-ticks --since YYYY-MM-DD --top 30` (no more standalone sweep scripts — all logic lives in sim.py).
 
-**⚠️ Residual DTRAIL bias** — sim still over-estimates trail_stop PnL by **+5pp on average** (status match 96% but PnL MAE 22%). Cause: cadence variance — even with 30s grid + look-back, real polling drifts due to loop iteration time, missing some peaks the sim catches. **Rule: always cross-check DTRAIL recommendations with `--from-trades` (ground truth). Trust `--from-ticks` only for relative ranking within FAST/BE families.**
+**⚠️ Residual sim bias is STRUCTURAL** — investigated v137.1 (filtering jupiter stream to paper-logged ticks only): made MAE WORSE (17%→30%) because sparser ticks meant look-back picked up stale prices. Reverted. The +4pp bias on trail-heavy strategies comes from `price_ticks` undersampling (60s throttle pre-v137 vs 30s real fetch cadence) — sim can only see logged ticks, not what real paper's cache actually held between logs. The throttle 60→30s patch (now deployed) will halve this bias for new trades over the next 24-48h. For HISTORICAL data the bias is locked.
+
+**Sim alignment status per family:**
+- FIXED, BE: sim bias ~+4%, ranking reliable ✓
+- FAST: sim bias ~+4%, ranking reliable ✓
+- DTRAIL/TRAIL: sim bias +4% with HIGH MAE (~20% per-trade) → sim says break-even when real loses → **NEVER decide on these from `--from-ticks`, always cross-check with `--from-trades`**
+- DIP: untested, treat like DTRAIL (trail-heavy mechanics)
+
+**Decision rule going forward:** for any strategy swap or live deployment, the ground-truth `--from-trades` is the source of truth. `--from-ticks` is exploratory only.
 
 **DB swap applied via `_apply_v137_swap.py --apply`:**
 - paper.active_strategies: removed DTRAIL3_ACT10/10_ACT10/3_ACT20, added TP50_SL15/BE15_TP100/DTRAIL10_ACT5

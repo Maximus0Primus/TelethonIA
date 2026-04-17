@@ -1274,7 +1274,19 @@ def _load_live_strategy_overrides() -> dict:
 # v137: realistic polling — replaces the v131 "next-tick-after-gap" subsample
 # with deterministic 30s grid + cache look-back. Mimics paper_trader's actual
 # unified_check_loop (30s) + _should_poll_trade(polling_sec) + _jupiter_prices_cache
-# semantics. Cuts DTRAIL bias by 50-60% vs v131 approach (see scripts/_cadence_bias_probe.py).
+# semantics.
+#
+# Tried v137.1 (filter jupiter to paper-logged only, drop live_trader ticks): MAE
+# got WORSE (17% -> 30%) because sparser ticks meant look-back picked up stale
+# prices between paper's 60s-throttled logs, whereas live_trader's 15s ticks were
+# actually giving the sim better visibility into real price action (real paper
+# fetched every 30s via Jupiter API — cache was fresh — even though it only
+# logged every 60s). Including live_trader ticks is the better approximation.
+#
+# Residual ~+4pp bias on trail_stop PnL is STRUCTURAL and comes from: price_ticks
+# undersamples what real paper's cache actually saw (60s throttle pre-v137 vs
+# 30s real fetch cadence). Throttle is now 30s post-v137 deploy, so NEW data will
+# converge. For DTRAIL decisions on historical data, use --from-trades.
 LOOP_SEC = 30  # paper_trader unified_check_loop interval
 
 
@@ -1306,7 +1318,11 @@ def _replay_trade_orchestrated(fake_trade: dict, ds_ticks: list[dict],
     trade_id = str(fake_trade["id"])
     _last_eval_ts.pop(trade_id, None)
 
-    # Sort streams once for look-back
+    # Sort streams once for look-back. We keep live_trader-logged jupiter ticks
+    # in the stream (v137.1 tested filtering them out: MAE went 17% -> 30%).
+    # Real paper_trader's cache was refreshed every 30s (not limited by log
+    # throttle), so live_trader's 15s-cadence jupiter logs are actually a
+    # decent proxy for what real paper's cache held between its own logs.
     jup_sorted = sorted(jup_ticks, key=lambda t: t["fetched_at"]) if jup_ticks else []
     ds_sorted = sorted(ds_ticks, key=lambda t: t["fetched_at"]) if ds_ticks else []
 
@@ -3416,8 +3432,12 @@ def _tick_based_simulation(args):
             ema_w = int(getattr(args, "ema_window", 3) or 3)
 
         if orch_mode:
-            ds_ticks = _filter_ticks_by_source(raw_ticks, "dexscreener")
-            jp_ticks = _filter_ticks_by_source(raw_ticks, "jupiter")
+            # v137.1: pass RAW ticks (not pre-subsampled) so _replay_trade_orchestrated
+            # can do its own grid-based polling + paper-only jupiter filter. The old
+            # _filter_ticks_by_source subsample clashed with realistic polling and
+            # dropped the source attribution needed for paper/live separation.
+            ds_ticks = [t for t in raw_ticks if t.get("source") in ("fast", "full", "live")]
+            jp_ticks = [t for t in raw_ticks if t.get("source") == "jupiter"]
             sim = _replay_trade_orchestrated(
                 fake, ds_ticks, jp_ticks,
                 orchestration=orch_mode,
