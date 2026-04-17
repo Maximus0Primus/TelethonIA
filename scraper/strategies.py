@@ -388,7 +388,8 @@ def _get_trail_config_uncached(strat: str, label: str) -> tuple[float | None, fl
 LAZY_STRATEGIES: set[str] = {
     # v138.2: mega-sweep showed lazy mode (180s/600s adaptive) dominates static
     # polling for these strats. All ranked top-30 in 9040-config grid.
-    "BE25_TP80_SL30",
+    # v138.3: BE25_TP80_SL30 removed — re-rank by avg_pnl_pct showed
+    #          median_5/static_240 is better (+0.95pp avg) than ds/lazy.
     "BE25_TP80_SL30_DS",
     "FAST_TP100_SL20",
     "FAST_TP80_SL25",

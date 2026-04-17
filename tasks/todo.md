@@ -5,7 +5,7 @@
 **Live (50/50):** `BE25_TP80_SL30 (ds/lazy)` + `BE15_TP100_SL50 (ds/fast)`. Position ~$1.70/trade, max 3 open. Configs upgraded per mega-sweep optimal (LAZY mode for BE25, FAST for BE15).
 
 **Paper Telegram (8 strats post-v138.2):** mega-sweep top winners by Kelly (production-valid configs only).
-- BE25_TP80_SL30 (ds/**lazy**) — sweep kelly 20.86, avg +9.14%
+- BE25_TP80_SL30 (**median_5/static_240**) — v138.3 tweak: avg +10.09% (vs ds/lazy +9.14%, +0.95pp gain after rerank by avg_pnl_pct)
 - BE25_TP80_SL30_DS (ds/**lazy**) — sweep kelly 19.99, avg +8.64%
 - FAST_TP100_SL20 (ds/**lazy**) — sweep kelly **24.14** (#1), avg +11.27%
 - FAST_TP80_SL25 (ds/**lazy**) — kelly 21.29 — **NEW v138.2**
@@ -39,6 +39,14 @@ FAST_TP50_SL30, FAST_TP40_SL30, TP50_SL15.
 | **TOTAL live** ($1.70/trade) | | **~+$11/jour** |
 
 Discount 55% basé sur ratio observé sur BE25 (sim 7.71% / real 4.22% = 0.55). Actual real numbers will vary; validate via `--from-eval-history` after 24-48h.
+
+## v138.3 — BE25 tweak + bankroll reset (Apr 17 16:50 UTC)
+
+**Bankroll RESET**: rt_bankroll → 8 strats × $1000 = **$8000 starting capital**, total_pnl=$0, trades=0, peak=$8000. All historical PnL wiped (was -$679 cumulative). Removed deprecated DTRAIL strats from strategy_bankrolls.
+
+**BE25 config tweak**: `ds/lazy` → `median_5/static_240`. Sweep showed +0.95pp avg_pnl gain. Code: removed BE25_TP80_SL30 from LAZY_STRATEGIES set.
+
+**Impact projeté** : ~+$8/jour additionnel pour BE25 → **~+$340/jour total paper** (vs $332 v138.2).
 
 All paper positions fixed $50 (kelly × bankroll capped at max_position_usd=50).
 
