@@ -17,23 +17,24 @@ All paper positions fixed $50 (kelly × bankroll capped at max_position_usd=50).
 
 ## v137 — Cadence Fix + Strategy Swap (Apr 17 14:30 UTC) ✅
 
-**Root cause of DTRAIL sim overestimation found** (`scripts/_cadence_bias_probe.py`):
-1. v135 `_subsample` picks "next tick after gap" → real paper uses "latest cached tick before poll"
-2. Sim used fixed 10bps slip; real uses dynamic 30-250bps depending on exit type
-3. `_log_price_ticks` throttled paper-only tokens to 60s while real cache updates every 30s
+**Root cause of DTRAIL sim overestimation:**
+1. Sim's tick-driven subsample picked "next tick after gap" → real paper uses "latest cached tick before poll" (paper_trader._jupiter_prices_cache lookup semantics)
+2. Sim used fixed 10bps slip; real uses dynamic 30-250bps via `_dynamic_sell_slip_factor` depending on exit type (already routed through `_evaluate_trade_exit`, was correct)
+3. `_log_price_ticks` throttled paper-only tokens to 60s while real cache updates every 30s — sim missed half the prices real paper used
 
-**Bias measured (v135 → v136 realistic):**
-- DTRAIL3_ACT10_SL70: +19.80% → +8.60% (-56%)
-- DTRAIL10_ACT10_SL70: +17.22% → +6.30% (-63%)
-- DTRAIL5_ACT10_SL60: +15.39% → +7.55% (-51%)
-- BE25/FAST: -30% bias reduction each
+**Bias measured (sim before → sim after, vs real paper PnL):**
+- DTRAIL3_ACT10_SL70: +19.80% → +4.24% (-78%)
+- DTRAIL10_ACT10_SL70: +17.22% → +3.37% (-80%)
+- BE25_TP80_SL30: +6.57% → +4.42% (-33%)
+- FAST_TP100_SL20: +10.68% → +4.19% (-61%)
 
-**Code changes:**
+**Code changes (everything in sim.py — no standalone scripts):**
 - [x] `paper_trader.py:369` throttle 60s → 30s for paper-only tokens
-- [x] `scripts/_sweep_v136_realistic.py` — new canonical sweep (deterministic 30s grid + cache look-back + dynamic slip)
-- [x] `scripts/_cadence_bias_probe.py` — v135 vs v136 vs real per-trade comparison
-- [x] `scripts/_apply_v137_swap.py` — atomic DB swap script
-- [x] `scripts/_sweep_v136_stability.py` — 3-day window cross-check
+- [x] `sim.py:_replay_trade_orchestrated` — replaced tick-driven subsample with deterministic 30s grid + cache look-back via new `_latest_tick_at_or_before` helper
+- [x] `sim.py:LOOP_SEC=30` constant aligned with paper_trader.unified_check_loop
+- [x] `scripts/_apply_v137_swap.py` — atomic DB swap (one-off, kept for audit)
+
+**Sweep workflow going forward:** `python scraper/sim.py --from-ticks --since YYYY-MM-DD --top 30` (no more standalone sweep scripts — all logic lives in sim.py).
 
 **DB swap applied via `_apply_v137_swap.py --apply`:**
 - paper.active_strategies: removed DTRAIL3_ACT10/10_ACT10/3_ACT20, added TP50_SL15/BE15_TP100/DTRAIL10_ACT5
@@ -79,11 +80,11 @@ All via DB (no code change). Based on v135 full sweep: 224 strats × 48 configs 
 4-9. BE15_TP70_SL50, TP90/70/30, BE20_TP100, FAST_TP100_SL50, FAST_TP70_SL50 ($600-720)
 25. BE25_TP80_SL30 (currently active) — +4.2% / 34% / $572
 
-**v136 realistic top family winners** (`scraper/_sweep_v136_realistic.csv`):
-- BE: BE25_TP80_SL30 jupiter/120/raw — kelly 16.88
-- FAST: FAST_TP100_SL20 jupiter/120/median_5 — kelly 15.57
-- DTRAIL: DTRAIL5_ACT10_SL50 jupiter/120/median_5 — kelly 13.13 (NB: SL50 not SL70)
-- TP: TP30_SL10 jupiter/60/raw — kelly 13.92
+**v137 sim --from-ticks top winners** (re-run any time via `sim.py --from-ticks --since 2026-04-13`):
+- BE: BE25_TP80_SL30 — +7.3% / 30% WR / $753 (5d, N=53)
+- FAST: FAST_TP50_SL30 — -0.1% / 44% WR / $494 (deprecated, residual main trades)
+- DTRAIL: DTRAIL5_ACT10_SL50 in v136 cross-product (kelly 13.13, SL50 not SL70)
+- TP: TP30_SL10 in v136 cross-product (kelly 13.92)
 
 ## Active Exploration
 

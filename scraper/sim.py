@@ -1271,24 +1271,33 @@ def _load_live_strategy_overrides() -> dict:
     return {}
 
 
-def _subsample_ticks(ticks: list[dict], poll_sec: int) -> list[dict]:
-    """v132: keep only ticks spaced at least poll_sec apart."""
-    if poll_sec <= 0 or not ticks:
-        return ticks
-    out = [ticks[0]]
-    last_t = datetime.fromisoformat(ticks[0]["fetched_at"].replace("Z", "+00:00"))
-    for tk in ticks[1:]:
-        tt = datetime.fromisoformat(tk["fetched_at"].replace("Z", "+00:00"))
-        if (tt - last_t).total_seconds() >= poll_sec:
-            out.append(tk)
-            last_t = tt
-    return out
+# v137: realistic polling — replaces the v131 "next-tick-after-gap" subsample
+# with deterministic 30s grid + cache look-back. Mimics paper_trader's actual
+# unified_check_loop (30s) + _should_poll_trade(polling_sec) + _jupiter_prices_cache
+# semantics. Cuts DTRAIL bias by 50-60% vs v131 approach (see scripts/_cadence_bias_probe.py).
+LOOP_SEC = 30  # paper_trader unified_check_loop interval
+
+
+def _latest_tick_at_or_before(sorted_ticks: list[dict], t_iso: str) -> tuple[float | None, str | None]:
+    """Look up cache-style: latest tick whose fetched_at <= t_iso.
+    sorted_ticks must be pre-sorted ascending by fetched_at."""
+    last = (None, None)
+    for tk in sorted_ticks:
+        if tk["fetched_at"] <= t_iso:
+            p = float(tk["price_usd"])
+            if p > 0:
+                last = (p, tk["fetched_at"])
+        else:
+            break
+    return last
 
 
 def _replay_trade_orchestrated(fake_trade: dict, ds_ticks: list[dict],
                                jup_ticks: list[dict], orchestration: str,
                                poll_sec: int = 0, ema_window: int = 3) -> dict | None:
     """v132: orchestrated tick replay. Supports decision vs exec price separation.
+    v137: realistic polling cadence — deterministic 30s grid + cache look-back
+          (was: tick-driven subsample, which over-estimated tight-trail strategies).
     orchestration: jupiter | ds | hybrid | confirm | ema
     """
     from paper_trader import _evaluate_trade_exit, _last_eval_ts
@@ -1297,68 +1306,70 @@ def _replay_trade_orchestrated(fake_trade: dict, ds_ticks: list[dict],
     trade_id = str(fake_trade["id"])
     _last_eval_ts.pop(trade_id, None)
 
-    # Pick decision stream
-    if orchestration == "ds":
-        dec_ticks = ds_ticks
-    elif orchestration == "jupiter":
-        dec_ticks = jup_ticks
-    elif orchestration == "hybrid":
-        dec_ticks = ds_ticks
-    elif orchestration == "confirm":
-        dec_ticks = jup_ticks  # will cross-reference DS per tick
-    elif orchestration == "ema":
-        dec_ticks = jup_ticks  # EMA applied inline
-    else:
-        dec_ticks = jup_ticks
-
-    if poll_sec > 0:
-        dec_ticks = _subsample_ticks(dec_ticks, poll_sec)
-
-    if not dec_ticks:
-        return None
-
-    # Sorted jup ticks for exit lookup
-    exec_sorted = sorted(jup_ticks or ds_ticks, key=lambda t: t["fetched_at"])
+    # Sort streams once for look-back
+    jup_sorted = sorted(jup_ticks, key=lambda t: t["fetched_at"]) if jup_ticks else []
     ds_sorted = sorted(ds_ticks, key=lambda t: t["fetched_at"]) if ds_ticks else []
 
-    def _nearest_after(sorted_ticks, ts):
-        for tk in sorted_ticks:
-            if tk["fetched_at"] >= ts:
-                p = float(tk["price_usd"])
-                if p > 0:
-                    return p
-        return float(sorted_ticks[-1]["price_usd"]) if sorted_ticks else None
+    if not jup_sorted and not ds_sorted:
+        return None
 
-    sell_slip = 1 - 10 / 10_000
+    horizon_min = int(fake_trade.get("horizon_minutes", 120) or 120)
+    horizon_sec = horizon_min * 60
+    effective_poll_sec = poll_sec if poll_sec > 0 else LOOP_SEC
+
+    # v137: build deterministic poll schedule on a 30s grid from entry, with
+    # _should_poll_trade(poll_sec) filter (matches paper_trader exactly).
+    poll_offsets = []
+    last_check = -10**9
+    t = LOOP_SEC
+    while t <= horizon_sec:
+        if (t - last_check) >= effective_poll_sec:
+            poll_offsets.append(t)
+            last_check = t
+        t += LOOP_SEC
+
+    sell_slip = 1 - 10 / 10_000  # 10bps base; _evaluate_trade_exit applies dynamic on top
     ema_val = None
     alpha = 2 / (ema_window + 1)
+    last_dec_ts_iso = None
+    last_exec_p = None
 
-    for tick in dec_ticks:
-        tick_time = datetime.fromisoformat(tick["fetched_at"].replace("Z", "+00:00"))
-        if tick_time < entry_time:
-            continue
-        raw_price = float(tick["price_usd"])
-        if raw_price <= 0:
-            continue
+    for offset_sec in poll_offsets:
+        poll_time = entry_time + timedelta(seconds=offset_sec)
+        poll_time_iso = poll_time.isoformat().replace("+00:00", "Z")
 
-        # Compute decision price per mode
-        if orchestration == "ema":
-            ema_val = raw_price if ema_val is None else (alpha * raw_price + (1 - alpha) * ema_val)
-            decision_p = ema_val
+        jp, jp_ts = _latest_tick_at_or_before(jup_sorted, poll_time_iso)
+        ds, ds_ts = _latest_tick_at_or_before(ds_sorted, poll_time_iso)
+
+        # Per-orchestration decision/exec selection
+        if orchestration == "ds":
+            decision_p = ds if ds is not None else jp
+            exec_p = jp if jp is not None else ds
+        elif orchestration == "hybrid":
+            decision_p = ds if ds is not None else jp
+            exec_p = jp if jp is not None else ds
         elif orchestration == "confirm":
-            ds_p = _nearest_after(ds_sorted, tick["fetched_at"])
-            decision_p = (raw_price + ds_p) / 2 if ds_p else raw_price
-        else:
-            decision_p = raw_price
+            if jp is not None and ds is not None:
+                decision_p = (jp + ds) / 2
+            else:
+                decision_p = jp if jp is not None else ds
+            exec_p = jp if jp is not None else ds
+        elif orchestration == "ema":
+            if jp is None:
+                continue
+            ema_val = jp if ema_val is None else (alpha * jp + (1 - alpha) * ema_val)
+            decision_p = ema_val
+            exec_p = jp
+        else:  # "jupiter" default
+            decision_p = jp
+            exec_p = jp if jp is not None else ds
 
-        # Exec price: always Jupiter nearest-after (or current raw if no jup stream)
-        if orchestration in ("hybrid", "confirm", "ema") and exec_sorted:
-            exec_p = _nearest_after(exec_sorted, tick["fetched_at"]) or raw_price
-        else:
-            exec_p = raw_price
+        if decision_p is None or exec_p is None:
+            continue
+        last_exec_p = exec_p
 
-        ev = _evaluate_trade_exit(fake_trade, exec_p, tick_time, sell_slip,
-                                   sell_fee_bps=0, decision_price=decision_p)
+        ev = _evaluate_trade_exit(fake_trade, exec_p, poll_time, sell_slip,
+                                  sell_fee_bps=0, decision_price=decision_p)
         if ev is None:
             continue
         if ev.get("high_price_seen") is not None:
@@ -1375,17 +1386,17 @@ def _replay_trade_orchestrated(fake_trade: dict, ds_ticks: list[dict],
                 "high_price_seen": fake_trade.get("high_price_seen"),
             }
 
-    # End of data — timeout at last decision tick
-    last_tick = dec_ticks[-1]
-    last_price = float(last_tick["price_usd"])
+    # End of horizon — timeout at last seen exec price
+    if last_exec_p is None:
+        return None
     entry_price = float(fake_trade["entry_price"])
-    pnl_pct = round((last_price / entry_price) - 1, 4) if entry_price > 0 else 0
+    pnl_pct = round((last_exec_p / entry_price) - 1, 4) if entry_price > 0 else 0
     return {
         "exit_reason": "timeout_eod",
-        "exit_price": last_price,
+        "exit_price": last_exec_p,
         "pnl_pct": pnl_pct,
         "pnl_usd": round(float(fake_trade.get("position_usd") or 10.0) * pnl_pct, 2),
-        "exit_minutes": 0,
+        "exit_minutes": horizon_min,
         "high_price_seen": fake_trade.get("high_price_seen"),
     }
 
