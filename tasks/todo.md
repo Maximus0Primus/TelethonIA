@@ -76,22 +76,20 @@ Si `high_price_seen >= tp_price` mais exit fires sur timeout/SL/trail, exit rét
 - Live volume ×3
 - Jupiter Trigger V2 keepers 0 fill 7j
 
-## 🧹 Housekeeping (non urgent)
+## 🧹 Housekeeping
 
-- [ ] `.gitignore` cache files (commit 007db6b a pushé 2400+ fichiers)
-- [ ] Jupiter LDS sous-fill (35% vs seuil 70%)
-- [ ] Holders sous-fill (27%)
-- [ ] CA resolution 71.9% (sous seuil 75%)
-- [ ] Backlog labels : 24h=774, 7d=2346
-- [ ] Bug `reconcile_positions` bypass bankroll (cosmétique)
-- [ ] DIP30 entry gate cassé (désactivé en v136, pas urgent)
+- [x] **v138.5** : `.gitignore` cache files — untracked 2440 OHLCV cache files (commit 007db6b accidentally tracked)
+- [x] **v138.5** : PA computation gate (skip si `w_price_action <= 0`)
+- [x] reconcile_positions bypass bankroll — DÉJÀ FIXÉ en v136.2 (todo entry était obsolète)
+- [ ] Jupiter LDS / Holders / CA resolution sous-fill — affectent SCORING uniquement (skip, scoring désactivé)
+- [ ] Backlog labels : sert ML qui est disabled (skip)
+- [ ] DIP30 entry gate (deprecated)
 
 ## 🔵 Low-priority
 
-- [ ] Birdeye TOP_N 20→50+ (whale_new_entries NULL 80%)
-- [ ] PA computation gate sur `SCORING_PARAMS["price_action"] > 0`
-- [ ] gate_mult dead compute (RugCheck always 1.0)
-- [ ] v53 features (holder_turnover, kol_cooccurrence) <6% fill
+- [ ] Birdeye TOP_N 20→50+ — affecte scoring (skip)
+- [ ] gate_mult dead compute (RugCheck) — vérifié 17 Apr : aucune référence dans live_trader/safe_scraper/pipeline → ne bloque rien en live, safe à supprimer si on veut économiser API. **Action différée** car low impact.
+- [ ] v53 features — ML disabled, skip
 
 ## Sim ↔ Live/Paper coherence (reference)
 

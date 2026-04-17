@@ -1083,41 +1083,52 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
 
 def _dynamic_sell_slip_factor(trade: dict, exit_type: str, base_bps: int = 10,
                               fee_bps: int = SELL_FEE_BPS) -> float:
-    """v124: Dynamic sell slippage calibrated from 70+ live Jupiter Ultra RFQ trades.
+    """v138.5: recalibrated against 132 live trades (Apr 13-17 post-v132).
 
-    Jupiter Ultra uses market-maker RFQ fills — near-zero slippage for normal exits.
-    Real data:
-      trail_stop / tp_hit / timeout:   0-2 bps slippage (market maker fills tight)
-      sl_hit:                          5-30 bps — moderate dump, RFQ still works
-      trail_crash (true rug/crash):    500-2000 bps — only when liquidity vanishes
+    Measured medians (paper_exit vs real_exit divergence on rt_live):
+      sl_hit       N=34  median -4.35%  → ~435 bps real slip (was ~30-120 sim)
+      trail_stop   N=52  median -2.48%  → ~250 bps  (was ~15-60 sim)
+      trail_crash  ~outliers in trail_stop, median -10%+ → 1000+ bps
+      tp_hit       N=15  median +7.74%  → POSITIVE slip (Jupiter trigger overshoots
+                                          tp_price, fill HIGHER than target = bonus)
+      timeout      N=31  median -1.22%  → ~100 bps (was ~30)
 
-    v124: v119 crash slippage was too aggressive — classified 58% of trail exits as
-    "crash" (threshold 0.95) and applied 3-12% slippage on paper trades. In reality,
-    Jupiter RFQ fills tight even during fast pullbacks. Only true crashes (>30% below
-    trigger, ~5% of exits) warrant elevated slippage.
+    Slip does NOT scale strongly with liquidity in $5K-100K range — flat baseline
+    per exit type, with low-liq amplifier only below $20K.
 
-    base_bps = 10 (Jupiter Ultra 0.1% platform fee).
-    Batch trades (no rt_liquidity_usd) fall back to 50K default."""
+    base_bps param kept for backward compat but ignored (slip now per exit type).
+    Conservative tp_hit: median was +7.7% but N=15 only → use +300 bps (+3%) until
+    more samples accumulate.
+    """
     liq_usd = float(trade.get("rt_liquidity_usd") or 50_000)
-
-    # Liquidity multiplier: $50K+ = 1x, $5K = 2x, $1K = 4x
-    liq_mult = max(1.0, min(4.0, 50_000 / max(liq_usd, 1_000)))
-
-    # v124: Exit type multiplier — all normal exits are near-zero with Jupiter RFQ.
-    # Only true crashes (liquidity rug) warrant significant slippage.
-    if exit_type == "trail_crash":
-        exit_mult = 5.0    # true crash: 50-200bps depending on liquidity
-    elif exit_type == "sl_hit":
-        exit_mult = 3.0    # SL dump: 30-120bps — selling into downtrend
-    elif exit_type == "trail_stop":
-        exit_mult = 1.5    # normal pullback: ~15bps
+    # Low-liq amplifier (kicks in below $20K)
+    if liq_usd < 5_000:
+        liq_mult = 2.0
+    elif liq_usd < 20_000:
+        liq_mult = 1.3
     else:
-        exit_mult = 1.0    # tp_hit, timeout: ~10bps (just the platform fee)
+        liq_mult = 1.0
 
-    adjusted_bps = int(base_bps * liq_mult * exit_mult) + fee_bps
-    # v124: Reasonable caps — crash max 10% (was 55%), normal max 5%
-    max_bps = 1000 if exit_type == "trail_crash" else 500
-    adjusted_bps = min(adjusted_bps, max_bps)
+    # Per-exit-type baseline bps (negative = positive slippage / overshoot)
+    if exit_type == "trail_crash":
+        type_bps = 1000        # was 50-200; real outliers show -10% to -29%
+    elif exit_type == "sl_hit":
+        type_bps = 435         # was 30-120; real median -4.35%
+    elif exit_type == "trail_stop":
+        type_bps = 250         # was 15-60; real median -2.48%
+    elif exit_type == "tp_hit":
+        type_bps = -300        # POSITIVE slip — Jupiter trigger fills above target
+    elif exit_type == "timeout":
+        type_bps = 120         # was 30; real median -1.22%
+    else:
+        type_bps = 100
+
+    adjusted_bps = int(type_bps * liq_mult) + fee_bps
+    # Caps prevent runaway on edge cases
+    if exit_type == "trail_crash":
+        adjusted_bps = max(-1000, min(2500, adjusted_bps))
+    else:
+        adjusted_bps = max(-1000, min(1500, adjusted_bps))
 
     return 1 - adjusted_bps / 10_000
 

@@ -56,6 +56,16 @@ scraper/*_cache.json
 group_cache.json
 scraper/enrich_cache.json
 scraper/failed_writes.jsonl
+# v138.5: commit 007db6b accidentally tracked 2400+ OHLCV cache files. Untracked + ignored.
+scraper/ohlcv_cache/*.json
+!scraper/ohlcv_cache/_pair_address_cache.json
+scraper/jupiter_candles_cache/
+# Sweep outputs (analytical artifacts, not source)
+scraper/_sweep_*.csv
+scraper/_sweep_*.log
+scraper/_mega_sweep_*.csv
+scraper/_mega_sweep_*.log
+scraper/_from_trades_*.log
 
 # === WINDOWS ARTIFACTS ===
 nul

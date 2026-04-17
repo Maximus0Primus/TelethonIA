@@ -4064,7 +4064,14 @@ def aggregate_ranking(
     logger.info("Parallel enrichment completed in %.1fs", time.time() - _enrich_start)
 
     # === Algorithm v4: Price Action scoring ===
+    # v138.5: skip computation entirely if PA weight = 0 (saves OHLCV-derived
+    # fields work). When weight is non-zero (default 5.4%), runs as before.
+    _pa_weight = float(SCORING_PARAMS.get("w_price_action", 0) or 0)
     for token in ranking:
+        if _pa_weight <= 0:
+            token["price_action_score"] = None
+            token["price_action_components"] = None
+            continue
         pa = compute_price_action_score(
             token,
             pa_norm_floor=SCORING_PARAMS["pa_norm_floor"],
