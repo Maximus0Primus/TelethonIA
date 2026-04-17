@@ -1,4 +1,4 @@
-# Pipeline Status — Updated Apr 17, 2026 (v138.3)
+# Pipeline Status — Updated Apr 17, 2026 (v140)
 
 ## Current state
 
@@ -27,59 +27,30 @@
 | **BE25_TP80_SL30_NZS30_HYST** | liq>0+score≥30 | hysteresis | — | static 240 | $86 | ~$48 | v140 avg **+25.67%** N=27 ⭐ |
 | **BE15_TP300_SL50_MCAP** | 30K<mcap<500K | ds | raw | fast 30s | $85 | ~$47 | v140 best MCAP_MID |
 
-Total sim projection : ~**+$1700/jour**. Réaliste (0.55x) : **~$900/jour**. Tous à $1000 bankroll fresh pour A/B équitable.
+**Total sim projection** : ~**+$1700/jour**. Réaliste (×0.55) : **~$900/jour**. Tous à $1000 bankroll fresh pour A/B équitable.
 
-| Strat | Config | Sweep avg | Mode |
-|---|---|---|---|
-| FAST_TP100_SL20 | ds | +11.27% | LAZY |
-| BE25_TP80_SL30 | median_5 | +10.09% | static 240s |
-| FAST_TP80_SL25 | ds | +9.46% | LAZY |
-| BE25_TP80_SL30_DS | ds | +8.64% | LAZY (A/B vs ema_fast) |
-| FAST_TP40_SL30 | hysteresis | +7.96% | LAZY |
-| FAST_TP50_SL30 | median_3 | +7.31% | LAZY |
-| BE15_TP100_SL50 | ds | +7.14% | static 30s (fast) |
-| TP50_SL15 | jupiter | +6.28% | LAZY |
-| **NOZEROLIQ_TP200_SL40** | jupiter | (test +14.91%) | static 120s — **NEW v139** |
-| **HIGHSCORE_TP200_SL40** | jupiter | (test +14.42%) | static 120s — **NEW v139** |
+LAZY mode = 180s pendant 5min puis 600s. Hardcoded dans `strategies.py:LAZY_STRATEGIES`.
 
-## v139 — TP200 asymmetric strategies (Apr 17 17:30 UTC)
+## Sim biais mesuré (ratios réel/sim sur historique pré-v140)
 
-Tested 19 candidate strategies on 71 post-v132 tokens (`scripts/_test_new_strategies.py`).
-Top 2 added to paper portfolio:
-- **NOZEROLIQ_TP200_SL40** : skip pump.fun pre-grad tokens (liq=0). N=44, WR 48%, avg +14.91%, $/jour proj +$83.
-- **HIGHSCORE_TP200_SL40** : rt_score ≥ 30 gate. N=38, WR 50%, avg +14.42%, proj +$69.
+| Strat | Ratio | Note |
+|---|---|---|
+| BE15_TP100_SL50 | 1.25 | sim sous-estime |
+| TP50_SL15 | 0.71 | fiable |
+| BE25_TP80_SL30 | 0.54 | sim 2x optimiste |
+| FAST_TP100_SL20 | **0.12** | 🚨 sim 8x optimiste |
 
-Insights de la batterie de tests :
-1. TP200_SL40 (3x TP, 0.6 SL, 4h horizon) > BE25_TP80_SL30 baseline systématiquement
-2. `liq=0` (pump.fun bonding) = -$19.82/jour drag — skip = +9pp avg
-3. `rt_score` PRÉDIT (revoir notre opinion "scoring on s'en fout") — score≥40 donne 65% WR median +22%
-4. EARLY_DUMP cut DÉGRADE (coupe des winners qui auraient récupéré)
-5. TOPKOLS whitelist : modeste gain (+$32 vs +$28)
+**Hypothèse v140** : `hysteresis` smoothing pourrait réduire le biais car il filtre les triggers transitoires (cause principale de divergence sim/real). À valider 24-48h.
 
-Code: `STRATEGY_FILTERS` étendus avec `min_liquidity_usd` + `min_rt_score` + `min_mcap`.
-Bankroll : 10 strats × $1000 = $10000 starting capital.
+## 🔴 Priorités immédiates (Apr 18-20)
 
-LAZY = 180s during first 5min, 600s after. Hardcoded in `strategies.py:LAZY_STRATEGIES`.
-
-## $/jour projeté vs réel attendu
-
-Sim biais mesuré sur historique (ratio réel/sim) :
-- TP50_SL15 : 0.71 (fiable)
-- BE15_TP100_SL50 : 1.25 (sim sous-estime, sera meilleur)
-- BE25_TP80_SL30 : 0.54 (sim 2x optimiste)
-- FAST_TP100_SL20 : **0.12** (sim 8x optimiste 🚨)
-- 3 nouvelles FAST + BE25_DS : N trop petit, projection théorique
-
-**Total projeté brut (sim)** : ~+$340/jour paper, ~+$11/jour live ($1.70/trade)
-**Total réaliste avec ratios** : **~+$200-280/jour paper**, ~+$5-8/jour live
-
-## 🔴 Priorités immédiates (Apr 17-19)
-
-- [ ] Validation 24-48h post-v138.3 : `current_balance > $8000` ? Si oui combien de gain réel
-- [ ] **Validation FAST family** — sim dit #1 mais historique réel = +1.01%. Si après 48h les 4 FAST génèrent < +2% avg réel → swap out
-- [ ] **`--from-eval-history`** — confirmer biais=0% sur trades fermés post-v138 deploy (eval_history maintenant persisté)
+- [ ] **Validation 24-48h post-v140** : `current_balance > $18000` ? Si oui combien de gain réel total
+- [ ] **A/B hysteresis** : `BE25_TP80_SL30` (median_5/240) vs `BE25_TP80_SL30_HYST` (hysteresis/lazy) — mêmes tokens, configs différentes. Si HYST > vanilla → hysteresis sauve réellement le sim. Si égal → sim trompeur encore.
+- [ ] **A/B filtres** : `BE25_TP80_SL30_HYST` vs `BE25_TP80_SL30_S30_HYST` vs `BE25_TP80_SL30_NZS30_HYST` — quel filter ajoute le plus de valeur réelle ?
+- [ ] **NZS30 confirmation** : avg sim +25.67% sur N=27. Si réel ≥ +10% confirmé → meilleure config absolue (ratio à mesurer).
+- [ ] **`--from-eval-history`** : biais=0% sur trades fermés post-v138 (eval_history persisté)
 - [ ] Live BE25 + BE15 : >$0.50/trade avg sur N≥10 trades
-- [ ] **Validation latence post-A.2.1** (24h post-deploy) : si `msg→ds` mean baisse de 24s → 15-18s sous charge, le batch shadow fix a aussi désengorgé l'executor (effet attendu)
+- [ ] **Latence A.2.1** : `msg→ds` mean 24s → 15-18s sous charge confirmé ?
 
 ## 🟡 Active Exploration
 
@@ -153,9 +124,13 @@ Si `high_price_seen >= tp_price` mais exit fires sur timeout/SL/trail, exit rét
 
 ## Historique récent (sessions Apr 17)
 
-- **v137** ✅ cadence fix `_replay_trade_orchestrated` (next-tick-after-gap → look-back), throttle 60→30s
-- **v138** ✅ eval_history JSONB + cache_snapshots table + `--from-eval-history` mode (0% bias par construction)
-- **v138.1** ✅ swap live FAST→BE15, drop 2 DTRAIL paper (perdaient -$160/j)
+- **v140** ✅ Full mega sweep 136K configs, 12 workers, 22min. Découverte `hysteresis+lazy` domine top 10. 8 nouvelles strats ajoutées + bankroll reset 18×$1000=$18K. `_BE_RE` regex relaxé pour accepter suffixes (_HYST/_NZ/_S30).
+- **v139** ✅ Test 19 candidates → ajout NOZEROLIQ_TP200_SL40 + HIGHSCORE_TP200_SL40 ($83+$69 sim/jour)
+- **v138.5** ✅ `_dynamic_sell_slip_factor` recalibré (sl_hit 30→435bps, trail 15→250bps, tp positive +300bps), .gitignore 2440 cache files, PA gate, audit ML (toujours cassé)
+- **v138.4** ✅ batch shadow inserts (217 HTTP → 1 batch) → -12s ds→pre_buy
+- **v138.3** ✅ BE25 → median_5/static_240, bankroll reset $1000×8
 - **v138.2** ✅ mega-sweep 9040 configs → 8 paper actives + LAZY mode + 3 nouvelles FAST
-- **v138.3** ✅ BE25 → median_5/static_240 (rerank par avg_pnl_pct), bankroll reset $1000×8
+- **v138.1** ✅ swap live FAST→BE15, drop 2 DTRAIL paper (perdaient -$160/j)
+- **v138** ✅ eval_history JSONB + cache_snapshots table + `--from-eval-history` (0% bias)
+- **v137** ✅ cadence fix `_replay_trade_orchestrated` (next-tick-after-gap → look-back), throttle 60→30s
 - **v133-D** (Apr 16) ✅ hybrid sell pollution fix
