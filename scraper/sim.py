@@ -1376,6 +1376,45 @@ def _replay_trade_orchestrated(fake_trade: dict, ds_ticks: list[dict],
             ema_val = jp if ema_val is None else (alpha * jp + (1 - alpha) * ema_val)
             decision_p = ema_val
             exec_p = jp
+        # v142 C — OHLCV in-memory reconstruction. Sample jp at each bar
+        # boundary, return that close throughout the bar.
+        elif orchestration in ("ohlcv_1min", "ohlcv_3min"):
+            if jp is None:
+                continue
+            bar_sec = 60 if orchestration == "ohlcv_1min" else 180
+            if not hasattr(_replay_trade_orchestrated, "_ohlcv_state"):
+                _replay_trade_orchestrated._ohlcv_state = {}
+            key = trade_id
+            st = _replay_trade_orchestrated._ohlcv_state.setdefault(key, {"ts": 0, "close": jp})
+            cur_bar = (offset_sec // bar_sec) * bar_sec
+            if cur_bar > st["ts"]:
+                st["close"] = jp
+                st["ts"] = cur_bar
+            decision_p = st["close"]
+            exec_p = jp
+        # v142 C — Twin-source confirmation. Both jp and ds must agree
+        # before letting SL/TP trigger. Single-source breach suppressed.
+        elif orchestration == "twin_confirm":
+            if jp is None:
+                continue
+            sl_price = float(fake_trade.get("sl_price") or 0)
+            tp_price = float(fake_trade.get("tp_price") or 0) or None
+            if ds is None:
+                decision_p = jp
+            else:
+                dec = jp
+                if sl_price:
+                    jp_brk = jp <= sl_price
+                    ds_brk = ds <= sl_price
+                    if jp_brk != ds_brk:
+                        dec = max(jp, ds)  # suppress single-source SL breach
+                if tp_price:
+                    jp_brk = jp >= tp_price
+                    ds_brk = ds >= tp_price
+                    if jp_brk != ds_brk:
+                        dec = min(jp, ds)  # suppress single-source TP breach
+                decision_p = dec
+            exec_p = jp
         else:  # "jupiter" default
             decision_p = jp
             exec_p = jp if jp is not None else ds
@@ -4327,7 +4366,10 @@ def main():
                         choices=["jupiter", "dexscreener", "both"],
                         help="Price source for --from-ticks (default: jupiter)")
     parser.add_argument("--orchestration", type=str, default=None,
-                        choices=["jupiter", "ds", "hybrid", "confirm", "ema"],
+                        choices=["jupiter", "ds", "hybrid", "confirm", "ema",
+                                 "median_3", "median_5", "winsor_p95", "dual_confirm",
+                                 "hysteresis", "ema_fast", "ema_slow",
+                                 "ohlcv_1min", "ohlcv_3min", "vwap_5min", "twin_confirm"],
                         help="v132: Orchestration mode (overrides --price-source for tick replay)")
     parser.add_argument("--poll-sec", type=int, default=0,
                         help="v132: Subsample ticks to N-second polling interval (0=no subsampling)")

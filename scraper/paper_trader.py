@@ -382,6 +382,67 @@ def _decision_price(addr: str, strategy: str, trade_id: int, orch: dict,
             return tp_price * 0.999, jp
         return jp, jp
 
+    # v142 C — OHLCV reconstruction in-memory. Sample `jp` at each bar
+    # boundary (60s or 180s) and return that close value throughout the bar.
+    # Equivalent to the historical OHLCV sim behavior that used candle close
+    # prices only — suppresses intra-bar wick triggers on TP/SL/trail.
+    if src == "ohlcv_1min" or src == "ohlcv_3min":
+        bar_sec = 60 if src == "ohlcv_1min" else 180
+        now_ts = _time_mod.time()
+        last_close_ts = state.get("ohlcv_ts", 0)
+        cur_bar = int(now_ts // bar_sec) * bar_sec
+        if cur_bar > last_close_ts:
+            state["ohlcv_close"] = jp
+            state["ohlcv_ts"] = cur_bar
+        close = state.get("ohlcv_close", jp)
+        return close, jp
+
+    # v142 C — VWAP 5min. Volume-weighted avg of prices over sliding 5min
+    # window. Volume per tick = delta of DexScreener rolling volume_usd
+    # between polls. Weights heavy trading periods above light ones, better
+    # reflecting actual execution-weighted market level than plain median/ema.
+    if src == "vwap_5min":
+        now_ts = _time_mod.time()
+        buf = state.setdefault("vwap_buf", [])  # list of (ts, price, dv)
+        prev_total_vol = state.get("vwap_last_vol")
+        dex_extra = _last_dex_extra.get(addr, {})
+        cur_vol = float(dex_extra.get("volume_usd") or 0)
+        dv = max(0.0, cur_vol - prev_total_vol) if prev_total_vol is not None else 0.0
+        state["vwap_last_vol"] = cur_vol
+        if dv > 0:
+            buf.append((now_ts, jp, dv))
+        # Keep only last 5 min
+        cutoff = now_ts - 300
+        state["vwap_buf"] = [x for x in buf if x[0] >= cutoff]
+        total_v = sum(v for _, _, v in state["vwap_buf"])
+        if total_v <= 0:
+            return jp, jp  # warm-up or zero volume
+        vwap = sum(p * v for _, p, v in state["vwap_buf"]) / total_v
+        return vwap, jp
+
+    # v142 C — Twin-source confirmation. Requires BOTH Jupiter and DS to
+    # breach the same threshold (SL or TP) before letting the trigger through.
+    # Single-source breach → returns the non-breaching source to suppress the
+    # false signal. Eliminates divergence-induced phantom triggers (common
+    # 2-5% gap between DS spot and Jupiter quote on illiquid tokens).
+    if src == "twin_confirm":
+        if trade is None or ds is None or jp is None:
+            return (jp or ds), (jp or ds)
+        sl_price = float(trade.get("sl_price") or 0)
+        tp_price = float(trade.get("tp_price") or 0) or None
+        if sl_price:
+            jp_breach = jp <= sl_price
+            ds_breach = ds <= sl_price
+            if jp_breach != ds_breach:
+                # Only one source breaches → suppress (use the higher one)
+                return max(jp, ds), jp
+        if tp_price:
+            jp_breach = jp >= tp_price
+            ds_breach = ds >= tp_price
+            if jp_breach != ds_breach:
+                return min(jp, ds), jp
+        return jp, jp
+
     # Unknown mode: fall back to jupiter
     return jp, jp
 
