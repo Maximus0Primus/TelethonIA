@@ -634,9 +634,6 @@ LAZY_STRATEGIES: set[str] = {
     "DIP30_B5_T5_A20_SL70_240m",
 
     # v142 (auto-aligned to mega sweep optimal):
-    "BE25_TP80_SL30",
-    "BE25_TP80_SL30_S30_HYST",
-    "BE25_TP80_SL30_NZS30_HYST",
     "FAST_TP70_SL50",
     "PTRAIL_V2_T10-18-30-45_SL30_T60",
     "SCORE40_FAST_TP50_SL30_30M",
