@@ -11,11 +11,15 @@ from dotenv import load_dotenv
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scraper"))
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", "scraper", ".env"))
 from supabase import create_client
-from paper_trader import _strategy_orchestration, _decision_price, _evaluate_trade_exit
+import paper_trader as _pt
+from paper_trader import (
+    _strategy_orchestration, _decision_price, _evaluate_trade_exit,
+    _jupiter_prices_cache, _dex_prices_cache, _ema_state, _smooth_state,
+)
 
 sb = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_ROLE_KEY"])
 
-SINCE = "2026-04-13 07:00:00+00:00"  # post-v131
+SINCE = os.environ.get("ALIGN_SINCE", "2026-04-15 00:00:00+00:00")  # post-v142E shadow-sync
 
 
 def fetch_all(table, **f):
@@ -44,59 +48,67 @@ def fetch_live_cfg():
 
 
 def replay_trade(trade, ticks, live_cfg):
-    """Replay a trade through historical ticks using production orchestration config."""
+    """Replay a trade through historical ticks using production orchestration config.
+
+    v143: feeds the real `_decision_price` (all smoothing modes supported:
+    median_3/5, hysteresis, winsor_p95, ema_fast/slow, twin_confirm, vwap_5min,
+    jp_sampled_*, dual_confirm, confirm). Ticks are merged chronologically and
+    populate the per-addr Jupiter/DS caches exactly as the live scraper does;
+    eval fires at `polling_sec` cadence and uses the smoothed decision price.
+    """
     strategy = trade["strategy"]
     orch = _strategy_orchestration(strategy, live_cfg)
     polling_sec = int(orch.get("polling_sec", 30))
-    source = orch.get("price_source", "jupiter")
+    addr = trade["token_address"]
 
-    ds_ticks = [(t["fetched_at"], float(t["price_usd"])) for t in ticks if t["source"] in ("fast","full","live") and float(t["price_usd"]) > 0]
-    jp_ticks = [(t["fetched_at"], float(t["price_usd"])) for t in ticks if t["source"] == "jupiter" and float(t["price_usd"]) > 0]
-    ds_ticks.sort(); jp_ticks.sort()
-
-    # Pick decision stream per source
-    if source == "ds":
-        dec_stream = ds_ticks
-    elif source == "hybrid":
-        dec_stream = ds_ticks
-    else:
-        dec_stream = jp_ticks
-
-    # Subsample at polling_sec
-    sampled = []
-    last_t = None
-    for t, p in dec_stream:
-        if t < trade["created_at"]:
+    # Merge ticks chronologically with source tag
+    merged = []
+    for t in ticks:
+        p = float(t.get("price_usd") or 0)
+        if p <= 0:
             continue
-        tt = datetime.fromisoformat(t.replace("Z", "+00:00"))
-        if last_t is None or (tt - last_t).total_seconds() >= polling_sec:
-            sampled.append((t, p))
-            last_t = tt
-
-    if not sampled:
+        ts = t["fetched_at"]
+        if ts < trade["created_at"]:
+            continue
+        src = "jp" if t["source"] == "jupiter" else ("ds" if t["source"] in ("fast","full","live") else None)
+        if src:
+            merged.append((ts, src, p))
+    merged.sort(key=lambda x: x[0])
+    if not merged:
         return None, "no_ticks"
 
-    # Jupiter-sorted for exit nearest-after
-    jp_sorted = sorted(jp_ticks)
+    # Isolate per-trade smoother state (caches are per-addr, must clear entry)
+    trade_id = f"replay_{trade['id']}"
+    _ema_state.pop(trade_id, None)
+    _smooth_state.pop(trade_id, None)
+    _jupiter_prices_cache.pop(addr, None)
+    _dex_prices_cache.pop(addr, None)
+
+    fake = dict(trade)
+    fake["id"] = trade_id
+
+    last_eval_t = None
     entry = float(trade["entry_price"])
 
-    # Mutable fake for _evaluate_trade_exit
-    fake = dict(trade)
-    fake["id"] = str(trade["id"])
+    for ts, src, p in merged:
+        # Update the cache that the live scraper would have populated
+        if src == "jp":
+            _jupiter_prices_cache[addr] = p
+        else:
+            _dex_prices_cache[addr] = p
 
-    def nearest_jp(ts):
-        for tt, pp in jp_sorted:
-            if tt >= ts:
-                return pp
-        return jp_sorted[-1][1] if jp_sorted else None
+        tt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        if last_eval_t is not None and (tt - last_eval_t).total_seconds() < polling_sec:
+            continue  # cache updated, but don't eval yet
 
-    for t, dec_price in sampled:
-        tick_time = datetime.fromisoformat(t.replace("Z", "+00:00"))
-        exec_price = nearest_jp(t) if source in ("ds","hybrid") else dec_price
-        if exec_price is None:
-            exec_price = dec_price
+        dec_price, exit_ref = _decision_price(addr, strategy, trade_id, orch, trade=fake)
+        if dec_price is None:
+            continue  # waiting on the required source
+        if exit_ref is None:
+            exit_ref = dec_price
 
-        ev = _evaluate_trade_exit(fake, exec_price, tick_time, sell_slip_factor=1.0,
+        last_eval_t = tt
+        ev = _evaluate_trade_exit(fake, exit_ref, tt, sell_slip_factor=1.0,
                                    sell_fee_bps=0, decision_price=dec_price)
         if ev is None:
             continue
@@ -104,19 +116,23 @@ def replay_trade(trade, ticks, live_cfg):
             new_high = ev["high_price_seen"]
             if new_high > float(fake.get("high_price_seen") or 0):
                 fake["high_price_seen"] = new_high
-        if "status" in ev and ev["status"]:
+        if ev.get("status"):
+            # Cleanup per-trade state before returning
+            _ema_state.pop(trade_id, None)
+            _smooth_state.pop(trade_id, None)
             return ev["pnl_pct"], ev["status"]
 
-    # Fallback: timeout at last tick
-    _, last_p = sampled[-1]
-    pnl = (last_p / entry) - 1
-    return round(pnl, 4), "timeout_eod"
+    # Fallback: timeout at last merged tick
+    _ema_state.pop(trade_id, None)
+    _smooth_state.pop(trade_id, None)
+    _, _, last_p = merged[-1]
+    return round((last_p / entry) - 1, 4), "timeout_eod"
 
 
 def main():
     print("Loading live trades post-v131...")
     live_trades = fetch_all("paper_trades", gte_created_at=SINCE)
-    live_trades = [t for t in live_trades if t.get("tx_signature") and t.get("status") in ("sl_hit","trail_stop","tp_hit","timeout")]
+    live_trades = [t for t in live_trades if t.get("source") == "rt_live" and t.get("tx_signature") and t.get("status") in ("sl_hit","trail_stop","tp_hit","timeout","be_stop")]
     print(f"  {len(live_trades)} closed live trades")
 
     if not live_trades:
@@ -142,6 +158,7 @@ def main():
     print("-"*100)
 
     diffs = []
+    per_strat = defaultdict(list)
     for tr in live_trades:
         pnl_live = float(tr.get("pnl_pct") or 0) * 100
         status_live = tr.get("status")
@@ -152,6 +169,7 @@ def main():
         sim_pnl_pct = sim_pnl * 100
         diff_pp = sim_pnl_pct - pnl_live
         diffs.append(diff_pp)
+        per_strat[tr["strategy"]].append(diff_pp)
         print(f"{tr['symbol']:<14}{tr['strategy']:<25}{pnl_live:>9.2f}%{sim_pnl_pct:>9.2f}%{diff_pp:>11.2f}pp{status_live:>14}{sim_status:>14}")
 
     if diffs:
@@ -160,11 +178,21 @@ def main():
         max_diff = max(abs(d) for d in diffs)
         print(f"\nAligned on {len(diffs)} trades. Avg diff = {avg_diff:+.2f}pp | Max |diff| = {max_diff:.2f}pp")
         if max_diff < 3:
-            print("✅ ALIGNMENT VERIFIED — all sim vs live diffs under 3pp (within noise)")
+            print("[OK] ALIGNMENT VERIFIED - all sim vs live diffs under 3pp (within noise)")
         elif max_diff < 10:
-            print("🟡 PARTIAL ALIGNMENT — some diffs up to 10pp (tick sampling gaps likely)")
+            print("[WARN] PARTIAL ALIGNMENT - some diffs up to 10pp (tick sampling gaps likely)")
         else:
-            print("🔴 MISALIGNMENT DETECTED — diffs >10pp, investigate orchestration logic")
+            print("[FAIL] MISALIGNMENT DETECTED - diffs >10pp, investigate orchestration logic")
+
+        import statistics as _st
+        print("\n=== Per-strategy diff breakdown ===")
+        for strat, ds in sorted(per_strat.items(), key=lambda x: -len(x[1])):
+            in1 = sum(1 for d in ds if abs(d) <= 1)
+            in3 = sum(1 for d in ds if abs(d) <= 3)
+            in10 = sum(1 for d in ds if abs(d) <= 10)
+            print(f"  {strat}: N={len(ds)}, median={_st.median(ds):+.2f}pp, "
+                  f"mean={_st.mean(ds):+.2f}pp, maxabs={max(ds, key=abs):+.2f}pp, "
+                  f"within_1pp={in1}, within_3pp={in3}, within_10pp={in10}")
 
 
 if __name__ == "__main__":
