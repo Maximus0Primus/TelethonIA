@@ -632,6 +632,15 @@ LAZY_STRATEGIES: set[str] = {
     "DTRAIL3_ACT5_SL60",
     "DTRAIL5_ACT10_SL60",
     "DIP30_B5_T5_A20_SL70_240m",
+
+    # v142 (auto-aligned to mega sweep optimal):
+    "BE25_TP80_SL30",
+    "BE25_TP80_SL30_S30_HYST",
+    "BE25_TP80_SL30_NZS30_HYST",
+    "FAST_TP70_SL50",
+    "PTRAIL_V2_T10-18-30-45_SL30_T60",
+    "SCORE40_FAST_TP50_SL30_30M",
+    "FAST_TP500_SL40_60M",
 }
 LAZY_FAST_SEC = 180     # 3 min during fast phase
 LAZY_FAST_WINDOW = 300  # 5 min fast phase
