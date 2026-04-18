@@ -2610,6 +2610,14 @@ def _replay_with_trigger_sl_only(fake_trade: dict, ticks: list[dict],
 SMOOTHING_MODES = [
     "raw", "median_3", "median_5", "winsor_p95", "dual_confirm",
     "ema_fast", "ema_slow", "hysteresis", "volume_gated",
+    # v143.2 — ported from paper_trader._decision_price so every strategy
+    # running these smoothers in prod can be replayed by sim.
+    "jp_sampled_60s", "jp_sampled_180s", "vwap_5min", "ohlc_burst_60s",
+    # NOT ported (require dual JP+DS streams; sim replays a single filtered
+    # stream — adding needs _replay_with_intervals refactor):
+    #   "confirm"       — decision = (jp+ds)/2
+    #   "twin_confirm"  — trigger requires both sources to agree
+    #   "hybrid"        — decision on DS, exit at Jupiter
 ]
 
 
@@ -2705,6 +2713,69 @@ def _smooth_decision(tick: dict, state: dict, mode: str,
         if vol is not None and vol < 500:
             return None  # skip tick entirely
         return p
+
+    # v143.2 — jp_sampled_60s / _180s: freeze decision between bar boundaries.
+    # Mirrors paper_trader._decision_price. Suppresses intra-bar triggers.
+    if mode == "jp_sampled_60s" or mode == "jp_sampled_180s":
+        bar_sec = 60 if mode == "jp_sampled_60s" else 180
+        try:
+            tick_ts = datetime.fromisoformat(
+                tick["fetched_at"].replace("Z", "+00:00")).timestamp()
+        except Exception:
+            return p
+        last_close_ts = state.get("ohlcv_ts", 0)
+        cur_bar = int(tick_ts // bar_sec) * bar_sec
+        if cur_bar > last_close_ts:
+            state["ohlcv_close"] = p
+            state["ohlcv_ts"] = cur_bar
+        return state.get("ohlcv_close", p)
+
+    # v143.2 — VWAP 5min over sliding window. Needs price_ticks.volume_usd,
+    # which is the rolling total; dv = delta between consecutive ticks.
+    if mode == "vwap_5min":
+        try:
+            tick_ts = datetime.fromisoformat(
+                tick["fetched_at"].replace("Z", "+00:00")).timestamp()
+        except Exception:
+            return p
+        buf = state.setdefault("vwap_buf", [])  # [(ts, price, dv)]
+        prev_total = state.get("vwap_last_vol")
+        cur_vol = float(tick.get("volume_usd") or 0)
+        dv = max(0.0, cur_vol - prev_total) if prev_total is not None else 0.0
+        state["vwap_last_vol"] = cur_vol
+        if dv > 0:
+            buf.append((tick_ts, p, dv))
+        cutoff = tick_ts - 300
+        state["vwap_buf"] = [x for x in buf if x[0] >= cutoff]
+        total_v = sum(v for _, _, v in state["vwap_buf"])
+        if total_v <= 0:
+            return p  # warm-up / zero volume
+        return sum(px * v for _, px, v in state["vwap_buf"]) / total_v
+
+    # v143.2 — ohlc_burst_60s: accumulate ticks per 60s bar, emit synthetic
+    # O/L/H/C sequence at bar close. Caller must consume the emitted list,
+    # so we return the raw price here; burst emission is driven by state.
+    # sim_engines.candles_to_synthetic_ticks() already handles this when the
+    # sim is fed candles directly. For tick-replay, we approximate by
+    # returning the running OHLC close once per bar.
+    if mode == "ohlc_burst_60s":
+        try:
+            tick_ts = datetime.fromisoformat(
+                tick["fetched_at"].replace("Z", "+00:00")).timestamp()
+        except Exception:
+            return p
+        bar_sec = 60
+        cur_bar = int(tick_ts // bar_sec) * bar_sec
+        buf = state.setdefault("ohlc_buf", [])
+        last_bar = state.get("ohlc_last_bar", cur_bar)
+        if cur_bar > last_bar and buf:
+            # Emit synthetic bar close = last tick of prior bar
+            state["ohlc_close"] = buf[-1]
+            state["ohlc_buf"] = []
+            state["ohlc_last_bar"] = cur_bar
+        buf.append(p)
+        state["ohlc_buf"] = buf[-300:]  # cap
+        return state.get("ohlc_close", p)
 
     return p
 
