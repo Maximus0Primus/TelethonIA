@@ -1,4 +1,16 @@
-# Pipeline Status — Updated Apr 18, 2026 (v142)
+# Pipeline Status — Updated Apr 18, 2026 (v142, post-revert)
+
+## Data windows (à lire avant toute lecture de stats 7d)
+
+- **Bases FAST/BE non-HYST** (ds/median_3/median_5/jupiter smoothing) : **~7j complets** depuis v132, N=11-123 par strat. Solide.
+- **_HYST variants** (hysteresis/30s) : activées **v140 Apr 17 ~16h UTC**, seulement **~20-24h** de data → N=8 par strat, fragile.
+- **3 nouvelles mains v142** (FAST_TP70_SL50, BE15_TP200_SL40_4H, MCAP_MID_DTRAIL5_ACT25_SL50_2H) : activées **Apr 18 12:07 UTC** aujourd'hui, quelques heures de data, N=0-5. Non évaluable.
+- **9 shadows v142** (TD2, PTRAIL_V2, BOND_FAST, SCORE40, etc.) : activées **Apr 18 08:39-12:01 UTC**, ~4-8h de data. Non évaluable.
+- **Orchestration align des mains existantes** : appliquée 12:16 UTC, **reverted à 12:30 UTC** (14 min de config erroné, impact négligeable).
+
+**ETA verdicts** :
+- HYST vs base A/B : N≥30 paired ~ Apr 22-23
+- Nouvelles strats v142 : N≥15 ~ Apr 19-20
 
 ## Current state
 
@@ -7,35 +19,54 @@
 **Paper Telegram — 21 strats active × $1000 bankroll (\$21K seed post-v142) + 9 shadows v142**.
 Orchestration per-strat aligned au mega sweep v142 (sim.py via price_ticks, 142K configs, 4-fold walk-forward). Voir `rt_trade_config.strategy_overrides` + `LAZY_STRATEGIES`.
 
-### 21 Mains actives (bankroll each $1000, allocation $500/top-3 = $166/trade)
+### 21 Mains actives — stats 7d réelles paginées (27,223 trades total 7d)
 
-| Strat | Orch v142 | LAZY? | Bankroll | 7d PnL | $/j |
-|---|---|---|---|---|---|
-| **FAST_TP80_SL25** ✅ | hysteresis/30s | ✓ | $1029 | +$1.22 | +$0.17 |
-| FAST_TP40_SL30 | hysteresis/30s | ✓ | **$1158** | −$3.33 | −$0.48 |
-| FAST_TP50_SL30 | hysteresis/30s | ✓ | $1100 | −$3.31 | −$0.47 |
-| BE25_TP80_SL30_DS | hysteresis/30s | ✓ | $1031 | −$18 | −$2.59 |
-| FAST_TP100_SL20 | hysteresis/30s | ✓ | $1024 | −$17 | −$2.45 |
-| TP50_SL15 | hysteresis/30s | ✓ | $1027 | −$13 | −$1.87 |
-| BE25_TP80_SL30 | hysteresis/30s | ✓ | $979 | −$17 | −$2.48 |
-| BE25_TP80_SL30_S30_HYST | hysteresis/30s | ✓ | $989 | −$3.25 | −$0.46 |
-| BE25_TP80_SL30_NZS30_HYST | hysteresis/30s | ✓ | $987 | −$4.91 | −$0.70 |
-| BE15_TP70_SL50_NZ | jupiter/240s | — | $975 | −$3.96 | −$0.57 |
-| BE15_TP300_SL50_MCAP | ds/30s | — | $970 | −$1.10 | −$0.16 |
-| FAST_TP70_SL50 🆕 | winsor_p95/30s | ✓ | $1000 | −$2.66 | −$0.38 |
-| BE15_TP200_SL40_4H 🆕 | hysteresis/60s | — | $1000 | — | — |
-| MCAP_MID_DTRAIL5_ACT25_SL50_2H 🆕 | median_5/120s | — | $1000 | — | — |
-| BE15_TP100_SL50 | ds/30s | — | $904 | −$14 | −$2.01 |
-| BE25_TP80_SL30_HYST | hysteresis/30s | ✓ | $929 | −$15 | −$2.19 |
-| FAST_TP50_SL30_HYST | hysteresis/30s | ✓ | $936 | −$3.81 | −$0.54 |
-| FAST_TP80_SL25_HYST | hysteresis/30s | ✓ | $921 | −$19 | −$2.74 |
-| FAST_TP100_SL20_HYST | hysteresis/30s | ✓ | $927 | −$15 | −$2.16 |
-| HIGHSCORE_TP200_SL40 | median_5/60s | — | $956 | −$15 | −$2.25 |
-| NOZEROLIQ_TP200_SL40 | dual_confirm/60s | — | $906 | −$37 | −$5.28 |
+Configs post-revert (A/B test structure intacte base vs _HYST). Stats `is_shadow=False` only.
 
-**Total paper 7d : 86 trades, −$207 cumulé (−$30/jour)**. Seule FAST_TP80_SL25 net positif sur 7d.
-**Bankrolls cumulés (depuis seed v140 Apr 17)** : +$158 FAST_TP40, +$100 FAST_TP50, +$31 BE25_DS, ... vs −$95 BE15, −$94 NOZEROLIQ, −$79 FAST_TP80_HYST.
-**Global rt_bankroll** : $17,750 current / $18,722 peak / −$249 all-time sur 147 trades.
+| Strat | Orch (config actuel) | N 7d | WR | avg% | **$ 7d** | bankroll |
+|---|---|---|---|---|---|---|
+| **FAST_TP80_SL25** ⭐ | ds/30s + LAZY | 54 | 37% | +5.83% | **+$157** | $1029 |
+| **FAST_TP40_SL30** ⭐ | hysteresis/30s + LAZY | 11 | 27% | +27.52% | **+$151** | $1158 |
+| **BE25_TP80_SL30** | median_5/240s | 77 | 32% | +2.10% | **+$87** | $979 |
+| **FAST_TP100_SL20** | ds/30s + LAZY | 65 | 31% | +1.61% | **+$52** | $1024 |
+| **FAST_TP50_SL30** | median_3/30s + LAZY | 123 | 41% | +1.85% | **+$47** | $1100 |
+| **TP50_SL15** | jupiter/30s | 11 | 45% | +4.74% | **+$26** | $1027 |
+| BE25_TP80_SL30_DS | ds/30s + LAZY | — | — | — | — | $1031 |
+| BE15_TP70_SL50_NZ (filter NOZEROLIQ) | jupiter/240s | — | — | — | — | $975 |
+| BE15_TP300_SL50_MCAP (filter MCAP_MID) | ds/30s | — | — | — | — | $970 |
+| BE15_TP100_SL50 | ds/30s | — | — | — | — | $904 |
+| FAST_TP100_SL20_HYST | hysteresis/30s + LAZY | 8 | 12% | −18.25% | **−$73** | $927 |
+| FAST_TP80_SL25_HYST | hysteresis/30s + LAZY | 8 | 12% | −19.67% | **−$79** | $921 |
+| FAST_TP50_SL30_HYST | hysteresis/30s + LAZY | 8 | 25% | −15.81% | **−$63** | $936 |
+| BE25_TP80_SL30_HYST | hysteresis/30s + LAZY | 8 | 12% | −17.66% | **−$71** | $929 |
+| BE25_TP80_SL30_S30_HYST (filter SCORE30) | hysteresis/240s | — | — | — | — | $989 |
+| BE25_TP80_SL30_NZS30_HYST (filter NZ+S30) | hysteresis/240s | — | — | — | — | $987 |
+| HIGHSCORE_TP200_SL40 (filter SCORE30) | jupiter/120s | — | — | — | — | $956 |
+| NOZEROLIQ_TP200_SL40 (filter liq>0) | jupiter/120s | — | — | — | — | $906 |
+| FAST_TP70_SL50 🆕 (Apr 18 12:07) | winsor_p95/30s + LAZY | 0 | — | — | — | $1000 |
+| BE15_TP200_SL40_4H 🆕 | hysteresis/60s | 0 | — | — | — | $1000 |
+| MCAP_MID_DTRAIL5_ACT25_SL50_2H 🆕 | median_5/120s | 0 | — | — | — | $1000 |
+
+**Totaux stratégiques 7d** :
+- **6 bases non-HYST** : N=341, **+$520 / 7j** = **+$74/jour** ✅
+- **4 HYST variants** : N=32, **−$286 / 7j** = **−$41/jour** (mais N=8 chacun, activées v140 Apr 17 ~20-24h seulement)
+- **Net book** : ~+$234 / 7j sur bases + HYST combinés, + delta indeterminé des strats avec `—` (filter-gated, trop peu de données)
+
+**Bankrolls cumulés winners** : +$158 FAST_TP40, +$100 FAST_TP50, +$31 BE25_DS, +$29 FAST_TP80, +$27 TP50_SL15, +$25 FAST_TP100
+**Bankrolls cumulés losers** : −$95 BE15_TP100_SL50, −$94 NOZEROLIQ, −$79 FAST_TP80_HYST, −$73 FAST_TP100_HYST, −$71 BE25_HYST, −$63 FAST_TP50_HYST
+
+**Global rt_bankroll** : $17,750 current / $18,722 peak / −$249 all-time sur 147 trades (cumul non-relié aux stats per-strat ci-dessus — ces dernières filtrent sur 7d).
+
+### Paired A/B comparison HYST vs base (mêmes token/date, 7d)
+
+| Paire | N pairs | mean Δ (HYST−base) | median Δ |
+|---|---|---|---|
+| FAST_TP100_SL20 | 8 | −0.47% | −0.64% |
+| **FAST_TP80_SL25** | 8 | **−6.61%** | −2.75% |
+| FAST_TP50_SL30 | 8 | −1.28% | −0.45% |
+| BE25_TP80_SL30 | 8 | −2.07% | −1.11% |
+
+**4/4 paires : HYST perd en mean ET median.** Direction consistante → signal vraisemblable, mais N=8/pair petit (activées ~20-24h). Need N≥30 paired pour verdict définitif (ETA Apr 22-23).
 
 ### 9 Shadows v142 (bankroll $0, observabilité pure)
 
@@ -55,7 +86,8 @@ Orchestration per-strat aligned au mega sweep v142 (sim.py via price_ticks, 142K
 - **v142 paper slip + live exit fallback observability** (commit `60ab314`) — buy/sell_slippage_bps now persisted on paper close; live_trader warns on DS-tick fallback.
 - **v142 diversity pack + HYST cleanup** (commit `a3fbbd7`) — 6 new shadow strats covering filter/mcap/horizon gaps. Removed 4 redundant HYST from SHADOW_STRATEGIES.
 - **v142 main promotion** (commit `1c19d0b`) — 3 mega-sweep winners (FAST_TP70_SL50, BE15_TP200_SL40_4H, MCAP_MID_DTRAIL5_ACT25_SL50_2H) seeded at $1000 each. 18→21 mains.
-- **v142 orchestration alignment** (commit `0feba13`) — 21 strategy_overrides aligned to mega sweep optimal (10 retuned, 11 new). LAZY_STRATEGIES 13→20 entries.
+- **v142 orchestration alignment** (commit `0feba13`) — 21 strategy_overrides aligned to mega sweep optimal. **→ REVERTED à 12:30 UTC.**
+- **v142 revert orch alignment** (commit `b559453`) — 10 existing mains restaurés à leurs configs pré-align (médecine A/B intacte). Les 11 nouveaux strats gardent leur v142 config. 3 LAZY additions retirées pour BE25_TP80_SL30 + filtered variants.
 
 ### Mega sweep v142 — top 10 per-strat ($/day at $50 pos, via price_ticks 80 tokens)
 
@@ -80,12 +112,7 @@ Orchestration per-strat aligned au mega sweep v142 (sim.py via price_ticks, 142K
 
 ## 🔴 Priorités immédiates (Apr 18-22)
 
-- [ ] **Validation 48-72h post-v142 orchestration alignment** (commit `0feba13` Apr 18 12:16 UTC) : comparer $/day 7d pre vs post pour les 10 strats retunées. Attendu : +$80-150/jour additionnel global selon sim. Strats à tracker de près :
-  - `BE25_TP80_SL30` : était median_5/240s → hysteresis/30s LAZY (gros changement)
-  - `FAST_TP100_SL20`, `FAST_TP80_SL25` : ds → hysteresis + LAZY
-  - `FAST_TP50_SL30` : median_3 → hysteresis + LAZY
-  - `NOZEROLIQ_TP200_SL40` : jupiter/120s → dual_confirm/60s
-  - `HIGHSCORE_TP200_SL40` : jupiter/120s → median_5/60s
+- [x] **Validation 48-72h post-v142 orchestration alignment** — **REVERTED** (commit `b559453` Apr 18 12:30 UTC). L'align avait écrasé les configs A/B existantes (base vs _HYST) en tout mettant en hysteresis, destruction de la diversité expérimentale. Les 10 mains existantes ont été restaurées à leur config pré-align. Les 11 nouveaux strats v142 gardent leur config sim-optimale (pas de config précédent à préserver).
 - [ ] **3 nouvelles mains v142** : FAST_TP70_SL50 / BE15_TP200_SL40_4H / MCAP_MID_DTRAIL5_ACT25_SL50_2H — attendre N≥15 par strat pour juger vs sim ($100/$86/$81 par jour respectivement)
 - [ ] **9 shadows v142** : TD2/PTRAIL_V2/BOND_FAST/SCORE40/FAST_TP200_60M/DIP30_B10/BE15_TP150_2H/FAST_TP500_60M — N≥20 shadow trades pour décider promotion en main
 - [ ] **Bug mineur rt_bankroll.current_balance** : pas incrémenté des $3K seed v142 (addition manuelle de strategy_bankrolls, _rt_update_bankroll ne touche qu'au pnl). Reseed si besoin de cohérence global vs per-strat.
