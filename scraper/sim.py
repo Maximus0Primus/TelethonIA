@@ -3506,6 +3506,11 @@ def _smoothing_sweep(args):
                         ticks = streams_by_token[t["token_address"]].get(source) or []
                         if not ticks:
                             continue
+                        # v143.4 — supply the DS stream for dual-stream smoothing
+                        # (confirm / twin_confirm / hybrid). _replay_with_intervals
+                        # ignores this arg for single-stream modes, so it is safe
+                        # to pass unconditionally.
+                        ds_stream = streams_by_token[t["token_address"]].get("dexscreener")
                         fake = _build_fake_trade(t)
                         sim = _replay_with_intervals(
                             fake, ticks,
@@ -3513,6 +3518,7 @@ def _smoothing_sweep(args):
                             lazy_fast_window=poll * 10 if poll > 0 else 0,
                             lazy_slow_sec=poll,
                             smoothing=mode,
+                            dex_ticks=ds_stream,
                         )
                         if sim is None:
                             continue

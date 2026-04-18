@@ -1442,6 +1442,50 @@ def check_live_trades(client_sb) -> dict:
             )
             continue
 
+        # v143.5 — exit shadow-sync : force-close the matching still-open paper
+        # trade (same token + strategy + cycle_ts) at live's Jupiter fill price.
+        # Symmetric to v142 E (entry sync). Only touches still-open paper rows —
+        # paper trades that already exited via their own decision are preserved
+        # as independent data points. Keeps median exit divergence <1%.
+        try:
+            cycle_ts = trade.get("cycle_ts")
+            paper_match_q = (
+                client_sb.table("paper_trades")
+                .select("id, entry_price, position_usd")
+                .eq("source", "rt")
+                .eq("token_address", trade["token_address"])
+                .eq("strategy", trade["strategy"])
+                .eq("status", "open")
+            )
+            if cycle_ts:
+                paper_match_q = paper_match_q.eq("cycle_ts", cycle_ts)
+            paper_match = paper_match_q.limit(1).execute().data
+            if paper_match:
+                pm = paper_match[0]
+                pm_entry = float(pm.get("entry_price") or 0) or entry_price
+                pm_pos_usd = float(pm.get("position_usd") or 0)
+                pm_pnl_pct = (exit_price / pm_entry) - 1 if pm_entry > 0 else 0
+                pm_pnl_usd = pm_pos_usd * pm_pnl_pct
+                paper_update = {
+                    "status": new_status,
+                    "exit_price": exit_price,
+                    "exit_at": now.isoformat(),
+                    "pnl_pct": round(pm_pnl_pct, 4),
+                    "pnl_usd": round(pm_pnl_usd, 2),
+                    "exit_minutes": int(elapsed_minutes),
+                    "sol_price_at_exit": sol_price_at_exit,
+                }
+                hist_p = _flush_eval_history(pm["id"])
+                if hist_p:
+                    paper_update["eval_history"] = hist_p
+                client_sb.table("paper_trades").update(paper_update).eq("id", pm["id"]).execute()
+                logger.info(
+                    "paper_exit_sync: %s %s — paper#%s closed at live exit $%.8f (pnl=%.1f%%)",
+                    trade["symbol"], trade["strategy"], pm["id"], exit_price, pm_pnl_pct * 100,
+                )
+        except Exception as _e:
+            logger.debug("paper_exit_sync skipped for %s: %s", trade.get("symbol"), _e)
+
         result_counts["closed"] += 1
         result_counts["pnl_usd"] += pnl_usd
         result_counts["rt_pnl_usd"] += pnl_usd
