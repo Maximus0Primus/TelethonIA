@@ -1,0 +1,87 @@
+name: Sim-Live Alignment Gate
+
+# v143.6 — nightly quality gate on sim vs live divergence. Fails (and alerts
+# Telegram) if the sim replay drifts from live beyond agreed thresholds.
+# Prevents silent regressions like the pre-v143 high_price_seen bug.
+
+on:
+  schedule:
+    - cron: '0 4 * * *'  # 04:00 UTC daily (after the day's live trades close)
+  workflow_dispatch: {}
+
+jobs:
+  align:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install deps
+        run: pip install supabase requests python-dotenv
+
+      - name: Run sim-live alignment check
+        id: align
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          # Rolling 48h window so every run sees enough N without dragging in
+          # pre-deploy trades forever.
+          export ALIGN_SINCE="$(date -u -d '48 hours ago' +'%Y-%m-%d %H:%M:%S+00:00')"
+          echo "window: $ALIGN_SINCE"
+          python scripts/verify_sim_live_alignment.py 2>&1 | tee align.out
+
+          # Parse the summary line: "Aligned on N trades. Avg diff = +X.XXpp | Max |diff| = Y.YY"
+          AVG=$(grep -oE 'Avg diff = [+-]?[0-9.]+pp' align.out | head -1 | grep -oE '[+-]?[0-9.]+')
+          MAX=$(grep -oE 'Max \|diff\| = [0-9.]+' align.out | head -1 | grep -oE '[0-9.]+')
+          WITHIN_COUNT=$(grep -oE 'within_10pp=[0-9]+' align.out | awk -F= '{s+=$2} END{print s+0}')
+          N_COUNT=$(grep -oE 'N=[0-9]+' align.out | awk -F= '{s+=$2} END{print s+0}')
+          echo "avg=$AVG max=$MAX within=$WITHIN_COUNT/$N_COUNT"
+          echo "avg=$AVG" >> "$GITHUB_OUTPUT"
+          echo "max=$MAX" >> "$GITHUB_OUTPUT"
+          echo "within=$WITHIN_COUNT" >> "$GITHUB_OUTPUT"
+          echo "n=$N_COUNT" >> "$GITHUB_OUTPUT"
+
+          # Gate in a single python script so the logic stays readable.
+          # Thresholds: avg |diff| <= 5pp and within_10pp ratio >= 80%.
+          python <<PYEOF
+          import sys
+          avg = float("${AVG}" or 0)
+          within = int("${WITHIN_COUNT}" or 0)
+          n = int("${N_COUNT}" or 0) or 1
+          ratio = 100 * within / n
+          print(f"avg_abs={abs(avg):.2f}pp  ratio={ratio:.1f}%")
+          if abs(avg) > 5 or ratio < 80:
+              print(f"::error::Sim-live alignment drifted (avg={avg:+.2f}pp, within_10pp={ratio:.1f}%)")
+              sys.exit(1)
+          print("Alignment OK")
+          PYEOF
+
+      - name: Alert on failure
+        if: failure()
+        env:
+          MONITOR_BOT_TOKEN: ${{ secrets.MONITOR_BOT_TOKEN }}
+          MONITOR_CHAT_ID: ${{ secrets.MONITOR_CHAT_ID }}
+        run: |
+          if [ -n "$MONITOR_BOT_TOKEN" ] && [ -n "$MONITOR_CHAT_ID" ]; then
+            MSG="<b>SIM-LIVE ALIGNMENT DRIFT</b>%0AAvg diff: ${{ steps.align.outputs.avg }}pp%0AMax |diff|: ${{ steps.align.outputs.max }}pp%0AWithin 10pp: ${{ steps.align.outputs.within }}/${{ steps.align.outputs.n }}%0A%0AInvestigate verify_sim_live_alignment.py output."
+            curl -s -X POST "https://api.telegram.org/bot${MONITOR_BOT_TOKEN}/sendMessage" \
+              -d chat_id="${MONITOR_CHAT_ID}" \
+              -d text="${MSG}" \
+              -d parse_mode=HTML \
+              -d disable_web_page_preview=true || true
+          fi
+
+      - name: Upload alignment report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: align-report
+          path: align.out
+          retention-days: 14

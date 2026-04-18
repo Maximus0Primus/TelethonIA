@@ -1414,6 +1414,12 @@ def check_live_trades(client_sb) -> dict:
             # v122: Paper vs live price divergence tracking
             "paper_exit_price": paper_exit_price,
             "price_divergence_pct": price_divergence_pct,
+            # v143.6: paper-accurate PnL (same slip/fee pipeline as paper_trader)
+            # for direct divergence measurement without re-running sim replay.
+            "paper_sim_pnl_pct": (
+                round(float(_paper_sim_ev.get("pnl_pct")), 4)
+                if _paper_sim_ev and _paper_sim_ev.get("pnl_pct") is not None else None
+            ),
         }
         # v138: persist accumulated poll history alongside close fields
         from paper_trader import _flush_eval_history
@@ -1429,6 +1435,21 @@ def check_live_trades(client_sb) -> dict:
                 db_updated = True
                 break
             except Exception as e:
+                err_str = str(e)
+                # v143.6: tolerate the column not yet existing — migration v13
+                # may not have been applied to Supabase yet. Drop the field and
+                # retry in the same attempt so we don't burn retry budget.
+                if "paper_sim_pnl_pct" in err_str and "paper_sim_pnl_pct" in update:
+                    logger.info("live_trader: paper_sim_pnl_pct column missing "
+                                "(apply supabase/migrations/v13_paper_sim_pnl.sql); "
+                                "retrying update without it")
+                    update.pop("paper_sim_pnl_pct", None)
+                    try:
+                        client_sb.table("paper_trades").update(update).eq("id", trade["id"]).execute()
+                        db_updated = True
+                        break
+                    except Exception as e2:
+                        e = e2
                 logger.warning("live_trader: DB update attempt %d/3 failed for trade %s: %s",
                                attempt + 1, trade["id"], e)
                 if attempt < 2:

@@ -615,9 +615,34 @@ def _log_price_ticks(client, prices: dict[str, float], source: str = "check",
 
 def _fetch_prices_batch(addresses: list[str]) -> dict[str, float]:
     """Batch fetch current USD prices. DexScreener primary, Jupiter fallback.
-    v107: Jupiter fallback catches pool migrations that DexScreener misses."""
+    v107: Jupiter fallback catches pool migrations that DexScreener misses.
+    v143.6: short DS cache TTL (5s) mirroring the 14s Jupiter cooldown, so
+    paper_fast and live_trader — called back-to-back in the same loop tick —
+    read the same DS snapshot instead of two fresh fetches seconds apart.
+    Prevents micro-divergence on ds / hybrid / twin_confirm / confirm strategies.
+    """
     if not addresses:
         return {}
+    # v143.6 — DS cache TTL: if the last fetch covered these addresses and is
+    # fresh enough, reuse _dex_prices_cache + _jupiter_prices_cache instead of
+    # re-fetching. Ensures paper + live share the same snapshot in one loop tick.
+    now_ts = _time_mod.time()
+    _last_ds_ts = getattr(_fetch_prices_batch, "_last_ds_ts", 0)
+    _last_ds_addrs = getattr(_fetch_prices_batch, "_last_ds_addrs", set())
+    _ds_ttl_sec = 5
+    if (now_ts - _last_ds_ts) < _ds_ttl_sec and _last_ds_addrs.issuperset(addresses):
+        # Cache hit: synthesize result from module caches, applying Jupiter
+        # override as the normal path would.
+        cached = {}
+        for addr in addresses:
+            jp = _jupiter_prices_cache.get(addr)
+            ds = _dex_prices_cache.get(addr)
+            if jp and jp > 0:
+                cached[addr] = jp
+            elif ds and ds > 0:
+                cached[addr] = ds
+        return cached
+
     prices = {}
     for i in range(0, len(addresses), BATCH_SIZE):
         chunk = addresses[i:i + BATCH_SIZE]
@@ -710,6 +735,10 @@ def _fetch_prices_batch(addresses: list[str]) -> dict[str, float]:
             "paper_trader: Jupiter price primary for %d/%d tokens (%s)",
             jup_overrides, len(addresses), _src,
         )
+
+    # v143.6 — stamp DS TTL so the next caller within 5s reuses this snapshot
+    _fetch_prices_batch._last_ds_ts = now_ts
+    _fetch_prices_batch._last_ds_addrs = set(addresses)
 
     return prices
 
