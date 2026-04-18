@@ -282,27 +282,32 @@ SHADOW_STRATEGIES.append("HIGHSCORE_TP200_SL40")
 # v140 — full mega sweep winners (hysteresis + lazy dominates)
 # A/B test variants vs existing strats, each gets $1000 bankroll
 # ============================================================
-# Top 10 (NONE filter, hysteresis/lazy) — the big surprise
+# v142 (Apr 18): _HYST variants of non-filtered strats produce IDENTICAL results
+# to their vanilla counterparts in sim.py mega sweep (same tp_mult/sl_mult; the
+# "HYST" naming carried a smoothing hint that is orchestrated separately). Kept
+# in STRATEGIES so any in-flight open trades can close cleanly, but removed
+# from SHADOW_STRATEGIES so no NEW duplicate shadows open. Filtered _HYST
+# variants (S30_HYST, NZS30_HYST) differ via entry filter and stay active.
 STRATEGIES["FAST_TP100_SL20_HYST"] = [
     {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.80, "horizon_min": 30, "label": "main"},
 ]
-SHADOW_STRATEGIES.append("FAST_TP100_SL20_HYST")
+# SHADOW_STRATEGIES.append("FAST_TP100_SL20_HYST")  # v142: redundant, dropped
 
 STRATEGIES["FAST_TP80_SL25_HYST"] = [
     {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.75, "horizon_min": 30, "label": "main"},
 ]
-SHADOW_STRATEGIES.append("FAST_TP80_SL25_HYST")
+# SHADOW_STRATEGIES.append("FAST_TP80_SL25_HYST")  # v142: redundant, dropped
 
 STRATEGIES["BE25_TP80_SL30_HYST"] = [
     {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.70, "horizon_min": 30,
      "be_activation": 0.25, "label": "main"},
 ]
-SHADOW_STRATEGIES.append("BE25_TP80_SL30_HYST")
+# SHADOW_STRATEGIES.append("BE25_TP80_SL30_HYST")  # v142: redundant, dropped
 
 STRATEGIES["FAST_TP50_SL30_HYST"] = [
     {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.70, "horizon_min": 30, "label": "main"},
 ]
-SHADOW_STRATEGIES.append("FAST_TP50_SL30_HYST")
+# SHADOW_STRATEGIES.append("FAST_TP50_SL30_HYST")  # v142: redundant, dropped
 
 # Best per filter — each combo tests different (filter, config) point
 STRATEGIES["BE25_TP80_SL30_S30_HYST"] = [  # SCORE30 filter + hysteresis/static_240
@@ -387,6 +392,62 @@ STRATEGY_FILTERS["BOND_FAST_TP50_SL20_T20"] = {
 
 # MOMENTUM_CONFIRM_ENTRY is not a strategy — sim falsified it (paired delta
 # −24% vs baseline). Hypothèse morte. Do not ship.
+
+# ============================================================
+# v142 (Apr 18, cont.) — Diversity pack, shadow-only (bankroll $0)
+#
+# 6 new strategies covering gaps in the current lineup, derived from mega
+# sweep signals. Each targets a distinct axis of the parameter space.
+# Shadow-only: observability without bankroll risk. Promote individually
+# after N>=15 real shadow trades confirm sim expectations.
+# ============================================================
+
+# 1) SCORE40 ultra-selective — mega sweep best per-trade alpha (+34.5% N=18)
+STRATEGIES["SCORE40_FAST_TP50_SL30_30M"] = [
+    {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.70, "horizon_min": 30, "label": "main"},
+]
+SHADOW_STRATEGIES.append("SCORE40_FAST_TP50_SL30_30M")
+STRATEGY_FILTERS["SCORE40_FAST_TP50_SL30_30M"] = {"min_rt_score": 40}
+
+# 2) MCAP_MID + DTRAIL — mega sweep MCAP filter winner ($81/j, +19.35% N=37)
+STRATEGIES["MCAP_MID_DTRAIL5_ACT25_SL50_2H"] = [
+    {"pct": 1.0, "tp_mult": None, "sl_mult": 0.50, "horizon_min": 120,
+     "trail_pct": 0.05, "trail_activation_pct": 0.25, "label": "main"},
+]
+SHADOW_STRATEGIES.append("MCAP_MID_DTRAIL5_ACT25_SL50_2H")
+STRATEGY_FILTERS["MCAP_MID_DTRAIL5_ACT25_SL50_2H"] = {
+    "min_mcap": 30_000, "max_mcap": 500_000,
+}
+
+# 3) Moonshot at 60min horizon — gap between FAST (30min) and SLOW (4h)
+STRATEGIES["FAST_TP200_SL40_60M"] = [
+    {"pct": 1.0, "tp_mult": 3.00, "sl_mult": 0.60, "horizon_min": 60, "label": "main"},
+]
+SHADOW_STRATEGIES.append("FAST_TP200_SL40_60M")
+
+# 4) DIP variant with stricter bounce threshold — vs existing B5 bounces
+# that trigger on false dips. Fits DIP_RE pattern so _get_trail_config
+# picks up trail/act correctly.
+STRATEGIES["DIP30_B10_T10_A20_SL60_120m"] = [
+    {"pct": 0.5, "tp_mult": None, "sl_mult": 0.40, "horizon_min": 120,
+     "trail_pct": 0.10, "trail_activation_pct": 0.20, "label": "dip_p1"},
+]
+SHADOW_STRATEGIES.append("DIP30_B10_T10_A20_SL60_120m")
+
+# 5) BE on medium horizon — current BE suite is all 30min; add 2h to catch
+# whale-sized tokens that take 30-60min to develop
+STRATEGIES["BE15_TP150_SL40_2H"] = [
+    {"pct": 1.0, "tp_mult": 2.50, "sl_mult": 0.60, "horizon_min": 120,
+     "be_activation": 0.15, "label": "main"},
+]
+SHADOW_STRATEGIES.append("BE15_TP150_SL40_2H")
+
+# 6) Pure moonshot tail-captor — TP500 (x6), wide SL, short horizon.
+# Negative EV per trade expected but captures the rare 5x+
+STRATEGIES["FAST_TP500_SL40_60M"] = [
+    {"pct": 1.0, "tp_mult": 6.00, "sl_mult": 0.60, "horizon_min": 60, "label": "main"},
+]
+SHADOW_STRATEGIES.append("FAST_TP500_SL40_60M")
 
 # --- Trailing stop grid (v106) ---
 _TRAIL_STRATEGIES = {}

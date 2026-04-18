@@ -4063,7 +4063,13 @@ _MEGA_SELL_SLIP_BASE = 1 - 10/10_000
 
 def _mega_replay_one(tp_mult, sl_mult, horizon_min, be_act,
                     jp_sorted, ds_sorted, entry_price, entry_time_iso,
-                    source, smoothing, polling_mode, rt_liq_usd):
+                    source, smoothing, polling_mode, rt_liq_usd,
+                    strat_name=None):
+    # v142: accept the real strategy name so _evaluate_trade_exit's name-based
+    # parsing (DTRAIL_RE, BE_RE, DIP_RE, DECAY_RE) + STRATEGIES tranche lookup
+    # (trail_tiers, tp_schedule, time_be_minute) all engage correctly. Without
+    # this, DTRAIL/DIP/TRAIL strats were running as plain TP/SL + horizon only,
+    # producing misleading mega-sweep rankings.
     from paper_trader import _evaluate_trade_exit, _last_eval_ts
     entry_time = datetime.fromisoformat(entry_time_iso.replace("Z", "+00:00"))
     trade_id = f"mega_{id(jp_sorted)}"
@@ -4077,7 +4083,7 @@ def _mega_replay_one(tp_mult, sl_mult, horizon_min, be_act,
         "id": trade_id, "entry_price": entry_price,
         "sl_price": sl_price, "tp_price": tp_price,
         "position_usd": 10.0,
-        "strategy": f"BE{int(be_act*100)}_TP80_SL30" if be_act else "TP80_SL30",
+        "strategy": strat_name or (f"BE{int(be_act*100)}_TP80_SL30" if be_act else "TP80_SL30"),
         "tranche_label": "main", "horizon_minutes": horizon_min,
         "created_at": entry_time_iso,
         "high_price_seen": entry_price,
@@ -4129,7 +4135,8 @@ def _mega_process_config(args):
         pnl = _mega_replay_one(tp_mult, sl_mult, horizon_min, be_act,
                               jp, ds, float(u["entry_price"]), u["created_at"],
                               source, smoothing, polling_mode,
-                              u.get("rt_liquidity_usd"))
+                              u.get("rt_liquidity_usd"),
+                              strat_name=strat_name)
         if pnl is not None: pnls.append(pnl)
     n = len(pnls)
     if n < 10: return None
@@ -4184,20 +4191,16 @@ def _mega_sweep_run(args):
     full_pool.update(_MEGA_NEW_STRATS)
     print(f"Strategies: {len(full_pool)} (incl. {len(_MEGA_NEW_STRATS)} new TP200+ variants)")
 
-    rows = []; off = 0
-    while True:
-        params = [
-            ("select", "id,token_address,created_at,entry_price,rt_liquidity_usd,"
-                       "rt_score,kol_group,entry_mcap"),
-            ("source", "eq.rt"),
-            ("created_at", f"gte.{since}"),
-            ("order", "created_at"),
-        ]
-        r = sb_get("paper_trades", params, range_lo=off, range_hi=off+999)
-        if not r: break
-        rows.extend(r)
-        if len(r) < 1000: break
-        off += 1000
+    # v142: sb_get() paginates internally via offset+limit; the previous manual
+    # range_lo/range_hi loop called it with kwargs that don't exist -> TypeError.
+    params = [
+        ("select", "id,token_address,created_at,entry_price,rt_liquidity_usd,"
+                   "rt_score,kol_group,entry_mcap"),
+        ("source", "eq.rt"),
+        ("created_at", f"gte.{since}"),
+        ("order", "created_at"),
+    ]
+    rows = sb_get("paper_trades", params)
     by_token = {}
     for r in rows:
         if r["token_address"] not in by_token:
