@@ -14,10 +14,10 @@
 
 ## Current state
 
-**Live (50/50)** — `BE25_TP80_SL30` + `BE15_TP100_SL50`. Position ~$1.70/trade, max 3 open. Orchestration live sync'd via v142 alignment (hysteresis+LAZY pour BE25).
+**Live (50/50)** — `BE25_TP80_SL30` (median_5/240s) + `BE15_TP100_SL50` (ds/30s). Position ~$1.70/trade, max 3 open. Configs live identiques au paper post-revert (A/B base preservé).
 
-**Paper Telegram — 21 strats active × $1000 bankroll (\$21K seed post-v142) + 9 shadows v142**.
-Orchestration per-strat aligned au mega sweep v142 (sim.py via price_ticks, 142K configs, 4-fold walk-forward). Voir `rt_trade_config.strategy_overrides` + `LAZY_STRATEGIES`.
+**Paper Telegram — 21 strats active × $1000 bankroll ($21K seed post-v142) + 9 shadows v142**.
+Orchestration per-strat : **10 mains existantes en configs pré-v142 (A/B base vs _HYST préservé)** + **11 nouvelles strats v142 en configs sim-optimal** (pas de config précédent à préserver). Voir `rt_trade_config.strategy_overrides` + `LAZY_STRATEGIES`.
 
 ### 21 Mains actives — stats 7d réelles paginées (27,223 trades total 7d)
 
@@ -110,7 +110,40 @@ Configs post-revert (A/B test structure intacte base vs _HYST). Stats `is_shadow
 - **v142 mega sweep via price_ticks** : ranking aligné au réel paper 7d. FAST/BE dominent, DTRAIL/DIP perdent (cohérent avec paper réel).
 - **Hypothèse haircut slip** : TD2 fine winner perd 12% à haircut (slip-efficient), BOND perd 64% (bondings extra +400bps brittle), PTRAIL perd 45% (trail mid-slip).
 
-## 🔴 Priorités immédiates (Apr 18-22)
+## 📋 Ce qui reste à faire — état Apr 18 13h UTC
+
+### 🟢 Rien à faire en code actuellement (attente de data)
+- ⏳ **N≥15 sur 3 nouvelles mains v142** (FAST_TP70_SL50, BE15_TP200_SL40_4H, MCAP_MID_DTRAIL5) — ETA Apr 19-20
+- ⏳ **N≥20 sur 9 shadows v142** (TD2, PTRAIL_V2, BOND_FAST, SCORE40, FAST_TP200_60M, DIP30_B10, BE15_TP150_2H, FAST_TP500_60M) — ETA Apr 20-21
+- ⏳ **N≥30 paired HYST vs base** pour verdict définitif HYST — ETA Apr 22-23
+- ⏳ **N≥15 live par liq_bucket** pour recalibrer slip v143 — ETA Apr 22-24
+
+### 🔴 Actions code restantes (priorité décroissante)
+1. **Bug `rt_bankroll.current_balance` drift** (−$3K non-incrémenté depuis seed v142). Re-sync manuel 1 query Supabase.
+2. **Debug Jupiter Trigger V2** (0 keeper fills historiques) — 3 étapes plan déjà écrit ligne 128-133. Orthogonal à v142, peut démarrer quand tu veux.
+3. **Nettoyage scripts one-shot** : delete `_audit2.py`, `_audit3.py`, `_v141_24h_audit.py|.json|.log`. Archiver `sim_new_strategies.py` + `sim_sweep.py` (remplacés par `sim.py --mega-sweep`).
+4. **Post-N≥15 (Apr 19-20)** : analyser les 3 nouvelles mains vs sim. Décision promote/demote/ajuster bankroll selon réel.
+5. **Post-N≥30 (Apr 22-23)** : décider sur HYST (dégager ou garder comme control). Si dégagés = libère $4K bankroll pour autre chose.
+
+### 🔴 Open bugs (à éteindre avant tout action structurelle)
+- **P1 — Inversion TP/SL paper vs live** (N=10, ligne 143) : need 20+ paires post-v141 — shadow-sync fix proposed
+- **P3 — Slip calibration** (ligne 144) : need N≥30 par liq bucket — modèle actuel surpénalise high-liq, sous-pénalise bondings
+- **P4 — Entry_price paper vs live ±9%** (ligne 145) : même fix que P1 (shadow-sync)
+- **S3 — exit_price live edge case** (ligne 150) : schema migration deferred, monitoring via `journalctl | grep DS-tick fallback` — check si 0 en 48h → close définitif
+- **S5 — Bondings profitable, filters losing** (ligne 152) : confirmer avec N≥50 par bucket (ETA 48h)
+
+### 🟡 Hors scope v142 (à reprendre si prio change)
+- Live BE25 + BE15 : >$0.50/trade avg sur N≥10 (bankroll live trop petit à $1.70/trade, scale-up d'abord)
+- Latence A.2.1 re-mesure, A.2.2-4 parallélisation (low ROI à volume actuel)
+- v137 cadence validation (mineur)
+- tp_touched exit mode (deferred, sous threshold à +$1.55/sem)
+
+### 🧠 Gotcha opérationnel récurrent
+**Supabase PostgREST cap 1000 rows par requête même avec `.limit(10000)`**. Toujours paginer via `.range(off, off+999)` en loop. Mon query non-paginée ce matin a cru N=5 partout alors que c'était 54-123 — conclusions toutes fausses. Pattern correct : voir `scraper/sim.py::sb_get` ou `scraper/_align_orchestration_to_sim.py`.
+
+---
+
+## 🔴 Priorités immédiates (Apr 18-22) — historique détaillé
 
 - [x] **Validation 48-72h post-v142 orchestration alignment** — **REVERTED** (commit `b559453` Apr 18 12:30 UTC). L'align avait écrasé les configs A/B existantes (base vs _HYST) en tout mettant en hysteresis, destruction de la diversité expérimentale. Les 10 mains existantes ont été restaurées à leur config pré-align. Les 11 nouveaux strats v142 gardent leur config sim-optimale (pas de config précédent à préserver).
 - [ ] **3 nouvelles mains v142** : FAST_TP70_SL50 / BE15_TP200_SL40_4H / MCAP_MID_DTRAIL5_ACT25_SL50_2H — attendre N≥15 par strat pour juger vs sim ($100/$86/$81 par jour respectivement)
@@ -120,7 +153,7 @@ Configs post-revert (A/B test structure intacte base vs _HYST). Stats `is_shadow
 - [x] **Live exit_price fallback log** — FIXED v142 (commit `c6a739d`), monitoring via `journalctl | grep DS-tick`
 - [x] **HYST shadows dedup** — FIXED v142 (commit `a3fbbd7`), 4 redundants retirés
 - [x] **3 mega-sweep winners promus main** — FIXED v142 (commit `1c19d0b`), $1K each
-- [x] **Orchestration alignment 21 strats** — FIXED v142 (commit `0feba13`), strategy_overrides + LAZY_STRATEGIES alignées au sweep
+- [⚠️] **Orchestration alignment 21 strats** — REVERTED (commit `0feba13` → `b559453`). Les 10 mains existantes ont retrouvé leur config pré-align pour préserver l'A/B. Seuls les 11 nouveaux strats v142 gardent leur config sim-optimal.
 - [ ] Live BE25 + BE15 : >$0.50/trade avg sur N≥10 trades (hors scope v142 — bankroll live micro)
 - [ ] **Latence A.2.1** : `msg→ds` mean 24s → 15-18s sous charge confirmé ? (hors scope v142)
 - [x] **v141 — fix mesure `paper_exit_price`** ✅ DÉPLOYÉ Apr 17 19:58 UTC (commit `16a7e8a`). Avant v141, `paper_exit_price` stocké par live_trader = niveau SL brut (slip=1, fee=0), mélangeant 3 effets dans `price_divergence_pct`. v141 calcule un 2ᵉ `ev` dédié mesure avec dynamic slip + SELL_FEE_BPS + Ultra SELL quote override — mirrors paper_trader exactement. Décision live inchangée (toujours slip=1, zéro impact sur PnL/status/sell). **Données pré-v141 biaisées** — filtrer par `created_at >= 2026-04-17T19:58:00Z` avant analyse divergence.
@@ -146,7 +179,7 @@ Window : 4h post-deploy 18 strats. N(live closed)=10, N(paper closed)=68, N(shad
 
 ### 🟠 Suspects (à retester avec plus de data)
 
-- [x] **S1 — Top 4 HYST du sweep v140 perdent toutes en réel** — **résolu v142** : mega sweep via price_ticks confirme que HYST vanilla = identique à non-HYST au niveau exit (c'est juste une hint smoothing orchestrée séparément). 4 variants HYST redondants retirés du SHADOW_STRATEGIES (commit `a3fbbd7`). Les filtered HYST (S30, NZS30) gardent leur valeur (filter distinct).
+- [ ] **S1 — HYST variants perdent en réel paper** — observation CONFIRMÉE par query paginée 7d (mean/median Δ HYST-base = -0.47% à -6.61%, 4/4 paires dans direction négative). Mais N=8/pair petit car HYST activés seulement ~20-24h. **Verdict définitif ETA Apr 22-23** (N≥30 paired). **Si confirmé** : soit dégager les 4 HYST mains, soit les garder comme control group en paper pour A/B continue. Note : le mega sweep predict HYST +$134/j pour FAST_TP100_SL20 = **sim très optimiste sur HYST**, ne plus s'y fier pour les rankings entre smoothings.
 - [ ] **S3 — `exit_price` live ≠ vrai prix de vente** — **PARTIELLEMENT FIXED v142** (commit `c6a739d`). Flag `exit_price_from_fill` tracké dans `check_live_trades` + WARNING log quand fallback DS-tick (sell_output=0/None, edge case). Formule reconstruction fiable documentée en commentaire : `entry_price × (sell_sol_received × sol_price_at_exit) / position_usd`, valide ssi `sell_sol_received IS NOT NULL`. **Schema change deferred** — on mesure la fréquence du fallback d'abord via `journalctl | grep "DS-tick fallback"` sur 24-48h. Si 0 occurrence → S3 académique, close définitif. Si >0 → migration propre (rename `exit_price` → `last_observed_price_at_exit` + ajout `exit_price_net` column).
 - [x] **S4 — Bankroll +$117 réel pas +$722** — **résolu** : section "Current state" réécrite avec chiffres actuels (commit `c55e29b` puis mise à jour v142).
 - [ ] **S5 — Bondings gagnent, high-liq perdent (contre-intuitif)**. 7d paper : NOZEROLIQ_TP200_SL40 −$37 sur 2 trades, HIGHSCORE_TP200_SL40 −$15 sur 2 trades, BOND_FAST (shadow) en cours. Les filtres continuent de perdre. **Data need** : attendre 48h v142 orch post-alignment pour N≥20 par filter + comparer `BOND_FAST` shadow vs ces filter.
