@@ -42,7 +42,7 @@ CLOSED = ["sl_hit", "tp_hit", "timeout", "trail_stop", "be_stop",
 KNOWN_CLEANUPS = {
     "v133-D": {
         "delta_usd": -2.99,
-        "description": "scripts/cleanup_hybrid_sell_pollution.py net delta on 30 rows",
+        "description": "v133-D hybrid-ATA sell pollution cleanup (net delta over 30 rows)",
     },
 }
 
