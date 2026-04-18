@@ -1376,21 +1376,67 @@ def _replay_trade_orchestrated(fake_trade: dict, ds_ticks: list[dict],
             ema_val = jp if ema_val is None else (alpha * jp + (1 - alpha) * ema_val)
             decision_p = ema_val
             exec_p = jp
-        # v142 C — OHLCV in-memory reconstruction. Sample jp at each bar
-        # boundary, return that close throughout the bar.
-        elif orchestration in ("ohlcv_1min", "ohlcv_3min"):
+        # v142 C — jp_sampled_Ns : freeze decision price between bar boundaries.
+        # Simple sampling, NOT a faithful OHLCV port (no intra-bar wicks emitted).
+        elif orchestration in ("jp_sampled_60s", "jp_sampled_180s"):
             if jp is None:
                 continue
-            bar_sec = 60 if orchestration == "ohlcv_1min" else 180
-            if not hasattr(_replay_trade_orchestrated, "_ohlcv_state"):
-                _replay_trade_orchestrated._ohlcv_state = {}
+            bar_sec = 60 if orchestration == "jp_sampled_60s" else 180
+            if not hasattr(_replay_trade_orchestrated, "_sampled_state"):
+                _replay_trade_orchestrated._sampled_state = {}
             key = trade_id
-            st = _replay_trade_orchestrated._ohlcv_state.setdefault(key, {"ts": 0, "close": jp})
+            st = _replay_trade_orchestrated._sampled_state.setdefault(key, {"ts": 0, "close": jp})
             cur_bar = (offset_sec // bar_sec) * bar_sec
             if cur_bar > st["ts"]:
                 st["close"] = jp
                 st["ts"] = cur_bar
             decision_p = st["close"]
+            exec_p = jp
+        # v142 D — ohlc_burst_60s : at each bar close, emit [O, L/H, H/L, C]
+        # sequence as 4 consecutive evals. Port of sim_engines OHLCV tick
+        # synthesis. Best-effort reconstruction from our polled ticks (still
+        # misses exchange-level micro-wicks between polls).
+        elif orchestration == "ohlc_burst_60s":
+            if jp is None:
+                continue
+            if not hasattr(_replay_trade_orchestrated, "_burst_state"):
+                _replay_trade_orchestrated._burst_state = {}
+            bst = _replay_trade_orchestrated._burst_state.setdefault(
+                trade_id, {"buf": [], "last_emitted_bar": 0})
+            # Accumulate tick in bar buffer
+            bst["buf"].append((offset_sec, jp))
+            # Check if we crossed a 60s boundary since last emit
+            cur_bar_start = (offset_sec // 60) * 60
+            prev_bar_start = cur_bar_start - 60
+            if prev_bar_start > bst["last_emitted_bar"]:
+                bar_ticks = [p for t, p in bst["buf"] if prev_bar_start <= t < cur_bar_start]
+                if len(bar_ticks) >= 2:
+                    o, c = bar_ticks[0], bar_ticks[-1]
+                    h, lo = max(bar_ticks), min(bar_ticks)
+                    burst = [o, lo, h, c] if c >= o else [o, h, lo, c]
+                    bst["last_emitted_bar"] = prev_bar_start
+                    # Emit the 4 synthetic prices SEQUENTIALLY, letting eval
+                    # trigger on the first match.
+                    burst_triggered = False
+                    for b_price in burst:
+                        ev = _evaluate_trade_exit(fake_trade, b_price, poll_time, sell_slip,
+                                                  sell_fee_bps=0, decision_price=b_price)
+                        if ev and ev.get("high_price_seen") is not None:
+                            new_h = ev["high_price_seen"]
+                            if new_h > float(fake_trade.get("high_price_seen") or 0):
+                                fake_trade["high_price_seen"] = new_h
+                        if ev and "status" in ev and ev["status"]:
+                            return {
+                                "exit_reason": ev["status"],
+                                "exit_price": ev.get("exit_price", 0),
+                                "pnl_pct": ev.get("pnl_pct", 0),
+                                "pnl_usd": ev.get("pnl_usd", 0),
+                                "exit_minutes": ev.get("exit_minutes", 0),
+                                "high_price_seen": fake_trade.get("high_price_seen"),
+                            }
+                # Purge old ticks to keep buffer small
+                bst["buf"] = [x for x in bst["buf"] if x[0] >= prev_bar_start]
+            decision_p = jp
             exec_p = jp
         # v142 C — Twin-source confirmation. Both jp and ds must agree
         # before letting SL/TP trigger. Single-source breach suppressed.
@@ -4369,7 +4415,8 @@ def main():
                         choices=["jupiter", "ds", "hybrid", "confirm", "ema",
                                  "median_3", "median_5", "winsor_p95", "dual_confirm",
                                  "hysteresis", "ema_fast", "ema_slow",
-                                 "ohlcv_1min", "ohlcv_3min", "vwap_5min", "twin_confirm"],
+                                 "jp_sampled_60s", "jp_sampled_180s",
+                                 "ohlc_burst_60s", "vwap_5min", "twin_confirm"],
                         help="v132: Orchestration mode (overrides --price-source for tick replay)")
     parser.add_argument("--poll-sec", type=int, default=0,
                         help="v132: Subsample ticks to N-second polling interval (0=no subsampling)")

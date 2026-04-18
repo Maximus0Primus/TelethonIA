@@ -382,12 +382,16 @@ def _decision_price(addr: str, strategy: str, trade_id: int, orch: dict,
             return tp_price * 0.999, jp
         return jp, jp
 
-    # v142 C — OHLCV reconstruction in-memory. Sample `jp` at each bar
-    # boundary (60s or 180s) and return that close value throughout the bar.
-    # Equivalent to the historical OHLCV sim behavior that used candle close
-    # prices only — suppresses intra-bar wick triggers on TP/SL/trail.
-    if src == "ohlcv_1min" or src == "ohlcv_3min":
-        bar_sec = 60 if src == "ohlcv_1min" else 180
+    # v142 C — jp_sampled_60s / _180s : sample `jp` at each bar boundary,
+    # return that close throughout the bar. NOT a port of the OHLCV sim
+    # (which emits O/L/H/C as 4 synthetic ticks per bar). This mode simply
+    # freezes the decision price between 60s/180s boundaries, suppressing
+    # intra-bar triggers. Utile pour tester "décision slow" vs "décision tick".
+    # Pour le vrai port OHLCV avec émission 4-ticks, voir ohlc_burst_60s
+    # dans check_paper_trades (emits a burst of 4 synthetic prices at each
+    # bar boundary through `_decision_prices_burst`).
+    if src == "jp_sampled_60s" or src == "jp_sampled_180s":
+        bar_sec = 60 if src == "jp_sampled_60s" else 180
         now_ts = _time_mod.time()
         last_close_ts = state.get("ohlcv_ts", 0)
         cur_bar = int(now_ts // bar_sec) * bar_sec
@@ -396,6 +400,18 @@ def _decision_price(addr: str, strategy: str, trade_id: int, orch: dict,
             state["ohlcv_ts"] = cur_bar
         close = state.get("ohlcv_close", jp)
         return close, jp
+
+    # v142 D — ohlc_burst_60s : accumule les ticks sur 60s, au bar close
+    # renvoie une LIST de 4 prix synthétiques (O, L, H, C ordered bull/bear)
+    # que le caller itère comme 4 evals successifs. Port littéral de
+    # sim_engines.candles_to_synthetic_ticks() sur les ticks que nous
+    # pollons réellement. LIMITATION : nos ticks ne contiennent que 2-4
+    # snapshots par 60s, pas les milliers de trades d'exchange. Les wicks
+    # entre 2 polls sont inaccessibles. Best-effort, pas un vrai port.
+    if src == "ohlc_burst_60s":
+        # Return jp as normal decision. The burst logic is handled in
+        # check_paper_trades via _decision_prices_burst (separate helper).
+        return jp, jp
 
     # v142 C — VWAP 5min. Volume-weighted avg of prices over sliding 5min
     # window. Volume per tick = delta of DexScreener rolling volume_usd
@@ -445,6 +461,76 @@ def _decision_price(addr: str, strategy: str, trade_id: int, orch: dict,
 
     # Unknown mode: fall back to jupiter
     return jp, jp
+
+
+# ---------------------------------------------------------------------------
+# v142 D — OHLC burst emission (port of sim_engines.candles_to_synthetic_ticks)
+# ---------------------------------------------------------------------------
+# Per-trade tick buffer for ohlc_burst_60s mode. Accumulates (ts, price) pairs
+# over each 60s window. At bar boundary, the caller queries _decision_prices_burst
+# which returns the OHLC-ordered synthetic tick sequence.
+_ohlc_buffer: dict[int, list[tuple[float, float]]] = {}  # trade_id -> [(ts, price), ...]
+_ohlc_last_bar: dict[int, int] = {}  # trade_id -> last bar_start ts processed
+
+
+def _record_ohlc_tick(trade_id: int, price: float) -> None:
+    """Append a tick to per-trade OHLC buffer. Called from check_paper_trades
+    at each poll to accumulate tick history for burst emission."""
+    if trade_id is None or price is None or price <= 0:
+        return
+    now_ts = _time_mod.time()
+    buf = _ohlc_buffer.setdefault(trade_id, [])
+    buf.append((now_ts, float(price)))
+    # Cap buffer to prevent memory leak on stuck trades
+    if len(buf) > 300:  # ~5min at 1s resolution
+        _ohlc_buffer[trade_id] = buf[-300:]
+
+
+def _decision_prices_burst(trade_id: int, bar_sec: int = 60) -> list[float] | None:
+    """Returns OHLC-ordered synthetic tick sequence for the MOST RECENTLY
+    CLOSED bar, or None if no bar has closed since last call.
+
+    Port of sim_engines.candles_to_synthetic_ticks():
+      - Compute O (first tick in bar), H (max), L (min), C (last tick)
+      - Bullish (close >= open): [O, L, H, C]
+      - Bearish (close < open):  [O, H, L, C]
+
+    The caller iterates this list, calling _evaluate_trade_exit once per
+    synthetic price. Mimics the exchange-aggregated intra-bar wick behavior
+    of DexScreener 15-min OHLCV as closely as our tick polling allows
+    (2-4 ticks per 60s — still misses exchange-level micro-wicks).
+
+    Returns None when: buffer empty, no bar boundary crossed, or already
+    emitted for the most recent bar.
+    """
+    buf = _ohlc_buffer.get(trade_id)
+    if not buf:
+        return None
+    now_ts = _time_mod.time()
+    cur_bar_start = int(now_ts // bar_sec) * bar_sec
+    prev_bar_start = cur_bar_start - bar_sec
+    last_emitted_bar = _ohlc_last_bar.get(trade_id, 0)
+    if prev_bar_start <= last_emitted_bar:
+        return None  # already emitted for this bar
+    # Find ticks in the previous bar window
+    bar_ticks = [p for t, p in buf if prev_bar_start <= t < cur_bar_start]
+    if len(bar_ticks) < 2:
+        return None  # need at least 2 ticks to form a meaningful bar
+    o = bar_ticks[0]
+    c = bar_ticks[-1]
+    h = max(bar_ticks)
+    lo = min(bar_ticks)
+    _ohlc_last_bar[trade_id] = prev_bar_start
+    # Bullish order: O → L → H → C. Bearish: O → H → L → C.
+    if c >= o:
+        return [o, lo, h, c]
+    return [o, h, lo, c]
+
+
+def _clear_ohlc_state(trade_id: int) -> None:
+    """Cleanup buffers on trade close to prevent memory leaks."""
+    _ohlc_buffer.pop(trade_id, None)
+    _ohlc_last_bar.pop(trade_id, None)
 
 
 def _get_sol_price() -> float:
@@ -1939,9 +2025,39 @@ def check_paper_trades(client) -> dict:
         # v138: record this poll BEFORE eval (captures every decision, even no-op)
         _record_eval_poll(trade_id, now, decision_price, current_price,
                           float(trade.get("high_price_seen") or 0))
-        # v123: sell_slip_factor=1.0 to match live (Jupiter Ultra RFQ = near-zero slippage)
-        ev = _evaluate_trade_exit(trade, current_price, now, 1.0, sl_cascade=is_cascade,
-                                   sell_fee_bps=0, decision_price=decision_price)
+        # v142 D: accumulate tick into OHLC buffer for ohlc_burst_60s mode.
+        # Cheap no-op for other modes.
+        _record_ohlc_tick(trade_id, current_price)
+
+        # v142 D: ohlc_burst_60s — at each bar close, emit 4 synthetic OHLC
+        # ticks to `_evaluate_trade_exit` in sequence before the normal eval.
+        # Port of sim_engines.candles_to_synthetic_ticks() so intra-bar wicks
+        # captured by our polling (high/low of last 60s) can trigger SL/TP/trail
+        # in the correct chronological order (bullish: O→L→H→C, bearish: O→H→L→C).
+        if orch.get("price_source") == "ohlc_burst_60s":
+            burst_prices = _decision_prices_burst(trade_id, bar_sec=60)
+            if burst_prices:
+                burst_exit = False
+                ev = None
+                for i, burst_p in enumerate(burst_prices):
+                    ev = _evaluate_trade_exit(trade, burst_p, now, 1.0,
+                                              sl_cascade=is_cascade,
+                                              sell_fee_bps=0,
+                                              decision_price=burst_p)
+                    if ev and ev.get("status"):
+                        burst_exit = True
+                        break
+                if burst_exit:
+                    ev = _override_exit_with_ultra_quote(client, trade, ev)
+                    # Fall through to the existing close-handling code below
+                else:
+                    ev = None  # reset so the normal eval runs
+
+        if orch.get("price_source") != "ohlc_burst_60s" or (ev is None):
+            # Normal eval path (or burst didn't trigger → continue with current tick)
+            # v123: sell_slip_factor=1.0 to match live (Jupiter Ultra RFQ = near-zero slippage)
+            ev = _evaluate_trade_exit(trade, current_price, now, 1.0, sl_cascade=is_cascade,
+                                       sell_fee_bps=0, decision_price=decision_price)
         if ev is None:
             continue
         ev = _override_exit_with_ultra_quote(client, trade, ev)
