@@ -2610,24 +2610,58 @@ def _replay_with_trigger_sl_only(fake_trade: dict, ticks: list[dict],
 SMOOTHING_MODES = [
     "raw", "median_3", "median_5", "winsor_p95", "dual_confirm",
     "ema_fast", "ema_slow", "hysteresis", "volume_gated",
-    # v143.2 — ported from paper_trader._decision_price so every strategy
-    # running these smoothers in prod can be replayed by sim.
+    # v143.2 — single-stream ports from paper_trader._decision_price
     "jp_sampled_60s", "jp_sampled_180s", "vwap_5min", "ohlc_burst_60s",
-    # NOT ported (require dual JP+DS streams; sim replays a single filtered
-    # stream — adding needs _replay_with_intervals refactor):
-    #   "confirm"       — decision = (jp+ds)/2
-    #   "twin_confirm"  — trigger requires both sources to agree
-    #   "hybrid"        — decision on DS, exit at Jupiter
+    # v143.3 — dual-stream ports (JP + DS). Caller must pass dex_ticks to
+    # _replay_with_intervals so the tick stream is enriched with ds_price
+    # before dispatch to _smooth_decision.
+    "confirm", "twin_confirm", "hybrid",
 ]
+
+DUAL_STREAM_MODES = {"confirm", "twin_confirm", "hybrid"}
 
 
 def _smooth_decision(tick: dict, state: dict, mode: str,
                      entry_price: float, sl_price: float,
                      tp_price: float | None) -> float | None:
     """Return smoothed decision price, or None to skip this tick entirely
-    (volume_gated). Mutates `state`."""
+    (volume_gated). Mutates `state`.
+
+    v143.3 — dual-stream modes (confirm / twin_confirm / hybrid) require the
+    caller to enrich each primary tick with tick['ds_price'] before calling
+    this. That is done in _replay_with_intervals when `dex_ticks` is provided.
+    If ds_price is missing on a dual mode, the function falls back to raw.
+    """
     p = float(tick["price_usd"])
     if mode == "raw":
+        return p
+
+    # v143.3 — dual-stream consensus modes
+    if mode in ("confirm", "twin_confirm", "hybrid"):
+        ds = tick.get("ds_price")
+        if ds is None or ds <= 0:
+            return p  # no paired DS price yet → pass through (warm-up)
+        ds = float(ds)
+        if mode == "confirm":
+            return (p + ds) / 2.0
+        if mode == "hybrid":
+            # Decision on DS, exit still at Jupiter. _evaluate_trade_exit
+            # receives tick_price as exit_ref, so returning `ds` routes the
+            # trigger comparisons through DS while execution stays Jupiter.
+            return ds
+        # twin_confirm — require both sources to agree on breaching SL/TP.
+        # If they disagree, serve the non-breaching side so the trigger is
+        # suppressed this tick.
+        if sl_price:
+            jp_breach = p <= sl_price
+            ds_breach = ds <= sl_price
+            if jp_breach != ds_breach:
+                return max(p, ds)
+        if tp_price:
+            jp_breach = p >= tp_price
+            ds_breach = ds >= tp_price
+            if jp_breach != ds_breach:
+                return min(p, ds)
         return p
 
     if mode == "median_3" or mode == "median_5":
@@ -2783,10 +2817,16 @@ def _smooth_decision(tick: dict, state: dict, mode: str,
 def _replay_with_intervals(fake_trade: dict, ticks: list[dict],
                            lazy_fast_sec: int, lazy_fast_window: int,
                            lazy_slow_sec: int,
-                           smoothing: str = "raw") -> dict | None:
+                           smoothing: str = "raw",
+                           dex_ticks: list[dict] | None = None) -> dict | None:
     """Replay trade with custom check interval throttling + exit analytics.
     If all intervals are 0, checks every tick (CURRENT mode).
     Otherwise simulates LAZY-style throttle at given intervals.
+
+    v143.3 — `dex_ticks` (optional) is a parallel DexScreener stream used by
+    dual-stream smoothing modes (confirm / twin_confirm / hybrid). If passed,
+    each primary tick is enriched with tick['ds_price'] = nearest-prior DS
+    price before smoothing. Required when smoothing in DUAL_STREAM_MODES.
 
     Returns enhanced result with peak/timing analytics for exit style analysis."""
     from paper_trader import _evaluate_trade_exit, _last_eval_ts
@@ -2814,6 +2854,19 @@ def _replay_with_intervals(fake_trade: dict, ticks: list[dict],
     smooth_state: dict = {}
     sl_price_trade = float(fake_trade.get("sl_price") or 0)
     tp_price_trade = float(fake_trade.get("tp_price") or 0) or None
+
+    # v143.3 — build sorted DS-by-timestamp list for nearest-prior lookup
+    # when a dual-stream smoothing mode is requested. O(n) precompute, then
+    # O(1) amortized per primary tick using a cursor.
+    ds_sorted: list[tuple[str, float]] = []
+    if dex_ticks:
+        for dt in dex_ticks:
+            dp = float(dt.get("price_usd") or 0)
+            if dp > 0 and dt.get("fetched_at"):
+                ds_sorted.append((dt["fetched_at"], dp))
+        ds_sorted.sort(key=lambda x: x[0])
+    ds_cursor = 0  # advances as primary ticks step forward in time
+    last_ds_price: float | None = None
 
     try:
         for tick in ticks:
@@ -2843,6 +2896,17 @@ def _replay_with_intervals(fake_trade: dict, ticks: list[dict],
                         fake_trade["high_price_seen"] = tick_price
                     continue
                 last_check_ts = now_ts
+
+            # v143.3 — for dual-stream modes, advance DS cursor and attach
+            # nearest-prior DS price to the tick before smoothing.
+            if ds_sorted and smoothing in DUAL_STREAM_MODES:
+                tick_ts_str = tick["fetched_at"]
+                while ds_cursor < len(ds_sorted) and ds_sorted[ds_cursor][0] <= tick_ts_str:
+                    last_ds_price = ds_sorted[ds_cursor][1]
+                    ds_cursor += 1
+                if last_ds_price is not None:
+                    tick = dict(tick)
+                    tick["ds_price"] = last_ds_price
 
             # Apply smoothing → decision_price (exit still at raw tick_price)
             decision_p = _smooth_decision(tick, smooth_state, smoothing,
