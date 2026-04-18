@@ -449,6 +449,15 @@ STRATEGIES["FAST_TP500_SL40_60M"] = [
 ]
 SHADOW_STRATEGIES.append("FAST_TP500_SL40_60M")
 
+# v142 — mega sweep pick: BE long-horizon moonshot. Top config (NONE + DS +
+# hysteresis + static_60) projects $86/day at $50 pos. Promoted to active
+# main paper with $1000 bankroll.
+STRATEGIES["BE15_TP200_SL40_4H"] = [
+    {"pct": 1.0, "tp_mult": 3.00, "sl_mult": 0.60, "horizon_min": 240,
+     "be_activation": 0.15, "label": "main"},
+]
+SHADOW_STRATEGIES.append("BE15_TP200_SL40_4H")
+
 # --- Trailing stop grid (v106) ---
 _TRAIL_STRATEGIES = {}
 for _trail_pct in [10, 15, 20, 25]:
