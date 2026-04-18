@@ -948,12 +948,22 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
         # Shallow liquidity → up to 3x base slippage; deep → 1x
         slip_mult = 1.0 + 2.0 * (1.0 - lds)  # 1.0 for lds=1.0, 3.0 for lds=0.0
         buy_slip_bps = int(buy_slip_bps_base * slip_mult)
+        # v142 E: shadow-sync — if live already opened this trade and passed its
+        # actual Jupiter fill price via token["_rt_force_entry_price"], use it
+        # directly. Fixes P1 (TP/SL status inversion) and P4 (entry_price ±9%
+        # divergence) caused by paper + live doing independent DS/Ultra quote
+        # fetches 4-27s apart. When not present (no live, live failed, or
+        # non-hybrid flow), paper falls back to its own Ultra quote.
+        forced_entry = token.get("_rt_force_entry_price")
         # v130: Quote Jupiter Ultra /order at live's position size — same route/fill
         # as the live swap. Single source of truth for entry_price, market_ref, and
         # high_price_seen (no DexScreener/Ultra mixing like v127 had).
         sol_price_entry = _get_sol_price()
         ultra_price = None
-        if ultra_quote_lamports > 0 and sol_price_entry > 0:
+        if forced_entry and float(forced_entry) > 0:
+            ultra_price = float(forced_entry)
+            entry_source = "live_sync"
+        elif ultra_quote_lamports > 0 and sol_price_entry > 0:
             try:
                 from enrich_jupiter import fetch_ultra_quote_price
                 ultra_price = fetch_ultra_quote_price(addr, ultra_quote_lamports, sol_price_entry)
@@ -961,7 +971,8 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
                 logger.debug("paper_trader: ultra quote failed for %s: %s", addr[:8], e)
         if ultra_price and ultra_price > 0:
             entry_price = ultra_price
-            entry_source = "ultra"
+            if not forced_entry:
+                entry_source = "ultra"
             _jupiter_prices_cache[addr] = ultra_price  # warm for tracking symmetry
         else:
             # Fallback when Ultra API unavailable (fresh token, Helius rate limit,

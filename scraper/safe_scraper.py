@@ -1435,11 +1435,34 @@ def _rt_open_trades(ca: str, symbol: str, price: float, mcap: float,
 
     # v96: Hybrid strategy — split position across configured allocations
     # v116: Each strategy sizes independently from its own bankroll (parallel mode)
+    # v142 E: LIVE trades open FIRST so paper can shadow-sync to the actual
+    # Jupiter execution_price (eliminates P1 inversion + P4 ±9% entry divergence).
     hybrid_cfg = config.get("hybrid_strategy", {})
     if hybrid_cfg.get("enabled", False):
         allocations = dict(hybrid_cfg.get("allocations", {"TP50_SL30": 0.50, "TP30_SL50": 0.30, "TP50_SL50": 0.20}))
-
         all_hybrid_strats = [s for s in allocations if s in STRATEGIES]
+
+        # v142 E — Phase 1: open LIVE trades first, collect their Jupiter fill
+        # prices so paper can reuse them. If live disabled/fails, dict stays
+        # empty and paper falls back to its own Ultra quote (prior behavior).
+        live_cfg = config.get("live_trading", {})
+        live_fill_prices: dict[str, float] = {}  # strategy -> execution_price
+        if live_cfg.get("enabled", False):
+            try:
+                from live_trader import open_live_trade
+                live_allocs = live_cfg.get("allocations", allocations)
+                for strat_name, alloc_pct in live_allocs.items():
+                    live_pos = round(pos_size * float(alloc_pct), 2)
+                    live_res = open_live_trade(sb, token_entry, strat_name, live_pos, live_cfg)
+                    if isinstance(live_res, dict) and live_res.get("success"):
+                        exe_p = live_res.get("execution_price")
+                        if exe_p and float(exe_p) > 0:
+                            live_fill_prices[strat_name] = float(exe_p)
+            except Exception as e:
+                logger.error("Live trading (open) failed: %s", e)
+
+        # v142 E — Phase 2: open PAPER per-strat, injecting live's execution_price
+        # when available so entry_price matches bit-for-bit.
         for i, (strat_name, alloc_pct) in enumerate(allocations.items()):
             if strat_name not in STRATEGIES:
                 continue
@@ -1460,34 +1483,28 @@ def _rt_open_trades(ca: str, symbol: str, price: float, mcap: float,
             if i > 0:
                 strat_config["shadow_enabled"] = False
 
-            token_entry["_rt_experiment_id"] = pt_config.get("experiment_id")
-            token_entry["_rt_variant_id"] = "hybrid_default"
+            # v142 E: shadow-sync entry_price from live's actual Jupiter fill
+            # (per-strategy — each live strat has its own fill price).
+            strat_token = dict(token_entry)
+            strat_token["_rt_experiment_id"] = pt_config.get("experiment_id")
+            strat_token["_rt_variant_id"] = "hybrid_default"
+            if strat_name in live_fill_prices:
+                strat_token["_rt_force_entry_price"] = live_fill_prices[strat_name]
 
-            opened = open_paper_trades(sb, [token_entry], cycle_ts=now, config=strat_config)
+            opened = open_paper_trades(sb, [strat_token], cycle_ts=now, config=strat_config)
             total_opened += opened
 
         if total_opened > 0:
             alloc_str = " + ".join(f"{s}={p:.0%}" for s, p in allocations.items())
+            sync_str = f" [sync={len(live_fill_prices)}]" if live_fill_prices else ""
             logger.info(
-                "RT TRADE [HYBRID]: %s @ $%.6f | %s | KOL: %s (%s, wr=%.0f%%) "
+                "RT TRADE [HYBRID]: %s @ $%.6f | %s%s | KOL: %s (%s, wr=%.0f%%) "
                 "rt_score=%.0f pos=$%.2f liq=$%.0fK",
-                symbol, price, alloc_str, kol_username, tier,
+                symbol, price, alloc_str, sync_str, kol_username, tier,
                 kol_info.get("win_rate", 0) * 100,
                 rt_score, pos_size,
                 token_info.get("liquidity_usd", 0) / 1000,
             )
-
-        # v72: Live trading — mirror paper trades with real execution
-        live_cfg = config.get("live_trading", {})
-        if live_cfg.get("enabled", False) and total_opened > 0:
-            try:
-                from live_trader import open_live_trade
-                live_allocs = live_cfg.get("allocations", allocations)
-                for strat_name, alloc_pct in live_allocs.items():
-                    live_pos = round(pos_size * float(alloc_pct), 2)
-                    open_live_trade(sb, token_entry, strat_name, live_pos, live_cfg)
-            except Exception as e:
-                logger.error("Live trading (open) failed: %s", e)
 
         return total_opened
 

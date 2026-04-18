@@ -597,27 +597,34 @@ def _track_pnl(pnl_sol: float):
 
 
 def open_live_trade(client_sb, token_entry: dict, strategy: str,
-                    position_usd: float, config: dict) -> bool:
+                    position_usd: float, config: dict):
     """
     Open a live trade: convert USD position to SOL lamports and execute buy.
     Inserts row into paper_trades with source='rt_live' on success.
-    Returns True on success, False on failure.
+
+    v142 E: returns dict {"success": bool, "execution_price": float|None}
+    instead of bare bool, so caller (safe_scraper._rt_open_trades) can
+    shadow-sync paper's entry_price to live's actual Jupiter fill. On
+    failure returns {"success": False, "execution_price": None}.
+
+    Backward-compat: truthiness still works (dict with success=True is truthy).
     """
+    _FAIL = {"success": False, "execution_price": None}
     ca = token_entry.get("token_address")
     symbol = token_entry.get("symbol", "???")
 
     if not ca:
         logger.warning("live_trader: no CA for %s — skipping", symbol)
-        return False
+        return _FAIL
 
     entry_price = float(token_entry.get("price_usd", 0))
     if entry_price <= 0:
         logger.error("live_trader: entry_price=0 for %s — aborting live trade", symbol)
-        return False
+        return _FAIL
 
     # Safety checks
     if _check_loss_limits(config):
-        return False
+        return _FAIL
 
     # Check max open positions
     max_open = int(config.get("max_open_positions", 5))
@@ -632,7 +639,7 @@ def open_live_trade(client_sb, token_entry: dict, strategy: str,
         open_count = result.count or 0
         if open_count >= max_open:
             logger.info("live_trader: max open positions (%d) reached — skipping %s", max_open, symbol)
-            return False
+            return _FAIL
     except Exception as e:
         logger.warning("live_trader: failed to check open positions: %s", e)
 
@@ -655,7 +662,7 @@ def open_live_trade(client_sb, token_entry: dict, strategy: str,
         if dedup_res.count and dedup_res.count > 0:
             logger.info("live_trader: dedup cooldown — %s/%s traded in last %dh, skipping",
                         symbol, strategy, dedup_hours)
-            return False
+            return _FAIL
     except Exception as e:
         logger.debug("live_trader: dedup check failed for %s: %s", symbol, e)
 
@@ -673,12 +680,12 @@ def open_live_trade(client_sb, token_entry: dict, strategy: str,
         if available_sol <= 0:
             logger.warning("live_trader: insufficient SOL (%.4f, reserve=%.2f) — skipping %s",
                            balances["sol_balance"], min_reserve, symbol)
-            return False
+            return _FAIL
         position_sol = min(position_sol, available_sol)
 
     if position_sol < 0.001:
         logger.info("live_trader: position too small (%.6f SOL) — skipping %s", position_sol, symbol)
-        return False
+        return _FAIL
 
     # v118: Recalculate position_usd after SOL cap — must match actual SOL spent
     position_usd = round(position_sol * sol_price, 2)
@@ -697,7 +704,7 @@ def open_live_trade(client_sb, token_entry: dict, strategy: str,
             alert_live_trade_failed(symbol, "BUY", result.get("error", "unknown"))
         except Exception:
             pass
-        return False
+        return _FAIL
 
     # v130: True fill price from outAmount + token decimals.
     # Previously used fill_ratio = sol_spent/expected_sol (≈1.0 for exact-in),
@@ -898,11 +905,13 @@ def open_live_trade(client_sb, token_entry: dict, strategy: str,
             )
         except Exception:
             pass
-        return True
+        # v142 E: return execution_price so caller can shadow-sync paper
+        # trades to the same fill price (fixes P1+P4 divergence).
+        return {"success": True, "execution_price": execution_price}
     except Exception as e:
         logger.error("live_trader: DB insert failed for %s (trade executed but not tracked!): %s",
                      symbol, e)
-        return False
+        return {"success": False, "execution_price": None}
 
 
 def _handle_trigger_fill(client_sb, trade: dict, order_status: dict, now) -> None:
