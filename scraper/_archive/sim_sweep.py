@@ -192,6 +192,98 @@ def replay_bond_fast(ticks, entry, cfg, liq_usd, is_bonding):
     return {"taken": True, "status": "noexit", "pnl_pct": 0.0, "exit_min": 0}
 
 
+def replay_standard(ticks, entry, cfg):
+    """Generic replay for standard STRATEGIES dict entries (single-tranche).
+    Supports: tp_mult, sl_mult, horizon_min, be_activation, trail_pct,
+    trail_activation_pct, tp_decay_end, trail_tiers, time_be_minute, tp_schedule.
+
+    Order of checks (matches paper_trader._evaluate_trade_exit):
+      1. SL (with BE override from be_activation or time_be_minute)
+      2. TP (scalar OR tp_schedule OR tp_decay_end)
+      3. Trail stop (trail_pct OR trail_tiers)
+      4. Timeout
+    """
+    if not ticks:
+        return {"taken": False}
+    sl_mult = cfg.get("sl_mult", 0.5)
+    tp_mult = cfg.get("tp_mult")
+    horizon = cfg.get("horizon_min", 120)
+    be_act = cfg.get("be_activation")
+    time_be = cfg.get("time_be_minute")
+    trail_pct = cfg.get("trail_pct")
+    trail_act = cfg.get("trail_activation_pct") or (trail_pct or 0)
+    trail_tiers = cfg.get("trail_tiers")
+    tp_schedule = cfg.get("tp_schedule")
+    tp_decay_end = cfg.get("tp_decay_end")
+
+    sl_base = entry * sl_mult
+    tp_px = entry * tp_mult if tp_mult else None
+    high = entry
+
+    for mins, price, h in ticks:
+        high = max(high, h, price)
+        if mins >= horizon:
+            return {"taken": True, "status": "timeout", "pnl_pct": (price / entry) - 1, "exit_min": mins}
+
+        # Effective SL: peak-based BE OR time-based BE
+        effective_sl = sl_base
+        if be_act is not None and high >= entry * (1 + be_act):
+            effective_sl = max(effective_sl, entry)
+        if time_be is not None and mins >= float(time_be):
+            effective_sl = max(effective_sl, entry)
+
+        if price <= effective_sl:
+            status = "be_stop" if effective_sl > sl_base else "sl_hit"
+            return {"taken": True, "status": status, "pnl_pct": (effective_sl / entry) - 1, "exit_min": mins}
+
+        # TP via tp_schedule (piecewise-linear)
+        if tp_schedule:
+            tp_m = None
+            for i in range(len(tp_schedule) - 1):
+                m1, v1 = tp_schedule[i]; m2, v2 = tp_schedule[i + 1]
+                if m1 <= mins <= m2:
+                    tp_m = v2 if m2 == m1 else v1 + (v2 - v1) * (mins - m1) / (m2 - m1)
+                    break
+            if tp_m is None:
+                tp_m = tp_schedule[-1][1] if mins >= tp_schedule[-1][0] else tp_schedule[0][1]
+            if tp_m > 1.0 and price >= entry * tp_m:
+                return {"taken": True, "status": "tp_hit", "pnl_pct": tp_m - 1, "exit_min": mins}
+            elif tp_m <= 1.0 and price >= entry:
+                return {"taken": True, "status": "tp_late", "pnl_pct": (price / entry) - 1, "exit_min": mins}
+        # TP scalar
+        elif tp_px and price >= tp_px:
+            return {"taken": True, "status": "tp_hit", "pnl_pct": tp_mult - 1, "exit_min": mins}
+        # TP decay (legacy)
+        elif tp_px and tp_decay_end is not None:
+            activation_frac = 0.5
+            if mins > horizon * activation_frac:
+                progress = min((mins - horizon * activation_frac) / (horizon * (1 - activation_frac)), 1.0)
+                decayed_mult = tp_mult - (tp_mult - tp_decay_end) * progress
+                if price >= entry * decayed_mult:
+                    return {"taken": True, "status": "tp_hit", "pnl_pct": decayed_mult - 1, "exit_min": mins}
+
+        # Trail (tiered OR scalar)
+        if trail_tiers and high > entry:
+            ratio = high / entry
+            eff_trail = sorted(trail_tiers)[0][1]
+            for pm, pp in sorted(trail_tiers):
+                if ratio >= pm:
+                    eff_trail = pp
+                else:
+                    break
+            if high >= entry * (1 + trail_act):
+                trig = high * (1 - eff_trail)
+                if price <= trig and trig > entry:
+                    status = "trail_crash" if (price / trig) < 0.70 else "trail_stop"
+                    return {"taken": True, "status": status, "pnl_pct": (trig / entry) - 1, "exit_min": mins}
+        elif trail_pct and high >= entry * (1 + trail_act):
+            trig = high * (1 - trail_pct)
+            if price <= trig and trig > entry:
+                status = "trail_crash" if (price / trig) < 0.70 else "trail_stop"
+                return {"taken": True, "status": status, "pnl_pct": (trig / entry) - 1, "exit_min": mins}
+    return {"taken": True, "status": "noexit", "pnl_pct": 0.0, "exit_min": 0}
+
+
 def replay_peak_trail(ticks, entry, cfg):
     """PEAK_TRAIL_V2 replay with tiered trail.
 
@@ -333,6 +425,88 @@ def split_folds(trades, k):
     return folds
 
 
+def score_strategy_name(strat_name, tranche, folds, apply_haircut_flag, filt=None):
+    """Replay an existing STRATEGIES-dict entry (via replay_standard) on each
+    fold. tranche: single-tranche dict from STRATEGIES. filt: optional filter
+    dict with min_liquidity_usd / max_liquidity_usd / etc.
+    Position sizing: fixed $50 per trade for fair cross-strat comparison.
+    """
+    POS_USD = 50.0
+    fold_pnl_usd = []
+    fold_wr = []
+    fold_n = []
+
+    for fold_trades in folds:
+        pnl_usd = 0.0
+        taken_count = 0
+        winners = 0
+        for trade in fold_trades:
+            # Apply entry filter if strategy has one
+            if filt:
+                liq = float(trade.get("rt_liquidity_usd") or 0)
+                if filt.get("min_liquidity_usd") and liq < filt["min_liquidity_usd"]:
+                    continue
+                if filt.get("max_liquidity_usd") and liq > filt["max_liquidity_usd"]:
+                    continue
+
+            entry = float(trade.get("entry_price") or 0)
+            if entry <= 0:
+                continue
+
+            res = replay_standard(trade["_ticks"], entry, tranche)
+            if not res.get("taken"):
+                continue
+            if apply_haircut_flag:
+                res = apply_haircut(res, bool(trade.get("rt_is_pump_fun")))
+            pnl_usd += res["pnl_pct"] * POS_USD
+            taken_count += 1
+            if res["pnl_pct"] > 0:
+                winners += 1
+
+        fold_pnl_usd.append(round(pnl_usd, 2))
+        fold_wr.append(round(winners / taken_count, 3) if taken_count else 0)
+        fold_n.append(taken_count)
+
+    mean_pnl = statistics.mean(fold_pnl_usd) if fold_pnl_usd else 0
+    min_pnl = min(fold_pnl_usd) if fold_pnl_usd else 0
+    pos_folds = sum(1 for x in fold_pnl_usd if x > 0)
+    stability = pos_folds / len(fold_pnl_usd) if fold_pnl_usd else 0
+    total_taken = sum(fold_n)
+
+    return {
+        "strat_name": strat_name,
+        "fold_pnl_usd": fold_pnl_usd,
+        "fold_wr": fold_wr,
+        "fold_n": fold_n,
+        "mean_pnl_usd": round(mean_pnl, 2),
+        "min_pnl_usd": round(min_pnl, 2),
+        "total_pnl_usd": round(sum(fold_pnl_usd), 2),
+        "total_taken": total_taken,
+        "stability": stability,
+    }
+
+
+def run_mega_sweep(trades, folds, apply_haircut_flag):
+    """Mega sweep: iterate every single-tranche entry in STRATEGIES dict +
+    test them on the same trade set. Excludes multi-tranche (MOONBAG/SCALE_OUT/
+    SPLIT/WIDE_RUNNER/DIP_split) for clean cross-comparison.
+    """
+    from strategies import STRATEGIES, STRATEGY_FILTERS
+    results = []
+    skipped_multi = 0
+    for strat_name, tranches in STRATEGIES.items():
+        if len(tranches) > 1:
+            skipped_multi += 1
+            continue
+        tranche = tranches[0]
+        filt = STRATEGY_FILTERS.get(strat_name)
+        score = score_strategy_name(strat_name, tranche, folds, apply_haircut_flag, filt)
+        score["cfg"] = tranche
+        score["filter"] = filt
+        results.append(score)
+    return results, skipped_multi
+
+
 def score_config(strat_name, cfg, folds, apply_haircut_flag):
     """Replay cfg on each fold; return per-fold aggregate stats.
 
@@ -459,6 +633,8 @@ def main():
                         choices=["all", "td2", "bond", "ptrail"])
     parser.add_argument("--fine-td2", action="store_true",
                         help="Use fine TD2 grid (~3K configs) instead of coarse (216)")
+    parser.add_argument("--mega", action="store_true",
+                        help="Iterate EVERY single-tranche STRATEGIES entry via replay_standard")
     parser.add_argument("--no-haircut", action="store_true",
                         help="Disable slippage haircut (raw replay, optimistic)")
     parser.add_argument("--out", type=str, default=str(SCRAPER_DIR / "sim_sweep.csv"))
@@ -499,6 +675,55 @@ def main():
 
     all_rows = []
     top_results = {}
+
+    # Mega-sweep branch: iterate ALL STRATEGIES dict entries (single-tranche)
+    if args.mega:
+        print(f"[MEGA] iterating every single-tranche entry in STRATEGIES...")
+        mega_results, skipped = run_mega_sweep(trades, folds, apply_haircut_flag)
+        print(f"[MEGA] scored {len(mega_results)} strategies (skipped {skipped} multi-tranche)\n")
+
+        # Rank
+        def _rank_key(r):
+            return r["mean_pnl_usd"] * max(r["stability"], 0.25)
+        mega_results.sort(key=_rank_key, reverse=True)
+
+        print(f"{'Strategy':<45} {'mean$':>8} {'min$':>8} {'total$':>9} {'stab':>5} {'N':>5} folds_pnl")
+        print("-" * 130)
+        for r in mega_results[:25]:
+            print(f"{r['strat_name']:<45} {r['mean_pnl_usd']:>+8.2f} {r['min_pnl_usd']:>+8.2f} "
+                  f"{r['total_pnl_usd']:>+9.2f} {r['stability']:>5.2f} {r['total_taken']:>5} {r['fold_pnl_usd']}")
+        print("\n--- BOTTOM 10 (worst) ---")
+        for r in mega_results[-10:]:
+            print(f"{r['strat_name']:<45} {r['mean_pnl_usd']:>+8.2f} {r['min_pnl_usd']:>+8.2f} "
+                  f"{r['total_pnl_usd']:>+9.2f} {r['stability']:>5.2f} {r['total_taken']:>5}")
+
+        # Save full CSV
+        import csv as _csv
+        mega_csv = Path(args.out).with_name("sim_mega_sweep.csv")
+        with open(mega_csv, "w", newline="", encoding="utf-8") as f:
+            writer = _csv.writer(f)
+            writer.writerow(["strat_name", "mean_pnl_usd", "min_pnl_usd", "total_pnl_usd",
+                             "total_taken", "stability", "fold_pnl_usd", "fold_wr", "fold_n",
+                             "cfg_json", "filter_json"])
+            for r in mega_results:
+                writer.writerow([
+                    r["strat_name"], r["mean_pnl_usd"], r["min_pnl_usd"], r["total_pnl_usd"],
+                    r["total_taken"], round(r["stability"], 3),
+                    json.dumps(r["fold_pnl_usd"]), json.dumps(r["fold_wr"]),
+                    json.dumps(r["fold_n"]), json.dumps(r["cfg"], default=str),
+                    json.dumps(r.get("filter") or {}, default=str),
+                ])
+        print(f"\n[OK] Mega CSV ({len(mega_results)} strats) written to {mega_csv}")
+
+        mega_json = Path(args.top_json).with_name("sim_mega_sweep_top.json")
+        mega_json.write_text(json.dumps({
+            "days": args.days, "folds": args.folds, "haircut": apply_haircut_flag,
+            "n_trades": len(trades),
+            "top_30": mega_results[:30],
+            "bottom_10": mega_results[-10:],
+        }, indent=2, default=str))
+        print(f"[OK] Mega top-30 JSON written to {mega_json}")
+        return
 
     for strat_name in selected:
         grid = strat_grids[strat_name]
