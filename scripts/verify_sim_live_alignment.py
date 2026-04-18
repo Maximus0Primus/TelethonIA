@@ -86,9 +86,13 @@ def replay_trade(trade, ticks, live_cfg):
 
     fake = dict(trade)
     fake["id"] = trade_id
+    # Critical: reset high_price_seen — the persisted value from the closed live
+    # trade (often the run peak) would make BE / trail-activation fire at tick 1
+    # before the replay has even seen price move. Mirror sim.py: start at entry.
+    entry = float(trade["entry_price"])
+    fake["high_price_seen"] = entry
 
     last_eval_t = None
-    entry = float(trade["entry_price"])
 
     for ts, src, p in merged:
         # Update the cache that the live scraper would have populated
