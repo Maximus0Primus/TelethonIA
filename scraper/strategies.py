@@ -329,6 +329,65 @@ STRATEGIES["BE15_TP300_SL50_MCAP"] = [  # MCAP_MID filter + ds/raw/fast
 ]
 SHADOW_STRATEGIES.append("BE15_TP300_SL50_MCAP")
 
+# ============================================================
+# v142 — Data-driven candidates (NOT active, shadow/sim only)
+#
+# Observation (7d, 881 trades): FAST+tight-SL family wins (+$405), HYST all lose
+# (−$284), filters (NZ/HS/MCAP) cut the rentable segment (bondings +$439/4h).
+# Four hypotheses to validate before shipping:
+#   1. Bondings are the alpha — gate FAST on low-liq/bonding only
+#   2. Memecoin pumps fade fast — decay TP + lock breakeven early in horizon
+#   3. Winners need breathing room — tier-scaled trail (tight on small peaks,
+#      loose on big peaks) beats fixed DTRAIL
+#   4. Entry price validation — 60s confirm before open filters dead calls
+# ============================================================
+
+# Sweep-tuned configs (sim_sweep.py, 14d post-v138 eval_history, 4-fold
+# walk-forward, post-haircut per-exit-type slippage). Ex-ante expectation
+# (14d, same trade universe where paper actual = −$455):
+#   - TD2  (fine grid 14400 configs, haircut ON): +$468 → delta +$923 vs paper
+#   - PTRAIL_V2 (coarse 432, haircut ON):          +$161 → delta +$616
+#   - BOND_FAST (coarse 864, haircut ON):          +$56  → delta +$511
+# Stability 3/4 folds positive on TD2 + PTRAIL; 2/4 on BOND (brittle to slip).
+# All 3 enter as SHADOW (in SHADOW_STRATEGIES but NOT in active_strategies) —
+# observe N≥20 actual trades before main-bankroll activation.
+
+# 1. TD2_BE5_TP120_SL44_T25 — TIME_DECAY_V2 fine winner.
+#    TP schedule: +120% at t=0, decays to +40% at t=5min, then +0% (late = take
+#    any profit). BE moves SL to entry at t=5min regardless of peak.
+STRATEGIES["TD2_BE5_TP120_SL44_T25"] = [
+    {"pct": 1.0, "tp_mult": None,  # TP handled by tp_schedule, not scalar
+     "sl_mult": 0.55, "horizon_min": 25,
+     "time_be_minute": 5,
+     "tp_schedule": [(0, 2.20), (5, 1.40), (15, 1.00), (25, 1.00)],
+     "label": "main"},
+]
+SHADOW_STRATEGIES.append("TD2_BE5_TP120_SL44_T25")
+
+# 2. PTRAIL_V2_T10-18-30-45_SL30_T60 — tiered trail winner.
+STRATEGIES["PTRAIL_V2_T10-18-30-45_SL30_T60"] = [
+    {"pct": 1.0, "tp_mult": None, "sl_mult": 0.70, "horizon_min": 60,
+     "trail_tiers": [(1.30, 0.10), (1.80, 0.18), (3.00, 0.30), (6.00, 0.45)],
+     "trail_activation_pct": 0.15, "label": "main"},
+]
+SHADOW_STRATEGIES.append("PTRAIL_V2_T10-18-30-45_SL30_T60")
+
+# 3. BOND_FAST_TP50_SL20_T20 — bonding/low-liq isolated, tight stops.
+STRATEGIES["BOND_FAST_TP50_SL20_T20"] = [
+    {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.80, "horizon_min": 20,
+     "trail_pct": 0.10, "trail_activation_pct": 0.15, "label": "main"},
+]
+SHADOW_STRATEGIES.append("BOND_FAST_TP50_SL20_T20")
+
+# Entry filter for BOND_FAST — only bondings / ultra-low liq.
+STRATEGY_FILTERS["BOND_FAST_TP50_SL20_T20"] = {
+    "max_liquidity_usd": 3_000,
+}
+# (TD2 and PTRAIL_V2 have no entry gate — all tokens eligible)
+
+# MOMENTUM_CONFIRM_ENTRY is not a strategy — sim falsified it (paired delta
+# −24% vs baseline). Hypothèse morte. Do not ship.
+
 # --- Trailing stop grid (v106) ---
 _TRAIL_STRATEGIES = {}
 for _trail_pct in [10, 15, 20, 25]:
@@ -439,6 +498,21 @@ def _get_trail_config(trade: dict) -> tuple[float | None, float | None]:
     result = _get_trail_config_uncached(strat, label)
     _trail_config_cache[cache_key] = result
     return result
+
+
+# v142: tranche config lookup — used by eval extensions (time_be, tp_schedule,
+# trail_tiers). Returns the specific tranche dict matching (strategy, label), or
+# None. Gracefully falls back to label-less first tranche when only one exists.
+def _find_tranche_config(strategy_name: str, tranche_label: str = "main") -> dict | None:
+    tranches = STRATEGIES.get(strategy_name)
+    if not tranches:
+        return None
+    for t in tranches:
+        if t.get("label") == tranche_label:
+            return t
+    if len(tranches) == 1:
+        return tranches[0]
+    return None
 
 
 def _get_trail_config_uncached(strat: str, label: str) -> tuple[float | None, float | None]:

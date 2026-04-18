@@ -155,6 +155,9 @@ def _passes_strategy_filter(token: dict, strategy_name: str) -> bool:
                 or token.get("liquidity_usd") or 0)
     if liq < filt.get("min_liquidity_usd", 0):
         return False
+    # v142: upper bound — for bonding-only / low-liq strats (BOND_FAST)
+    if filt.get("max_liquidity_usd") and liq > filt["max_liquidity_usd"]:
+        return False
     rt_score = float(token.get("_rt_score") or token.get("rt_score") or 0)
     if rt_score < filt.get("min_rt_score", 0):
         return False
@@ -1130,6 +1133,14 @@ def _dynamic_sell_slip_factor(trade: dict, exit_type: str, base_bps: int = 10,
         type_bps = -300        # POSITIVE slip — Jupiter trigger fills above target
     elif exit_type == "timeout":
         type_bps = 120         # was 30; real median -1.22%
+    elif exit_type == "be_stop":
+        # v142: breakeven stop — active close at ~entry price. Less dump pressure
+        # than sl_hit (we exit on BE violation, usually in a normal pullback, not
+        # crash). Mid-range between tp_hit and sl_hit.
+        type_bps = 200
+    elif exit_type == "tp_late":
+        # v142: late-phase take-any-profit. Thinner book than fresh TP.
+        type_bps = 80
     else:
         type_bps = 100
 
@@ -1294,6 +1305,13 @@ def _evaluate_trade_exit(trade: dict, current_price: float | None,
         exit_price = sl_price * _dynamic_sell_slip_factor(trade, "sl_hit", base_bps, sell_fee_bps)
 
     elif eval_price is not None:
+        # v142: resolve tranche config once for time_be_minute / tp_schedule /
+        # trail_tiers extensions. Cheap dict lookup. None for unknown strats.
+        from strategies import _find_tranche_config as _pt_find_tranche
+        _v142_tranche = _pt_find_tranche(
+            trade.get("strategy", ""), trade.get("tranche_label", "main") or "main"
+        ) or {}
+
         # 2) SL check — with breakeven stop override
         #    BE strategies: once peak exceeded entry*(1+be_act), SL moves to entry price
         effective_sl = sl_price
@@ -1304,6 +1322,13 @@ def _evaluate_trade_exit(trade: dict, current_price: float | None,
                 # Breakeven activated — SL is now entry price
                 effective_sl = entry_price
 
+        # v142: TIME-based BE — after N minutes elapsed, SL moves to entry
+        # regardless of peak reached. Distinct from peak-based BE_RE logic above.
+        # Config key: `time_be_minute` in tranche dict.
+        _time_be = _v142_tranche.get("time_be_minute")
+        if _time_be and elapsed_minutes >= float(_time_be):
+            effective_sl = max(effective_sl, entry_price)
+
         # v133: SL check against exit_ref (Jupiter quote — what the sell would actually
         # fill at) rather than decision_price. Fixes hybrid-mode divergence where DS
         # noise dips trigger phantom SLs in paper while live Jupiter quote stays above.
@@ -1311,12 +1336,39 @@ def _evaluate_trade_exit(trade: dict, current_price: float | None,
         sl_eval = current_price if current_price is not None else eval_price
 
         if sl_eval <= effective_sl:
-            new_status = "sl_hit"
-            exit_price = effective_sl * _dynamic_sell_slip_factor(trade, "sl_hit", base_bps, sell_fee_bps)
+            new_status = "sl_hit" if effective_sl <= sl_price else "be_stop"
+            exit_price = effective_sl * _dynamic_sell_slip_factor(
+                trade, "sl_hit" if new_status == "sl_hit" else "be_stop",
+                base_bps, sell_fee_bps,
+            )
         # 3) TP check (only tranches with TP target)
         elif tp_price is not None and eval_price >= tp_price:
             new_status = "tp_hit"
             exit_price = tp_price * _dynamic_sell_slip_factor(trade, "tp_hit", base_bps, sell_fee_bps)
+        # 3a-v142) TP_SCHEDULE — piecewise-linear TP mult over time.
+        # Config: `tp_schedule` = [(minute, tp_mult), ...] sorted by minute.
+        # Overrides tp_decay_end when present. Allows TP to rise or fall over time.
+        elif _v142_tranche.get("tp_schedule"):
+            _sched = _v142_tranche["tp_schedule"]
+            # interpolate tp_mult at current elapsed_minutes
+            _tp_m = None
+            for i in range(len(_sched) - 1):
+                m1, v1 = _sched[i]
+                m2, v2 = _sched[i + 1]
+                if m1 <= elapsed_minutes <= m2:
+                    _tp_m = v2 if m2 == m1 else v1 + (v2 - v1) * (elapsed_minutes - m1) / (m2 - m1)
+                    break
+            if _tp_m is None and _sched:
+                _tp_m = _sched[-1][1] if elapsed_minutes >= _sched[-1][0] else _sched[0][1]
+            if _tp_m is not None and _tp_m > 1.0:
+                _sched_price = entry_price * _tp_m
+                if eval_price >= _sched_price:
+                    new_status = "tp_hit"
+                    exit_price = _sched_price * _dynamic_sell_slip_factor(trade, "tp_hit", base_bps, sell_fee_bps)
+            elif _tp_m is not None and _tp_m <= 1.0 and eval_price >= entry_price:
+                # Late-phase catch-any-profit: TP mult ≤ 1 means take breakeven+
+                new_status = "tp_late"
+                exit_price = eval_price * _dynamic_sell_slip_factor(trade, "tp_late", base_bps, sell_fee_bps)
         # 3b) v106: Time-decay TP — threshold decreases in second half of horizon
         #     Derive tp_decay_end from strategy name (DECAY_TPxx_SLyy_Ezz → 1 + zz/100)
         elif tp_price is not None and _get_decay_end(trade.get("strategy", "")) is not None:
@@ -1337,7 +1389,31 @@ def _evaluate_trade_exit(trade: dict, current_price: float | None,
     #     v106 TRAIL: activates once peak > entry * (1 + trail_pct).
     #     v110 DTRAIL: activates once peak > entry * (1 + activation_pct).
     if new_status is None and eval_price is not None:
+        # v142: _v142_tranche was defined in the SL/TP elif block above (same
+        # condition eval_price is not None). Reuse it; guard with try/except in
+        # the unlikely case of control-flow change.
+        try:
+            _tranche_for_trail = _v142_tranche  # noqa: F821
+        except NameError:
+            from strategies import _find_tranche_config as _pt_find_tranche
+            _tranche_for_trail = _pt_find_tranche(
+                trade.get("strategy", ""), trade.get("tranche_label", "main") or "main"
+            ) or {}
         trail_pct, activation_pct = _get_trail_config(trade)
+        # v142: trail_tiers override — scalar trail_pct varies with peak ratio.
+        _tiers = _tranche_for_trail.get("trail_tiers")
+        if _tiers and high_seen > 0 and entry_price > 0:
+            _ratio = high_seen / entry_price
+            _sorted_tiers = sorted(_tiers)
+            _tier_pct = _sorted_tiers[0][1]
+            for _pm, _pp in _sorted_tiers:
+                if _ratio >= _pm:
+                    _tier_pct = _pp
+                else:
+                    break
+            trail_pct = _tier_pct
+            if activation_pct is None:
+                activation_pct = float(_tranche_for_trail.get("trail_activation_pct") or 0.15)
         if trail_pct is not None and high_seen > 0 and market_ref_price > 0:
             activation_price = market_ref_price * (1 + activation_pct)
             if high_seen >= activation_price:
