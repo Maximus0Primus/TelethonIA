@@ -1321,6 +1321,13 @@ def check_live_trades(client_sb) -> dict:
         sell_slippage_bps = 0
         sol_price_at_exit = 0
         sell_sol_received = None
+        # v142 (S3 audit fix): track exit_price provenance. When False, exit_price
+        # stored in DB is the decision-time DS tick (no real Jupiter fill data) —
+        # pnl_pct/pnl_usd derived from it are unreliable. Post-hoc analysis should
+        # prefer reconstruction from stored columns:
+        #   exit_price_net = entry_price * (sell_sol_received * sol_price_at_exit) / position_usd
+        # Only valid when sell_sol_received IS NOT NULL.
+        exit_price_from_fill = False
 
         try:
             if sell_output and sell_output > 0 and entry_price > 0:
@@ -1330,6 +1337,7 @@ def check_live_trades(client_sb) -> dict:
                 pos_usd_val = float(trade.get("position_usd") or 0)
                 if pos_usd_val > 0:
                     exit_price = entry_price * (usd_received / pos_usd_val)
+                    exit_price_from_fill = True
 
             pnl_pct = round((exit_price / entry_price) - 1, 4) if exit_price and entry_price else 0
             pnl_usd = round(pos_usd * pnl_pct, 2) if pos_usd else 0
@@ -1359,6 +1367,17 @@ def check_live_trades(client_sb) -> dict:
             logger.warning("live_trader: PnL calc error for %s (sell OK, sig=%s): %s — DB update proceeds with defaults",
                            trade["symbol"], sell_result.get("signature"), e)
             sell_sol_received = (sell_output / LAMPORTS_PER_SOL) if sell_output else None
+
+        # v142 (S3): surface the fallback case explicitly so it can be measured.
+        # Normal path: sell_output > 0 → exit_price reflects real Jupiter fill.
+        # Fallback: exit_price == ev.exit_price (DS tick at decision moment), unreliable.
+        if not exit_price_from_fill:
+            logger.warning(
+                "live_trader: exit_price for %s (%s) is DS-tick fallback, not Jupiter fill "
+                "(sell_output=%s, pos_usd=%.2f). pnl_pct/pnl_usd unreliable for this row. "
+                "Reconstruct via sell_sol_received if available.",
+                trade["symbol"], new_status, sell_output, pos_usd,
+            )
 
         # v122: Compute paper vs live price divergence
         price_divergence_pct = None

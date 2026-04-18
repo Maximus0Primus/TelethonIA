@@ -1733,13 +1733,18 @@ def check_paper_trades(client) -> dict:
         _process_dip_watchlist(client, prices, now)
 
     # v73: Load sell slippage + fee config for exit price simulation
+    # v142: also load buy slip so we can persist both bps on close (observability
+    # gap: paper_trades rows had NULL buy/sell_slippage_bps, blocking divergence
+    # analysis against live's real execution slippage).
     _sell_slip_bps = SELL_SLIPPAGE_BPS
     _sell_fee_bps = SELL_FEE_BPS
+    _buy_slip_bps = BUY_SLIPPAGE_BPS
     _active_strats = []
     try:
         _cfg = _load_paper_trade_config(client)
         _sell_slip_bps = int(_cfg.get("sell_slippage_bps", SELL_SLIPPAGE_BPS))
         _sell_fee_bps = int(_cfg.get("sell_fee_bps", SELL_FEE_BPS))
+        _buy_slip_bps = int(_cfg.get("buy_slippage_bps", BUY_SLIPPAGE_BPS))
         _active_strats = _cfg.get("active_strategies", [])
     except Exception:
         pass
@@ -1826,6 +1831,10 @@ def check_paper_trades(client) -> dict:
         update = {k: ev[k] for k in ("status", "exit_price", "exit_at", "pnl_pct", "pnl_usd", "exit_minutes", "sol_price_at_exit") if k in ev}
         if ev.get("high_price_seen") is not None:
             update["high_price_seen"] = ev["high_price_seen"]
+        # v142: persist slip bps assumed by the close so divergence vs live's real
+        # fill is measurable. Previously NULL on every paper row — blocking audit.
+        update["buy_slippage_bps"] = _buy_slip_bps
+        update["sell_slippage_bps"] = _sell_slip_bps
         # v138: persist accumulated poll history alongside close fields
         hist = _flush_eval_history(trade["id"])
         if hist:
@@ -1912,6 +1921,9 @@ def check_paper_trades(client) -> dict:
         update = {k: ev[k] for k in ("status", "exit_price", "exit_at", "pnl_pct", "pnl_usd", "exit_minutes", "sol_price_at_exit") if k in ev}
         if ev.get("high_price_seen") is not None:
             update["high_price_seen"] = ev["high_price_seen"]
+        # v142: persist slip bps on cascade close too (see main pass above)
+        update["buy_slippage_bps"] = _buy_slip_bps
+        update["sell_slippage_bps"] = _sell_slip_bps
 
         try:
             # v114: Conditional update — only close if still open (prevents race)
@@ -2097,11 +2109,13 @@ def check_paper_trades_fast(client) -> dict:
 
     _sell_slip_bps = SELL_SLIPPAGE_BPS
     _sell_fee_bps = SELL_FEE_BPS
+    _buy_slip_bps = BUY_SLIPPAGE_BPS
     _active_strats = []
     try:
         _cfg = _load_paper_trade_config(client)
         _sell_slip_bps = int(_cfg.get("sell_slippage_bps", SELL_SLIPPAGE_BPS))
         _sell_fee_bps = int(_cfg.get("sell_fee_bps", SELL_FEE_BPS))
+        _buy_slip_bps = int(_cfg.get("buy_slippage_bps", BUY_SLIPPAGE_BPS))
         _active_strats = _cfg.get("active_strategies", [])
     except Exception:
         pass
@@ -2159,6 +2173,9 @@ def check_paper_trades_fast(client) -> dict:
         update = {k: ev[k] for k in ("status", "exit_price", "exit_at", "pnl_pct", "pnl_usd", "exit_minutes", "sol_price_at_exit") if k in ev}
         if ev.get("high_price_seen") is not None:
             update["high_price_seen"] = ev["high_price_seen"]
+        # v142: persist slip bps (see check_paper_trades for rationale)
+        update["buy_slippage_bps"] = _buy_slip_bps
+        update["sell_slippage_bps"] = _sell_slip_bps
         # v138: persist accumulated poll history alongside close fields
         hist = _flush_eval_history(trade["id"])
         if hist:
