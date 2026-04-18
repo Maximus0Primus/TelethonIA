@@ -87,9 +87,10 @@ Configs post-revert (A/B test structure intacte base vs _HYST). Stats `is_shadow
 - **v142 B** (`a3fbbd7`) — 6 shadows diversity + cleanup 4 HYST redondants
 - **v142 main promote** (`1c19d0b`) — 3 mega-sweep winners en main $1K chacun (FAST_TP70, BE15_TP200_4H, MCAP_MID_DTRAIL5)
 - **v142 orch align** (`0feba13`) → **REVERT** (`b559453`) — alignment a écrasé l'A/B structure existant, rollback sur 10 mains
-- **v142 bankroll fix + cleanup** (`3710416`) — `current_balance` $17,750→$20,754 (seed $3K non-reflété), archive sim_sweep/sim_new_strategies → `_archive/`
-- **v142 C — smoothings** (`79a0d7d`) — 3 nouveaux `price_source` : `jp_sampled_60s`, `vwap_5min`, `twin_confirm` (ancien ohlcv_1min était trompeur)
-- **v142 D — OHLC burst port** (`6c10d24`) — `ohlc_burst_60s` port littéral de `sim_engines.candles_to_synthetic_ticks()` (émet O→L→H→C au bar boundary)
+- **v142 bankroll fix + cleanup** (`3710416`) — `current_balance` $17,750→$20,754, archive sim_sweep/sim_new_strategies → `_archive/`
+- **v142 C — smoothings** (`79a0d7d`) — 3 nouveaux `price_source` : `jp_sampled_60s`, `vwap_5min`, `twin_confirm`
+- **v142 D — OHLC burst port** (`6c10d24`) — `ohlc_burst_60s` port littéral de `sim_engines.candles_to_synthetic_ticks()`
+- **v142 E — shadow-sync P1+P4** (`34ec4be`) — live opens first in hybrid flow, paper reuse `execution_price` via `_rt_force_entry_price`. `open_live_trade` retourne dict `{success, execution_price}`. Élimine divergence entry_price ±9% + TP/SL status inversion.
 
 ### v142 C/D finding important
 
@@ -132,13 +133,15 @@ Legacy OHLCV sim historique donnait **+184% sur DIP_SCALE_OUT** (DIP30_B5_SO50_1
 - ⏳ **N≥30 paired HYST vs base** pour verdict définitif HYST — ETA Apr 22-23
 - ⏳ **N≥15 live par liq_bucket** pour recalibrer slip v143 — ETA Apr 22-24
 
-### 🔴 Actions code restantes (priorité décroissante)
-1. [x] ~~Bug `rt_bankroll.current_balance` drift~~ — FIX commit `3710416` (current $20,754)
-2. [x] ~~Nettoyage scripts one-shot~~ — FAIT `3710416` (archive + deletes)
-3. **A/B test ohlc_burst_60s en shadow paper** — créer `BE25_TP80_SL30_OHLCB` avec `price_source=ohlc_burst_60s` pour mesurer en vrai si le burst aide (sim dit +$11 sur BE25, confirmer en paper 48h)
-4. **Debug Jupiter Trigger V2** — seul vrai moyen de catch wicks sub-second en live. Plan 3 étapes ligne 128-133. **Bloqué tant que live_pos $1.70 < trigger_min $10** ; nécessite soit baisser trigger_min, soit scale live (impossible à $1.70 actuel). Attendre scale-up décision.
-5. **Post-N≥15 (Apr 19-20)** : analyser 3 nouvelles mains vs sim, décision promote/demote.
-6. **Post-N≥30 (Apr 22-23)** : verdict HYST définitif (dégager ou garder).
+### 🔴 Actions code restantes
+1. [x] ~~Bug `rt_bankroll.current_balance` drift~~ — FIX `3710416` (current $20,754)
+2. [x] ~~Nettoyage scripts one-shot~~ — FAIT `3710416`
+3. [x] ~~S3 exit_price DS-tick fallback~~ — CLOSED (0 occurrences en 5h post-v142 → pas de schema migration nécessaire)
+4. [x] ~~P1 + P4 shadow-sync paper ↔ live entry_price~~ — FIX `34ec4be` (live opens first, paper reuse execution_price via `_rt_force_entry_price`)
+5. **Debug Jupiter Trigger V2** — bloqué par live_pos $1.70 < trigger_min $10. Nécessite scale-up live d'abord.
+6. **Post-N≥15 (Apr 19-20)** : analyser 3 nouvelles mains v142 vs sim
+7. **Post-N≥30 (Apr 22-23)** : verdict HYST définitif
+8. **Post-48h v142E (Apr 20)** : valider shadow-sync — query paires paper+live avec `entry_source='live_sync'` → `ABS(paper.entry_price - live.execution_price) < 0.5%` attendu (vs ±9% avant). P1 inversion rate attendu ~0%.
 
 ### 🔴 Open bugs (à éteindre avant tout action structurelle)
 - **P1 — Inversion TP/SL paper vs live** (N=10, ligne 143) : need 20+ paires post-v141 — shadow-sync fix proposed
@@ -188,14 +191,14 @@ Window : 4h post-deploy 18 strats. N(live closed)=10, N(paper closed)=68, N(shad
 
 ### 🔴 Problèmes actionnables (confirmés sur N=10 mais N trop faible)
 
-- [ ] **P1 — Inversion TP/SL paper vs live sur même token/strat**. $ELONMUSK BE15_TP100_SL50 : live=tp_hit +2.07%, paper=sl_hit −0.08% (inversion totale). Entry_price paper=2.514e-5 vs live=2.635e-5 (−4.58%). 1/10 paires live+paper divergent sur le status. → paper et live voient des séquences de prix différentes. **Data need** : 20+ paires live+paper post-v141 pour confirmer taux d'inversion. **Fix possible** : shadow-sync paper reuses live's entry_price (décision v130-v131 deferred, à remettre sur la table).
+- [x] **P1 — Inversion TP/SL paper vs live** — FIXED v142 E (commit `34ec4be` Apr 18 14:18 UTC). Shadow-sync implémenté : live opens first, paper reuse execution_price. Validation 48h : query paires `entry_source='live_sync'` → inversion rate attendu 0%.
 - [ ] **P3 — Slippage live réel vs modèle sim v138.5 : gaps des 2 côtés**. Modèle actuel (`paper_trader.py:1094-1143`, v138.5 recalibré sur 132 trades Apr 13-17) = 435 bps sl_hit, 1000 trail_crash, 250 trail_stop, −300 tp_hit, 120 timeout, avec ×2.0 si liq<$5K et ×1.3 si liq<$20K, caps [−1000, +1500/+2500]. Live mesuré (audit N=10 Apr 17) : bonding sl_hit **+1165 bps** (sim projette 870 → gap ~300 bps sous-estimé), liq >$50K sl_hit **−188 bps** (sim projette 435 → sim sur-pénalise ~620 bps en haute liq !). ~~**Paper ne store aucun `buy/sell_slippage_bps`**~~ **FIXED v142** (Apr 18 08:39 UTC, commit `c6a739d`) : paper_trader.check_paper_trades + cascade + fast persistent désormais `buy_slippage_bps`/`sell_slippage_bps` au close depuis la config courante. **Data need** : N≥30 live par liq_bucket pour re-calibrer v143 (sur-pénalisation en liq >$50K à corriger + renforcer bondings). **Fix possible** : ajuster type_bps par bucket liq fin (pas juste <$5K / <$20K).
-- [ ] **P4 — Entry_price paper vs live diverge ±9% même token**. $DRAGON BE15 +8.99%, $QUACK BE25 −7.73%. Gap 4-27s entre les 2 inserts → 2 fetch DexScreener indépendants, prix bouge 5-10% en 10s sur bonding. **Cause racine** : double pipeline entry (live + paper) non-synchronisés. **Data need** : confirmer sur 20+ paires. **Fix possible** : shadow-sync (même fix que P1).
+- [x] **P4 — Entry_price paper vs live ±9%** — FIXED v142 E (même commit `34ec4be`). Paper utilise désormais `live.execution_price` directement via `_rt_force_entry_price`. Gap attendu: 0 (bit-pour-bit identique). Validation 48h.
 
 ### 🟠 Suspects (à retester avec plus de data)
 
 - [ ] **S1 — HYST variants perdent en réel paper** — observation CONFIRMÉE par query paginée 7d (mean/median Δ HYST-base = -0.47% à -6.61%, 4/4 paires dans direction négative). Mais N=8/pair petit car HYST activés seulement ~20-24h. **Verdict définitif ETA Apr 22-23** (N≥30 paired). **Si confirmé** : soit dégager les 4 HYST mains, soit les garder comme control group en paper pour A/B continue. Note : le mega sweep predict HYST +$134/j pour FAST_TP100_SL20 = **sim très optimiste sur HYST**, ne plus s'y fier pour les rankings entre smoothings.
-- [ ] **S3 — `exit_price` live ≠ vrai prix de vente** — **PARTIELLEMENT FIXED v142** (commit `c6a739d`). Flag `exit_price_from_fill` tracké dans `check_live_trades` + WARNING log quand fallback DS-tick (sell_output=0/None, edge case). Formule reconstruction fiable documentée en commentaire : `entry_price × (sell_sol_received × sol_price_at_exit) / position_usd`, valide ssi `sell_sol_received IS NOT NULL`. **Schema change deferred** — on mesure la fréquence du fallback d'abord via `journalctl | grep "DS-tick fallback"` sur 24-48h. Si 0 occurrence → S3 académique, close définitif. Si >0 → migration propre (rename `exit_price` → `last_observed_price_at_exit` + ajout `exit_price_net` column).
+- [x] **S3 — `exit_price` live fallback** — CLOSED Apr 18 14h UTC. `journalctl | grep "DS-tick fallback"` = 0 occurrences en 5h post-v142 deploy → edge case jamais triggered en prod. Warning log sert de canary, schema migration non nécessaire.
 - [x] **S4 — Bankroll +$117 réel pas +$722** — **résolu** : section "Current state" réécrite avec chiffres actuels (commit `c55e29b` puis mise à jour v142).
 - [ ] **S5 — Bondings gagnent, high-liq perdent (contre-intuitif)**. 7d paper : NOZEROLIQ_TP200_SL40 −$37 sur 2 trades, HIGHSCORE_TP200_SL40 −$15 sur 2 trades, BOND_FAST (shadow) en cours. Les filtres continuent de perdre. **Data need** : attendre 48h v142 orch post-alignment pour N≥20 par filter + comparer `BOND_FAST` shadow vs ces filter.
 
