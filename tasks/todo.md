@@ -83,11 +83,25 @@ Configs post-revert (A/B test structure intacte base vs _HYST). Stats `is_shadow
 
 ## v142 changelog (Apr 18)
 
-- **v142 paper slip + live exit fallback observability** (commit `60ab314`) — buy/sell_slippage_bps now persisted on paper close; live_trader warns on DS-tick fallback.
-- **v142 diversity pack + HYST cleanup** (commit `a3fbbd7`) — 6 new shadow strats covering filter/mcap/horizon gaps. Removed 4 redundant HYST from SHADOW_STRATEGIES.
-- **v142 main promotion** (commit `1c19d0b`) — 3 mega-sweep winners (FAST_TP70_SL50, BE15_TP200_SL40_4H, MCAP_MID_DTRAIL5_ACT25_SL50_2H) seeded at $1000 each. 18→21 mains.
-- **v142 orchestration alignment** (commit `0feba13`) — 21 strategy_overrides aligned to mega sweep optimal. **→ REVERTED à 12:30 UTC.**
-- **v142 revert orch alignment** (commit `b559453`) — 10 existing mains restaurés à leurs configs pré-align (médecine A/B intacte). Les 11 nouveaux strats gardent leur v142 config. 3 LAZY additions retirées pour BE25_TP80_SL30 + filtered variants.
+- **v142 A** (`60ab314`) — paper slip bps persisté + live exit fallback log
+- **v142 B** (`a3fbbd7`) — 6 shadows diversity + cleanup 4 HYST redondants
+- **v142 main promote** (`1c19d0b`) — 3 mega-sweep winners en main $1K chacun (FAST_TP70, BE15_TP200_4H, MCAP_MID_DTRAIL5)
+- **v142 orch align** (`0feba13`) → **REVERT** (`b559453`) — alignment a écrasé l'A/B structure existant, rollback sur 10 mains
+- **v142 bankroll fix + cleanup** (`3710416`) — `current_balance` $17,750→$20,754 (seed $3K non-reflété), archive sim_sweep/sim_new_strategies → `_archive/`
+- **v142 C — smoothings** (`79a0d7d`) — 3 nouveaux `price_source` : `jp_sampled_60s`, `vwap_5min`, `twin_confirm` (ancien ohlcv_1min était trompeur)
+- **v142 D — OHLC burst port** (`6c10d24`) — `ohlc_burst_60s` port littéral de `sim_engines.candles_to_synthetic_ticks()` (émet O→L→H→C au bar boundary)
+
+### v142 C/D finding important
+
+Legacy OHLCV sim historique donnait **+184% sur DIP_SCALE_OUT** (DIP30_B5_SO50_100_RT10_RA50_SL70 = $500 → $1421). Tick sim sur même famille DIP = **−25%** (DIP30_B5_T5_A20_SL70_240m = $373 sur start $500).
+
+**Gap de 209pp** = les "supers résultats" OHLCV étaient un **artifact d'estimation** :
+- OHLCV 15-min bars DS agrégent tous les trades exchange → wicks extrêmes visibles
+- Nos polls 30s voient 2-4 snapshots → manquent 95%+ amplitude intra-bar
+- Même avec Birdeye OHLCV API (payant), exec latency Jupiter (1-3s) rate les wicks <5s
+- Seul Jupiter Trigger V2 (on-chain triggers) peut les catcher — déjà implémenté, 0 fills car live_pos $1.70 < trigger_min $10
+
+**Conclusion** : le sim OHLCV historique était **overfitted aux wicks intrabar** qu'on ne capture pas en live. Les DIP_SCALE_OUT top-ranked là-dedans ne peuvent pas reproduire leurs gains. Inutile de payer Birdeye pour reproduire ce biais. **Focus sur FAST/BE vanilla qui gagnent empiriquement (+$74/j 7d).**
 
 ### Mega sweep v142 — top 10 per-strat ($/day at $50 pos, via price_ticks 80 tokens)
 
@@ -119,11 +133,12 @@ Configs post-revert (A/B test structure intacte base vs _HYST). Stats `is_shadow
 - ⏳ **N≥15 live par liq_bucket** pour recalibrer slip v143 — ETA Apr 22-24
 
 ### 🔴 Actions code restantes (priorité décroissante)
-1. **Bug `rt_bankroll.current_balance` drift** (−$3K non-incrémenté depuis seed v142). Re-sync manuel 1 query Supabase.
-2. **Debug Jupiter Trigger V2** (0 keeper fills historiques) — 3 étapes plan déjà écrit ligne 128-133. Orthogonal à v142, peut démarrer quand tu veux.
-3. **Nettoyage scripts one-shot** : delete `_audit2.py`, `_audit3.py`, `_v141_24h_audit.py|.json|.log`. Archiver `sim_new_strategies.py` + `sim_sweep.py` (remplacés par `sim.py --mega-sweep`).
-4. **Post-N≥15 (Apr 19-20)** : analyser les 3 nouvelles mains vs sim. Décision promote/demote/ajuster bankroll selon réel.
-5. **Post-N≥30 (Apr 22-23)** : décider sur HYST (dégager ou garder comme control). Si dégagés = libère $4K bankroll pour autre chose.
+1. [x] ~~Bug `rt_bankroll.current_balance` drift~~ — FIX commit `3710416` (current $20,754)
+2. [x] ~~Nettoyage scripts one-shot~~ — FAIT `3710416` (archive + deletes)
+3. **A/B test ohlc_burst_60s en shadow paper** — créer `BE25_TP80_SL30_OHLCB` avec `price_source=ohlc_burst_60s` pour mesurer en vrai si le burst aide (sim dit +$11 sur BE25, confirmer en paper 48h)
+4. **Debug Jupiter Trigger V2** — seul vrai moyen de catch wicks sub-second en live. Plan 3 étapes ligne 128-133. **Bloqué tant que live_pos $1.70 < trigger_min $10** ; nécessite soit baisser trigger_min, soit scale live (impossible à $1.70 actuel). Attendre scale-up décision.
+5. **Post-N≥15 (Apr 19-20)** : analyser 3 nouvelles mains vs sim, décision promote/demote.
+6. **Post-N≥30 (Apr 22-23)** : verdict HYST définitif (dégager ou garder).
 
 ### 🔴 Open bugs (à éteindre avant tout action structurelle)
 - **P1 — Inversion TP/SL paper vs live** (N=10, ligne 143) : need 20+ paires post-v141 — shadow-sync fix proposed
