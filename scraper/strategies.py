@@ -132,6 +132,10 @@ STRATEGY_FILTERS = {
     # and FAST_TP100_SL20 (WR 66.7%, avg +32.0%) — complete the SCORE40 family.
     "FAST_TP50_SL30_S40": {"min_rt_score": 40},
     "FAST_TP100_SL20_S40": {"min_rt_score": 40},
+    # v144 — MCAP_MID_SCORE40 combo on FAST_TP50_SL30 — sim extended top WR 74%
+    "FAST_TP50_SL30_MCAP_S40": {
+        "min_mcap": 30_000, "max_mcap": 500_000, "min_rt_score": 40,
+    },
 }
 
 # --- Grid strategies (v93) ---
@@ -756,6 +760,76 @@ STRATEGIES["BE25_TP80_SL30_LAZYSLOW"] = [
      "be_activation": 0.25, "label": "main"},
 ]
 SHADOW_STRATEGIES.append("BE25_TP80_SL30_LAZYSLOW")
+
+
+# ---------------------------------------------------------------------------
+# v144 — LAZY cadence family A/B on FAST_TP50_SL30 (live + top paper earner).
+# Tests full LAZY profile spread: LAZYFAST / LAZYMED / LAZYSTD (LAZY_STRATEGIES
+# main) / LAZYSLOW / LAZYXSLOW. Polling_sec overrides approximate the slow-phase
+# interval of each LAZY profile. NOLAZY (polling 30s) already exists.
+# ---------------------------------------------------------------------------
+STRATEGIES["FAST_TP50_SL30_LAZYFAST"] = [
+    {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.70, "horizon_min": 30, "label": "main"},
+]
+SHADOW_STRATEGIES.append("FAST_TP50_SL30_LAZYFAST")
+
+STRATEGIES["FAST_TP50_SL30_LAZYMED"] = [
+    {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.70, "horizon_min": 30, "label": "main"},
+]
+SHADOW_STRATEGIES.append("FAST_TP50_SL30_LAZYMED")
+
+STRATEGIES["FAST_TP50_SL30_LAZYXSLOW"] = [
+    {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.70, "horizon_min": 30, "label": "main"},
+]
+SHADOW_STRATEGIES.append("FAST_TP50_SL30_LAZYXSLOW")
+
+
+# ---------------------------------------------------------------------------
+# v144 — Source family A/B: BOTH (merge jp+ds) / JUPITER / DS on live strats.
+# Extended sweep flagged "both" as dominant on top configs. Validation via
+# shadows before orchestration override on mains.
+# ---------------------------------------------------------------------------
+STRATEGIES["FAST_TP50_SL30_BOTH"] = [
+    {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.70, "horizon_min": 30, "label": "main"},
+]
+SHADOW_STRATEGIES.append("FAST_TP50_SL30_BOTH")
+
+STRATEGIES["FAST_TP50_SL30_JUPITER"] = [
+    {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.70, "horizon_min": 30, "label": "main"},
+]
+SHADOW_STRATEGIES.append("FAST_TP50_SL30_JUPITER")
+
+STRATEGIES["BE25_TP80_SL30_BOTH"] = [
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.25, "label": "main"},
+]
+SHADOW_STRATEGIES.append("BE25_TP80_SL30_BOTH")
+
+STRATEGIES["BE25_TP80_SL30_JUPITER"] = [
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.25, "label": "main"},
+]
+SHADOW_STRATEGIES.append("BE25_TP80_SL30_JUPITER")
+
+STRATEGIES["FAST_TP80_SL25_BOTH"] = [
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.75, "horizon_min": 30, "label": "main"},
+]
+SHADOW_STRATEGIES.append("FAST_TP80_SL25_BOTH")
+
+STRATEGIES["FAST_TP100_SL20_BOTH"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.80, "horizon_min": 30, "label": "main"},
+]
+SHADOW_STRATEGIES.append("FAST_TP100_SL20_BOTH")
+
+
+# ---------------------------------------------------------------------------
+# v144 — MCAP_MID_SCORE40 combo filter shadow. Sim extended: FAST_TP50_SL30
+# + MCAP_MID_SCORE40 = N=19 WR 74% avg +33.6%. Already in STRATEGY_FILTERS.
+# ---------------------------------------------------------------------------
+STRATEGIES["FAST_TP50_SL30_MCAP_S40"] = [
+    {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.70, "horizon_min": 30, "label": "main"},
+]
+SHADOW_STRATEGIES.append("FAST_TP50_SL30_MCAP_S40")
 
 
 # ---------------------------------------------------------------------------
