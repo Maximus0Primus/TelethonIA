@@ -1509,11 +1509,29 @@ def _rt_open_trades(ca: str, symbol: str, price: float, mcap: float,
         return total_opened
 
     # --- Fallback: exploration mode (all active strategies, equal sizing) ---
-    # v72: Warn if live trading is enabled but hybrid mode is off (live trades only fire in hybrid mode)
+    # v144: shadow-sync entry also fires in exploration path. If live_trading is
+    # enabled without hybrid_strategy, open live trades first (per alloc) so paper
+    # rows can reuse the Jupiter fill price via `_rt_force_entry_price`. Prevents
+    # sync=False outliers on any future non-hybrid config.
     live_cfg = config.get("live_trading", {})
+    live_fill_prices: dict[str, float] = {}
     if live_cfg.get("enabled", False):
-        logger.warning("live_trading.enabled=True but hybrid_strategy.enabled=False — "
-                        "live trades only fire in hybrid mode. Enable hybrid_strategy or disable live_trading.")
+        try:
+            from live_trader import open_live_trade
+            live_allocs = live_cfg.get("allocations") or {}
+            for strat_name, alloc_pct in live_allocs.items():
+                if strat_name not in STRATEGIES:
+                    continue
+                live_pos = round(pos_size * float(alloc_pct), 2)
+                live_res = open_live_trade(sb, token_entry, strat_name, live_pos, live_cfg)
+                if isinstance(live_res, dict) and live_res.get("success"):
+                    exe_p = live_res.get("execution_price")
+                    if exe_p and float(exe_p) > 0:
+                        live_fill_prices[strat_name] = float(exe_p)
+            if not live_allocs:
+                logger.warning("live_trading.enabled=True but no allocations defined — no live trades opened in exploration mode.")
+        except Exception as e:
+            logger.error("Exploration-mode live trading (open) failed: %s", e)
 
     db_active = [s for s in pt_config.get("active_strategies", list(STRATEGIES.keys())) if s in STRATEGIES]
     rt_strats = config.get("rt_strategies", "all")
@@ -1524,19 +1542,35 @@ def _rt_open_trades(ca: str, symbol: str, price: float, mcap: float,
         if not valid_strategies:
             valid_strategies = db_active
 
-    explore_config = dict(pt_config)
-    explore_config["budget_usd"] = pos_size
-    explore_config["active_strategies"] = valid_strategies
-    explore_config["top_n"] = 1
-    explore_config["ca_filter"] = False
-
-    total_opened = open_paper_trades(sb, [token_entry], cycle_ts=now, config=explore_config)
+    # v144: per-strategy paper open so we can inject live fill price when present
+    # (mirrors hybrid branch). Pre-v144 used single batch call; still falls back
+    # to batch when no live fills to preserve behavior.
+    total_opened = 0
+    if live_fill_prices:
+        for strat_name in valid_strategies:
+            strat_config = dict(pt_config)
+            strat_config["budget_usd"] = pos_size
+            strat_config["active_strategies"] = [strat_name]
+            strat_config["top_n"] = 1
+            strat_config["ca_filter"] = False
+            strat_token = dict(token_entry)
+            if strat_name in live_fill_prices:
+                strat_token["_rt_force_entry_price"] = live_fill_prices[strat_name]
+            total_opened += open_paper_trades(sb, [strat_token], cycle_ts=now, config=strat_config)
+    else:
+        explore_config = dict(pt_config)
+        explore_config["budget_usd"] = pos_size
+        explore_config["active_strategies"] = valid_strategies
+        explore_config["top_n"] = 1
+        explore_config["ca_filter"] = False
+        total_opened = open_paper_trades(sb, [token_entry], cycle_ts=now, config=explore_config)
 
     if total_opened > 0:
+        sync_str = f" [sync={len(live_fill_prices)}]" if live_fill_prices else ""
         logger.info(
-            "RT TRADE [EXPLORE]: %s @ $%.6f | %d strats | KOL: %s (%s, wr=%.0f%%) "
+            "RT TRADE [EXPLORE]: %s @ $%.6f | %d strats%s | KOL: %s (%s, wr=%.0f%%) "
             "rt_score=%.0f pos=$%.2f liq=$%.0fK",
-            symbol, price, len(valid_strategies), kol_username, tier,
+            symbol, price, len(valid_strategies), sync_str, kol_username, tier,
             kol_info.get("win_rate", 0) * 100,
             rt_score, pos_size,
             token_info.get("liquidity_usd", 0) / 1000,

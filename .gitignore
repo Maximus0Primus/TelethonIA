@@ -1,3 +1,7 @@
+# === ANALYSIS ARTIFACTS ===
+# JSON dumps from scripts/ analyses — session artifacts, not code
+data/
+
 # === SECRETS & AUTH ===
 *.session
 .env

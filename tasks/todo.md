@@ -1,4 +1,4 @@
-# Pipeline Status — Updated Apr 19, 2026 (v143.6 deployed)
+# Pipeline Status — Updated Apr 19, 2026 (v144 deployed)
 
 ## Current state
 
@@ -70,19 +70,16 @@ TD2_BE5_TP120_SL44_T25, PTRAIL_V2_T10-18-30-45_SL30_T60, BOND_FAST_TP50_SL20_T20
 - **3 mains v142** (FAST_TP70, BE15_TP200_4H, MCAP_MID_DTRAIL5) — N≥15 ~ Apr 20-21
 - **9 shadows v142** — N≥20 ~ Apr 21-22
 - **HYST verdict** (paired N≥30) — Apr 22-23
-- **v143.5 exit shadow-sync validation** — 48h, query `exit_div_pct` BE15 doit tomber <2% — Apr 20-21
-- **v143.6 paper_sim_pnl_pct populate** — 24h, joint analysis `pnl_pct vs paper_sim_pnl_pct` isolera slip/routing — Apr 20
-- **Slip calibration v144** par liq_bucket — N≥15 live/bucket — Apr 22-24
+- **v144 slip offset validation** — 48h, re-run `scripts/diverge_report.py`, L−S median doit rester ≤ 2pp sur strats actives — Apr 21
+- **Non-pump N≥30 pour décider split pump vs global offset** — ETA Apr 25
 
 ### 🔴 Open bugs (need data)
-- **P3** : slip model sur-pénalise liq>$50K, sous-pénalise bondings. N≥30 par bucket.
-- **S5** : NOZEROLIQ/HIGHSCORE filtres continuent de perdre. N≥50 par bucket.
-- **BE15 exit divergence** : -10.4% median. v143.5 devrait résoudre — re-measure Apr 20.
+- **S5 filters audit (v144)** : NOZEROLIQ retro sur BE25 = +$217 vs base $+187 → **NZ aide**. SCORE30 capte bien >=40 (mean +11%) mais inclut 30-40 (mean -5.86%) → **SCORE40 > SCORE30** recommandé. HYST reste le vrai tueur. TP200 N=9-11 trop faible pour conclure.
+- **Paper↔live outliers automatisé (v144)** : `nightly-outlier-monitor.yml` tourne à 04:30 UTC, fail + alert si outlier sync=True apparaît. Test local OK (10 historiques sync=False, 0 sync=True).
+- **LAZY polling audit (v144)** — real 7d data : LAZY total +$1387, non-LAZY −$1720 (different strat pools, confounded). Top 4 earners tous LAZY (FAST_TP40 +$275, FAST_TP80 +$269, FAST_TP50 +$242, TP50_SL15 +$216). Sim bench contredit (disait FAST_30 > LAZY sur FAST_TP50) → sim a probablement biais "sur-check" (voit tous ticks 15-30s, triggers SL aberrants). **v144 action** : 4 shadows `*_NOLAZY` ajoutés (strategies.py) — FAST_TP40/TP80/TP50 + TP50_SL15. Paired comparaison via `scripts/compare_lazy_vs_nolazy.py` post-deploy. N≥50 ETA Apr 22. LAZY_XSLOW jamais best en sim → pas déployé.
 
 ### 🟡 Améliorations alignment identifiées (low-priority)
-- **Tick logging 15-30s → 5-10s** : gain DTRAIL outliers maxabs −36pp → <5pp, coût Jupiter RPC 2-3x. À envisager SI #v143.5/v143.6 ne résolvent pas tout.
-- **Shadow-sync entry pour trades non-hybrid** : v142E ne sync que hybrid. Low-stakes si on reste 100% hybrid.
-- **Update 4 autres callsites `_replay_with_intervals`** pour passer `dex_ticks` systématiquement (actuellement seul mega-sweep le fait). Utile si un jour on active confirm/twin_confirm/hybrid sur une stratégie non-mega.
+- **Tick logging 15-30s → 5-10s** : gain DTRAIL outliers maxabs −36pp → <5pp, coût Jupiter RPC 2-3x. À envisager SI outliers sync=True émergent.
 
 ### 🔒 Bloqué sur scale-up live
 - **Jupiter Trigger V2** — 0 fills historiques. Débloquer quand live_pos > $10.
@@ -92,27 +89,33 @@ Supabase PostgREST cap 1000 rows même avec `.limit(10000)`. Toujours paginer vi
 
 ---
 
-## Sim ↔ Live/Paper coherence (v143 = aligned)
+## Sim ↔ Live/Paper coherence (v144 aligned)
 
-### Status post-v143.6
-- **Avg sim-live diff** : +0.09pp (centered on zero)
-- **BE25 within_10pp** : 13/19 (68%)
-- **BE15 within_10pp** : 10/15 (67%)
-- **Outliers restants** : structurels (polling cadence + tick 15-30s resolution), pas bugs logiques
+### Status post-v144 (Apr 19, N=56 paires live/paper, DTRAIL exclu)
+- **sim ↔ live per-pair median** : L−S ≤ 2.5pp sur toutes strats actives (FAST_TP50 +0.35, BE25 −1.54, BE15 −2.45)
+- **sim ↔ paper Spearman rank corr** : ρ = +0.905 (N=139 strats) → **sim prédit bien le classement paper**
+- **paper ↔ live median** : ≤ 2pp per strat (FAST_TP50 +0.93, BE25 +1.00, BE15 −1.73) — gap fermé au median par v142E (entry sync) + v143.5 (exit sync)
+- **Outliers restants** : 23 historiques |L−P|>10pp, 100% avec sync=False (= pré-v142E ou live swap failed). Post-sync devrait être zéro.
 
-### v143 changelog (Apr 18-19)
-- **v143 + 143.1** (`3c6cfee` + `5c35a0d`) — verify_sim_live_alignment utilise `_decision_price` + reset `high_price_seen` dans fake trade (bug critique : BE armait au tick 1)
-- **v143.2** (`7ab6f6a`) — sim.py port single-stream modes (jp_sampled_60s/180s, vwap_5min, ohlc_burst_60s)
-- **v143.3** (`07c62f6`) — sim.py port dual-stream modes (confirm, twin_confirm, hybrid) via `dex_ticks` param
-- **v143.4 + 143.5** (`0aeac2d`) — mega-sweep passe `dex_ticks`, live_trader exit shadow-sync (symétrique à v142 E)
-- **v143.6** (`be44422`) — DS cache 5s TTL dans `_fetch_prices_batch`, colonne `paper_sim_pnl_pct` persistée par live_trader, CI gate nightly `sim-align-gate.yml`
-- **chore** (`54b10d5`) — suppression 6 scripts obsolètes (check_alerts, query_trades, _apply_v140_*, _rt_score_v2_audit, cleanup_hybrid_sell_pollution)
+### Méthodologie mesure divergence sim
+Trois canaux complémentaires :
+1. **`paper_trades.paper_sim_pnl_pct`** (colonne v143.6) — PnL sim joint par live_trader sur ticks réels pour chaque trade live. Source directe per-trade.
+2. **`scripts/verify_sim_live_alignment.py`** — replay via `_decision_price` + `_evaluate_trade_exit`. CI nightly.
+3. **Mega-sweep ranking vs paper/live** (`sim.py --mega-sweep` + `scripts/ranking_compare.py`) — **toujours faire ça en complément** : compare Spearman rank sur stratégies pour vérifier que la sim classe correctement même avec biais de niveau. Sans ce check, on risque de ne détecter qu'un biais absolu et manquer un problème de structure.
+
+### Split slip : pump vs global offset
+Test (`slip_split_test.py`) : pump/liq/mcap donnent pooled std ~2920 bps, aucun ne réduit meaningfully → **offset global −100 bps** dans `_dynamic_sell_slip_factor` (v144). Monitor non-pump jusqu'à N≥30 (Apr 25) avant de décider split définitif.
 
 ### Tools
 - `--from-eval-history` (v138) = 0% bias mathématique
 - `--from-trades` = ground truth historique
-- `--from-ticks jupiter` = +4pp residual sur trail-heavy
-- `scripts/verify_sim_live_alignment.py` = audit sim vs live (tourne en CI nightly)
+- `--mega-sweep` = grid complet → ranking correlation sim vs paper/live
+- `scripts/verify_sim_live_alignment.py` = audit sim vs live (CI nightly)
+- `scripts/diverge_report.py` = tableau récap sim/paper/live unifié
+- `scripts/calibrate_slip.py` = calibration per-pair delta
+- `scripts/slip_split_test.py` = test splitter pump/liq/mcap
+- `scripts/ranking_compare.py` = Spearman sim↔paper↔live
+- `scripts/outlier_diag.py` = root-cause par outlier |L−P|>10pp
 
 **Thresholds CI** : avg |diff| ≤ 5pp ET within_10pp ≥ 80% sinon fail + Telegram alert.
 
@@ -142,6 +145,8 @@ python scraper/sim.py --mega-sweep  # flags: --mega-workers N, --mega-csv-out, -
 
 ## Historique récent
 
+- **v144** (Apr 19, soir) ✅ 4 chantiers safe : (1) shadow-sync entry étendu au path exploration dans `safe_scraper.py` — plus aucun sync=False sur nouveaux trades même si hybrid OFF. (2) `dex_ticks` câblé dans les 4 autres callsites `_replay_with_intervals` (sim.py:3074/3315/4016/4023) — dual-stream smoothing utilisable partout. (3) S5 filter audit (voir §Open bugs). (4) `nightly-outlier-monitor.yml` déployé — CI nightly alert Telegram sur outlier sync=True.
+- **v144** (Apr 19) ✅ `_dynamic_sell_slip_factor` : offset global −100 bps (shift per-pair delta mean +115 → 0). Split pump/non-pump testé (N=6 non-pump trop petit, pas de gain std) → report Apr 25.
 - **v143.6** (Apr 19) ✅ DS cache TTL + `paper_sim_pnl_pct` column + CI nightly gate
 - **v143.5** (Apr 19) ✅ Live exit shadow-sync : force-close paper match au fill Jupiter
 - **v143.1-4** (Apr 18-19) ✅ Sim alignment fixes (`_decision_price`, `high_price_seen` reset, 7 smoothing modes ports)

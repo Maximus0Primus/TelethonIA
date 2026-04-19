@@ -1283,25 +1283,19 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
 
 def _dynamic_sell_slip_factor(trade: dict, exit_type: str, base_bps: int = 10,
                               fee_bps: int = SELL_FEE_BPS) -> float:
-    """v138.5: recalibrated against 132 live trades (Apr 13-17 post-v132).
+    """v144: v138.5 baselines + global −100bps overshoot offset.
 
-    Measured medians (paper_exit vs real_exit divergence on rt_live):
-      sl_hit       N=34  median -4.35%  → ~435 bps real slip (was ~30-120 sim)
-      trail_stop   N=52  median -2.48%  → ~250 bps  (was ~15-60 sim)
-      trail_crash  ~outliers in trail_stop, median -10%+ → 1000+ bps
-      tp_hit       N=15  median +7.74%  → POSITIVE slip (Jupiter trigger overshoots
-                                          tp_price, fill HIGHER than target = bonus)
-      timeout      N=31  median -1.22%  → ~100 bps (was ~30)
+    Measured per-pair delta (pnl_live − pnl_paper) on 77 live/paper twins
+    (Apr 13-19, DTRAIL excl.): median +115 bps pump (N=71), -328 non-pump (N=6).
+    Pump/liq/mcap splits all yield the same pooled std (~2920 bps) — no bucket
+    reduces variance meaningfully. Going with a single global offset instead of
+    split until N non-pump ≥ 30 (ETA Apr 25).
 
-    Slip does NOT scale strongly with liquidity in $5K-100K range — flat baseline
-    per exit type, with low-liq amplifier only below $20K.
-
-    base_bps param kept for backward compat but ignored (slip now per exit type).
-    Conservative tp_hit: median was +7.7% but N=15 only → use +300 bps (+3%) until
-    more samples accumulate.
+    Offset −100 bps applied post-type to shift the overall mean toward zero.
+    Non-pump stays slightly under-slipped (N=6 is noisy, wait for more data).
     """
     liq_usd = float(trade.get("rt_liquidity_usd") or 50_000)
-    # Low-liq amplifier (kicks in below $20K)
+
     if liq_usd < 5_000:
         liq_mult = 2.0
     elif liq_usd < 20_000:
@@ -1309,30 +1303,27 @@ def _dynamic_sell_slip_factor(trade: dict, exit_type: str, base_bps: int = 10,
     else:
         liq_mult = 1.0
 
-    # Per-exit-type baseline bps (negative = positive slippage / overshoot)
     if exit_type == "trail_crash":
-        type_bps = 1000        # was 50-200; real outliers show -10% to -29%
+        type_bps = 1000
     elif exit_type == "sl_hit":
-        type_bps = 435         # was 30-120; real median -4.35%
+        type_bps = 435
     elif exit_type == "trail_stop":
-        type_bps = 250         # was 15-60; real median -2.48%
+        type_bps = 250
     elif exit_type == "tp_hit":
-        type_bps = -300        # POSITIVE slip — Jupiter trigger fills above target
+        type_bps = -300
     elif exit_type == "timeout":
-        type_bps = 120         # was 30; real median -1.22%
+        type_bps = 120
     elif exit_type == "be_stop":
-        # v142: breakeven stop — active close at ~entry price. Less dump pressure
-        # than sl_hit (we exit on BE violation, usually in a normal pullback, not
-        # crash). Mid-range between tp_hit and sl_hit.
         type_bps = 200
     elif exit_type == "tp_late":
-        # v142: late-phase take-any-profit. Thinner book than fresh TP.
         type_bps = 80
     else:
         type_bps = 100
 
-    adjusted_bps = int(type_bps * liq_mult) + fee_bps
-    # Caps prevent runaway on edge cases
+    # v144: shift global by −100 bps (live is consistently 100 bps better than paper)
+    GLOBAL_OFFSET_BPS = -100
+
+    adjusted_bps = int(type_bps * liq_mult) + fee_bps + GLOBAL_OFFSET_BPS
     if exit_type == "trail_crash":
         adjusted_bps = max(-1000, min(2500, adjusted_bps))
     else:

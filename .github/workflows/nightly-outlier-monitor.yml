@@ -1,0 +1,57 @@
+name: Nightly Outlier Monitor
+
+# v144 — watches paper↔live per-pair outliers. sync=False outliers are
+# historic (pre-v142E or live-swap failed) and expected; sync=True outliers
+# post-v143.5 indicate a real logic bug and alert Telegram.
+
+on:
+  schedule:
+    - cron: '30 4 * * *'  # 04:30 UTC, 30min after sim-align-gate
+  workflow_dispatch: {}
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install deps
+        run: pip install supabase requests python-dotenv
+
+      - name: Run nightly outlier monitor
+        id: monitor
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          OUTLIER_THRESHOLD_PP: "10"
+        run: python scripts/nightly_outlier_monitor.py
+
+      - name: Alert on sync=True outlier
+        if: failure()
+        env:
+          MONITOR_BOT_TOKEN: ${{ secrets.MONITOR_BOT_TOKEN }}
+          MONITOR_CHAT_ID: ${{ secrets.MONITOR_CHAT_ID }}
+        run: |
+          if [ -n "$MONITOR_BOT_TOKEN" ] && [ -n "$MONITOR_CHAT_ID" ]; then
+            MSG="<b>PAPER-LIVE OUTLIER (sync=True)</b>%0A${{ steps.monitor.outputs.sync_true_count }} outlier(s) |L-P|>10pp on ${{ steps.monitor.outputs.pairs }} pairs%0AFirst: ${{ steps.monitor.outputs.first_symbol }} / ${{ steps.monitor.outputs.first_strategy }} Δ=${{ steps.monitor.outputs.first_delta }}pp%0A%0APost-v143.5 logic bug signal. Investigate."
+            curl -s -X POST "https://api.telegram.org/bot${MONITOR_BOT_TOKEN}/sendMessage" \
+              -d chat_id="${MONITOR_CHAT_ID}" \
+              -d text="${MSG}" \
+              -d parse_mode=HTML \
+              -d disable_web_page_preview=true || true
+          fi
+
+      - name: Upload outliers JSON
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-outliers
+          path: data/nightly_outliers.json
+          retention-days: 14

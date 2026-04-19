@@ -3028,6 +3028,10 @@ def _tick_grid_search(trades: list[dict], ticks_by_token: dict[str, list[dict]],
             ticks = filtered_ticks.get(addr)
             if not ticks:
                 continue
+            # v144: always expose the raw DS stream so dual-stream smoothing modes
+            # work even when primary source=jupiter (no-op for raw smoothing).
+            _raw = ticks_by_token.get(addr) or []
+            _ds_stream = [t for t in _raw if t.get("source") in ("fast", "full", "live")]
 
             entry_price = float(trade["entry_price"])
 
@@ -3076,6 +3080,7 @@ def _tick_grid_search(trades: list[dict], ticks_by_token: dict[str, list[dict]],
                     lazy_fast_sec=cfg["lazy_fast_sec"],
                     lazy_fast_window=cfg["lazy_fast_window"],
                     lazy_slow_sec=cfg["lazy_slow_sec"],
+                    dex_ticks=_ds_stream,
                 )
                 if sim is None:
                     continue
@@ -3295,6 +3300,9 @@ def _synthetic_strategy_sweep(args):
                         ticks = streams_by_token.get(t["token_address"], {}).get(source) or []
                         if not ticks:
                             continue
+                        # v144: ds_stream feeds dual-stream smoothing modes (confirm/
+                        # twin_confirm/hybrid) that require a parallel DexScreener tick stream.
+                        _ds_stream = streams_by_token.get(t["token_address"], {}).get("dexscreener") or []
                         entry_price = float(t["entry_price"])
                         tp_price = entry_price * (1 + spec["tp"] / 100)
                         sl_price = entry_price * (1 - spec["sl"] / 100)
@@ -3318,6 +3326,7 @@ def _synthetic_strategy_sweep(args):
                             lazy_fast_window=poll * 10,
                             lazy_slow_sec=poll,
                             smoothing=mode,
+                            dex_ticks=_ds_stream,
                         )
                         if sim is None:
                             continue
@@ -3998,6 +4007,8 @@ def _tick_based_simulation(args):
                 tks = _filter_ticks_by_source(raw, source)
                 if not tks:
                     continue
+                # v144: ds_stream for dual-stream smoothing (confirm/twin_confirm/hybrid)
+                _ds_stream = [t2 for t2 in raw if t2.get("source") in ("fast", "full", "live")]
                 ep = float(t["entry_price"])
                 fake = {
                     "id": t["id"], "entry_price": ep,
@@ -4013,14 +4024,14 @@ def _tick_based_simulation(args):
                     "dex_spot_price_at_entry": float(t.get("dex_spot_price_at_entry") or 0),
                 }
                 if trigger_mode == "polling":
-                    sim = _replay_with_intervals(fake, tks, fs, fw, ss)
+                    sim = _replay_with_intervals(fake, tks, fs, fw, ss, dex_ticks=_ds_stream)
                 elif trigger_mode == "trigger_trail":
                     sim = _replay_with_trigger(fake, tks)
                 elif trigger_mode == "trigger_sl_only":
                     # Trigger for SL only (no trail PATCH), polling for trail
                     sim = _replay_with_trigger_sl_only(fake, tks, fs, fw, ss)
                 else:
-                    sim = _replay_with_intervals(fake, tks, fs, fw, ss)
+                    sim = _replay_with_intervals(fake, tks, fs, fw, ss, dex_ticks=_ds_stream)
                 if sim:
                     pnl_list.append(sim["pnl_pct"])
                     tr_list.append({"pnl_pct": sim["pnl_pct"], "token_address": addr,

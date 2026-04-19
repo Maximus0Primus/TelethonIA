@@ -645,6 +645,34 @@ LAZY_SLOW_SEC = 600     # 10 min after fast phase
 
 
 # ---------------------------------------------------------------------------
+# v144 — LAZY vs non-LAZY A/B shadows. Top 4 real 7d earners ($275/$270/$242/$217
+# all LAZY) vs identical TP/SL but NOT in LAZY_STRATEGIES. Shadows have
+# position_usd=0 which forces CURRENT interval in _should_poll_trade, giving a
+# clean paired control. Goal: paired N≥50 to confirm LAZY domination isn't an
+# artifact of which strats got assigned LAZY.
+# ---------------------------------------------------------------------------
+STRATEGIES["FAST_TP40_SL30_NOLAZY"] = [
+    {"pct": 1.0, "tp_mult": 1.40, "sl_mult": 0.70, "horizon_min": 30, "label": "main"},
+]
+SHADOW_STRATEGIES.append("FAST_TP40_SL30_NOLAZY")
+
+STRATEGIES["FAST_TP80_SL25_NOLAZY"] = [
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.75, "horizon_min": 30, "label": "main"},
+]
+SHADOW_STRATEGIES.append("FAST_TP80_SL25_NOLAZY")
+
+STRATEGIES["FAST_TP50_SL30_NOLAZY"] = [
+    {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.70, "horizon_min": 30, "label": "main"},
+]
+SHADOW_STRATEGIES.append("FAST_TP50_SL30_NOLAZY")
+
+STRATEGIES["TP50_SL15_NOLAZY"] = [
+    {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.85, "horizon_min": 120, "label": "main"},
+]
+SHADOW_STRATEGIES.append("TP50_SL15_NOLAZY")
+
+
+# ---------------------------------------------------------------------------
 # Sim config → fake trade converter
 # ---------------------------------------------------------------------------
 def sim_cfg_to_fake_trade(cfg: dict, entry_price: float, created_at: str,
