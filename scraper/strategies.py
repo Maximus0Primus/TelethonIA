@@ -860,6 +860,23 @@ SHADOW_STRATEGIES.append("FAST_TP50_SL30_COMBO")
 
 
 # ---------------------------------------------------------------------------
+# v144 — FAST_TP40_SL30 smoothing A/B. Main uses hysteresis smoothing but has
+# no paired _HYST variant for control. Other _HYST paired tests show −2 to −6pp
+# vs base, suggesting FAST_TP40 with hysteresis may leave money on the table.
+# Shadow with median_3 (same as FAST_TP50_SL30 main) to isolate smoothing effect.
+# ---------------------------------------------------------------------------
+STRATEGIES["FAST_TP40_SL30_MED3"] = [
+    {"pct": 1.0, "tp_mult": 1.40, "sl_mult": 0.70, "horizon_min": 30, "label": "main"},
+]
+SHADOW_STRATEGIES.append("FAST_TP40_SL30_MED3")
+
+STRATEGIES["FAST_TP40_SL30_DS"] = [
+    {"pct": 1.0, "tp_mult": 1.40, "sl_mult": 0.70, "horizon_min": 30, "label": "main"},
+]
+SHADOW_STRATEGIES.append("FAST_TP40_SL30_DS")
+
+
+# ---------------------------------------------------------------------------
 # Sim config → fake trade converter
 # ---------------------------------------------------------------------------
 def sim_cfg_to_fake_trade(cfg: dict, entry_price: float, created_at: str,
