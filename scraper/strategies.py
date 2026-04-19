@@ -126,6 +126,8 @@ STRATEGY_FILTERS = {
     # on BE25 retroactive = N=13, WR 62%, avg +34% on rt_score v141).
     "BE25_TP80_SL30_S30": {"min_rt_score": 30},
     "BE25_TP80_SL30_S40": {"min_rt_score": 40},
+    # v144 — SCORE>=40 on FAST_TP80_SL25 retroactive = N=16, WR 68.8%, avg +29.76%
+    "FAST_TP80_SL25_S40": {"min_rt_score": 40},
 }
 
 # --- Grid strategies (v93) ---
@@ -699,6 +701,15 @@ STRATEGIES["BE25_TP80_SL30_S40"] = [
      "be_activation": 0.25, "label": "main"},
 ]
 SHADOW_STRATEGIES.append("BE25_TP80_SL30_S40")
+
+# FAST_TP80_SL25 + SCORE>=40 filter. Retroactive (N=16): WR 68.8%, avg +29.76%,
+# $+232 — strongest score-filtered FAST on rt_score v141. No HYST, no LAZY
+# override (LAZY_STRATEGIES kept empty for this variant so CURRENT polling
+# applies, giving a second paired point alongside FAST_TP80_SL25 main LAZY).
+STRATEGIES["FAST_TP80_SL25_S40"] = [
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.75, "horizon_min": 30, "label": "main"},
+]
+SHADOW_STRATEGIES.append("FAST_TP80_SL25_S40")
 
 
 # ---------------------------------------------------------------------------
