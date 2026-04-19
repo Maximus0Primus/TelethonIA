@@ -4185,6 +4185,21 @@ _MEGA_POLLING_MODES = ["fast", "static_60", "static_120", "static_240", "lazy"]
 _MEGA_FILTERS = ["NONE", "NOZEROLIQ", "SCORE30", "SCORE40", "MCAP_MID",
                  "TOPKOL", "NOZEROLIQ_SCORE30"]
 
+# --- v144 EXTENDED MEGA SWEEP ---
+# Fires via --mega-sweep-extended. Meant to run several hours (half a day).
+# Adds: source=both (merged streams), 4 LAZY cadence variants, volume_gated
+# smoothing, 5 new filters (finer score thresholds + filter combos).
+# NOT YET added (need dual-stream tick-window logic, deferred patch):
+# confirm, twin_confirm, hybrid, vwap_5min, ohlc_burst_60s, jp_sampled_{60,180}s.
+_MEGA_EXT_SOURCES = ["jupiter", "dexscreener", "both"]
+_MEGA_EXT_SMOOTHINGS = ["raw", "ema_fast", "ema_slow", "median_3", "median_5",
+                        "winsor_p95", "dual_confirm", "hysteresis", "volume_gated"]
+_MEGA_EXT_POLLING_MODES = ["fast", "static_30", "static_60", "static_120", "static_240",
+                           "lazy_fast", "lazy_med", "lazy", "lazy_slow", "lazy_xslow"]
+_MEGA_EXT_FILTERS = ["NONE", "NOZEROLIQ", "SCORE30", "SCORE35", "SCORE40",
+                     "SCORE45", "SCORE50", "MCAP_MID", "TOPKOL",
+                     "NOZEROLIQ_SCORE30", "NOZEROLIQ_SCORE40", "MCAP_MID_SCORE40"]
+
 _MEGA_LOOP_SEC = 30
 _MEGA_LAZY_FAST_SEC = 180
 _MEGA_LAZY_FAST_WINDOW = 300
@@ -4214,10 +4229,20 @@ def _mega_poll_offsets(polling_mode, horizon_sec):
                 out.append(t); last = t
             t += LOOP
         return out
-    if polling_mode == "lazy":
+    # v144 ext: per-variant LAZY cadences (fast/window/slow). Original "lazy"
+    # maps to LAZY_STD. Others match the strategies.py reference profiles.
+    LAZY_PROFILES = {
+        "lazy":        (_MEGA_LAZY_FAST_SEC, _MEGA_LAZY_FAST_WINDOW, _MEGA_LAZY_SLOW_SEC),  # 180/300/600
+        "lazy_fast":   (60,  120,  180),
+        "lazy_med":    (120, 300,  360),
+        "lazy_slow":   (300, 600,  900),
+        "lazy_xslow":  (600, 900, 1200),
+    }
+    if polling_mode in LAZY_PROFILES:
+        fast_sec, fast_win, slow_sec = LAZY_PROFILES[polling_mode]
         out, last, t = [], -10**9, LOOP
         while t <= horizon_sec:
-            interval = _MEGA_LAZY_FAST_SEC if t < _MEGA_LAZY_FAST_WINDOW else _MEGA_LAZY_SLOW_SEC
+            interval = fast_sec if t < fast_win else slow_sec
             if (t - last) >= interval:
                 out.append(t); last = t
             t += LOOP
@@ -4226,10 +4251,11 @@ def _mega_poll_offsets(polling_mode, horizon_sec):
 
 
 class _MegaSmState:
-    __slots__ = ("ema", "hist", "prev_p", "armed_sl", "armed_tp")
+    __slots__ = ("ema", "hist", "prev_p", "armed_sl", "armed_tp", "last_vol")
     def __init__(self):
         self.ema = None; self.hist = []; self.prev_p = None
         self.armed_sl = True; self.armed_tp = True
+        self.last_vol = None
 
 
 def _mega_smooth(st, p, mode, sl_price, tp_price):
@@ -4270,6 +4296,16 @@ def _mega_smooth(st, p, mode, sl_price, tp_price):
         if not st.armed_sl and sl_price and p <= sl_price: return sl_price * 1.001
         if not st.armed_tp and tp_price and p >= tp_price: return tp_price * 0.999
         return p
+    if mode == "volume_gated":
+        # Only accept price updates when volume is present; else return previous.
+        # Volume is not passed to _mega_smooth in current architecture, so we fall
+        # back to dual_confirm semantics (require prior tick confirmation). Proper
+        # volume_gated needs tick-object access — TODO in a follow-up patch.
+        if st.prev_p is None: st.prev_p = p; return p
+        prev = st.prev_p; st.prev_p = p
+        if sl_price and p <= sl_price and prev > sl_price: return prev
+        if tp_price and p >= tp_price and prev < tp_price: return prev
+        return p
     return p
 
 
@@ -4287,11 +4323,18 @@ def _mega_apply_filter(u, fname):
     if fname == "NONE": return True
     if fname == "NOZEROLIQ": return (u.get("rt_liquidity_usd") or 0) > 0
     if fname == "SCORE30": return (u.get("rt_score") or 0) >= 30
+    if fname == "SCORE35": return (u.get("rt_score") or 0) >= 35
     if fname == "SCORE40": return (u.get("rt_score") or 0) >= 40
+    if fname == "SCORE45": return (u.get("rt_score") or 0) >= 45
+    if fname == "SCORE50": return (u.get("rt_score") or 0) >= 50
     if fname == "MCAP_MID": return 30_000 <= (u.get("entry_mcap") or 0) <= 500_000
     if fname == "TOPKOL": return (u.get("kol_group") or "") in _MEGA_TOP_KOLS
     if fname == "NOZEROLIQ_SCORE30":
         return (u.get("rt_liquidity_usd") or 0) > 0 and (u.get("rt_score") or 0) >= 30
+    if fname == "NOZEROLIQ_SCORE40":
+        return (u.get("rt_liquidity_usd") or 0) > 0 and (u.get("rt_score") or 0) >= 40
+    if fname == "MCAP_MID_SCORE40":
+        return 30_000 <= (u.get("entry_mcap") or 0) <= 500_000 and (u.get("rt_score") or 0) >= 40
     return True
 
 
@@ -4336,6 +4379,11 @@ def _mega_replay_one(tp_mult, sl_mult, horizon_min, be_act,
         ds = _mega_latest_at_or_before(ds_sorted, poll_iso)
         if source == "jupiter":
             base = jp; exec_p = jp
+        elif source == "both":
+            # Merge: prefer Jupiter for decision (RFQ accuracy) but use it for
+            # execution too. DS is fallback when Jupiter not yet available.
+            base = jp if jp is not None else ds
+            exec_p = jp if jp is not None else ds
         else:
             base = ds; exec_p = jp if jp is not None else ds
         if base is None or exec_p is None: continue
@@ -4400,17 +4448,39 @@ def _mega_process_config(args):
 
 
 def _mega_sweep_run(args):
-    """v140: full mega sweep entry point. Multiprocessing grid sweep."""
+    """v140: full mega sweep entry point. Multiprocessing grid sweep.
+
+    v144: --mega-sweep-extended swaps dimension lists for the full matrix
+    (9 polling modes × 12 filters × 3 sources × 9 smoothings = 2916 configs
+    per strategy, ~800K total). Runtime several hours. More ticks = slower.
+    """
     import multiprocessing as mp
     import json as _json
     import time as _time
     import pandas as pd
     import re as _re
 
+    extended = getattr(args, "mega_sweep_extended", False)
+    default_csv = "_mega_sweep_extended.csv" if extended else "_mega_sweep_full.csv"
     csv_out = args.mega_csv_out or os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), "_mega_sweep_full.csv")
+        os.path.dirname(os.path.abspath(__file__)), default_csv)
     n_workers = args.mega_workers or min(12, mp.cpu_count() - 2)
     since = args.mega_since
+
+    # Select dimension lists based on mode
+    if extended:
+        sources = _MEGA_EXT_SOURCES
+        smoothings = _MEGA_EXT_SMOOTHINGS
+        polling_modes = _MEGA_EXT_POLLING_MODES
+        filters = _MEGA_EXT_FILTERS
+        print(f"\n*** EXTENDED MEGA SWEEP — FULL MATRIX ***")
+    else:
+        sources = _MEGA_SOURCES
+        smoothings = _MEGA_SMOOTHINGS
+        polling_modes = _MEGA_POLLING_MODES
+        filters = _MEGA_FILTERS
+    print(f"  sources={len(sources)} smoothings={len(smoothings)} polling={len(polling_modes)} filters={len(filters)}")
+    print(f"  per-strat configs: {len(sources)*len(smoothings)*len(polling_modes)*len(filters)}")
 
     print(f"\n{'#'*90}\n# v140 MEGA SWEEP {datetime.now().isoformat()[:19]}\n{'#'*90}\n")
     t0 = _time.time()
@@ -4473,10 +4543,10 @@ def _mega_sweep_run(args):
 
     jobs = []
     for strat_name, (tp, sl, h, be) in full_pool.items():
-        for fname in _MEGA_FILTERS:
-            for src in _MEGA_SOURCES:
-                for smooth in _MEGA_SMOOTHINGS:
-                    for poll in _MEGA_POLLING_MODES:
+        for fname in filters:
+            for src in sources:
+                for smooth in smoothings:
+                    for poll in polling_modes:
                         jobs.append((strat_name, tp, sl, h, be, fname, src, smooth, poll, universe))
     total = len(jobs)
     print(f"\nTotal configs: {total}")
@@ -4621,6 +4691,12 @@ def main():
     parser.add_argument("--mega-sweep", action="store_true",
                         help="v140: Full mega sweep — all STRATEGIES + new TP200 variants × 7 filters × "
                              "2 sources × 8 smoothings × 5 polling modes. Multiprocessing. ~30-45min.")
+    parser.add_argument("--mega-sweep-extended", action="store_true",
+                        help="v144: EXTENDED mega sweep — 12 filters × 3 sources × 9 smoothings × "
+                             "10 polling modes (adds source=both, 4 LAZY cadence variants, 5 finer "
+                             "filters, volume_gated smoothing). ~5× the configs vs --mega-sweep. "
+                             "Runtime several hours (meant to run afternoon/overnight). Output: "
+                             "_mega_sweep_extended.csv.")
     parser.add_argument("--mega-workers", type=int, default=0,
                         help="Workers for --mega-sweep (default: min(12, cpu_count-2))")
     parser.add_argument("--mega-csv-out", type=str, default=None,
@@ -4878,7 +4954,7 @@ def main():
     # MEGA SWEEP (v140): full strategies × filters × sources × smoothings × polling
     # multiprocessing grid sweep. Uses _evaluate_trade_exit (v138.5 slip).
     # =====================================================================
-    if getattr(args, "mega_sweep", False):
+    if getattr(args, "mega_sweep", False) or getattr(args, "mega_sweep_extended", False):
         _mega_sweep_run(args)
         return
 
