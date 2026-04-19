@@ -122,6 +122,10 @@ STRATEGY_FILTERS = {
     "BE15_TP70_SL50_NZ": {"min_liquidity_usd": 1.0},
     "BE25_TP80_SL30_NZS30_HYST": {"min_liquidity_usd": 1.0, "min_rt_score": 30},
     "BE15_TP300_SL50_MCAP": {"min_mcap": 30_000, "max_mcap": 500_000},
+    # v144 — isolate SCORE filter alpha from HYST noise (S5 audit: SCORE>=40
+    # on BE25 retroactive = N=13, WR 62%, avg +34% on rt_score v141).
+    "BE25_TP80_SL30_S30": {"min_rt_score": 30},
+    "BE25_TP80_SL30_S40": {"min_rt_score": 40},
 }
 
 # --- Grid strategies (v93) ---
@@ -670,6 +674,31 @@ STRATEGIES["TP50_SL15_NOLAZY"] = [
     {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.85, "horizon_min": 120, "label": "main"},
 ]
 SHADOW_STRATEGIES.append("TP50_SL15_NOLAZY")
+
+
+# ---------------------------------------------------------------------------
+# v144 — SCORE filter isolation shadows.
+# BE25_TP80_SL30_S30_HYST (N=12) showed WR 58%, avg +25.84% — but HYST bagage
+# confounds. Retroactive audit on BE25 base (N=69):
+#   SCORE>=30: N=33 WR 39% avg +16.20%
+#   SCORE>=35: N=22 WR 50% avg +27.68%
+#   SCORE>=40: N=13 WR 62% avg +33.92%
+#   SCORE>=45: N=11 WR 64% avg +38.52%
+# Threshold >=40 concentrates alpha (the 30-40 band loses −5.86% pop-wide).
+# These shadows isolate the filter from HYST noise — same TP/SL/horizon as
+# BE25_TP80_SL30 base, only difference is the min_rt_score filter.
+# ---------------------------------------------------------------------------
+STRATEGIES["BE25_TP80_SL30_S30"] = [
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.25, "label": "main"},
+]
+SHADOW_STRATEGIES.append("BE25_TP80_SL30_S30")
+
+STRATEGIES["BE25_TP80_SL30_S40"] = [
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.25, "label": "main"},
+]
+SHADOW_STRATEGIES.append("BE25_TP80_SL30_S40")
 
 
 # ---------------------------------------------------------------------------

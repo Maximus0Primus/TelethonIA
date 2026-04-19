@@ -70,8 +70,32 @@ TD2_BE5_TP120_SL44_T25, PTRAIL_V2_T10-18-30-45_SL30_T60, BOND_FAST_TP50_SL20_T20
 - **3 mains v142** (FAST_TP70, BE15_TP200_4H, MCAP_MID_DTRAIL5) — N≥15 ~ Apr 20-21
 - **9 shadows v142** — N≥20 ~ Apr 21-22
 - **HYST verdict** (paired N≥30) — Apr 22-23
+- **v144 LAZY A/B verdict** — 4 shadows `*_NOLAZY` (FAST_TP40/TP80/TP50/TP50_SL15) vs leurs mains LAZY. Run `scripts/compare_lazy_vs_nolazy.py`. N≥50 paires ETA Apr 22-23. Seul test clean possible (paired mêmes tokens, mêmes prix de fill, delta = polling seul).
+- **v144 SCORE filter isolation** — shadows `BE25_TP80_SL30_S30` + `BE25_TP80_SL30_S40` (raw smoothing, pas de HYST). S5 audit retroactive : SCORE≥40 = N=13, WR 62%, avg +34%. Confirme que SCORE≥40 > SCORE≥30 (bande 30-40 perd −5.86% pop-wide). Si S40 > S40_HYST sur N≥30, promouvoir en main. ETA Apr 28-30.
 - **v144 slip offset validation** — 48h, re-run `scripts/diverge_report.py`, L−S median doit rester ≤ 2pp sur strats actives — Apr 21
 - **Non-pump N≥30 pour décider split pump vs global offset** — ETA Apr 25
+
+### 🟠 Décision live scale-up — **Plan 2 étapes**
+
+**BE15_TP100_SL50 : à dégager complètement (live + paper).**
+- Origine : A/B entre 2 profils BE — BE25 (active +25%, TP +80%, SL −30%) vs BE15 (active +15%, TP +100%, SL −50%)
+- Verdict triple-confirmé :
+  - Paper 7d : BE25 +$183/N=69/avg +5.31% vs BE15 +$52/N=119/avg +2.65% → BE25 gagne 3.5×
+  - Sim mega sweep (400 configs chacun) : BE25 median avg +9.03% / WR 41.7% / $50/jour vs BE15 +6.01% / 27.1% / $32/jour
+  - Live en cours : BE15 sous-performe (bankroll $904 vs seed $1000)
+- **L'A/B est terminé, BE15 perd sur tous les angles.**
+
+**Étape 1 — Apr 20-21** (action concrète à faire) :
+1. `rt_trade_config.live_trading.allocations` → `{BE25_TP80_SL30: 0.5, FAST_TP50_SL30: 0.5}` (remplace BE15)
+2. `rt_trade_config.hybrid_strategy.allocations` → retirer `BE15_TP100_SL50` de la liste (18 → 17 strats actives en paper)
+3. Code : `BE15_TP100_SL50` reste dans `STRATEGIES` dict pour permettre aux trades ouverts de clôturer proprement, mais disparaît des auto-opens
+4. Bankroll BE15 ($904) réallouable
+5. VPS pick up config au prochain cycle, pas de restart
+
+FAST_TP50_SL30 justifié : N=126 paper (max data), avg +3.87%, WR 41%, SL 30% raisonnable real money, LAZY déjà configuré.
+
+**Étape 2 — après 3-5 jours + N≥30 live FAST_TP50** :
+Si FAST matche ses stats paper, remplacer BE25 par une 2e FAST avec TP **différent** (FAST_TP80_SL25 ou FAST_TP100_SL20) pour décorréler par profil d'exit. Sinon garder BE25 comme hedge. Pas 2×FAST similaires = concentration de risque.
 
 ### 🔴 Open bugs (need data)
 - **S5 filters audit (v144)** : NOZEROLIQ retro sur BE25 = +$217 vs base $+187 → **NZ aide**. SCORE30 capte bien >=40 (mean +11%) mais inclut 30-40 (mean -5.86%) → **SCORE40 > SCORE30** recommandé. HYST reste le vrai tueur. TP200 N=9-11 trop faible pour conclure.
