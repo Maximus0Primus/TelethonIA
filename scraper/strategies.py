@@ -642,16 +642,12 @@ LAZY_STRATEGIES: set[str] = {
     "FAST_TP80_SL25_HYST",
     "BE25_TP80_SL30_HYST",
     "FAST_TP50_SL30_HYST",
-    # legacy
-    "DTRAIL3_ACT5_SL60",
-    "DTRAIL5_ACT10_SL60",
-    "DIP30_B5_T5_A20_SL70_240m",
-
-    # v142 (auto-aligned to mega sweep optimal):
-    "FAST_TP70_SL50",
-    "PTRAIL_V2_T10-18-30-45_SL30_T60",
-    "SCORE40_FAST_TP50_SL30_30M",
-    "FAST_TP500_SL40_60M",
+    # v144: removed 7 entries that weren't in hybrid mains. LAZY flag has NO
+    # effect on shadow trades (position_usd=0 → _should_evaluate_exit bypasses
+    # LAZY). Previously listed but inactive: DTRAIL3_ACT5_SL60,
+    # DTRAIL5_ACT10_SL60, DIP30_B5_T5_A20_SL70_240m, FAST_TP70_SL50,
+    # PTRAIL_V2_T10-18-30-45_SL30_T60, SCORE40_FAST_TP50_SL30_30M,
+    # FAST_TP500_SL40_60M. Re-add if any of these are promoted to hybrid.
 }
 LAZY_FAST_SEC = 180     # 3 min during fast phase
 LAZY_FAST_WINDOW = 300  # 5 min fast phase
