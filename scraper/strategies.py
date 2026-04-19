@@ -833,6 +833,37 @@ SHADOW_STRATEGIES.append("FAST_TP50_SL30_MCAP_S40")
 
 
 # ---------------------------------------------------------------------------
+# v144 — Top sim combo shadows. Uses the new split source+smoothing fields
+# (requires paper_trader._decision_price v144 refactor). Each shadow replicates
+# the exact top config found by the extended mega sweep for validation.
+# ---------------------------------------------------------------------------
+# Sim #1: FAST_TP100_SL20 + both + median_3 + lazy_slow → \$149/day
+STRATEGIES["FAST_TP100_SL20_COMBO"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.80, "horizon_min": 30, "label": "main"},
+]
+SHADOW_STRATEGIES.append("FAST_TP100_SL20_COMBO")
+
+# Sim #2: BE25_TP80_SL30 + both + median_3 + lazy_slow → \$141/day
+STRATEGIES["BE25_TP80_SL30_COMBO"] = [
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.25, "label": "main"},
+]
+SHADOW_STRATEGIES.append("BE25_TP80_SL30_COMBO")
+
+# Sim #3: FAST_TP80_SL25 + ds + winsor_p95 + lazy → \$138/day
+STRATEGIES["FAST_TP80_SL25_COMBO"] = [
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.75, "horizon_min": 30, "label": "main"},
+]
+SHADOW_STRATEGIES.append("FAST_TP80_SL25_COMBO")
+
+# Sim #4: FAST_TP50_SL30 + ds + winsor_p95 + lazy_slow → \$127/day
+STRATEGIES["FAST_TP50_SL30_COMBO"] = [
+    {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.70, "horizon_min": 30, "label": "main"},
+]
+SHADOW_STRATEGIES.append("FAST_TP50_SL30_COMBO")
+
+
+# ---------------------------------------------------------------------------
 # Sim config → fake trade converter
 # ---------------------------------------------------------------------------
 def sim_cfg_to_fake_trade(cfg: dict, entry_price: float, created_at: str,

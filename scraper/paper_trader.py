@@ -267,38 +267,100 @@ def _log_cache_snapshot(client) -> None:
         logger.debug("cache_snapshot insert failed: %s", e)
 
 
+_SMOOTHING_VALUES = {
+    "raw", "ema", "ema_fast", "ema_slow", "median_3", "median_5",
+    "winsor_p95", "dual_confirm", "hysteresis",
+    "jp_sampled_60s", "jp_sampled_180s", "ohlc_burst_60s",
+    "vwap_5min", "twin_confirm",
+}
+_SOURCE_ONLY_VALUES = {"jupiter", "ds", "both", "hybrid", "confirm"}
+
+
+def _parse_legacy_price_source(s: str) -> tuple[str, str]:
+    """v144: map legacy compound price_source to (source, smoothing) pair.
+
+    Legacy values mix source+smoothing in one field. Pure smoothings assume
+    jupiter as base source; pure sources assume raw smoothing.
+    """
+    if s in _SOURCE_ONLY_VALUES:
+        return s, "raw"
+    if s in _SMOOTHING_VALUES:
+        return "jupiter", s
+    return s, "raw"  # unknown → treat as source, raw smoothing
+
+
 def _decision_price(addr: str, strategy: str, trade_id: int, orch: dict,
                     trade: dict | None = None) -> tuple[float | None, float | None]:
-    """Return (decision_price, exit_price_ref) based on strategy's price_source.
+    """Return (decision_price, exit_price_ref) based on strategy's orch.
     exit_price_ref is always Jupiter (or fallback current) since live exec = Jupiter.
 
-    v134: Added smoothing modes ported from sim.py._smooth_decision:
-      median_3/5, winsor_p95, dual_confirm, ema_fast (w=2), ema_slow (w=8),
-      hysteresis. volume_gated NOT ported (prod cache lacks per-tick volume).
-    These modes all consume the Jupiter stream as input and return a smoothed
-    decision price; exit_ref stays Jupiter (matches live Ultra fill).
+    v144: source + smoothing split. orch may set either:
+      - source: jupiter|ds|both|hybrid|confirm  +  smoothing: raw|median_N|ema|winsor_p95|...
+      - legacy price_source: compound value auto-parsed into (source, smoothing)
+
+    v134: Smoothing modes ported from sim.py._smooth_decision. All consume the
+    resolved *base* stream (from source) as input. volume_gated NOT ported
+    (prod cache lacks per-tick volume).
     """
     jp = _jupiter_prices_cache.get(addr)
     ds = _dex_prices_cache.get(addr)
-    src = orch.get("price_source", "jupiter")
 
+    # v144: parse config — support both split (source+smoothing) and legacy
+    # compound (price_source). Split takes precedence when present.
+    source = orch.get("source")
+    smoothing = orch.get("smoothing", "raw")
+    if not source:
+        source, smoothing = _parse_legacy_price_source(
+            orch.get("price_source", "jupiter"))
+
+    # Resolve base price from source. exit_ref always prefers jupiter.
+    if source == "jupiter":
+        base, exit_ref = jp, jp
+    elif source == "ds":
+        base, exit_ref = ds, (jp if jp else ds)
+    elif source == "both":
+        base = jp if jp else ds
+        exit_ref = base
+    elif source == "hybrid":
+        base = ds if ds else jp
+        exit_ref = jp if jp else ds
+    elif source == "confirm":
+        if jp and ds:
+            base = (jp + ds) / 2
+        else:
+            base = jp or ds
+        exit_ref = jp or ds
+    else:
+        # Unknown source: default to jupiter
+        base, exit_ref = jp, jp
+
+    # Fast-path: no smoothing → return base directly
+    if smoothing == "raw":
+        return base, exit_ref
+
+    # Legacy: when source field absent and smoothing is a compound mode,
+    # the old function signature expected `src = <smoothing>` with jupiter
+    # base. Now base is already jupiter (via _parse_legacy), so smoothing
+    # logic below consumes `base` (replacing the old `jp` references).
+    src = smoothing  # keep old variable name for minimal diff below
+    # Normalize for the remainder of the function: the old branches reference
+    # `jp` as the stream to smooth. For source=jupiter, base IS jp. For other
+    # sources (ds/both/hybrid), base is the proper stream. We substitute:
+    jp = base  # rebind for smoothing branches
+    # Back-compat routing for legacy string values below.
     if src == "jupiter":
-        return jp, jp
+        return base, exit_ref
     if src == "ds":
-        return ds, (jp if jp else ds)
+        return (ds if ds is not None else base), exit_ref
     if src == "hybrid":
-        # decision on DS, exit at Jupiter
-        return (ds if ds else jp), (jp if jp else ds)
+        return ((ds if ds else jp)), exit_ref
     if src == "both":
-        # v144: merge jp+ds — prefer Jupiter for decision AND exit, fall back to
-        # DS when Jupiter cache is empty. Matches sim mega_sweep source="both"
-        # behavior. Tested by *_BOTH shadow variants.
         p = jp if jp else ds
-        return p, p
+        return p, exit_ref
     if src == "confirm":
         if jp and ds:
-            return ((jp + ds) / 2), jp
-        return (jp or ds), (jp or ds)
+            return ((jp + ds) / 2), exit_ref
+        return (jp or ds), exit_ref
     if src == "ema":
         if not jp:
             return None, (jp or ds)
