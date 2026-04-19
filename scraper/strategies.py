@@ -733,6 +733,32 @@ SHADOW_STRATEGIES.append("FAST_TP100_SL20_S40")
 
 
 # ---------------------------------------------------------------------------
+# v144 — LAZYSLOW variants. Extended mega sweep v142 flagged lazy_slow
+# (300/600/900s) as dominant on several strats BUT sim over-estimates trail/BE
+# strategies by ~45x (TD2 sim \$154/day vs real \$3.40/day) so this needs
+# shadow validation. These shadows use polling_sec=600 via strategy_overrides
+# (approx lazy_slow) instead of LAZY_STRATEGIES membership (which shadows
+# bypass anyway). Not a true LAZY profile (no fast-burst window) but closest
+# approximation without refactoring _should_evaluate_exit.
+# ---------------------------------------------------------------------------
+STRATEGIES["FAST_TP50_SL30_LAZYSLOW"] = [
+    {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.70, "horizon_min": 30, "label": "main"},
+]
+SHADOW_STRATEGIES.append("FAST_TP50_SL30_LAZYSLOW")
+
+STRATEGIES["FAST_TP80_SL25_LAZYSLOW"] = [
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.75, "horizon_min": 30, "label": "main"},
+]
+SHADOW_STRATEGIES.append("FAST_TP80_SL25_LAZYSLOW")
+
+STRATEGIES["BE25_TP80_SL30_LAZYSLOW"] = [
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.25, "label": "main"},
+]
+SHADOW_STRATEGIES.append("BE25_TP80_SL30_LAZYSLOW")
+
+
+# ---------------------------------------------------------------------------
 # Sim config → fake trade converter
 # ---------------------------------------------------------------------------
 def sim_cfg_to_fake_trade(cfg: dict, entry_price: float, created_at: str,
