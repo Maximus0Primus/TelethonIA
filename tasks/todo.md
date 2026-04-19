@@ -88,14 +88,12 @@ Supabase PostgREST cap 1000 rows même avec `.limit(10000)`. Toujours paginer vi
 ### Scripts utilitaires (`scripts/`)
 - `recap_daily.py` — top earners + $/jour paper & live
 - `refresh_main_stats.py` — ranking actuel par $ 7d
-- `compare_lazy_vs_nolazy.py` — paired LAZY A/B verdict
+- `compare_lazy_vs_nolazy.py` — paired LAZY A/B verdict (à run Apr 22-23)
 - `diverge_report.py` — tableau unifié sim/paper/live
-- `calibrate_slip.py`, `slip_split_test.py` — slip model tuning
+- `calibrate_slip.py` — slip model calibration per-pair delta
 - `ranking_compare.py` — Spearman sim↔paper↔live
 - `outlier_diag.py`, `nightly_outlier_monitor.py` — outlier root-cause
-- `audit_lazy_paired.py` — paired audit LAZY strats existantes
 - `analyze_s5_filters.py` — NZ/SCORE/MCAP filter analysis
-- `bench_poll_modes.py` — polling mode benchmark sim
 - `verify_sim_live_alignment.py` — CI sim vs live audit
 
 ---
