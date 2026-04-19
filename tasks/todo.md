@@ -2,110 +2,62 @@
 
 ## Current state
 
-**Live (50/50)** — `BE25_TP80_SL30` (median_5/240s) + `BE15_TP100_SL50` (ds/30s). Position ~$1.70/trade, max 3 open. Configs live identiques au paper post-revert (A/B base préservé).
+**Live (50/50)** — `BE25_TP80_SL30` + `FAST_TP50_SL30`. Position 0.02 SOL (~$3.40)/trade. **max_open_positions: 6** (bumped from 3 pour plus de data). Exposition max 0.12 SOL ≈ $20. Daily loss limit 0.5 SOL (~$85).
 
-**Paper Telegram — 21 strats active × $1000 bankroll ($21K seed post-v142) + 9 shadows v142**. Orchestration per-strat via `rt_trade_config.strategy_overrides` + `LAZY_STRATEGIES`.
+**Paper (hybrid) — 16 mains actives** + **12 shadows** (9 v142 + 3 v144 SCORE filter + 4 v144 NOLAZY + 3 v144 SCORE40 FAST).
 
-### 21 Mains actives — stats 7d (27,223 trades total)
+### 16 Mains actives — stats 7d
 
-| Strat | Orch | N 7d | WR | avg% | **$ 7d** | bankroll |
-|---|---|---|---|---|---|---|
-| **FAST_TP80_SL25** ⭐ | ds/30s + LAZY | 54 | 37% | +5.83% | **+$157** | $1029 |
-| **FAST_TP40_SL30** ⭐ | hysteresis/30s + LAZY | 11 | 27% | +27.52% | **+$151** | $1158 |
-| **BE25_TP80_SL30** | median_5/240s | 77 | 32% | +2.10% | **+$87** | $979 |
-| **FAST_TP100_SL20** | ds/30s + LAZY | 65 | 31% | +1.61% | **+$52** | $1024 |
-| **FAST_TP50_SL30** | median_3/30s + LAZY | 123 | 41% | +1.85% | **+$47** | $1100 |
-| **TP50_SL15** | jupiter/30s | 11 | 45% | +4.74% | **+$26** | $1027 |
-| BE25_TP80_SL30_DS | ds/30s + LAZY | — | — | — | — | $1031 |
-| BE15_TP70_SL50_NZ (NOZEROLIQ) | jupiter/240s | — | — | — | — | $975 |
-| BE15_TP300_SL50_MCAP (MCAP_MID) | ds/30s | — | — | — | — | $970 |
-| BE15_TP100_SL50 | ds/30s | — | — | — | — | $904 |
-| FAST_TP100_SL20_HYST | hysteresis/30s + LAZY | 8 | 12% | −18.25% | **−$73** | $927 |
-| FAST_TP80_SL25_HYST | hysteresis/30s + LAZY | 8 | 12% | −19.67% | **−$79** | $921 |
-| FAST_TP50_SL30_HYST | hysteresis/30s + LAZY | 8 | 25% | −15.81% | **−$63** | $936 |
-| BE25_TP80_SL30_HYST | hysteresis/30s + LAZY | 8 | 12% | −17.66% | **−$71** | $929 |
-| BE25_TP80_SL30_S30_HYST (SCORE30) | hysteresis/240s | — | — | — | — | $989 |
-| BE25_TP80_SL30_NZS30_HYST (NZ+S30) | hysteresis/240s | — | — | — | — | $987 |
-| HIGHSCORE_TP200_SL40 (SCORE30) | jupiter/120s | — | — | — | — | $956 |
-| NOZEROLIQ_TP200_SL40 (liq>0) | jupiter/120s | — | — | — | — | $906 |
-| FAST_TP70_SL50 🆕 (Apr 18) | winsor_p95/30s + LAZY | 0 | — | — | — | $1000 |
-| BE15_TP200_SL40_4H 🆕 | hysteresis/60s | 0 | — | — | — | $1000 |
-| MCAP_MID_DTRAIL5_ACT25_SL50_2H 🆕 | median_5/120s | 0 | — | — | — | $1000 |
+| Strat | N 7d | WR | avg% | **$ 7d** | **$/jour** |
+|---|---|---|---|---|---|
+| **FAST_TP40_SL30** ⭐ | 126 | 41.3% | +3.73% | **+$276** | **+$39** |
+| **FAST_TP80_SL25** ⭐ | 78 | 37.2% | +6.28% | **+$270** | **+$39** |
+| **FAST_TP50_SL30** ⭐ (live) | 126 | 41.3% | +3.87% | **+$242** | **+$35** |
+| **TP50_SL15** | 126 | 35.7% | +6.72% | **+$217** | **+$31** |
+| **FAST_TP100_SL20** | 78 | 34.6% | +4.72% | **+$184** | **+$26** |
+| **BE25_TP80_SL30** (live) | 69 | 33.3% | +5.31% | **+$183** | **+$26** |
+| **BE25_TP80_SL30_S30_HYST** | 12 | 58.3% | +25.84% | **+$155** | **+$22** 🎯 |
+| FAST_TP50_SL30_HYST | 21 | 42.9% | +7.40% | +$78 | +$11 |
+| FAST_TP100_SL20_HYST | 21 | 33.3% | +6.53% | +$69 | +$10 |
+| BE25_TP80_SL30_HYST | 21 | 38.1% | +5.14% | +$54 | +$8 |
+| FAST_TP80_SL25_HYST | 21 | 38.1% | +4.46% | +$47 | +$7 |
+| BE25_TP80_SL30_DS | 37 | 37.8% | +2.02% | +$37 | +$5 |
+| BE15_TP70_SL50_NZ | 9 | 33.3% | +6.81% | +$31 | +$4 |
+| BE25_TP80_SL30_NZS30_HYST | 7 | 28.6% | +7.13% | +$25 | +$4 |
+| HIGHSCORE_TP200_SL40 | 11 | 27.3% | +2.27% | +$12 | +$2 |
+| NOZEROLIQ_TP200_SL40 | 9 | 11.1% | −27.34% | **−$123** | **−$18** 🔴 |
 
-**Totaux 7d** :
-- **6 bases non-HYST** : N=341, **+$520 / 7j** = **+$74/jour** ✅
-- **4 HYST variants** : N=32, **−$286 / 7j** = **−$41/jour** (N=8 chacun, activées Apr 17)
-- **Net book** : ~+$234 / 7j sur bases + HYST combinés
+**TOTAL paper 7d : +$1756 / 7j = +$251/jour** (positions $50/trade)
 
-**Global rt_bankroll** : $17,750 current / $18,722 peak.
+### Live 7d (N=48 FAST + N=25 BE25)
+BE25 avg +12.3% / WR 44% / +$5.28 → **+$0.75/jour**
+FAST_TP50 avg +5.21% / WR 45.8% / +$4.31 → **+$0.62/jour**
+**Total projeté post-swap : +$1.37/jour** (avant bump max_open_positions). Avec 6 positions vs 3, potentiel ~2× si opportunités de même qualité.
 
-### Paired A/B comparison HYST vs base (même token/date, 7d)
-
-| Paire | N | mean Δ (HYST−base) | median Δ |
-|---|---|---|---|
-| FAST_TP100_SL20 | 8 | −0.47% | −0.64% |
-| **FAST_TP80_SL25** | 8 | **−6.61%** | −2.75% |
-| FAST_TP50_SL30 | 8 | −1.28% | −0.45% |
-| BE25_TP80_SL30 | 8 | −2.07% | −1.11% |
-
-**4/4 paires : HYST perd**. Direction consistante, mais N=8/pair. Need N≥30 pour verdict définitif (ETA Apr 22-23).
-
-### Live vs Paper same-strat (depuis 2026-04-17 13:50, excl. pump.fun outliers)
-
-| Strat | Matched | Avg diff | Median | Max | within_10pp | Same status | Entry div | Exit div |
-|---|---|---|---|---|---|---|---|---|
-| **BE25_TP80_SL30** | 15 | +2.90pp | +1.54pp | 23pp | **12/15 (80%)** | **100%** | 2.9% | +1.8% |
-| **BE15_TP100_SL50** | 12 | +16.17pp | −1.16pp | 215pp | 6/12 (50%) | 10/12 | 2.6% | **−10.4%** |
-
-BE25 bien aligné, BE15 a 1-2 outliers qui écrasent la moyenne.
-
-### 9 Shadows v142 (bankroll $0)
-TD2_BE5_TP120_SL44_T25, PTRAIL_V2_T10-18-30-45_SL30_T60, BOND_FAST_TP50_SL20_T20, SCORE40_FAST_TP50_SL30_30M, FAST_TP200_SL40_60M, DIP30_B10_T10_A20_SL60_120m, BE15_TP150_SL40_2H, FAST_TP500_SL40_60M.
+Note : live avg% > paper avg% (ex. BE25 live +12.3% vs paper +5.31%) — probablement effet v142E/v143.5 shadow-sync (live réutilise fill Jupiter réel).
 
 ---
 
 ## 📋 Reste à faire
 
-### ⏳ Data wait
-- **3 mains v142** (FAST_TP70, BE15_TP200_4H, MCAP_MID_DTRAIL5) — N≥15 ~ Apr 20-21
-- **9 shadows v142** — N≥20 ~ Apr 21-22
-- **HYST verdict** (paired N≥30) — Apr 22-23
-- **v144 LAZY A/B verdict** — 4 shadows `*_NOLAZY` (FAST_TP40/TP80/TP50/TP50_SL15) vs leurs mains LAZY. Run `scripts/compare_lazy_vs_nolazy.py`. N≥50 paires ETA Apr 22-23. Seul test clean possible (paired mêmes tokens, mêmes prix de fill, delta = polling seul).
-- **v144 SCORE filter isolation** — shadows `BE25_TP80_SL30_S30` + `BE25_TP80_SL30_S40` (raw smoothing, pas de HYST). S5 audit retroactive : SCORE≥40 = N=13, WR 62%, avg +34%. Confirme que SCORE≥40 > SCORE≥30 (bande 30-40 perd −5.86% pop-wide). Si S40 > S40_HYST sur N≥30, promouvoir en main. ETA Apr 28-30.
-- **v144 slip offset validation** — 48h, re-run `scripts/diverge_report.py`, L−S median doit rester ≤ 2pp sur strats actives — Apr 21
-- **Non-pump N≥30 pour décider split pump vs global offset** — ETA Apr 25
+### ⏳ Data wait (rien à faire, laisser tourner)
+- **v144 LAZY A/B verdict** (Apr 22-23) — shadows `*_NOLAZY` × 4 vs mains LAZY. Run `scripts/compare_lazy_vs_nolazy.py` à N≥50.
+- **v144 SCORE40 family verdict** (Apr 28-30) — 5 shadows (BE25_S30/S40, FAST_TP50/TP80/TP100 _S40). Run `scripts/refresh_main_stats.py` à N≥30. Promouvoir le meilleur en main si stats confirmées.
+- **HYST paired verdict** (Apr 22-23) — N≥30 pour confirmer le −2 à −6pp penalty.
+- **3 mains v142** (FAST_TP70, BE15_TP200_4H, MCAP_MID_DTRAIL5) — N≥15 ~ Apr 20-21.
+- **9 shadows v142** (TD2, PTRAIL_V2, BOND_FAST, etc.) — N≥20 ~ Apr 21-22.
+- **Slip offset validation v144** — Apr 21, re-run `scripts/diverge_report.py` pour vérifier L−S median ≤ 2pp persiste.
+- **Non-pump N≥30 pour split slip final** — ETA Apr 25.
 
-### 🟠 Décision live scale-up — **Plan 2 étapes**
+### 🟠 Scale-up live — Étape 2 (après Étape 1 validée)
 
-**BE15_TP100_SL50 : à dégager complètement (live + paper).**
-- Origine : A/B entre 2 profils BE — BE25 (active +25%, TP +80%, SL −30%) vs BE15 (active +15%, TP +100%, SL −50%)
-- Verdict triple-confirmé :
-  - Paper 7d : BE25 +$183/N=69/avg +5.31% vs BE15 +$52/N=119/avg +2.65% → BE25 gagne 3.5×
-  - Sim mega sweep (400 configs chacun) : BE25 median avg +9.03% / WR 41.7% / $50/jour vs BE15 +6.01% / 27.1% / $32/jour
-  - Live en cours : BE15 sous-performe (bankroll $904 vs seed $1000)
-- **L'A/B est terminé, BE15 perd sur tous les angles.**
-
-**Étape 1 — Apr 20-21** (action concrète à faire) :
-1. `rt_trade_config.live_trading.allocations` → `{BE25_TP80_SL30: 0.5, FAST_TP50_SL30: 0.5}` (remplace BE15)
-2. `rt_trade_config.hybrid_strategy.allocations` → retirer `BE15_TP100_SL50` de la liste (18 → 17 strats actives en paper)
-3. Code : `BE15_TP100_SL50` reste dans `STRATEGIES` dict pour permettre aux trades ouverts de clôturer proprement, mais disparaît des auto-opens
-4. Bankroll BE15 ($904) réallouable
-5. VPS pick up config au prochain cycle, pas de restart
-
-FAST_TP50_SL30 justifié : N=126 paper (max data), avg +3.87%, WR 41%, SL 30% raisonnable real money, LAZY déjà configuré.
+**Étape 1 : FAIT** ✅ (Apr 19) — BE15 retiré live + paper, FAST_TP50_SL30 ajouté live, max_open_positions 3→6.
 
 **Étape 2 — après 3-5 jours + N≥30 live FAST_TP50** :
-Si FAST matche ses stats paper, remplacer BE25 par une 2e FAST avec TP **différent** (FAST_TP80_SL25 ou FAST_TP100_SL20) pour décorréler par profil d'exit. Sinon garder BE25 comme hedge. Pas 2×FAST similaires = concentration de risque.
+- Si FAST_TP50 matche ses stats paper : remplacer BE25 par une 2e FAST à TP différent (FAST_TP80_SL25 ou FAST_TP100_SL20) pour diversifier par profil d'exit, OU ajouter une 3e strat (33/33/33).
+- Si un SCORE40 shadow a validé son alpha (N≥30) : promouvoir en main paper + envisager live.
 
-### 🔴 Open bugs (need data)
-- **S5 filters audit (v144)** : NOZEROLIQ retro sur BE25 = +$217 vs base $+187 → **NZ aide**. SCORE30 capte bien >=40 (mean +11%) mais inclut 30-40 (mean -5.86%) → **SCORE40 > SCORE30** recommandé. HYST reste le vrai tueur. TP200 N=9-11 trop faible pour conclure.
-- **Paper↔live outliers automatisé (v144)** : `nightly-outlier-monitor.yml` tourne à 04:30 UTC, fail + alert si outlier sync=True apparaît. Test local OK (10 historiques sync=False, 0 sync=True).
-- **LAZY polling audit (v144)** — real 7d data : LAZY total +$1387, non-LAZY −$1720 (different strat pools, confounded). Top 4 earners tous LAZY (FAST_TP40 +$275, FAST_TP80 +$269, FAST_TP50 +$242, TP50_SL15 +$216). Sim bench contredit (disait FAST_30 > LAZY sur FAST_TP50) → sim a probablement biais "sur-check" (voit tous ticks 15-30s, triggers SL aberrants). **v144 action** : 4 shadows `*_NOLAZY` ajoutés (strategies.py) — FAST_TP40/TP80/TP50 + TP50_SL15. Paired comparaison via `scripts/compare_lazy_vs_nolazy.py` post-deploy. N≥50 ETA Apr 22. LAZY_XSLOW jamais best en sim → pas déployé.
-
-### 🟡 Améliorations alignment identifiées (low-priority)
-- **Tick logging 15-30s → 5-10s** : gain DTRAIL outliers maxabs −36pp → <5pp, coût Jupiter RPC 2-3x. À envisager SI outliers sync=True émergent.
-
-### 🔒 Bloqué sur scale-up live
+### 🔒 Bloqué sur scale-up
 - **Jupiter Trigger V2** — 0 fills historiques. Débloquer quand live_pos > $10.
 
 ### 🧠 Gotcha
@@ -115,41 +67,44 @@ Supabase PostgREST cap 1000 rows même avec `.limit(10000)`. Toujours paginer vi
 
 ## Sim ↔ Live/Paper coherence (v144 aligned)
 
-### Status post-v144 (Apr 19, N=56 paires live/paper, DTRAIL exclu)
-- **sim ↔ live per-pair median** : L−S ≤ 2.5pp sur toutes strats actives (FAST_TP50 +0.35, BE25 −1.54, BE15 −2.45)
-- **sim ↔ paper Spearman rank corr** : ρ = +0.905 (N=139 strats) → **sim prédit bien le classement paper**
-- **paper ↔ live median** : ≤ 2pp per strat (FAST_TP50 +0.93, BE25 +1.00, BE15 −1.73) — gap fermé au median par v142E (entry sync) + v143.5 (exit sync)
-- **Outliers restants** : 23 historiques |L−P|>10pp, 100% avec sync=False (= pré-v142E ou live swap failed). Post-sync devrait être zéro.
+### Status post-v144
+- **sim ↔ live per-pair median** : L−S ≤ 2.5pp sur strats actives (FAST_TP50 +0.35, BE25 −1.54)
+- **sim ↔ paper Spearman rank corr** : ρ = +0.905 (N=139 strats) → sim prédit bien le classement
+- **paper ↔ live median** : ≤ 2pp per strat (gap fermé par v142E + v143.5 shadow-sync)
+- **Outliers restants** : 23 historiques |L−P|>10pp, 100% avec sync=False (pré-v142E). Nouveaux outliers sync=True = vrai bug → monitor nightly actif.
 
-### Méthodologie mesure divergence sim
-Trois canaux complémentaires :
-1. **`paper_trades.paper_sim_pnl_pct`** (colonne v143.6) — PnL sim joint par live_trader sur ticks réels pour chaque trade live. Source directe per-trade.
-2. **`scripts/verify_sim_live_alignment.py`** — replay via `_decision_price` + `_evaluate_trade_exit`. CI nightly.
-3. **Mega-sweep ranking vs paper/live** (`sim.py --mega-sweep` + `scripts/ranking_compare.py`) — **toujours faire ça en complément** : compare Spearman rank sur stratégies pour vérifier que la sim classe correctement même avec biais de niveau. Sans ce check, on risque de ne détecter qu'un biais absolu et manquer un problème de structure.
+### Méthodologie mesure divergence sim (3 canaux)
+1. **`paper_trades.paper_sim_pnl_pct`** (v143.6) — PnL sim joint par trade live
+2. **`scripts/verify_sim_live_alignment.py`** — CI nightly 04:00 UTC
+3. **Mega-sweep ranking vs paper/live** (`ranking_compare.py`) — **toujours faire en complément** : Spearman rank corr pour validation structurelle en plus du biais absolu
 
-### Split slip : pump vs global offset
-Test (`slip_split_test.py`) : pump/liq/mcap donnent pooled std ~2920 bps, aucun ne réduit meaningfully → **offset global −100 bps** dans `_dynamic_sell_slip_factor` (v144). Monitor non-pump jusqu'à N≥30 (Apr 25) avant de décider split définitif.
+### Slip calibration v144
+`_dynamic_sell_slip_factor` : offset global −100 bps (pump/liq/mcap splits testés, pooled std identique ~2920 bps → pas de gain du split). Revisit Apr 25 avec N non-pump ≥ 30.
 
-### Tools
-- `--from-eval-history` (v138) = 0% bias mathématique
-- `--from-trades` = ground truth historique
-- `--mega-sweep` = grid complet → ranking correlation sim vs paper/live
-- `scripts/verify_sim_live_alignment.py` = audit sim vs live (CI nightly)
-- `scripts/diverge_report.py` = tableau récap sim/paper/live unifié
-- `scripts/calibrate_slip.py` = calibration per-pair delta
-- `scripts/slip_split_test.py` = test splitter pump/liq/mcap
-- `scripts/ranking_compare.py` = Spearman sim↔paper↔live
-- `scripts/outlier_diag.py` = root-cause par outlier |L−P|>10pp
+### Monitoring CI actif
+- `sim-align-gate.yml` (04:00 UTC) — alert si sim-live drift > 5pp
+- `nightly-outlier-monitor.yml` (04:30 UTC) — alert si outlier paper↔live sync=True
 
-**Thresholds CI** : avg |diff| ≤ 5pp ET within_10pp ≥ 80% sinon fail + Telegram alert.
+### Scripts utilitaires (`scripts/`)
+- `recap_daily.py` — top earners + $/jour paper & live
+- `refresh_main_stats.py` — ranking actuel par $ 7d
+- `compare_lazy_vs_nolazy.py` — paired LAZY A/B verdict
+- `diverge_report.py` — tableau unifié sim/paper/live
+- `calibrate_slip.py`, `slip_split_test.py` — slip model tuning
+- `ranking_compare.py` — Spearman sim↔paper↔live
+- `outlier_diag.py`, `nightly_outlier_monitor.py` — outlier root-cause
+- `audit_lazy_paired.py` — paired audit LAZY strats existantes
+- `analyze_s5_filters.py` — NZ/SCORE/MCAP filter analysis
+- `bench_poll_modes.py` — polling mode benchmark sim
+- `verify_sim_live_alignment.py` — CI sim vs live audit
 
 ---
 
 ## Architecture summary
 
-**Scoring :** 40.5/13.5/40.5/5.4 (consensus/conviction/breadth/PA), 16-multiplier chain.
-**Trading :** Paper slip dynamic, live Jupiter Ultra RFQ ~10bps, position reconciliation sibling-aware (v133-D), loss limit 0.5 SOL/jour.
-**Alerting :** ML disabled, RT listener uncapped, GH Actions failures, daily summary 8am UTC.
+**Scoring :** 40.5/13.5/40.5/5.4 (consensus/conviction/breadth/PA), 16-multiplier chain. rt_score v141 data-driven bonuses (+3 features).
+**Trading :** Paper slip dynamic (v144 offset −100bps), live Jupiter Ultra RFQ, position reconciliation sibling-aware (v133-D), loss limit 0.5 SOL/jour.
+**Alerting :** ML disabled (v109, anti-predictive), RT listener uncapped, GH Actions failures, daily summary 8am UTC, sim-align + outlier nightly alerts.
 
 ## Workflow sim
 
@@ -164,19 +119,26 @@ Test (`slip_split_test.py`) : pump/liq/mcap donnent pooled std ~2920 bps, aucun 
 python scraper/sim.py --from-ticks --since 2026-04-13 --top 30
 python scraper/sim.py --from-trades --since 2026-04-13
 python scraper/sim.py --from-eval-history --since 2026-04-17
-python scraper/sim.py --mega-sweep  # flags: --mega-workers N, --mega-csv-out, --mega-since
+python scraper/sim.py --mega-sweep
 ```
 
 ## Historique récent
 
-- **v144** (Apr 19, soir) ✅ 4 chantiers safe : (1) shadow-sync entry étendu au path exploration dans `safe_scraper.py` — plus aucun sync=False sur nouveaux trades même si hybrid OFF. (2) `dex_ticks` câblé dans les 4 autres callsites `_replay_with_intervals` (sim.py:3074/3315/4016/4023) — dual-stream smoothing utilisable partout. (3) S5 filter audit (voir §Open bugs). (4) `nightly-outlier-monitor.yml` déployé — CI nightly alert Telegram sur outlier sync=True.
-- **v144** (Apr 19) ✅ `_dynamic_sell_slip_factor` : offset global −100 bps (shift per-pair delta mean +115 → 0). Split pump/non-pump testé (N=6 non-pump trop petit, pas de gain std) → report Apr 25.
-- **v143.6** (Apr 19) ✅ DS cache TTL + `paper_sim_pnl_pct` column + CI nightly gate
+- **v144** (Apr 19 — complet) ✅
+  - Slip `_dynamic_sell_slip_factor` offset global −100 bps (calibration per-pair L−P delta)
+  - Shadow-sync entry étendu au path exploration dans `safe_scraper.py` (plus de sync=False si hybrid OFF)
+  - `dex_ticks` câblé dans 4 callsites `_replay_with_intervals` (sim.py complet)
+  - 4 shadows `*_NOLAZY` pour paired A/B LAZY (FAST_TP40/TP80/TP50/TP50_SL15)
+  - 5 shadows SCORE filter isolation (BE25_S30/S40, FAST_TP50/TP80/TP100_S40)
+  - `nightly-outlier-monitor.yml` CI — alert Telegram sur outlier sync=True
+  - DB swap live : BE15→FAST_TP50_SL30. Paper hybrid : BE15_TP100_SL50 + BE15_TP300_SL50_MCAP retirés
+  - max_open_positions 3→6
+- **v143.6** (Apr 19) ✅ DS cache TTL + `paper_sim_pnl_pct` column + CI sim-align-gate
 - **v143.5** (Apr 19) ✅ Live exit shadow-sync : force-close paper match au fill Jupiter
-- **v143.1-4** (Apr 18-19) ✅ Sim alignment fixes (`_decision_price`, `high_price_seen` reset, 7 smoothing modes ports)
-- **v142 E** (Apr 18) ✅ Entry shadow-sync : paper reuse live `execution_price` via `_rt_force_entry_price`
-- **v142 A-D** (Apr 18) ✅ Mega sweep 134K configs → 3 new mains + 9 shadows + 3 smoothing modes + OHLC burst port
+- **v143.1-4** (Apr 18-19) ✅ Sim alignment fixes + 7 smoothing modes ports
+- **v142 E** (Apr 18) ✅ Entry shadow-sync : paper reuse live `execution_price`
+- **v142 A-D** (Apr 18) ✅ Mega sweep 134K configs → 3 new mains + 9 shadows + smoothing ports
 - **v141** (Apr 17) ✅ rt_score +3 bonuses data-driven (corr +0.207 → +0.236)
-- **v140** (Apr 17) ✅ 8 new strats, `_BE_RE` regex relaxé, bankroll reset $18K
+- **v140** (Apr 17) ✅ 8 new strats, bankroll reset $18K
 - **v138.5** (Apr 17) ✅ Slip recalibration (sl_hit 435bps, trail 250bps, tp +300bps)
-- **v138** (Apr 17) ✅ `eval_history` JSONB + `cache_snapshots` table + `--from-eval-history`
+- **v138** (Apr 17) ✅ `eval_history` JSONB + `--from-eval-history` 0% bias mode
