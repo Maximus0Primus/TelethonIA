@@ -4567,7 +4567,7 @@ def _mega_sweep_run(args):
 
     df = pd.DataFrame(results)
     df.to_csv(csv_out, index=False)
-    print(f"\n{len(df)} valid rows / {total} configs → {csv_out}")
+    print(f"\n{len(df)} valid rows / {total} configs -> {csv_out}")
     print(f"Total time: {_time.time()-t0:.0f}s")
 
     df = df.sort_values("dollars_per_day", ascending=False)
