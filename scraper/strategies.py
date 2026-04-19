@@ -128,6 +128,10 @@ STRATEGY_FILTERS = {
     "BE25_TP80_SL30_S40": {"min_rt_score": 40},
     # v144 — SCORE>=40 on FAST_TP80_SL25 retroactive = N=16, WR 68.8%, avg +29.76%
     "FAST_TP80_SL25_S40": {"min_rt_score": 40},
+    # v144 — Sim mega sweep v142 SCORE40 top: FAST_TP50_SL30 (WR 72.2%, avg +34.5%)
+    # and FAST_TP100_SL20 (WR 66.7%, avg +32.0%) — complete the SCORE40 family.
+    "FAST_TP50_SL30_S40": {"min_rt_score": 40},
+    "FAST_TP100_SL20_S40": {"min_rt_score": 40},
 }
 
 # --- Grid strategies (v93) ---
@@ -710,6 +714,22 @@ STRATEGIES["FAST_TP80_SL25_S40"] = [
     {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.75, "horizon_min": 30, "label": "main"},
 ]
 SHADOW_STRATEGIES.append("FAST_TP80_SL25_S40")
+
+# FAST_TP50_SL30 + SCORE>=40. Sim mega sweep v142 TOP SCORE40 candidate:
+# N=18, WR 72.22%, avg +34.53%, $69.93/jour. Paper retroactive (N=37):
+# WR 51%, avg +8.91% — sim much more optimistic, real N≥30 will arbitrate.
+STRATEGIES["FAST_TP50_SL30_S40"] = [
+    {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.70, "horizon_min": 30, "label": "main"},
+]
+SHADOW_STRATEGIES.append("FAST_TP50_SL30_S40")
+
+# FAST_TP100_SL20 + SCORE>=40. Sim top5 SCORE40: N=18, WR 66.67%, avg +32.0%,
+# $64.82/jour. Highest TP in the score-filtered family — tests whether wide TP
+# captures the outliers that SCORE>=40 tokens typically produce.
+STRATEGIES["FAST_TP100_SL20_S40"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.80, "horizon_min": 30, "label": "main"},
+]
+SHADOW_STRATEGIES.append("FAST_TP100_SL20_S40")
 
 
 # ---------------------------------------------------------------------------
