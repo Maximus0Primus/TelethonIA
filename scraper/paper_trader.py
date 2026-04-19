@@ -289,6 +289,12 @@ def _decision_price(addr: str, strategy: str, trade_id: int, orch: dict,
     if src == "hybrid":
         # decision on DS, exit at Jupiter
         return (ds if ds else jp), (jp if jp else ds)
+    if src == "both":
+        # v144: merge jp+ds — prefer Jupiter for decision AND exit, fall back to
+        # DS when Jupiter cache is empty. Matches sim mega_sweep source="both"
+        # behavior. Tested by *_BOTH shadow variants.
+        p = jp if jp else ds
+        return p, p
     if src == "confirm":
         if jp and ds:
             return ((jp + ds) / 2), jp
