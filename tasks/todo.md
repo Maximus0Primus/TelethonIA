@@ -116,6 +116,26 @@ Live avg% > paper avg% (BE25: live +12.3% vs paper +5.3%) — effet shadow-sync 
 ### 🔒 Bloqué
 - **Jupiter Trigger V2** — 0 fills historiques. Débloquer quand live_pos > $10.
 
+### 🛠 Chantier sim/paper/live (à planifier)
+
+#### Sprint #1 — Refinement slip model (1-2h, gain 0.3-0.5pp médiane)
+**Cible** : ETA Apr 25-28 quand N≥30 par cellule `pump × exit_type`
+**Quoi** :
+- Remplacer les 3 buckets liq actuels (5K/20K/50K) dans `_dynamic_sell_slip_factor` par un modèle continu utilisant `price_ticks.volume_24h` + `price_ticks.liquidity_usd` à l'instant exit_time
+- Calibrer sur les ~143 paires live/paper matched (`scripts/slip_per_exit_type.py` outputs)
+- Modèle suggéré : `slip_bps = base × (1 + α × log(50K / liq)) × (1 + β × volume_volatility) × exit_type_mult`
+- Gain attendu : médiane gap paper↔live de +1pp à <0.5pp
+**Coût** : ~200 lignes dans `paper_trader.py` + tests + redéploiement
+**Trigger** : attendre Apr 25 que cellules pump×tp_hit + non-pump×* aient N≥15
+
+#### Sprint #2 — Coherence sim trail/dtrail/dip family (post Apr 25)
+**Problème** : sim mega_sweep top picks famille trail/dtrail/dip alors que paper/live montrent que ça ne marche pas (DTRAIL10_ACT15: sim top vs live 65% reconciled, slip 47×)
+**Options possibles** :
+- (a) Modéliser `position_reconciler` dans sim (~150 lignes) — random 55% chance early-close à un tick aléatoire pour les trail strats
+- (b) Per-family slip multiplier : appliquer × 5-10 au slip pour DTRAIL/TRAIL/DIP basé sur observations live (~50 lignes)
+- (c) Post-process flag `family_realism_score` dans `analyze_mega_sweep.py` — déjà fait ce 2026-04-20, à itérer avec data live additionnelle
+**Recommandation** : commencer par (b) car data-driven, simple. (a) pour la rigueur. Skip (a) si paper paired test confirme la couverture.
+
 ### 🧠 Gotcha
 - Supabase PostgREST cap 1000 rows même avec `.limit(10000)`. Toujours paginer via `.range(off, off+999)`.
 - **Sim TD2/BOND/DTRAIL/TRAIL sur-estime 45-57×** — ne pas croire le sim sur ces familles.
