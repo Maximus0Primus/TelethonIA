@@ -998,6 +998,21 @@ STRATEGY_FILTERS["HIGHSCORE_TP200_SL40_NOLAZY"] = {"min_rt_score": 30}
 
 
 # ---------------------------------------------------------------------------
+# v144.4 (Apr 20) — SCORE35 sweet spot from mega_sweep_top_robust
+# Top robust cluster (analyze_mega_sweep.py): FAST_TP100_SL20 + SCORE35 + LAZY
+# + median_3 + jupiter — N=35, WR 62.86%, avg +28.06%, fdr_q=0.0000.
+# Single distinct pattern that survives Bonferroni × 508K eligible configs.
+# Existing shadows test SCORE>=30 and SCORE>=40 — S35 fills the sweet-spot gap.
+# ---------------------------------------------------------------------------
+STRATEGIES["FAST_TP100_SL20_S35"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.80, "horizon_min": 30, "label": "main"},
+]
+SHADOW_STRATEGIES.append("FAST_TP100_SL20_S35")
+STRATEGY_FILTERS["FAST_TP100_SL20_S35"] = {"min_rt_score": 35}
+LAZY_STRATEGIES.add("FAST_TP100_SL20_S35")
+
+
+# ---------------------------------------------------------------------------
 # Sim config → fake trade converter
 # ---------------------------------------------------------------------------
 def sim_cfg_to_fake_trade(cfg: dict, entry_price: float, created_at: str,
