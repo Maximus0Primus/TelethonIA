@@ -106,8 +106,8 @@ live_eligible = [r for r in rank_data if r[5] >= 5 and not math.isnan(r[6])]
 if live_eligible:
     top_live = set([r[0] for r in sorted(live_eligible, key=lambda x: -x[6])[:5]])
     print(f"live top5  : {top_live}")
-    print(f"sim ∩ live : {top_sim & top_live}")
-    print(f"paper ∩ live: {top_paper & top_live}")
+    print(f"sim & live : {top_sim & top_live}")
+    print(f"paper & live: {top_paper & top_live}")
 
 import json
 out = os.path.join(os.path.dirname(__file__), "..", "data", "ranking_compare.json")

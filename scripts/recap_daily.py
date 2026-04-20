@@ -105,7 +105,7 @@ be15_live_day = sum(float(x.get("pnl_usd") or 0) for x in live_by_strat.get("BE1
 
 print()
 print("=" * 80)
-print("LIVE — projection POST-SWAP (BE15 → FAST_TP50_SL30)")
+print("LIVE — projection POST-SWAP (BE15 -> FAST_TP50_SL30)")
 print("=" * 80)
 print(f"Live position: ${live_pos}/trade  (scale vs paper ${paper_pos}: {scale:.4f})")
 print()

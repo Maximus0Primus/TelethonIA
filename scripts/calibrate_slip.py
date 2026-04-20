@@ -49,7 +49,7 @@ groups = defaultdict(list)
 for (_, strat), lv, pp in pairs:
     et = lv["status"]
     pf = bool(lv.get("rt_is_pump_fun"))
-    # bps delta: positive means live PnL > paper PnL → sim is too pessimistic → decrease paper type_bps
+    # bps delta: positive means live PnL > paper PnL -> sim is too pessimistic -> decrease paper type_bps
     pnl_l = float(lv.get("pnl_pct") or 0)
     pnl_p = float(pp.get("pnl_pct") or 0)
     delta_bps = round((pnl_l - pnl_p) * 10000)  # positive = live better than paper
@@ -70,5 +70,5 @@ out = os.path.join(os.path.dirname(__file__), "..", "data", "slip_calibration_v2
 with open(out, "w", encoding="utf-8") as f: json.dump(calibration, f, indent=2)
 print(f"\nSaved -> {out}")
 print("\nInterpretation:")
-print("  median > 0 → live PnL > paper PnL → sim too pessimistic → DECREASE paper type_bps by median")
-print("  median < 0 → paper PnL > live PnL → sim too optimistic → INCREASE paper type_bps by |median|")
+print("  median > 0 -> live PnL > paper PnL -> sim too pessimistic -> DECREASE paper type_bps by median")
+print("  median < 0 -> paper PnL > live PnL -> sim too optimistic -> INCREASE paper type_bps by |median|")

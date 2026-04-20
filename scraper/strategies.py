@@ -631,23 +631,19 @@ def _get_trail_config_uncached(strat: str, label: str) -> tuple[float | None, fl
 # ---------------------------------------------------------------------------
 LAZY_STRATEGIES: set[str] = {
     # v138.2: lazy dominates static on these.
-    "BE25_TP80_SL30_DS",
     "FAST_TP100_SL20",
     "FAST_TP80_SL25",
     "FAST_TP50_SL30",
     "FAST_TP40_SL30",
     "TP50_SL15",
-    # v140: new hysteresis+lazy variants (full sweep top 10)
-    "FAST_TP100_SL20_HYST",
-    "FAST_TP80_SL25_HYST",
-    "BE25_TP80_SL30_HYST",
+    # v140 filtered HYST variants kept (still in hybrid_strategy.allocations)
     "FAST_TP50_SL30_HYST",
-    # v144: removed 7 entries that weren't in hybrid mains. LAZY flag has NO
-    # effect on shadow trades (position_usd=0 → _should_evaluate_exit bypasses
-    # LAZY). Previously listed but inactive: DTRAIL3_ACT5_SL60,
-    # DTRAIL5_ACT10_SL60, DIP30_B5_T5_A20_SL70_240m, FAST_TP70_SL50,
-    # PTRAIL_V2_T10-18-30-45_SL30_T60, SCORE40_FAST_TP50_SL30_30M,
-    # FAST_TP500_SL40_60M. Re-add if any of these are promoted to hybrid.
+    # v144.5: removed 4 entries that were retired from hybrid_strategy.allocations
+    # by v144.1 cleanup (Apr 20): BE25_TP80_SL30_DS, FAST_TP100_SL20_HYST,
+    # FAST_TP80_SL25_HYST, BE25_TP80_SL30_HYST. LAZY membership without hybrid
+    # presence had no behavioral effect since shadow path now respects LAZY
+    # (v144.3) but those names produced 0 shadow trades anyway.
+    # Re-add if any of these are promoted back to hybrid.
 }
 LAZY_FAST_SEC = 180     # 3 min during fast phase
 LAZY_FAST_WINDOW = 300  # 5 min fast phase
@@ -1010,6 +1006,16 @@ STRATEGIES["FAST_TP100_SL20_S35"] = [
 SHADOW_STRATEGIES.append("FAST_TP100_SL20_S35")
 STRATEGY_FILTERS["FAST_TP100_SL20_S35"] = {"min_rt_score": 35}
 LAZY_STRATEGIES.add("FAST_TP100_SL20_S35")
+
+# v144.5 — Sweet spot SCORE35 also worth testing on BE25 (live strat).
+# Existing: BE25_TP80_SL30_S30 (broad), BE25_TP80_SL30_S40 (strict). S35 fills the gap.
+# Pattern extrapolated from FAST_TP100_SL20_S35 robust cluster.
+STRATEGIES["BE25_TP80_SL30_S35"] = [
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.25, "label": "main"},
+]
+SHADOW_STRATEGIES.append("BE25_TP80_SL30_S35")
+STRATEGY_FILTERS["BE25_TP80_SL30_S35"] = {"min_rt_score": 35}
 
 
 # ---------------------------------------------------------------------------
