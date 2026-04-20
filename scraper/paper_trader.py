@@ -964,13 +964,19 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
     for i, token in enumerate(candidates):
         token["_alloc_usd"] = round(budget_usd * scores[i] / total_score, 2)
 
-    # Check which (token_address, strategy) combos already have open trades
+    # Check which (token_address, strategy) combos already have open paper trades.
+    # v144.2: Exclude rt_live rows. The v142 E shadow-sync flow opens live FIRST
+    # (creates rt_live status=open) and paper SECOND for the same (token, strategy)
+    # — paper must NOT be blocked by its own live sibling. Without this filter,
+    # FAST_TP50_SL30 and BE25_TP80_SL30 (both in live_trading.allocations) get
+    # zero paper rows created, breaking 14d of paired A/B analysis.
     addrs = [t["token_address"] for t in candidates]
     try:
         existing = (
             client.table("paper_trades")
             .select("token_address, strategy")
             .eq("status", "open")
+            .neq("source", "rt_live")
             .in_("token_address", addrs)
             .execute()
         )
@@ -984,6 +990,8 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
     # Cooldown dedup: check recently closed trades (main + shadow)
     # v105: Apply cooldown to ALL trades (not just main). Shadow re-entries on the same
     # token pollute data — a KOL re-calling a dead token generates 47 losing shadow trades.
+    # v144.2: exclude rt_live closures from paper cooldown (live and paper are distinct
+    # universes — a live close on (token, FAST_TP50) shouldn't block paper from re-entry).
     cooldown_combos = set()
     if dedup_cooldown_h > 0:
         cooldown_since = (cycle_ts - timedelta(hours=dedup_cooldown_h)).isoformat()
@@ -992,6 +1000,7 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
                 client.table("paper_trades")
                 .select("token_address, strategy")
                 .neq("status", "open")
+                .neq("source", "rt_live")
                 .gte("exit_at", cooldown_since)
                 .in_("token_address", addrs)
                 .execute()
@@ -1157,12 +1166,14 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
 
             # v108: Defensive re-check right before insert to catch race conditions
             # (e.g. batch + RT overlap, or two RT calls that slipped past in-flight lock)
+            # v144.2: exclude rt_live so a sibling live row doesn't block paper.
             try:
                 recheck = (
                     client.table("paper_trades")
                     .select("id", count="exact")
                     .eq("token_address", addr)
                     .eq("strategy", strat_name)
+                    .neq("source", "rt_live")
                     .eq("status", "open")
                     .execute()
                 )

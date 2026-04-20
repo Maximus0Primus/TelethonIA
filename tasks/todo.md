@@ -1,10 +1,46 @@
-# Pipeline Status — Updated Apr 19, 2026 (v144 complet)
+# Pipeline Status — Updated Apr 20, 2026 (v144.1 cleanup)
 
 ## Current state
 
 **Live (50/50)** — `BE25_TP80_SL30` (median_5/240s) + `FAST_TP50_SL30` (median_3/30s + LAZY). Position 0.02 SOL (~$3.40)/trade. **max_open_positions: 6**. Exposition max 0.12 SOL ≈ $20. Daily loss limit 0.5 SOL (~$85).
 
-**Paper hybrid — 16 mains + 261 shadows** (dont 34 v144 A/B). Alignment audit: **zéro issue**.
+**Paper hybrid — 12 mains + 261 shadows** (dont 34 v144 A/B). Alignment audit: **zéro issue**.
+
+### v144.1 (Apr 20) — 4 retraits HYST/DS losers
+Retirés du `hybrid_strategy.allocations` après pair-test 7d (N=38-69) :
+- **FAST_TP80_SL25_HYST** (−$62 vs base +$427)
+- **FAST_TP100_SL20_HYST** (−$54 vs base +$137)
+- **BE25_TP80_SL30_HYST** (+$6 vs base +$191)
+- **BE25_TP80_SL30_DS** (−$0 vs base +$191)
+
+Pattern : sim sur-estime HYST/DS car whipsaw paper-réel n'apparaît pas dans ticks lissés. Voir `tasks/lessons.md` Apr 20. **HYST + filtre qualité (S30/NZS30) reste profitable** (BE25_S30_HYST = #2 earner).
+
+### v144 shadows paired audit (Apr 20 PM) — `paired_all_v144_shadows.py`
+
+**Top winners paired (pair_N≥10, vs leur base 14d)** — candidats promotion à N≥30 :
+| Variant | pair_N | med Δpp | sum Δ$ |
+|---|---|---|---|
+| FAST_TP100_SL20_BOTH | 11 | +3.52 | +$43 |
+| TP50_SL15_NOLAZY | 15 | +3.80 | +$40 |
+| FAST_TP40_SL30_DS | 11 | +1.98 | +$38 |
+| FAST_TP80_SL25_BOTH | 11 | +3.52 | +$37 |
+| FAST_TP80_SL25_COMBO | 11 | +3.61 | +$37 |
+| FAST_TP40_SL30_MED3 | 11 | +1.98 | +$36 |
+| FAST_TP80_SL25_NOLAZY | 16 | +1.55 | +$31 |
+| FAST_TP100_SL20_COMBO | 11 | +3.05 | +$30 |
+| FAST_TP80_SL25_LAZYSLOW | 12 | +2.62 | +$28 |
+| FAST_TP40_SL30_NOLAZY | 16 | +1.76 | +$28 |
+
+**0 LOSERS** (pair_N≥10) — aucune base ne bat son shadow v144.
+
+**Couverture A/B incomplète (gaps à combler)** :
+- **BE25_TP80_SL30_S30_HYST** (#2 earner +$44/j) : 0 shadow v144 — créer `_NOLAZY/_BOTH/_JUPITER/_DS/_MED3/_COMBO`
+- **HIGHSCORE_TP200_SL40** (#5 earner +$35/j) : 0 shadow v144 — créer `_BOTH/_DS/_MED3/_NOLAZY`
+- **TP50_SL15** : seul `_NOLAZY` testé, manque `_BOTH/_DS/_MED3/_S30/_S40`
+- **FAST_TP40_SL30** : a `_NOLAZY/_DS/_MED3`, manque `_BOTH/_JUPITER/_S40/_COMBO`
+- **NOZEROLIQ_TP200_SL40, BE25_TP80_SL30_NZS30_HYST, BE15_TP70_SL50_NZ, FAST_TP50_SL30_HYST** : 0 shadow v144
+
+**Bug à investiguer** : FAST_TP50_SL30_* et BE25_TP80_SL30_* (sauf _DS) ont **0 paired tokens** — gating filter trop strict ou routing cassé dans `safe_scraper.py`.
 
 ### 16 Mains actives — stats 7d
 

@@ -118,3 +118,62 @@
 **Observation:** Bot ML gate (7d, N=189): SKIP trades = 60% WR, FULL trades = 35% WR. Model is consistently anti-predictive — its "bad" signals are actually good.
 **Approach:** Instead of disabling, invert: SKIP→1.5x boost, HALF→1.3x boost, FULL→0.7x reduce. Config-driven via `ml_gate_mode: "inverted"` to easily switch back.
 **Rule:** An anti-predictive model has signal — just inverted. Before discarding a model, check if flipping its output adds value. This only works if the anti-correlation is stable over time (not just noise).
+
+## 2026-04-20: TOUJOURS paired-test pour comparer variants (pas agrégat $)
+**Mistake:** Comparé NOLAZY/LAZYSLOW v144 vs base LAZY en aggregate $ 7d. Conclusion : "NOLAZY perd $8/strat, retirer". REVERSED après paired-test.
+**Réalité (paired sur mêmes tokens) :**
+- FAST_TP40_SL30_NOLAZY : pair_N=16, med Δpp **+1.76**, sum Δ$ +$27 (10 wins / 6 losses) → NOLAZY > base
+- FAST_TP80_SL25_NOLAZY : pair_N=16, med Δpp +1.55, sum +$30 (9/7) → NOLAZY > base
+- TP50_SL15_NOLAZY : pair_N=15, med Δpp **+3.80**, sum +$40 (11/4) → NOLAZY domine
+- FAST_TP80_SL25_LAZYSLOW : pair_N=12, med Δpp +2.62, sum +$27 (8/4) → LAZYSLOW > base
+**Cause de l'erreur initiale :** v144 shadows démarrés Apr 19 → ont raté les bonnes journées du début de fenêtre 7d que la base a captées. Agrégat $ est un artefact de fenêtre, pas de qualité strat.
+**Rule :** Quand on compare strat A vs strat B et qu'elles tradent des sets de tokens partiellement disjoints :
+1. Calculer le set INTERSECTION (tokens tradés par les DEUX)
+2. Calculer Δpp = pnl_pct_A − pnl_pct_B PAR token, puis median + win/loss/tie counts
+3. Si pair_N < 10, déclarer "verdict prématuré" — ne JAMAIS conclure sur agrégat $ seul quand les set sizes diffèrent par >2×
+4. Script de référence : `scripts/compare_lazy_vs_nolazy.py` (existe déjà). À étendre pour `_LAZYSLOW/_LAZYFAST/_LAZYMED/_LAZYXSLOW`.
+5. Cette règle s'applique à TOUTE comparaison variant vs base (HYST, DS, MED3, NOLAZY, LAZY*, BOTH, JUPITER, S30/S40, COMBO).
+
+## 2026-04-20: HYST nu = artefact sim, HYST + filtre qualité = vrai signal
+**Observation:** Sweep sim v140 a promu 4 variants `_HYST` en mains. Paper 7d (N=38-69 chacun) confirme l'artefact :
+- FAST_TP80_SL25 base +$427 vs `_HYST` −$62 → **−$489 coût HYST**
+- FAST_TP100_SL20 base +$137 vs `_HYST` −$54 → **−$191**
+- BE25_TP80_SL30 base +$191 vs `_HYST` +$6 → **−$185**
+- BE25_TP80_SL30 base +$191 vs `_DS` −$0 → **−$191**
+
+Mais **HYST + filtre qualité** marche très bien : `BE25_TP80_SL30_S30_HYST` (HYST + SCORE≥30) = +$312/7d, WR 52% (#2 earner). `_NZS30_HYST` (NZ + S30 + HYST) = +$77.
+
+**Rule :**
+1. Ne JAMAIS promouvoir un variant `_HYST` ou `_DS` sans pair-test paper N≥30 vs la base.
+2. Le sim sur-estime systématiquement les variants smoothing (HYST/MED/DS) car le whipsaw paper-réel n'apparaît pas dans les ticks lissés du sim.
+3. Préférer combo `_HYST` + filtre entrée (`_S30`/`_NZ`) — le filtre élimine les tokens où le hysteresis whipsaw.
+4. Famille connue à sur-estimation sim massive (`tasks/todo.md` Apr 19) : TD2 45×, BOND_FAST 57×, HYST −2 à −6pp, DTRAIL/TRAIL.
+
+## 2026-04-20: Spearman per-trade ≠ Spearman per-strategy — ne pas confondre
+**Mistake:** todo.md a noté "Spearman sim↔paper ρ=+0.905 (N=139)" issu de `paper_sim_pnl_pct` (join per-trade), puis `ranking_compare.py` (cross-strategy) sort ρ=+0.599 — interprété à tort comme une "dérive".
+**Réalité:** Ce sont DEUX métriques différentes :
+- **Per-trade ρ** (=0.905) : sim_pnl vs paper_pnl pour CHAQUE trade joint — mesure si le sim est ordonnateur de trades individuels
+- **Per-strategy ρ** (~0.6-0.7 stable) : rank des stratégies par avg PnL agrégé — mesure si le sim choisit les bonnes strats
+**Rule :** Toujours préciser le niveau d'agrégation quand on cite un Spearman. Per-trade et per-strategy ne sont pas comparables. Le per-strategy ranking sim↔paper est ~+0.7 historiquement et c'est OK pour notre cas — pas de "drift". Bonus : v144 shadows polluent le ranking per-strategy de −0.10 ρ, donc exclure suffixes `_NOLAZY/_LAZY*/_BOTH/_JUPITER/_S30/_S40/_MED3/_DS/_HYST/_COMBO/_MCAP` dans `ranking_compare.py`.
+
+## 2026-04-20: Shadow DTRAIL/TRAIL/DIP n'est PAS reproductible en live
+**Mistake potentiel :** Voir DTRAIL10_ACT15_SL70 shadow paper +$52-370/7d (selon fenêtre/filtres) avec WR 53% et envisager promotion live.
+**Réalité (audit Apr 20, 20 trades live + 108 shadow paire pair):**
+- Live actual sell slip median = **9429 bps (94%)** vs paper modélise 200 bps → paper 47× trop optimiste sur coût sortie
+- 13/20 trades live = status `reconciled` (pas `trail_stop`) → le `position_reconciler` ferme prématurément avant que le trail s'exécute. Exemples : `GLzhjuzxKDrw7r` live +68% vs paper +213%, `26jyBRf3nCxAs1` live 0% vs paper +107%
+**Rule :** Toute stratégie famille DTRAIL/TRAIL/DIP/SPLIT (= multiples sells au cours d'un trade, ou logique trail/peak-detect) sur Solana memecoins low-liq pump.fun :
+1. Ne JAMAIS promouvoir en live même si paper WR=65% et $/jour positif
+2. Le `position_reconciler` interrompt typiquement 50-65% des trades avant que la logique trail/peak ne s'exécute
+3. Slippage réelle sur sells fréquents = 50-100× le modèle paper
+4. Pour Solana memecoins, préférer stratégies à exit unique (TP/SL/timeout/BE) sans logique trail dynamique
+5. Ces shadows polluent l'analyse — candidat retrait de SHADOW_STRATEGIES dans `strategies.py`
+
+## 2026-04-20: Slip recalibration per-exit-type, pas global
+**Observation:** Apr 20, 143 pairs L/P matched 14d. Median delta L−P par cellule :
+- pump × sl_hit (N=26) : −22 bps (OK)
+- pump × timeout (N=29) : **+87 bps** (paper trop pessimiste)
+- pump × tp_hit (N=5) : +154 bps mais N trop petit
+- pump × trail_stop (N=79) : +83 bps mais 100% DTRAIL10 (strat retirée)
+
+**Mistake potentiel :** appliquer un offset global −87 bps casserait `sl_hit` qui est calibré.
+**Rule :** Ne jamais appliquer un offset slip global quand les cellules pump × exit_type divergent. Schéma futur : `_dynamic_sell_slip_factor` doit accepter `{exit_type: bps_offset}` dict, pas un scalaire. Calibration par cellule à N≥15. Script `scripts/slip_per_exit_type.py` rejoue le diagnostic.

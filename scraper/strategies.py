@@ -877,6 +877,127 @@ SHADOW_STRATEGIES.append("FAST_TP40_SL30_DS")
 
 
 # ---------------------------------------------------------------------------
+# v144.2 (Apr 20) — Coverage extension for paired A/B testing.
+# Audit `paired_all_v144_shadows.py` showed gaps:
+#   - TP50_SL15: only _NOLAZY paired (won +$40, med +3.80pp). Missing source/smoothing.
+#   - FAST_TP40_SL30: missing source dim (_BOTH/_JUPITER) and SCORE filter (_S40)
+#   - FAST_TP100_SL20: missing _NOLAZY, full smoothing dim
+#   - FAST_TP80_SL25: missing smoothing dim (_DS/_MED3/_JUPITER)
+#   - HIGHSCORE_TP200_SL40 (#5 earner +$35/j): zero v144 coverage
+# Filters inherited via STRATEGY_FILTERS lookup below.
+# ---------------------------------------------------------------------------
+
+# TP50_SL15 family extension (5 new)
+STRATEGIES["TP50_SL15_BOTH"] = [
+    {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.85, "horizon_min": 120, "label": "main"},
+]
+SHADOW_STRATEGIES.append("TP50_SL15_BOTH")
+
+STRATEGIES["TP50_SL15_JUPITER"] = [
+    {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.85, "horizon_min": 120, "label": "main"},
+]
+SHADOW_STRATEGIES.append("TP50_SL15_JUPITER")
+
+STRATEGIES["TP50_SL15_DS"] = [
+    {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.85, "horizon_min": 120, "label": "main"},
+]
+SHADOW_STRATEGIES.append("TP50_SL15_DS")
+
+STRATEGIES["TP50_SL15_MED3"] = [
+    {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.85, "horizon_min": 120, "label": "main"},
+]
+SHADOW_STRATEGIES.append("TP50_SL15_MED3")
+
+STRATEGIES["TP50_SL15_S40"] = [
+    {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.85, "horizon_min": 120, "label": "main"},
+]
+SHADOW_STRATEGIES.append("TP50_SL15_S40")
+
+# FAST_TP40_SL30 source + filter (3 new)
+STRATEGIES["FAST_TP40_SL30_BOTH"] = [
+    {"pct": 1.0, "tp_mult": 1.40, "sl_mult": 0.70, "horizon_min": 30, "label": "main"},
+]
+SHADOW_STRATEGIES.append("FAST_TP40_SL30_BOTH")
+
+STRATEGIES["FAST_TP40_SL30_JUPITER"] = [
+    {"pct": 1.0, "tp_mult": 1.40, "sl_mult": 0.70, "horizon_min": 30, "label": "main"},
+]
+SHADOW_STRATEGIES.append("FAST_TP40_SL30_JUPITER")
+
+STRATEGIES["FAST_TP40_SL30_S40"] = [
+    {"pct": 1.0, "tp_mult": 1.40, "sl_mult": 0.70, "horizon_min": 30, "label": "main"},
+]
+SHADOW_STRATEGIES.append("FAST_TP40_SL30_S40")
+
+# FAST_TP100_SL20 NOLAZY + smoothing (4 new)
+STRATEGIES["FAST_TP100_SL20_NOLAZY"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.80, "horizon_min": 30, "label": "main"},
+]
+SHADOW_STRATEGIES.append("FAST_TP100_SL20_NOLAZY")
+
+STRATEGIES["FAST_TP100_SL20_DS"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.80, "horizon_min": 30, "label": "main"},
+]
+SHADOW_STRATEGIES.append("FAST_TP100_SL20_DS")
+
+STRATEGIES["FAST_TP100_SL20_MED3"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.80, "horizon_min": 30, "label": "main"},
+]
+SHADOW_STRATEGIES.append("FAST_TP100_SL20_MED3")
+
+STRATEGIES["FAST_TP100_SL20_JUPITER"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.80, "horizon_min": 30, "label": "main"},
+]
+SHADOW_STRATEGIES.append("FAST_TP100_SL20_JUPITER")
+
+# FAST_TP80_SL25 smoothing (3 new)
+STRATEGIES["FAST_TP80_SL25_DS"] = [
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.75, "horizon_min": 30, "label": "main"},
+]
+SHADOW_STRATEGIES.append("FAST_TP80_SL25_DS")
+
+STRATEGIES["FAST_TP80_SL25_MED3"] = [
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.75, "horizon_min": 30, "label": "main"},
+]
+SHADOW_STRATEGIES.append("FAST_TP80_SL25_MED3")
+
+STRATEGIES["FAST_TP80_SL25_JUPITER"] = [
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.75, "horizon_min": 30, "label": "main"},
+]
+SHADOW_STRATEGIES.append("FAST_TP80_SL25_JUPITER")
+
+# HIGHSCORE_TP200_SL40 (#5 earner +$35/j) — full v144 coverage (4 new)
+# Inherits min_rt_score:30 filter via STRATEGY_FILTERS extension below.
+STRATEGIES["HIGHSCORE_TP200_SL40_BOTH"] = [
+    {"pct": 1.0, "tp_mult": 3.00, "sl_mult": 0.60, "horizon_min": 240, "label": "main"},
+]
+SHADOW_STRATEGIES.append("HIGHSCORE_TP200_SL40_BOTH")
+
+STRATEGIES["HIGHSCORE_TP200_SL40_DS"] = [
+    {"pct": 1.0, "tp_mult": 3.00, "sl_mult": 0.60, "horizon_min": 240, "label": "main"},
+]
+SHADOW_STRATEGIES.append("HIGHSCORE_TP200_SL40_DS")
+
+STRATEGIES["HIGHSCORE_TP200_SL40_MED3"] = [
+    {"pct": 1.0, "tp_mult": 3.00, "sl_mult": 0.60, "horizon_min": 240, "label": "main"},
+]
+SHADOW_STRATEGIES.append("HIGHSCORE_TP200_SL40_MED3")
+
+STRATEGIES["HIGHSCORE_TP200_SL40_NOLAZY"] = [
+    {"pct": 1.0, "tp_mult": 3.00, "sl_mult": 0.60, "horizon_min": 240, "label": "main"},
+]
+SHADOW_STRATEGIES.append("HIGHSCORE_TP200_SL40_NOLAZY")
+
+# Filter inheritance for v144.2 score-gated shadows
+STRATEGY_FILTERS["TP50_SL15_S40"] = {"min_rt_score": 40}
+STRATEGY_FILTERS["FAST_TP40_SL30_S40"] = {"min_rt_score": 40}
+STRATEGY_FILTERS["HIGHSCORE_TP200_SL40_BOTH"] = {"min_rt_score": 30}
+STRATEGY_FILTERS["HIGHSCORE_TP200_SL40_DS"] = {"min_rt_score": 30}
+STRATEGY_FILTERS["HIGHSCORE_TP200_SL40_MED3"] = {"min_rt_score": 30}
+STRATEGY_FILTERS["HIGHSCORE_TP200_SL40_NOLAZY"] = {"min_rt_score": 30}
+
+
+# ---------------------------------------------------------------------------
 # Sim config → fake trade converter
 # ---------------------------------------------------------------------------
 def sim_cfg_to_fake_trade(cfg: dict, entry_price: float, created_at: str,
