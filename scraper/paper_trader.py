@@ -1266,12 +1266,27 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
             lds = max(0.1, min(1.0, lds)) if lds else 1.0
             slip_mult = 1.0 + 2.0 * (1.0 - lds)
             buy_slip_bps = int(buy_slip_bps_base * slip_mult)
-            # v123: Jupiter price as entry (same as main trades)
-            jup_entry = _jupiter_prices_cache.get(addr)
-            if jup_entry and jup_entry > 0:
-                entry_price = jup_entry
+            # v144.3: Use SAME entry_price as main — Ultra quote with forced_entry priority,
+            # cached via _jupiter_prices_cache (warmed by main loop). Tag entry_source so
+            # _override_exit_with_ultra_quote applies the same SELL Ultra quote at exit.
+            forced_entry = token.get("_rt_force_entry_price")
+            ultra_price = _jupiter_prices_cache.get(addr)
+            if forced_entry and float(forced_entry) > 0:
+                entry_price = float(forced_entry)
+                entry_source = "live_sync"
+            elif ultra_price and ultra_price > 0:
+                entry_price = ultra_price
+                entry_source = "ultra"
             else:
-                entry_price = raw_price  # v123: no slippage markup (match live)
+                entry_price = raw_price
+                entry_source = "dexscreener"
+
+            # v144.3: Shadow position_usd matches a hypothetical main allocation, so
+            # _override_exit_with_ultra_quote can compute token_amount and the dynamic
+            # slip model behaves identically. is_shadow=True still gates telegram alerts
+            # and bankroll updates (kept downstream).
+            shadow_alloc = float(token.get("_alloc_usd", budget_usd / max(top_n, 1)))
+            sol_price_entry = _get_sol_price()
 
             shadow_base = {
                 "cycle_ts": cycle_ts.isoformat(),
@@ -1283,8 +1298,14 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
                 "entry_mcap": float(token["market_cap"]) if token.get("market_cap") else None,
                 "status": "open",
                 "is_shadow": True,
-                "position_usd": 0,
                 "portfolio_budget": budget_usd,
+                "sol_price_at_entry": sol_price_entry,  # v144.3 parity
+                "dex_spot_price_at_entry": entry_price,
+                "high_price_seen": entry_price,
+                "entry_source": entry_source,
+                "unique_kols": token.get("unique_kols"),
+                "whale_new_entries": token.get("whale_new_entries"),
+                "momentum_mult": float(token["momentum_mult"]) if token.get("momentum_mult") else None,
             }
             # v92: A/B testing — thread experiment/variant into shadow rows
             if config.get("experiment_id"):
@@ -1317,6 +1338,11 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
                 if (addr, strat_name) in cooldown_combos:
                     continue
 
+                # v144.3: Apply Bot ML gate to shadows too — same skip/half logic as main.
+                # Currently disabled (ml_threshold=99) but enforces parity if re-enabled.
+                bot_ml_mult = _bot_ml_gate(token, strat_name, config)
+                if bot_ml_mult <= 0.0:
+                    continue
                 tranches = STRATEGIES[strat_name]
                 for tranche in tranches:
                     tp_price = entry_price * tranche["tp_mult"] if tranche.get("tp_mult") else None
@@ -1329,6 +1355,8 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
                         "horizon_minutes": tranche["horizon_min"],
                         "tranche_pct": tranche["pct"],
                         "tranche_label": tranche["label"],
+                        # v144.3: real position_usd so Ultra exit + slip model match mains
+                        "position_usd": round(shadow_alloc * tranche["pct"] * bot_ml_mult, 2),
                     })
                 # v108: Mark as opened so subsequent tokens in this call don't re-insert
                 open_combos.add((addr, strat_name))
@@ -1418,13 +1446,12 @@ _last_eval_ts: dict[str, float] = {}  # trade_id -> last evaluation timestamp
 def _should_evaluate_exit(trade: dict, now: datetime) -> bool:
     """v118: Check if this trade should be evaluated for exit.
     LAZY strategies are throttled to check less frequently.
-    Only applies to hybrid trades (position_usd > 0), NOT shadows.
-    Shadows keep CURRENT interval = control group for A/B test."""
+    v144.3: Apply LAZY throttling to ALL trades regardless of position_usd.
+    Previously skipped for shadows (pos=0), which biased shadow vs main A/B
+    by giving shadows constant polling instead of LAZY profile. Now shadows
+    get the same throttling as mains — true behavioral A/B."""
     strat = trade.get("strategy", "")
     if strat not in LAZY_STRATEGIES:
-        return True
-    # Shadows (position_usd=0) always use CURRENT interval (control group)
-    if float(trade.get("position_usd") or 0) == 0:
         return True
 
     trade_id = str(trade.get("id", ""))
@@ -1464,7 +1491,9 @@ def _override_exit_with_ultra_quote(client, trade: dict, ev: dict) -> dict:
     """
     if not ev or ev.get("status") is None:
         return ev
-    # Shadow trades (pos_usd=0) skip Ultra quote — they're analysis-only
+    # v144.3: Ultra quote applies to BOTH mains and shadows for behavioral A/B parity.
+    # Legacy shadows with pos_usd=0 (pre-v144.3) still bail out below since token_amount
+    # would be 0; new shadows have non-zero pos_usd and get the same Ultra quote as mains.
     pos_usd = float(trade.get("position_usd") or 0)
     entry_price = float(trade.get("entry_price") or 0)
     if pos_usd <= 0 or entry_price <= 0:
