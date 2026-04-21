@@ -187,15 +187,16 @@ Sweet-spot SCORE35 sur BE25 (extrapolation FAST_TP100_S35). LAZY_STRATEGIES nett
 **Problème** : sim mega_sweep top picks famille trail/dtrail/dip alors que paper/live confirment artefact (DTRAIL10 sim top vs live 65% reconciled, slip 47×)
 **Options** :
 - (a) Modéliser `position_reconciler` dans sim (~150 lignes)
-- (b) Per-family slip multiplier × 5-10 sur DTRAIL/TRAIL/DIP (~50 lignes)
+- (b) **✅ DONE v144.13 (Apr 21)** — `_mega_family_slip_mult` applique ×10 DTRAIL, ×8 TRAIL, ×6 DIP, ×5 SCALP, ×4 SPLIT. Le reste (FAST/BE/TP*/HIGHSCORE/MOONBAG) inchangé. Hybrides = worst-family wins. Les prochains `--mega-sweep` et `--mega-sweep-eval-history` utiliseront la nouvelle calibration automatiquement.
 - (c) Post-process flag `family_realism` dans `analyze_mega_sweep.py` — **fait Apr 20**, à itérer
 **Reco** : (b) data-driven simple, puis (a) si rigueur nécessaire
+**Next** : re-run mega_sweep extended overnight (~3h) et comparer rankings vs `_mega_sweep_extended.csv` pre-v144.13. Shadow DTRAIL/TRAIL/DIP devraient dégringoler de 30-70%, FAST/BE inchangés.
 
 ---
 
 ## 🧠 Gotcha
 - Supabase PostgREST cap 1000 rows même avec `.limit(10000)`. Toujours paginer via `.range(off, off+999)`.
-- **Sim mega_sweep over-estimates massivement** trail/dtrail/dip/HYST (45-57×). 44% du sweep est de cette famille → toujours filtrer via `family_realism` avant promotion.
+- **Sim mega_sweep over-estimates trail/dtrail/dip/HYST** (historique 45-57×). **Partiellement corrigé v144.13** via `_mega_family_slip_mult` (×10 DTRAIL, ×8 TRAIL, ×6 DIP, ×5 SCALP, ×4 SPLIT). Calibration conservative — re-calibrer quand N≥30 par famille live.
 - `slippage_actual_bps` column : signe opposé à `_dynamic_sell_slip_factor`. Utiliser per-pair PnL delta pour calibration.
 - **Dedup paper/live asymétrique** (intentionnel) : paper exclut rt_live, live n'inclut que rt_live. Edge case sur KOL recall <24h après SL — bias ~5-10% optimiste paper. Pas un bug, design OK.
 - **Per-trade Spearman ρ ≠ Per-strategy Spearman ρ** — par-trade ~0.9, par-strat ~0.7. Toujours préciser le niveau.
