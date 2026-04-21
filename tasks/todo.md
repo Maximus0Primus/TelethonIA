@@ -133,7 +133,13 @@ Sweet-spot SCORE35 sur BE25 (extrapolation FAST_TP100_S35). LAZY_STRATEGIES nett
 - Documenter règles HYST/DTRAIL/paired-test dans `docs/known_issues.md`
 
 ### 🔵 Sim-align follow-up (post v144.9)
-- **A/B mega sweep** : run `--mega-sweep` et `--mega-sweep-eval-history` côte à côte, comparer les rankings top-40 des deux CSVs. Delta rank ≥ 5 ⇒ strat biaisée par price_ticks. Priorité sur `BE25_TP80_SL30_S35` et `FAST_TP100_SL20_S35` (ajoutées v144.4/5 depuis price_ticks sweep).
+- **A/B mega sweep DONE (Apr 21)** : Spearman ρ=**0.225** (weak), 99.9% configs suspectes.
+  - `FAST_TP100_SL20_S35` : **faux positif PT** (rank 33 vs EH 404, Δ+371) — shadow-only, no harm
+  - `BE25_TP80_SL30_S35` : PT modérément optimiste (rank 21 vs EH 51, Δ+30)
+  - `HIGHSCORE_TP200_SL40` : **hidden gem massif** (PT 12665 vs EH 369, Δ−12296) → candidate scale-up post N≥30 paper
+  - `FAST_TP80_SL25` ⭐ rank 1 des DEUX sweeps → priorité absolue confirmée
+  - Famille let-it-run TP100 (DECAY/SLOW4H/6H/TP100_NOSL/SL60/SL70/MOONBAG/WIDE_RUNNER) = systématiquement sous-estimée par PT (Δ−82000). Déjà shadow.
+  - DTRAIL MCAP_MID cluster = artifact confirmé sur top 15 over-estimated
 - **Vrais bugs logiques résiduels** (gate v144.8 flagged) : 4 cas à investiguer quand N > 20 paired
   - `$BUZZED BE25` +11pp : sim `timeout_eod` mais live `timeout` — sim ne trigger pas le timeout
   - `$XBT BE25` −32pp : idem
