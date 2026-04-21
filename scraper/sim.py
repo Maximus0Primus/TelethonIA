@@ -4447,13 +4447,173 @@ def _mega_process_config(args):
     }
 
 
+def _mega_sweep_run_eh(args):
+    """v144.9: mega-sweep driven by paper_trades.eval_history (ground truth).
+
+    Universe = all closed paper trades with eval_history (live + paper, dedup'd
+    per token keeping the earliest entry). Each eval_history entry provides
+    (t, decision, exec, high) at true 30s cadence — identical to what the live
+    bot saw. Strategy dimension is tested by rebuilding fake_trade rows with
+    the candidate (tp, sl, horizon, be) and replaying via _mega_replay_one,
+    treating exec_price as the Jupiter feed. DS dimension unavailable (the
+    archive only persists the collapsed decision+exec pair) so source={jupiter}
+    only.
+    """
+    import multiprocessing as mp
+    import json as _json
+    import time as _time
+    import pandas as pd
+    import re as _re
+
+    csv_out = args.mega_csv_out or os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "_mega_sweep_eh.csv")
+    n_workers = args.mega_workers or min(12, mp.cpu_count() - 2)
+    since = args.mega_since
+
+    # Eval_history mode uses the same dimension grid except source (jupiter-only)
+    sources = ["jupiter"]
+    smoothings = _MEGA_EXT_SMOOTHINGS if getattr(args, "mega_sweep_extended", False) else _MEGA_SMOOTHINGS
+    polling_modes = _MEGA_EXT_POLLING_MODES if getattr(args, "mega_sweep_extended", False) else _MEGA_POLLING_MODES
+    filters = _MEGA_EXT_FILTERS if getattr(args, "mega_sweep_extended", False) else _MEGA_FILTERS
+    print(f"\n*** MEGA SWEEP — EVAL_HISTORY MODE (v144.9) ***")
+    print(f"  sources={len(sources)} smoothings={len(smoothings)} polling={len(polling_modes)} filters={len(filters)}")
+    print(f"  per-strat configs: {len(sources)*len(smoothings)*len(polling_modes)*len(filters)}")
+    t0 = _time.time()
+
+    from strategies import STRATEGIES as _STRATS
+    full_pool = {}
+    for name, tranches in _STRATS.items():
+        tr0 = tranches[0]
+        tp = tr0.get("tp_mult")
+        sl = tr0.get("sl_mult", 0.50)
+        h = tr0.get("horizon_min", 120) or 120
+        be_m = _re.match(r"^BE(\d+)_TP", name)
+        be_act = int(be_m.group(1)) / 100 if be_m else None
+        full_pool[name] = (tp, sl, h, be_act)
+    full_pool.update(_MEGA_NEW_STRATS)
+    print(f"Strategies: {len(full_pool)}")
+
+    # Fetch closed trades with eval_history — both paper and live contribute.
+    # Dedup per token keeping the earliest entry so the sweep doesn't double-
+    # count the same token via its live copy.
+    params = [
+        ("select", "id,token_address,created_at,entry_price,rt_liquidity_usd,"
+                   "rt_score,kol_group,entry_mcap,source,eval_history"),
+        ("created_at", f"gte.{since}"),
+        ("status", "in.(tp_hit,sl_hit,be_stop,trail_stop,timeout)"),
+        ("eval_history", "not.is.null"),
+        ("order", "created_at"),
+    ]
+    rows = sb_get("paper_trades", params)
+    print(f"Raw: {len(rows)} trades with eval_history since {since}")
+
+    by_token = {}
+    for r in rows:
+        eh = r.get("eval_history")
+        if not isinstance(eh, list) or len(eh) < 3:
+            continue
+        tok = r["token_address"]
+        if tok not in by_token or r["created_at"] < by_token[tok]["created_at"]:
+            by_token[tok] = r
+    universe = list(by_token.values())
+    print(f"Universe: {len(universe)} unique tokens (dedup'd, ≥3 polls each)")
+
+    # Build fake "ticks" dict — eval_history's exec field maps to Jupiter ticks.
+    # DS bucket stays empty; sources != jupiter will skip these tokens in
+    # _mega_replay_one (base = ds = None → continue). That's the expected
+    # behaviour: eval_history doesn't have a separate DS stream.
+    ticks = {}
+    for u in universe:
+        eh = u["eval_history"]
+        jp_ticks = []
+        for p in eh:
+            try:
+                e = p.get("e")
+                t_iso = p.get("t")
+                if e is None or t_iso is None or float(e) <= 0:
+                    continue
+                jp_ticks.append({
+                    "fetched_at": t_iso.replace("+00:00", "Z") if "+" in t_iso else t_iso,
+                    "price_usd": float(e),
+                    "source": "jupiter",
+                })
+            except Exception:
+                continue
+        if jp_ticks:
+            ticks[u["token_address"]] = {"jp": jp_ticks, "ds": []}
+    print(f"  {len(ticks)} tokens with usable jp stream")
+
+    if ticks:
+        jp_counts = [len(v["jp"]) for v in ticks.values()]
+        import statistics as _stx
+        print(f"  Jupiter coverage (eval_history): median={_stx.median(jp_counts):.0f} ticks/token  "
+              f"min={min(jp_counts)}  max={max(jp_counts)}")
+        print(f"  (No DS bucket — eval_history persists decision+exec only)")
+
+    ticks_path = os.path.join(os.path.dirname(csv_out), "_mega_ticks_eh_tmp.json")
+    with open(ticks_path, "w") as f:
+        _json.dump(ticks, f)
+    print(f"  ticks JSON: {ticks_path} ({os.path.getsize(ticks_path)/1e6:.1f} MB)")
+
+    jobs = []
+    for strat_name, (tp, sl, h, be) in full_pool.items():
+        for fname in filters:
+            for src in sources:
+                for smooth in smoothings:
+                    for poll in polling_modes:
+                        jobs.append((strat_name, tp, sl, h, be, fname, src, smooth, poll, universe))
+    total = len(jobs)
+    print(f"\nTotal configs: {total}")
+    print(f"Launching {n_workers} workers...\n")
+    results = []
+    t_start = _time.time()
+    with mp.Pool(n_workers, initializer=_mega_init_worker, initargs=(ticks_path,)) as pool:
+        for i, r in enumerate(pool.imap_unordered(_mega_process_config, jobs, chunksize=50)):
+            if r is not None:
+                results.append(r)
+            if (i+1) % 2000 == 0:
+                pct = 100 * (i+1) / total
+                el = _time.time() - t_start
+                eta = el / (i+1) * (total - i - 1)
+                print(f"  {i+1}/{total} ({pct:.1f}%) in {el:.0f}s, ETA {eta:.0f}s", flush=True)
+
+    try:
+        os.remove(ticks_path)
+    except Exception:
+        pass
+
+    df = pd.DataFrame(results)
+    df.to_csv(csv_out, index=False)
+    print(f"\n{len(df)} valid rows / {total} configs -> {csv_out}")
+    print(f"Total time: {_time.time()-t0:.0f}s")
+
+    if not df.empty:
+        df = df.sort_values("dollars_per_day", ascending=False)
+        print("\n" + "=" * 120)
+        print("TOP 40 BY $/DAY (EVAL_HISTORY MODE — A/B vs price_ticks mega sweep)")
+        print("=" * 120)
+        print(df.head(40)[["strategy", "filter", "source", "smoothing", "polling_mode",
+                           "n", "wr_pct", "avg_pnl_pct", "median_pnl_pct", "dollars_per_day"]].to_string(index=False))
+        print("\nDONE. Compare rankings with _mega_sweep_full.csv to catch "
+              "price_ticks-induced bias (diff >= 5 ranks = suspect).")
+
+
 def _mega_sweep_run(args):
     """v140: full mega sweep entry point. Multiprocessing grid sweep.
 
     v144: --mega-sweep-extended swaps dimension lists for the full matrix
     (9 polling modes × 12 filters × 3 sources × 9 smoothings = 2916 configs
     per strategy, ~800K total). Runtime several hours. More ticks = slower.
+
+    v144.9: --mega-sweep-eval-history routes universe+ticks through
+    paper_trades.eval_history instead of price_ticks. Universe becomes the set
+    of tokens actually traded live/paper (ground truth, 30s polling resolution).
+    Use A/B vs the price_ticks-based mega sweep to catch ranking bias induced
+    by Jupiter tick sparsity in the archive logger.
     """
+    if getattr(args, "mega_sweep_eval_history", False):
+        _mega_sweep_run_eh(args)
+        return
     import multiprocessing as mp
     import json as _json
     import time as _time
@@ -4535,6 +4695,26 @@ def _mega_sweep_run(args):
             ticks[addr] = {"jp": jp, "ds": ds}
         if (i+1) % 20 == 0: print(f"  {i+1}/{len(universe)}", flush=True)
     print(f"  {len(ticks)} with ticks ({_time.time()-t0:.0f}s)")
+
+    # v144.9: Jupiter coverage stats — warn when price_ticks is sparse on Jupiter.
+    # price_ticks logs Jupiter at 3-min batch cadence vs live 30s polling; tokens
+    # that drop out of the active rotation end up with 0-2 jup ticks in window,
+    # forcing the replay to fall back to DS-only. Heavy DS-fallback skews rankings
+    # towards strats tolerant to DS noise. Prefer --mega-sweep-eval-history for
+    # clean ranking, or interpret this run accordingly.
+    if ticks:
+        jp_counts = [len(v["jp"]) for v in ticks.values()]
+        ds_counts = [len(v["ds"]) for v in ticks.values()]
+        n_zero_jp = sum(1 for c in jp_counts if c == 0)
+        n_low_jp = sum(1 for c in jp_counts if c < 10)
+        import statistics as _stx
+        print(f"\n  Jupiter coverage: median={_stx.median(jp_counts):.0f} ticks/token  "
+              f"zero_jup={n_zero_jp}/{len(ticks)} ({100*n_zero_jp/len(ticks):.1f}%)  "
+              f"<10_jup={n_low_jp}/{len(ticks)} ({100*n_low_jp/len(ticks):.1f}%)")
+        print(f"  DS coverage:      median={_stx.median(ds_counts):.0f} ticks/token")
+        if n_zero_jp / len(ticks) > 0.15:
+            print(f"  [WARN] >15% tokens have 0 Jupiter ticks — jup-source results biased "
+                  f"towards DS fallback. Cross-check with --mega-sweep-eval-history.")
 
     ticks_path = os.path.join(os.path.dirname(csv_out), "_mega_ticks_tmp.json")
     with open(ticks_path, "w") as f:
@@ -4697,6 +4877,13 @@ def main():
                              "filters, volume_gated smoothing). ~5× the configs vs --mega-sweep. "
                              "Runtime several hours (meant to run afternoon/overnight). Output: "
                              "_mega_sweep_extended.csv.")
+    parser.add_argument("--mega-sweep-eval-history", action="store_true",
+                        help="v144.9: mega sweep driven by paper_trades.eval_history instead of "
+                             "price_ticks. Universe = tokens actually traded (live/paper). "
+                             "Source forced to jupiter (eval_history has no DS stream). "
+                             "Resolution 30s (ground truth) vs 3-min batch in price_ticks. "
+                             "Use A/B vs --mega-sweep to detect ranking bias from Jupiter "
+                             "tick sparsity in the archive. Output: _mega_sweep_eh.csv.")
     parser.add_argument("--mega-workers", type=int, default=0,
                         help="Workers for --mega-sweep (default: min(12, cpu_count-2))")
     parser.add_argument("--mega-csv-out", type=str, default=None,
@@ -4954,7 +5141,9 @@ def main():
     # MEGA SWEEP (v140): full strategies × filters × sources × smoothings × polling
     # multiprocessing grid sweep. Uses _evaluate_trade_exit (v138.5 slip).
     # =====================================================================
-    if getattr(args, "mega_sweep", False) or getattr(args, "mega_sweep_extended", False):
+    if (getattr(args, "mega_sweep", False)
+            or getattr(args, "mega_sweep_extended", False)
+            or getattr(args, "mega_sweep_eval_history", False)):
         _mega_sweep_run(args)
         return
 

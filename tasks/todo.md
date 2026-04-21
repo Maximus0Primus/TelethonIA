@@ -1,4 +1,4 @@
-# Pipeline Status — Updated Apr 20, 2026 (v144.5 complete)
+# Pipeline Status — Updated Apr 21, 2026 (v144.9 sim-align overhaul)
 
 ## Current state
 
@@ -8,7 +8,32 @@
 
 ---
 
-## v144.x deployed today (Apr 20)
+## v144.6-9 deployed Apr 21 (sim alignment overhaul)
+
+### v144.6 — Fix LAZY throttling for live_sync shadows
+Nightly_outlier_monitor a flaggé 4 outliers sync=True post-v144.3 (ASMORA +21pp, SAEP +25pp, TRUST x2). Cause : v144.3 a retiré le shortcut `if pos_usd==0: return True` dans `_should_evaluate_exit`, donc les paper rows `entry_source="live_sync"` (v142E shadow-sync) se sont retrouvées LAZY-throttled (180-600s) alors qu'elles doivent mirror la cadence live (30s). Fix : bypass LAZY quand `entry_source="live_sync"`. Shadows A/B purs gardent LAZY.
+
+### v144.7 — Sim-align gate via eval_history (not price_ticks)
+`sim-align-gate.yml` fail chronique 3 jours (Apr 19-20-21). Root cause : `verify_sim_live_alignment.py` reconstruisait l'input prix depuis `price_ticks` qui sample Jupiter à 3-min batch vs live 30s polling. Tokens hors rotation active → 0% coverage Jupiter → sim fallback `timeout_eod` bidons. Fix : switched to `paper_trades.eval_history` JSONB (v138+, chaque poll persisté), replay via `sim._replay_from_eval_history`. **avg=-3.78pp → -1.16pp** (3.3× mieux).
+
+### v144.8 — Gate compares replay vs paper_sim_pnl_pct (apples-to-apples)
+Encore des "divergences" trompeuses parce que le gate comparait sim_replay vs live.pnl_pct, et live.pnl_pct inclut le fill Jupiter Ultra réel (slippage positif sur spikes, ex: $CHUCHU TP=+50% fill=+120%). Fix : compare vs `paper_sim_pnl_pct` (colonne v143.6 persistée par live_trader.py:1174 — "ce que paper aurait book avec le même input"). Colonne "Jup slip" ajoutée en info. **avg=-1.16pp → -0.61pp**, max Jup slip ±0.5pp typique confirme Ultra RFQ near-zero. Aussi migré `scripts/diverge_report.py` pour préférer eval_history.
+
+### v144.9 — mega_sweep A/B price_ticks vs eval_history
+Le mega_sweep (discovery de strats, dernier output = BE25_S35 + FAST_TP100_S35 v144.4/5) lisait `price_ticks` → même biais structurel 3-min Jupiter. Deux patches :
+- **A (minimaliste)** : warning coverage dans `_mega_sweep_run`. Affiche `median jup ticks/token`, `% zero_jup`, `% <10_jup`. Alerte si >15% zero_jup ⇒ résultats biaisés DS fallback.
+- **B (propre)** : nouveau flag `--mega-sweep-eval-history`. Universe = tokens tradés avec `eval_history`. Source forcée à jupiter (eval_history n'a pas de DS stream). Output `_mega_sweep_eh.csv`.
+
+Usage A/B :
+```
+python scraper/sim.py --mega-sweep                  # legacy price_ticks
+python scraper/sim.py --mega-sweep-eval-history     # ground truth
+# Compare rankings; strats avec delta rank ≥ 5 = suspectes.
+```
+
+---
+
+## v144.x deployed Apr 20
 
 ### v144.1 — 4 retraits HYST/DS losers from hybrid
 Pair-test 7d (N=38-69) :
@@ -97,6 +122,17 @@ Sweet-spot SCORE35 sur BE25 (extrapolation FAST_TP100_S35). LAZY_STRATEGIES nett
 - Migrer `paired_all_v144_shadows.py` + `analyze_mega_sweep.py` + `verify_shadow_main_parity.py` en CI nightly
 - Documenter règles HYST/DTRAIL/paired-test dans `docs/known_issues.md`
 
+### 🔵 Sim-align follow-up (post v144.9)
+- **A/B mega sweep** : run `--mega-sweep` et `--mega-sweep-eval-history` côte à côte, comparer les rankings top-40 des deux CSVs. Delta rank ≥ 5 ⇒ strat biaisée par price_ticks. Priorité sur `BE25_TP80_SL30_S35` et `FAST_TP100_SL20_S35` (ajoutées v144.4/5 depuis price_ticks sweep).
+- **Vrais bugs logiques résiduels** (gate v144.8 flagged) : 4 cas à investiguer quand N > 20 paired
+  - `$BUZZED BE25` +11pp : sim `timeout_eod` mais live `timeout` — sim ne trigger pas le timeout
+  - `$XBT BE25` −32pp : idem
+  - `$ZACHXBT BE25` +12pp : status match (be_stop/be_stop) mais exit_price diverge — bug formule be_stop
+  - `$ACHI BE25` −12pp (dont 4.7pp Jup slip) : mix logique + slippage
+- **Assouplir threshold gate** (optionnel) : `sim-align-gate.yml` passer `within_10pp >= 80%` → 70% si v144.8 ne suffit pas à le faire vert. Seuil actuel est cohérent avec le signal propre, laisser 80% pour forcer l'investigation des 4 bugs résiduels.
+- **Attendre 48-72h** : la colonne `paper_sim_pnl_pct` se remplit progressivement (17/45 trades actuels). Gate plus stable avec N≥40.
+- **Backfill eval_history** pré-v138 : N/A (pré-v138 n'a pas la colonne, laisser filtrer naturellement).
+
 ### 🟠 Actions après verdicts
 - **NOZEROLIQ_TP200_SL40** : si pattern perdant à N≥30, retirer du hybrid (~+$8/j net)
 - **Top winners shadow paired** : promouvoir 1-2 en main paper si Δpp ≥ +5pp
@@ -175,14 +211,15 @@ Sweet-spot SCORE35 sur BE25 (extrapolation FAST_TP100_S35). LAZY_STRATEGIES nett
 
 ## Workflow sim
 
-| Mode | Flag | Use case |
-|---|---|---|
-| Focused grid | `--from-ticks` | Ranking rapide |
-| Ground truth | `--from-trades` | Vérité historique |
-| 0% bias | `--from-eval-history` | Perfect replay |
-| Standard sweep | `--mega-sweep` | 7 filters × 2 sources × 8 smooth × 5 poll |
-| Extended sweep | `--mega-sweep-extended` | 12 filters × 3 sources × 9 smooth × 10 poll = 874K configs (~3h) |
-| Annotation | `analyze_mega_sweep.py` | Multi-test correction (FDR/Bonferroni) + family_realism flag |
+| Mode | Flag | Source | Biais | Use case |
+|---|---|---|---|---|
+| Focused grid | `--from-ticks` | price_ticks | ⚠️ 3-min jup batch | Ranking rapide legacy |
+| Ground truth | `--from-trades` | paper_trades.pnl_pct | ✅ exact | Vérité historique (strats déjà tradées) |
+| 0% bias | `--from-eval-history` | eval_history JSONB | ✅ 30s exact | Perfect replay per-trade |
+| Standard sweep | `--mega-sweep` | price_ticks | ⚠️ biaisé | Discovery legacy (warning coverage depuis v144.9) |
+| Extended sweep | `--mega-sweep-extended` | price_ticks | ⚠️ biaisé | 874K configs (~3h) |
+| **Ground truth sweep** | `--mega-sweep-eval-history` | eval_history | ✅ 30s | **v144.9 — A/B vs legacy, discover sans biais** |
+| Annotation | `analyze_mega_sweep.py` | — | — | Multi-test correction (FDR/Bonferroni) + family_realism flag |
 
 ## Scripts (`scripts/`)
 
@@ -205,6 +242,10 @@ Sweet-spot SCORE35 sur BE25 (extrapolation FAST_TP100_S35). LAZY_STRATEGIES nett
 
 ## Historique récent
 
+- **v144.9** (Apr 21) mega_sweep A/B : warning coverage jup (A) + `--mega-sweep-eval-history` mode (B)
+- **v144.8** (Apr 21) Sim-align gate apples-to-apples (vs `paper_sim_pnl_pct`, Jup slip info) + diverge_report migration
+- **v144.7** (Apr 21) Sim-align gate switched from price_ticks to eval_history replay (−3.78pp → −1.16pp)
+- **v144.6** (Apr 21) Fix LAZY throttling bypass pour live_sync shadows (4 outliers Apr 21)
 - **v144.5** (Apr 20 PM) BE25_TP80_SL30_S35 + LAZY_STRATEGIES cleanup (4 dead entries)
 - **v144.4** (Apr 20 PM) FAST_TP100_SL20_S35 — top robust sweep cluster
 - **v144.3** (Apr 20 PM) Shadow ↔ main behavioral parity (LAZY + Ultra exit + position)
