@@ -4340,6 +4340,43 @@ def _mega_apply_filter(u, fname):
 
 _MEGA_SELL_SLIP_BASE = 1 - 10/10_000
 
+# v144.13 — per-family slip calibration (Sprint #2 option b).
+# Memory Apr 20 (dtrail_shadow_artifact_apr20.md): "Paper models 200 bps sell
+# slip; live actual = 9429 bps (47×)". DTRAIL / TRAIL / DIP / SPLIT / SCALP
+# all exit on dynamic triggers (trail stops, dip rebuys, scalp tight TPs) where
+# Jupiter Ultra fill diverges from the modeled tick price far more than for
+# static TP/SL strats. Mega_sweep applies uniform 10bps slip, which:
+#   - OVERESTIMATES trail/dtrail/dip rankings by 5-10× (44% of sweep universe)
+#   - Matches fine for FAST/BE/TP* static exits.
+# Multipliers are conservative first-pass (not the full 47× which would zero
+# out all trail P&L). Revisit with live calibration once N≥30 per family.
+_MEGA_FAMILY_SLIP_MULT = {
+    # Ordered by descending multiplier — first match wins (= worst slip wins),
+    # so a hybrid like SPLIT_50_TRAIL_SL50 inherits TRAIL's 8× (conservative).
+    "DTRAIL":  10.0,   # 100 bps effective — narrow trails on memecoins = catastrophic slip
+    "TRAIL":    8.0,   #  80 bps — wide trails a bit less bad
+    "DIP":      6.0,   #  60 bps — staged re-entries
+    "SCALP":    5.0,   #  50 bps — tiny TPs amplify any slip
+    "SPLIT":    4.0,   #  40 bps — partial exits compound slippage
+}
+
+
+def _mega_family_slip_mult(strat_name: str) -> float:
+    """Return slip multiplier for strategy family. 1.0 if static TP/SL strat.
+
+    Scans the ordered _MEGA_FAMILY_SLIP_MULT dict and returns the first match
+    by prefix or embedded suffix (`_FAMILY`). Dict is ordered by descending
+    multiplier so hybrid strategies take the worst slip — e.g. SPLIT_TRAIL
+    gets TRAIL's 8× rather than SPLIT's 4×.
+    """
+    if not strat_name:
+        return 1.0
+    up = strat_name.upper()
+    for prefix, mult in _MEGA_FAMILY_SLIP_MULT.items():
+        if up.startswith(prefix) or f"_{prefix}" in up:
+            return mult
+    return 1.0
+
 
 def _mega_replay_one(tp_mult, sl_mult, horizon_min, be_act,
                     jp_sorted, ds_sorted, entry_price, entry_time_iso,
@@ -4359,6 +4396,10 @@ def _mega_replay_one(tp_mult, sl_mult, horizon_min, be_act,
     if not poll_offsets: return None
     sl_price = entry_price * sl_mult
     tp_price = entry_price * tp_mult if tp_mult else None
+    # v144.13: apply per-family slip correction. Base is 10bps (1 - 10/10_000);
+    # trail/dtrail/dip/split/scalp get multiplier 4-10× to match live reality.
+    _family_mult = _mega_family_slip_mult(strat_name)
+    _sell_slip = 1 - (10 * _family_mult) / 10_000 if _family_mult != 1.0 else _MEGA_SELL_SLIP_BASE
     fake_trade = {
         "id": trade_id, "entry_price": entry_price,
         "sl_price": sl_price, "tp_price": tp_price,
@@ -4389,7 +4430,7 @@ def _mega_replay_one(tp_mult, sl_mult, horizon_min, be_act,
         if base is None or exec_p is None: continue
         last_exec = exec_p
         dec_p = _mega_smooth(st, base, smoothing, sl_price, tp_price)
-        ev = _evaluate_trade_exit(fake_trade, exec_p, poll_time, _MEGA_SELL_SLIP_BASE,
+        ev = _evaluate_trade_exit(fake_trade, exec_p, poll_time, _sell_slip,
                                   sell_fee_bps=0, decision_price=dec_p)
         if ev is None: continue
         if ev.get("high_price_seen") is not None:
