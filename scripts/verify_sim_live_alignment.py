@@ -1,21 +1,23 @@
 """
-Preuve d'alignement : rejoue les trades live réels dans le sim avec --from-live-config,
-et compare le PnL simulé au PnL réel on-chain.
+Preuve d'alignement : rejoue les trades live reels via paper_trades.eval_history
+(polls persistes par live_trader + paper_trader depuis v138), et compare le PnL
+simule au PnL reel on-chain.
+
+v144.7: switched from price_ticks reconstruction to eval_history replay.
+price_ticks logs Jupiter at 3-min batch cadence, which is too coarse vs the
+30s live polling. eval_history stores every (decision_price, exec_price) pair
+the live bot actually saw, so replay is mathematically identical input —
+divergence is now a pure logic check rather than a tick-sampling artifact.
 """
 import os
 import sys
-from datetime import datetime
 from collections import defaultdict
 from dotenv import load_dotenv
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scraper"))
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", "scraper", ".env"))
 from supabase import create_client
-import paper_trader as _pt
-from paper_trader import (
-    _strategy_orchestration, _decision_price, _evaluate_trade_exit,
-    _jupiter_prices_cache, _dex_prices_cache, _ema_state, _smooth_state,
-)
+from sim import _replay_from_eval_history
 
 sb = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_ROLE_KEY"])
 
@@ -29,8 +31,7 @@ def fetch_all(table, **f):
         for k, v in f.items():
             if k.startswith("gte_"): q = q.gte(k[4:], v)
             elif k.startswith("eq_"): q = q.eq(k[3:], v)
-            elif k == "in_token": q = q.in_("token_address", v)
-        q = q.range(offset, offset+step-1).order("fetched_at" if "tick" in table else "created_at")
+        q = q.range(offset, offset+step-1).order("created_at")
         r = q.execute()
         if not r.data: break
         out.extend(r.data)
@@ -39,193 +40,64 @@ def fetch_all(table, **f):
     return out
 
 
-def fetch_live_cfg():
-    r = sb.table("scoring_config").select("rt_trade_config").eq("id", 1).execute()
-    cfg = r.data[0]["rt_trade_config"]
-    if isinstance(cfg, str):
-        import json; cfg = json.loads(cfg)
-    return cfg
-
-
-def replay_trade(trade, ticks, live_cfg):
-    """Replay a trade through historical ticks using production orchestration config.
-
-    v143: feeds the real `_decision_price` (all smoothing modes supported:
-    median_3/5, hysteresis, winsor_p95, ema_fast/slow, twin_confirm, vwap_5min,
-    jp_sampled_*, dual_confirm, confirm). Ticks are merged chronologically and
-    populate the per-addr Jupiter/DS caches exactly as the live scraper does;
-    eval fires at `polling_sec` cadence and uses the smoothed decision price.
-
-    v144.6: skip trades where the strategy requires Jupiter source but the
-    price_tick logger captured too few jupiter ticks in-window to drive a fair
-    replay. Live trades poll Jupiter at 30s continuously; price_ticks samples
-    Jupiter in a 3-min batch, so tokens dropped from the active rotation end
-    up with 0% Jupiter coverage — the replay then has no way to trigger exits
-    and falls through to timeout_eod with a stale last-tick DS price, which
-    is not a real sim-vs-live divergence.
-    """
-    strategy = trade["strategy"]
-    orch = _strategy_orchestration(strategy, live_cfg)
-    polling_sec = int(orch.get("polling_sec", 30))
-    addr = trade["token_address"]
-
-    # v144.6: filter on Jupiter coverage BEFORE replay for strategies that
-    # need Jupiter in _decision_price. Source resolution mirrors paper_trader.
-    from paper_trader import _parse_legacy_price_source
-    src_cfg = orch.get("source")
-    if not src_cfg:
-        src_cfg, _ = _parse_legacy_price_source(orch.get("price_source", "jupiter"))
-    needs_jup = src_cfg in ("jupiter", "hybrid", "confirm", "both")
-
-    # Merge ticks chronologically with source tag
-    merged = []
-    n_jup_in_window = 0
-    horizon_min = float(trade.get("horizon_minutes", 120))
-    created = datetime.fromisoformat(trade["created_at"].replace("Z", "+00:00"))
-    horizon_end = created.timestamp() + horizon_min * 60
-    for t in ticks:
-        p = float(t.get("price_usd") or 0)
-        if p <= 0:
-            continue
-        ts = t["fetched_at"]
-        if ts < trade["created_at"]:
-            continue
-        src = "jp" if t["source"] == "jupiter" else ("ds" if t["source"] in ("fast","full","live") else None)
-        if src:
-            merged.append((ts, src, p))
-            if src == "jp":
-                tts = datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
-                if tts <= horizon_end:
-                    n_jup_in_window += 1
-    merged.sort(key=lambda x: x[0])
-    if not merged:
-        return None, "no_ticks"
-    if needs_jup and n_jup_in_window < 3:
-        return None, "insufficient_jup_ticks"
-
-    # Isolate per-trade smoother state (caches are per-addr, must clear entry)
-    trade_id = f"replay_{trade['id']}"
-    _ema_state.pop(trade_id, None)
-    _smooth_state.pop(trade_id, None)
-    _jupiter_prices_cache.pop(addr, None)
-    _dex_prices_cache.pop(addr, None)
-
-    fake = dict(trade)
-    fake["id"] = trade_id
-    # Critical: reset high_price_seen — the persisted value from the closed live
-    # trade (often the run peak) would make BE / trail-activation fire at tick 1
-    # before the replay has even seen price move. Mirror sim.py: start at entry.
-    entry = float(trade["entry_price"])
-    fake["high_price_seen"] = entry
-
-    last_eval_t = None
-
-    for ts, src, p in merged:
-        # Update the cache that the live scraper would have populated
-        if src == "jp":
-            _jupiter_prices_cache[addr] = p
-        else:
-            _dex_prices_cache[addr] = p
-
-        tt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-        if last_eval_t is not None and (tt - last_eval_t).total_seconds() < polling_sec:
-            continue  # cache updated, but don't eval yet
-
-        dec_price, exit_ref = _decision_price(addr, strategy, trade_id, orch, trade=fake)
-        if dec_price is None:
-            continue  # waiting on the required source
-        if exit_ref is None:
-            exit_ref = dec_price
-
-        last_eval_t = tt
-        ev = _evaluate_trade_exit(fake, exit_ref, tt, sell_slip_factor=1.0,
-                                   sell_fee_bps=0, decision_price=dec_price)
-        if ev is None:
-            continue
-        if ev.get("high_price_seen"):
-            new_high = ev["high_price_seen"]
-            if new_high > float(fake.get("high_price_seen") or 0):
-                fake["high_price_seen"] = new_high
-        if ev.get("status"):
-            # Cleanup per-trade state before returning
-            _ema_state.pop(trade_id, None)
-            _smooth_state.pop(trade_id, None)
-            return ev["pnl_pct"], ev["status"]
-
-    # Fallback: timeout at last merged tick
-    _ema_state.pop(trade_id, None)
-    _smooth_state.pop(trade_id, None)
-    _, _, last_p = merged[-1]
-    return round((last_p / entry) - 1, 4), "timeout_eod"
-
-
 def main():
-    print("Loading live trades post-v131...")
+    print("Loading closed live trades with eval_history...")
     live_trades = fetch_all("paper_trades", gte_created_at=SINCE)
-    live_trades = [t for t in live_trades if t.get("source") == "rt_live" and t.get("tx_signature") and t.get("status") in ("sl_hit","trail_stop","tp_hit","timeout","be_stop")]
-    print(f"  {len(live_trades)} closed live trades")
+    live_trades = [t for t in live_trades
+                   if t.get("source") == "rt_live"
+                   and t.get("tx_signature")
+                   and t.get("status") in ("sl_hit", "trail_stop", "tp_hit", "timeout", "be_stop")]
+    print(f"  {len(live_trades)} closed live trades in window")
 
-    if not live_trades:
-        print("No closed live trades to compare.")
+    with_history = [t for t in live_trades
+                    if isinstance(t.get("eval_history"), list) and len(t["eval_history"]) >= 2]
+    print(f"  {len(with_history)} have eval_history (≥2 polls)")
+    skipped_no_hist = len(live_trades) - len(with_history)
+
+    if not with_history:
+        print("No live trades with eval_history to compare.")
         return
 
-    tokens = list({t["token_address"] for t in live_trades})
-    print(f"  Loading ticks for {len(tokens)} tokens...")
-    ticks = fetch_all("price_ticks", gte_fetched_at=SINCE, in_token=tokens)
-    print(f"  {len(ticks)} ticks")
-
-    by_token = defaultdict(list)
-    for tk in ticks:
-        by_token[tk["token_address"]].append(tk)
-
-    print("\nLoading live orchestration config from DB...")
-    rt_cfg = fetch_live_cfg()
-    overrides = rt_cfg.get("strategy_overrides", {})
-    for s, ov in overrides.items():
-        print(f"    {s:30s}  poll={ov.get('polling_sec','-')}s  src={ov.get('price_source','-')}")
-
-    print(f"\n{'Symbol':<14}{'Strategy':<25}{'Live PnL':>10}{'Sim PnL':>10}{'Diff (pp)':>12}{'Status live':>14}{'Status sim':>14}")
-    print("-"*100)
+    print(f"\n{'Symbol':<14}{'Strategy':<25}{'Live PnL':>10}{'Sim PnL':>10}"
+          f"{'Diff (pp)':>12}{'Status live':>14}{'Status sim':>14}{'N_polls':>10}")
+    print("-" * 110)
 
     diffs = []
     per_strat = defaultdict(list)
-    n_skip_jup = 0
-    n_skip_eod = 0
-    for tr in live_trades:
+    for tr in with_history:
         pnl_live = float(tr.get("pnl_pct") or 0) * 100
         status_live = tr.get("status")
-        sim_pnl, sim_status = replay_trade(tr, by_token[tr["token_address"]], rt_cfg)
-        if sim_pnl is None:
-            if sim_status == "insufficient_jup_ticks":
-                n_skip_jup += 1
-            print(f"{tr['symbol']:<14}{tr['strategy']:<25}{pnl_live:>9.2f}%{sim_status:>12}  [SKIPPED]")
+        fake = dict(tr)
+        # Reset high_price_seen so replay tracks from entry, not from the persisted peak
+        fake["high_price_seen"] = float(tr["entry_price"])
+        result = _replay_from_eval_history(fake, tr["eval_history"])
+        if result is None:
             continue
-        # v144.6: timeout_eod means the replay never triggered any exit (no jup
-        # ticks fed _decision_price, or last eval before horizon). Not a fair
-        # apples-to-apples comparison — live had continuous Jupiter polling.
-        if sim_status == "timeout_eod":
-            n_skip_eod += 1
-            print(f"{tr['symbol']:<14}{tr['strategy']:<25}{pnl_live:>9.2f}%{sim_pnl*100:>9.2f}%"
-                  f"{(sim_pnl*100 - pnl_live):>11.2f}pp{status_live:>14}{sim_status:>14}  [SKIPPED]")
-            continue
-        sim_pnl_pct = sim_pnl * 100
+        sim_pnl_pct = float(result["pnl_pct"]) * 100
+        sim_status = result["exit_reason"]
         diff_pp = sim_pnl_pct - pnl_live
+        n_polls = len(tr["eval_history"])
+        # eval_history replay never hits insufficient-data since it's the exact
+        # poll stream the live bot saw. timeout_eod only surfaces when the live
+        # trade closed before any status triggered in the replay — meaning the
+        # strategy logic itself missed an exit the live bot took. That IS a bug.
         diffs.append(diff_pp)
         per_strat[tr["strategy"]].append(diff_pp)
-        print(f"{tr['symbol']:<14}{tr['strategy']:<25}{pnl_live:>9.2f}%{sim_pnl_pct:>9.2f}%{diff_pp:>11.2f}pp{status_live:>14}{sim_status:>14}")
+        print(f"{tr['symbol']:<14}{tr['strategy']:<25}{pnl_live:>9.2f}%{sim_pnl_pct:>9.2f}%"
+              f"{diff_pp:>11.2f}pp{status_live:>14}{sim_status:>14}{n_polls:>10}")
 
     if diffs:
-        print("-"*100)
-        avg_diff = sum(diffs)/len(diffs)
+        print("-" * 110)
+        avg_diff = sum(diffs) / len(diffs)
         max_diff = max(abs(d) for d in diffs)
-        print(f"\nAligned on {len(diffs)} trades. Avg diff = {avg_diff:+.2f}pp | Max |diff| = {max_diff:.2f}pp")
-        print(f"Skipped: {n_skip_jup} insufficient_jup_ticks, {n_skip_eod} timeout_eod (price_ticks 3-min batch gaps)")
+        print(f"\nAligned on {len(diffs)} trades (skipped {skipped_no_hist} without eval_history). "
+              f"Avg diff = {avg_diff:+.2f}pp | Max |diff| = {max_diff:.2f}pp")
         if max_diff < 3:
-            print("[OK] ALIGNMENT VERIFIED - all sim vs live diffs under 3pp (within noise)")
+            print("[OK] ALIGNMENT VERIFIED - all sim vs live diffs under 3pp (logic identical)")
         elif max_diff < 10:
-            print("[WARN] PARTIAL ALIGNMENT - some diffs up to 10pp (tick sampling gaps likely)")
+            print("[WARN] PARTIAL ALIGNMENT - some diffs up to 10pp (possible logic drift)")
         else:
-            print("[FAIL] MISALIGNMENT DETECTED - diffs >10pp, investigate orchestration logic")
+            print("[FAIL] MISALIGNMENT DETECTED - diffs >10pp, real sim vs live logic bug")
 
         import statistics as _st
         print("\n=== Per-strategy diff breakdown ===")
