@@ -1449,9 +1449,14 @@ def _should_evaluate_exit(trade: dict, now: datetime) -> bool:
     v144.3: Apply LAZY throttling to ALL trades regardless of position_usd.
     Previously skipped for shadows (pos=0), which biased shadow vs main A/B
     by giving shadows constant polling instead of LAZY profile. Now shadows
-    get the same throttling as mains — true behavioral A/B."""
+    get the same throttling as mains — true behavioral A/B.
+    v144.6: live_sync shadows (v142E paper mirror of a live trade) bypass LAZY —
+    their whole purpose is 1:1 cadence parity with the live_trader, which does
+    not apply LAZY throttling. Fixes 4 nightly_outlier_monitor sync=True flags."""
     strat = trade.get("strategy", "")
     if strat not in LAZY_STRATEGIES:
+        return True
+    if trade.get("entry_source") == "live_sync":
         return True
 
     trade_id = str(trade.get("id", ""))
