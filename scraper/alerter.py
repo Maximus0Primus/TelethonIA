@@ -8,7 +8,7 @@ Throttled per category to avoid spam. Silent if env vars missing.
 import os
 import time
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import requests
 
@@ -269,12 +269,41 @@ def alert_live_buy(symbol: str, strategy: str, position_sol: float,
                    position_usd: float, entry_price: float, score: float,
                    kol: str, mcap: float, signature: str,
                    slippage_bps: int = 0, exec_ms: int = 0,
-                   sol_price: float = 0, ca: str = ""):
-    """v119: Detailed Telegram alert for live buy execution."""
+                   sol_price: float = 0, ca: str = "",
+                   bankroll: float = 0, deployed_usd: float = 0,
+                   open_count: int = 0,
+                   strategy_bankrolls: dict | None = None,
+                   active_strategies: list | None = None):
+    """v119: Detailed Telegram alert for live buy execution.
+    v144.11: bankroll + per-strategy positions, mirrors alert_kol_trade."""
     solscan = f"https://solscan.io/tx/{signature}"
     dex = f"https://dexscreener.com/solana/{ca}" if ca else ""
 
     mcap_str = f"${mcap/1000:.0f}K" if mcap < 1_000_000 else f"${mcap/1_000_000:.1f}M"
+
+    # v144.11: per-strategy breakdown (same pattern as alert_trade_closed)
+    strat_text = ""
+    if strategy_bankrolls:
+        parts = []
+        for sname, sdata in sorted(strategy_bankrolls.items()):
+            if active_strategies and sname not in active_strategies and sname != strategy:
+                continue
+            bal = float(sdata.get("balance", 0))
+            pnl = float(sdata.get("pnl", 0))
+            short = short_strat(sname)
+            marker = " ◀" if sname == strategy else ""
+            parts.append(f"  {short}: <b>${bal:.0f}</b> ({pnl:+.0f}){marker}")
+        if parts:
+            strat_text = "\n📊 Bankrolls:\n" + "\n".join(parts)
+    elif bankroll > 0:
+        deployed_after = deployed_usd + position_usd
+        count_after = open_count + 1
+        available = bankroll - deployed_after
+        strat_text = (
+            f"\n💰 <b>${bankroll:.0f}</b> bankroll"
+            f" | ${deployed_after:.0f} déployé ({count_after} pos)"
+            f" | ${available:.0f} dispo"
+        )
 
     text = (
         f"🟢 <b>LIVE BUY: ${symbol}</b>\n\n"
@@ -284,11 +313,67 @@ def alert_live_buy(symbol: str, strategy: str, position_sol: float,
         f"👤 KOL: {kol}\n"
         f"⭐ Score: {score:.0f} | MCap: {mcap_str}\n"
         f"⚡ Slip: {slippage_bps/100:.1f}% | {exec_ms}ms\n"
-        f"💵 SOL: ${sol_price:.2f}\n"
+        f"💵 SOL: ${sol_price:.2f}"
+        f"{strat_text}\n"
         f'🔗 <a href="{solscan}">Solscan</a>'
         + (f' | <a href="{dex}">DexScreener</a>' if dex else "")
     )
     _send(text, "live_trade")
+
+
+# v144.11: rolling 24h paper-vs-live drift cache. 5 min TTL mirrors _rt_bankroll
+# TTL pattern; keyed by nothing (single global row) because it aggregates all
+# active strategies. Callers should tolerate an empty dict (helper returns {}
+# on DB failure or if column paper_sim_pnl_pct doesn't exist yet).
+_DRIFT_CACHE: dict = {"data": None, "ts": 0.0}
+_DRIFT_TTL = 300  # seconds
+
+
+def _live_paper_strategy_drift_24h(client_sb) -> dict:
+    """Return {strategy: {live_avg, paper_avg, drift_pp, N}} for live trades closed
+    in the last 24h that have paper_sim_pnl_pct populated. 5 min cache.
+
+    live_avg/paper_avg are decimal (not pp), so callers multiply by 100 for display.
+    Returns {} on any DB error — this is display-only, must never fail the alert path.
+    """
+    now = time.time()
+    if _DRIFT_CACHE["data"] is not None and now - _DRIFT_CACHE["ts"] < _DRIFT_TTL:
+        return _DRIFT_CACHE["data"]
+    try:
+        since = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+        rows = (client_sb.table("paper_trades")
+                .select("strategy, pnl_pct, paper_sim_pnl_pct")
+                .eq("source", "rt_live")
+                .gte("exit_at", since)
+                .not_.is_("paper_sim_pnl_pct", "null")
+                .execute().data or [])
+        agg: dict[str, dict] = {}
+        for r in rows:
+            s = r.get("strategy") or "?"
+            pl = r.get("pnl_pct")
+            pp = r.get("paper_sim_pnl_pct")
+            if pl is None or pp is None:
+                continue
+            a = agg.setdefault(s, {"live_sum": 0.0, "paper_sum": 0.0, "N": 0})
+            a["live_sum"] += float(pl)
+            a["paper_sum"] += float(pp)
+            a["N"] += 1
+        out = {}
+        for s, a in agg.items():
+            n = a["N"]
+            if n == 0:
+                continue
+            la = a["live_sum"] / n
+            pa = a["paper_sum"] / n
+            out[s] = {"live_avg": la, "paper_avg": pa, "drift_pp": (pa - la) * 100, "N": n}
+        _DRIFT_CACHE["data"] = out
+        _DRIFT_CACHE["ts"] = now
+        return out
+    except Exception as e:
+        logger.debug("_live_paper_strategy_drift_24h failed: %s", e)
+        _DRIFT_CACHE["data"] = {}
+        _DRIFT_CACHE["ts"] = now
+        return {}
 
 
 def alert_live_sell(symbol: str, strategy: str, exit_reason: str,
@@ -298,8 +383,18 @@ def alert_live_sell(symbol: str, strategy: str, exit_reason: str,
                     kol: str, signature: str,
                     slippage_bps: int = 0, exec_ms: int = 0,
                     sol_price: float = 0, ca: str = "",
-                    high_price: float = 0):
-    """v119: Detailed Telegram alert for live sell execution."""
+                    high_price: float = 0,
+                    bankroll: float = 0, deployed_usd: float = 0,
+                    open_count: int = 0,
+                    strategy_bankrolls: dict | None = None,
+                    active_strategies: list | None = None,
+                    paper_pnl_pct: float | None = None,
+                    price_divergence_pct: float | None = None,
+                    strategy_drift_24h: dict | None = None):
+    """v119: Detailed Telegram alert for live sell execution.
+    v144.11: real bankroll + per-strategy breakdown (mirrors alert_trade_closed)
+             + per-trade PAPER vs LIVE block (paper_sim_pnl_pct from DB row)
+             + rolling 24h drift per strategy (from _live_paper_strategy_drift_24h)."""
     solscan = f"https://solscan.io/tx/{signature}"
     dex = f"https://dexscreener.com/solana/{ca}" if ca else ""
 
@@ -319,6 +414,64 @@ def alert_live_sell(symbol: str, strategy: str, exit_reason: str,
 
     max_gain = ((high_price / entry_price) - 1) * 100 if entry_price and high_price else 0
 
+    # v144.11: bankroll breakdown, same pattern as alert_trade_closed
+    strat_text = ""
+    if strategy_bankrolls:
+        parts = []
+        for sname, sdata in sorted(strategy_bankrolls.items()):
+            if active_strategies and sname not in active_strategies and sname != strategy:
+                continue
+            bal = float(sdata.get("balance", 0))
+            pnl = float(sdata.get("pnl", 0))
+            short = short_strat(sname)
+            marker = " ◀" if sname == strategy else ""
+            parts.append(f"  {short}: <b>${bal:.0f}</b> ({pnl:+.0f}){marker}")
+        if parts:
+            strat_text = "\n📊 Bankrolls:\n" + "\n".join(parts)
+    elif bankroll > 0:
+        deployed_after = max(0, deployed_usd - position_usd)
+        count_after = max(0, open_count - 1)
+        available = bankroll - deployed_after
+        strat_text = (
+            f"\n💰 <b>${bankroll:.0f}</b> bankroll"
+            f" | ${deployed_after:.0f} déployé ({count_after} pos)"
+            f" | ${available:.0f} dispo"
+        )
+
+    # v144.11: per-trade paper vs live block — drift = paper_sim − live
+    # paper_sim_pnl_pct comes from live_trader:1419 (v143.6). If absent (trigger
+    # fill path or pre-v143.6 row), the entire block is hidden.
+    paper_block = ""
+    if paper_pnl_pct is not None:
+        p_pct = paper_pnl_pct * 100
+        l_pct = pnl_pct * 100
+        drift_pp = p_pct - l_pct
+        warn = "  ⚠️" if abs(drift_pp) > 3 else ""
+        paper_block = (
+            f"\n🔀 Paper vs Live:\n"
+            f"  paper_sim: {p_pct:+.1f}% | live: {l_pct:+.1f}%\n"
+            f"  drift: {drift_pp:+.1f}pp{warn}"
+        )
+        if price_divergence_pct is not None:
+            paper_block += f" | fill Δ{price_divergence_pct*100:+.1f}%"
+
+    # v144.11: rolling 24h drift per active strategy — see _live_paper_strategy_drift_24h
+    drift_block = ""
+    if strategy_drift_24h:
+        lines = []
+        for sname, row in sorted(strategy_drift_24h.items()):
+            n = int(row.get("N", 0))
+            if n == 0:
+                continue
+            la = float(row.get("live_avg", 0)) * 100
+            pa = float(row.get("paper_avg", 0)) * 100
+            d = pa - la
+            warn = " ⚠️" if abs(d) > 3 and n >= 5 else ""
+            short = short_strat(sname)
+            lines.append(f"  {short}: live {la:+.1f}% vs paper {pa:+.1f}% | Δ{d:+.1f}pp (N={n}){warn}")
+        if lines:
+            drift_block = "\n📊 Drift 24h par strat:\n" + "\n".join(lines)
+
     text = (
         f"{emoji} <b>LIVE SELL: ${symbol}</b> — {reason_text}\n\n"
         f"📈 PnL: <b>{pnl_pct*100:+.1f}%</b> (${pnl_usd:+.2f})\n"
@@ -328,7 +481,10 @@ def alert_live_sell(symbol: str, strategy: str, exit_reason: str,
         f"🔝 Max: {max_gain:+.0f}%\n"
         f"🎯 Strat: {short_strat(strategy)}\n"
         f"👤 KOL: {kol}\n"
-        f"⚡ Slip: {slippage_bps/100:.1f}% | {exec_ms}ms\n"
+        f"⚡ Slip: {slippage_bps/100:.1f}% | {exec_ms}ms"
+        f"{strat_text}"
+        f"{paper_block}"
+        f"{drift_block}\n"
         f'🔗 <a href="{solscan}">Solscan</a>'
         + (f' | <a href="{dex}">DexScreener</a>' if dex else "")
     )

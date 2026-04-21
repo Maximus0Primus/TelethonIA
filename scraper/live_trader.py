@@ -890,8 +890,17 @@ def open_live_trade(client_sb, token_entry: dict, strategy: str,
             pass
 
         # Alert via Telegram — v119: detailed buy alert
+        # v144.11: include real bankroll + per-strategy breakdown (same shape as paper alerts).
         try:
             from alerter import alert_live_buy
+            _br, _strat_bals, _active = {}, {}, None
+            try:
+                from safe_scraper import _rt_load_bankroll
+                _br = _rt_load_bankroll() or {}
+                _strat_bals = _br.get("strategy_bankrolls") or {}
+                _active = list(_strat_bals.keys()) if _strat_bals else None
+            except Exception:
+                pass
             alert_live_buy(
                 symbol=symbol, strategy=strategy,
                 position_sol=position_sol, position_usd=position_usd,
@@ -902,6 +911,9 @@ def open_live_trade(client_sb, token_entry: dict, strategy: str,
                 slippage_bps=actual_slippage_bps,
                 exec_ms=result.get("exec_ms", 0),
                 sol_price=sol_price, ca=ca,
+                bankroll=float(_br.get("current_balance", 0) or 0),
+                strategy_bankrolls=_strat_bals,
+                active_strategies=_active,
             )
         except Exception:
             pass
@@ -1023,8 +1035,24 @@ def _handle_trigger_fill(client_sb, trade: dict, order_status: dict, now) -> Non
     )
 
     # Alert
+    # v144.11: trigger fill path doesn't compute _paper_sim_ev (keeper fills are
+    # SL-only on-chain, no polling tick). paper_pnl_pct stays None → per-trade
+    # block hides itself. Bankroll + 24h drift are still useful.
     try:
-        from alerter import alert_live_sell
+        from alerter import alert_live_sell, _live_paper_strategy_drift_24h
+        _br, _strat_bals, _active = {}, {}, None
+        try:
+            from safe_scraper import _rt_load_bankroll
+            _br = _rt_load_bankroll() or {}
+            _strat_bals = _br.get("strategy_bankrolls") or {}
+            _active = list(_strat_bals.keys()) if _strat_bals else None
+        except Exception:
+            pass
+        _drift_24h = {}
+        try:
+            _drift_24h = _live_paper_strategy_drift_24h(client_sb) or {}
+        except Exception:
+            pass
         alert_live_sell(
             symbol=trade["symbol"], strategy=trade.get("strategy", ""),
             exit_reason=new_status,
@@ -1038,6 +1066,11 @@ def _handle_trigger_fill(client_sb, trade: dict, order_status: dict, now) -> Non
             sol_price=sol_price,
             ca=trade.get("token_address", ""),
             high_price=float(trade.get("high_price_seen") or 0),
+            bankroll=float(_br.get("current_balance", 0) or 0),
+            strategy_bankrolls=_strat_bals,
+            active_strategies=_active,
+            price_divergence_pct=price_divergence_pct,
+            strategy_drift_24h=_drift_24h,
         )
     except Exception:
         pass
@@ -1528,8 +1561,27 @@ def check_live_trades(client_sb) -> dict:
             )
 
         # Alert via Telegram — v119: detailed sell alert
+        # v144.11: enriched with real bankroll + per-strategy bankrolls + paper-vs-live drift
+        # (both per-trade using paper_sim_pnl_pct from this row, and rolling 24h per strat).
         try:
-            from alerter import alert_live_sell
+            from alerter import alert_live_sell, _live_paper_strategy_drift_24h
+            _br, _strat_bals, _active = {}, {}, None
+            try:
+                from safe_scraper import _rt_load_bankroll
+                _br = _rt_load_bankroll() or {}
+                _strat_bals = _br.get("strategy_bankrolls") or {}
+                _active = list(_strat_bals.keys()) if _strat_bals else None
+            except Exception:
+                pass
+            _paper_sim_pnl = (
+                float(_paper_sim_ev.get("pnl_pct"))
+                if _paper_sim_ev and _paper_sim_ev.get("pnl_pct") is not None else None
+            )
+            _drift_24h = {}
+            try:
+                _drift_24h = _live_paper_strategy_drift_24h(client_sb) or {}
+            except Exception:
+                pass
             alert_live_sell(
                 symbol=trade["symbol"], strategy=trade.get("strategy", ""),
                 exit_reason=new_status,
@@ -1545,6 +1597,12 @@ def check_live_trades(client_sb) -> dict:
                 sol_price=sol_price_at_exit,
                 ca=trade.get("token_address", ""),
                 high_price=float(trade.get("high_price_seen") or 0),
+                bankroll=float(_br.get("current_balance", 0) or 0),
+                strategy_bankrolls=_strat_bals,
+                active_strategies=_active,
+                paper_pnl_pct=_paper_sim_pnl,
+                price_divergence_pct=price_divergence_pct,
+                strategy_drift_24h=_drift_24h,
             )
         except Exception:
             pass

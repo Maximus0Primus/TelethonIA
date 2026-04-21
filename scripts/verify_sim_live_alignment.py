@@ -56,10 +56,14 @@ def main():
                    and t.get("status") in ("sl_hit", "trail_stop", "tp_hit", "timeout", "be_stop")]
     print(f"  {len(live_trades)} closed live trades in window")
 
+    # v144.11: relax eval_history filter from ≥2 to ≥1 — FAST strategies often
+    # exit on the first poll (timeout/SL) and would otherwise be dropped, which
+    # is exactly the population where economic drift concentrates. paper_sim_pnl_pct
+    # remains the hard gate since it's our apples-to-apples anchor.
     with_history = [t for t in live_trades
-                    if isinstance(t.get("eval_history"), list) and len(t["eval_history"]) >= 2
+                    if isinstance(t.get("eval_history"), list) and len(t["eval_history"]) >= 1
                     and t.get("paper_sim_pnl_pct") is not None]
-    print(f"  {len(with_history)} have eval_history (≥2 polls) AND paper_sim_pnl_pct")
+    print(f"  {len(with_history)} have eval_history (≥1 poll) AND paper_sim_pnl_pct")
     skipped_no_hist = len(live_trades) - len(with_history)
 
     if not with_history:
@@ -72,6 +76,7 @@ def main():
 
     diffs = []
     per_strat = defaultdict(list)
+    per_strat_slip = defaultdict(list)  # v144.11: economic drift (live fill vs paper_sim)
     for tr in with_history:
         paper_sim_pnl = float(tr.get("paper_sim_pnl_pct") or 0) * 100
         pnl_live = float(tr.get("pnl_pct") or 0) * 100
@@ -91,6 +96,7 @@ def main():
         n_polls = len(tr["eval_history"])
         diffs.append(diff_pp)
         per_strat[tr["strategy"]].append(diff_pp)
+        per_strat_slip[tr["strategy"]].append(jup_slip_pp)
         print(f"{tr['symbol']:<14}{tr['strategy']:<25}{paper_sim_pnl:>9.2f}%{sim_pnl_pct:>9.2f}%"
               f"{diff_pp:>11.2f}pp{pnl_live:>9.2f}%{jup_slip_pp:>10.2f}pp"
               f"{(status_live + '/' + sim_status):>12}{n_polls:>5}")
@@ -110,7 +116,7 @@ def main():
             print("[FAIL] LOGIC DRIFT - replay vs paper_sim diffs >10pp, real sim bug")
 
         import statistics as _st
-        print("\n=== Per-strategy diff breakdown ===")
+        print("\n=== Per-strategy LOGIC drift breakdown (replay vs paper_sim) ===")
         for strat, ds in sorted(per_strat.items(), key=lambda x: -len(x[1])):
             in1 = sum(1 for d in ds if abs(d) <= 1)
             in3 = sum(1 for d in ds if abs(d) <= 3)
@@ -118,6 +124,34 @@ def main():
             print(f"  {strat}: N={len(ds)}, median={_st.median(ds):+.2f}pp, "
                   f"mean={_st.mean(ds):+.2f}pp, maxabs={max(ds, key=abs):+.2f}pp, "
                   f"within_1pp={in1}, within_3pp={in3}, within_10pp={in10}")
+
+        # v144.11: second gate — ECONOMIC drift = real Jupiter fill vs paper_sim.
+        # Logic can be perfect (replay == paper_sim) yet a strategy collapses
+        # because its exits land in a regime where Jupiter Ultra fills asymmetrically
+        # worse than paper's slip model (MEV, routing, thin liquidity). FAST_TP50_SL30
+        # with 30min timeout is the classic victim.
+        print("\n=== Per-strategy ECONOMIC drift (live fill vs paper_sim) ===")
+        collapsed = []
+        MIN_N = 5
+        MEAN_FAIL = -3.0   # live pnl systematically below paper_sim by >3pp on average
+        MEDIAN_FAIL = 5.0  # |median| slip > 5pp
+        for strat, ds in sorted(per_strat_slip.items(), key=lambda x: -len(x[1])):
+            n = len(ds)
+            med = _st.median(ds)
+            mean = _st.mean(ds)
+            maxabs = max(ds, key=abs)
+            flag = ""
+            if n >= MIN_N and (mean < MEAN_FAIL or abs(med) > MEDIAN_FAIL):
+                flag = "  [COLLAPSE]"
+                collapsed.append(strat)
+            print(f"  {strat}: N={n}, median={med:+.2f}pp, mean={mean:+.2f}pp, "
+                  f"maxabs={maxabs:+.2f}pp{flag}")
+
+        if collapsed:
+            print(f"\n[ALERT] ECONOMIC DRIFT — live underperforms paper_sim on {', '.join(collapsed)}")
+            print("        Root cause is execution (Jupiter fill vs modeled slip), NOT a loop bug.")
+            print(f"        Gate: mean < {MEAN_FAIL}pp OR |median| > {MEDIAN_FAIL}pp (N >= {MIN_N}).")
+            sys.exit(2)
 
 
 if __name__ == "__main__":
