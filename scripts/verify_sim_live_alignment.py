@@ -182,8 +182,10 @@ def main():
                 day = str(r["created_at"])[:10]
                 paper_by_strat[r["strategy"]].append((day, float(r["pnl_usd"])))
             MAX_DRIFT = 0.30
+            # v144.12b-fix: iterate all paper strategies (not only those present in
+            # live eval_history) so FAST/DTRAIL without paper_sim_pnl_pct still appear.
             print(f"  {'Strategy':<25}{'paper $/d':>12}{'sim median $/d':>16}{'diff':>10}{'verdict':>18}")
-            for strat in sorted(per_strat_slip.keys()):
+            for strat in sorted(paper_by_strat.keys()):
                 pr = paper_by_strat.get(strat) or []
                 if not pr:
                     continue
