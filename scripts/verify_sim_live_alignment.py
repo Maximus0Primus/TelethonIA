@@ -126,31 +126,95 @@ def main():
                   f"within_1pp={in1}, within_3pp={in3}, within_10pp={in10}")
 
         # v144.11: second gate — ECONOMIC drift = real Jupiter fill vs paper_sim.
-        # Logic can be perfect (replay == paper_sim) yet a strategy collapses
-        # because its exits land in a regime where Jupiter Ultra fills asymmetrically
-        # worse than paper's slip model (MEV, routing, thin liquidity). FAST_TP50_SL30
-        # with 30min timeout is the classic victim.
+        # v144.12: bidirectional (flag |mean|>3pp and |median|>5pp). Live > paper is
+        # also a divergence (selection bias, Jupiter catches pumps, asymmetric
+        # position sizing) — any 3pp persistent gap is worth flagging.
         print("\n=== Per-strategy ECONOMIC drift (live fill vs paper_sim) ===")
-        collapsed = []
+        drifted = []
         MIN_N = 5
-        MEAN_FAIL = -3.0   # live pnl systematically below paper_sim by >3pp on average
-        MEDIAN_FAIL = 5.0  # |median| slip > 5pp
+        MEAN_FAIL = 3.0    # |mean| > 3pp either direction
+        MEDIAN_FAIL = 5.0  # |median| > 5pp either direction
         for strat, ds in sorted(per_strat_slip.items(), key=lambda x: -len(x[1])):
             n = len(ds)
             med = _st.median(ds)
             mean = _st.mean(ds)
             maxabs = max(ds, key=abs)
             flag = ""
-            if n >= MIN_N and (mean < MEAN_FAIL or abs(med) > MEDIAN_FAIL):
-                flag = "  [COLLAPSE]"
-                collapsed.append(strat)
+            if n >= MIN_N and (abs(mean) > MEAN_FAIL or abs(med) > MEDIAN_FAIL):
+                direction = "live>paper" if mean > 0 else "live<paper"
+                flag = f"  [DRIFT {direction}]"
+                drifted.append((strat, direction, mean))
             print(f"  {strat}: N={n}, median={med:+.2f}pp, mean={mean:+.2f}pp, "
                   f"maxabs={maxabs:+.2f}pp{flag}")
 
-        if collapsed:
-            print(f"\n[ALERT] ECONOMIC DRIFT — live underperforms paper_sim on {', '.join(collapsed)}")
-            print("        Root cause is execution (Jupiter fill vs modeled slip), NOT a loop bug.")
-            print(f"        Gate: mean < {MEAN_FAIL}pp OR |median| > {MEDIAN_FAIL}pp (N >= {MIN_N}).")
+        # v144.12 gate (b): SIM vs PAPER — load _mega_sweep_extended.csv and compare
+        # baseline (jupiter/raw/default) or median dollars_per_day against observed
+        # paper $/day over the same window. Flag if |diff| > 30%.
+        print("\n=== SIM vs PAPER — $/day realism check ===")
+        sim_csv_candidates = [
+            os.path.join(os.path.dirname(__file__), "..", "scraper", "_mega_sweep_extended.csv"),
+            os.path.join(os.path.dirname(__file__), "..", "scraper", "data", "_mega_sweep_extended.csv"),
+        ]
+        sim_path = next((p for p in sim_csv_candidates if os.path.exists(p)), None)
+        sim_drifted = []
+        if not sim_path:
+            print("  (skipped — _mega_sweep_extended.csv not found)")
+        else:
+            import csv as _csv
+            from collections import defaultdict as _dd
+            sim_by_strat = _dd(list)
+            with open(sim_path, newline="") as f:
+                for row in _csv.DictReader(f):
+                    try:
+                        sim_by_strat[row["strategy"]].append(float(row["dollars_per_day"]))
+                    except (ValueError, KeyError):
+                        pass
+            # Paper $/day per strategy over the same ALIGN_SINCE window.
+            from collections import defaultdict as _dd2
+            from datetime import datetime as _dt
+            paper_by_strat: dict[str, list[tuple[str, float]]] = _dd2(list)
+            paper_rows = fetch_all("paper_trades", gte_created_at=SINCE)
+            paper_rows = [r for r in paper_rows
+                          if r.get("source") == "rt"
+                          and r.get("status") in ("sl_hit","trail_stop","tp_hit","timeout","be_stop")
+                          and r.get("pnl_usd") is not None]
+            for r in paper_rows:
+                day = str(r["created_at"])[:10]
+                paper_by_strat[r["strategy"]].append((day, float(r["pnl_usd"])))
+            MAX_DRIFT = 0.30
+            print(f"  {'Strategy':<25}{'paper $/d':>12}{'sim median $/d':>16}{'diff':>10}{'verdict':>18}")
+            for strat in sorted(per_strat_slip.keys()):
+                pr = paper_by_strat.get(strat) or []
+                if not pr:
+                    continue
+                ndays = len({d for d, _ in pr}) or 1
+                paper_per_day = sum(v for _, v in pr) / ndays
+                sim_list = sim_by_strat.get(strat) or []
+                if not sim_list:
+                    print(f"  {strat:<25}{paper_per_day:>+11.2f}  {'(no sim)':>14}{'':>10}{'':>18}")
+                    continue
+                sim_med = _st.median(sim_list)
+                if abs(sim_med) < 0.01:
+                    diff_ratio = 0.0
+                else:
+                    diff_ratio = (paper_per_day - sim_med) / abs(sim_med)
+                verdict = ""
+                if abs(diff_ratio) > MAX_DRIFT:
+                    verdict = "[SIM-DRIFT]"
+                    sim_drifted.append((strat, diff_ratio))
+                print(f"  {strat:<25}{paper_per_day:>+11.2f}  {sim_med:>+14.2f}  {diff_ratio*100:>+7.1f}%  {verdict:>18}")
+
+        # Combined exit code: 2 if any economic drift OR sim drift.
+        if drifted or sim_drifted:
+            print("")
+            if drifted:
+                bits = ", ".join(f"{s}({d},{m:+.1f}pp)" for s, d, m in drifted)
+                print(f"[ALERT] ECONOMIC DRIFT — {bits}")
+            if sim_drifted:
+                bits = ", ".join(f"{s}({r*100:+.0f}%)" for s, r in sim_drifted)
+                print(f"[ALERT] SIM-vs-PAPER DRIFT — {bits}")
+            print(f"        Gates: |mean|>{MEAN_FAIL}pp or |median|>{MEDIAN_FAIL}pp (N>={MIN_N})"
+                  f" | |paper/sim − 1|>{int(MAX_DRIFT*100)}%")
             sys.exit(2)
 
 
