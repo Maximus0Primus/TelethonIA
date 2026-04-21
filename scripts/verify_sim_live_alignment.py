@@ -55,14 +55,34 @@ def replay_trade(trade, ticks, live_cfg):
     jp_sampled_*, dual_confirm, confirm). Ticks are merged chronologically and
     populate the per-addr Jupiter/DS caches exactly as the live scraper does;
     eval fires at `polling_sec` cadence and uses the smoothed decision price.
+
+    v144.6: skip trades where the strategy requires Jupiter source but the
+    price_tick logger captured too few jupiter ticks in-window to drive a fair
+    replay. Live trades poll Jupiter at 30s continuously; price_ticks samples
+    Jupiter in a 3-min batch, so tokens dropped from the active rotation end
+    up with 0% Jupiter coverage — the replay then has no way to trigger exits
+    and falls through to timeout_eod with a stale last-tick DS price, which
+    is not a real sim-vs-live divergence.
     """
     strategy = trade["strategy"]
     orch = _strategy_orchestration(strategy, live_cfg)
     polling_sec = int(orch.get("polling_sec", 30))
     addr = trade["token_address"]
 
+    # v144.6: filter on Jupiter coverage BEFORE replay for strategies that
+    # need Jupiter in _decision_price. Source resolution mirrors paper_trader.
+    from paper_trader import _parse_legacy_price_source
+    src_cfg = orch.get("source")
+    if not src_cfg:
+        src_cfg, _ = _parse_legacy_price_source(orch.get("price_source", "jupiter"))
+    needs_jup = src_cfg in ("jupiter", "hybrid", "confirm", "both")
+
     # Merge ticks chronologically with source tag
     merged = []
+    n_jup_in_window = 0
+    horizon_min = float(trade.get("horizon_minutes", 120))
+    created = datetime.fromisoformat(trade["created_at"].replace("Z", "+00:00"))
+    horizon_end = created.timestamp() + horizon_min * 60
     for t in ticks:
         p = float(t.get("price_usd") or 0)
         if p <= 0:
@@ -73,9 +93,15 @@ def replay_trade(trade, ticks, live_cfg):
         src = "jp" if t["source"] == "jupiter" else ("ds" if t["source"] in ("fast","full","live") else None)
         if src:
             merged.append((ts, src, p))
+            if src == "jp":
+                tts = datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+                if tts <= horizon_end:
+                    n_jup_in_window += 1
     merged.sort(key=lambda x: x[0])
     if not merged:
         return None, "no_ticks"
+    if needs_jup and n_jup_in_window < 3:
+        return None, "insufficient_jup_ticks"
 
     # Isolate per-trade smoother state (caches are per-addr, must clear entry)
     trade_id = f"replay_{trade['id']}"
@@ -163,12 +189,24 @@ def main():
 
     diffs = []
     per_strat = defaultdict(list)
+    n_skip_jup = 0
+    n_skip_eod = 0
     for tr in live_trades:
         pnl_live = float(tr.get("pnl_pct") or 0) * 100
         status_live = tr.get("status")
         sim_pnl, sim_status = replay_trade(tr, by_token[tr["token_address"]], rt_cfg)
         if sim_pnl is None:
-            print(f"{tr['symbol']:<14}{tr['strategy']:<25}{pnl_live:>9.2f}%{'no_data':>10}")
+            if sim_status == "insufficient_jup_ticks":
+                n_skip_jup += 1
+            print(f"{tr['symbol']:<14}{tr['strategy']:<25}{pnl_live:>9.2f}%{sim_status:>12}  [SKIPPED]")
+            continue
+        # v144.6: timeout_eod means the replay never triggered any exit (no jup
+        # ticks fed _decision_price, or last eval before horizon). Not a fair
+        # apples-to-apples comparison — live had continuous Jupiter polling.
+        if sim_status == "timeout_eod":
+            n_skip_eod += 1
+            print(f"{tr['symbol']:<14}{tr['strategy']:<25}{pnl_live:>9.2f}%{sim_pnl*100:>9.2f}%"
+                  f"{(sim_pnl*100 - pnl_live):>11.2f}pp{status_live:>14}{sim_status:>14}  [SKIPPED]")
             continue
         sim_pnl_pct = sim_pnl * 100
         diff_pp = sim_pnl_pct - pnl_live
@@ -181,6 +219,7 @@ def main():
         avg_diff = sum(diffs)/len(diffs)
         max_diff = max(abs(d) for d in diffs)
         print(f"\nAligned on {len(diffs)} trades. Avg diff = {avg_diff:+.2f}pp | Max |diff| = {max_diff:.2f}pp")
+        print(f"Skipped: {n_skip_jup} insufficient_jup_ticks, {n_skip_eod} timeout_eod (price_ticks 3-min batch gaps)")
         if max_diff < 3:
             print("[OK] ALIGNMENT VERIFIED - all sim vs live diffs under 3pp (within noise)")
         elif max_diff < 10:
