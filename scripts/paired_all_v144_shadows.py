@@ -44,6 +44,18 @@ while True:
     off += 1000
 print(f"  {len(all_strats)} distinct strategies in last 14d\n")
 
+# v144.12: load strategy_overrides to compare price_source / smoothing per strategy.
+# When base and variant use different price_source, entry_price differs for the
+# SAME token (coherence check on Apr 21 showed 57% of multi-strat groups have
+# entry_price spread >0.1pp). The paired delta still measures economic perf,
+# but the comparison is NOT "same trade different exit" — flag with same_src=N.
+_cfg_row = sb.table("scoring_config").select("rt_trade_config").eq("id",1).execute().data
+_overrides = (_cfg_row[0]["rt_trade_config"].get("strategy_overrides") or {}) if _cfg_row else {}
+def _src_of(strat: str) -> str:
+    o = _overrides.get(strat) or {}
+    return (o.get("price_source") or o.get("source") or "default").lower()
+print(f"  {len(_overrides)} strategy_overrides loaded for price_source cross-check\n")
+
 def fetch_dedup_per_token(strat):
     out = {}
     off = 0
@@ -62,12 +74,13 @@ def fetch_dedup_per_token(strat):
 # Per-base × suffix matrix
 results = []
 gaps = []
-print(f"{'Base':<25} {'Suffix':<12} {'pair_N':>7} {'med_dpp':>9} {'sum_d$':>9} {'V/B/T':>10} {'Verdict':>14}")
-print("-" * 95)
+print(f"{'Base':<25} {'Suffix':<12} {'pair_N':>7} {'med_dpp':>9} {'sum_d$':>9} {'V/B/T':>10} {'same_src':>9} {'Verdict':>14}")
+print("-" * 105)
 for base in MAINS:
     base_idx = fetch_dedup_per_token(base)
     if not base_idx:
         continue
+    base_src = _src_of(base)
     for suf in SUFFIXES:
         v_name = base + suf
         if v_name not in all_strats:
@@ -76,9 +89,11 @@ for base in MAINS:
         v_idx = fetch_dedup_per_token(v_name)
         common = set(base_idx) & set(v_idx)
         n = len(common)
+        v_src = _src_of(v_name)
+        same_src = "Y" if v_src == base_src else f"N ({base_src}/{v_src})"
         if n == 0:
-            print(f"{base:<25} {suf:<12} {n:>7} {'—':>9} {'—':>9} {'—':>10} {'NO PAIR':>14}")
-            results.append((base, suf, 0, None, None, None, "NO PAIR"))
+            print(f"{base:<25} {suf:<12} {n:>7} {'—':>9} {'—':>9} {'—':>10} {same_src:>9} {'NO PAIR':>14}")
+            results.append((base, suf, 0, None, None, None, same_src, "NO PAIR"))
             continue
         deltas_pp = [(v_idx[t]["pnl_pct"] or 0)*100 - (base_idx[t]["pnl_pct"] or 0)*100 for t in common]
         deltas_usd = [(v_idx[t]["pnl_usd"] or 0) - (base_idx[t]["pnl_usd"] or 0) for t in common]
@@ -95,8 +110,12 @@ for base in MAINS:
             verdict = "BASE WIN"
         else:
             verdict = "TIE"
-        results.append((base, suf, n, med_pp, sum_d, (wins_v,wins_b,ties), verdict))
-        print(f"{base:<25} {suf:<12} {n:>7} {med_pp:>+8.2f} {sum_d:>+8.2f} {wins_v:>3}/{wins_b}/{ties:<3} {verdict:>14}")
+        # v144.12: flag cross-source comparisons — result still valid as economic
+        # perf, but the "same entry price" assumption breaks.
+        flag = " ⚠️CROSS-SRC" if same_src.startswith("N") else ""
+        results.append((base, suf, n, med_pp, sum_d, (wins_v,wins_b,ties), same_src, verdict + flag))
+        short_src = "Y" if same_src == "Y" else "N"
+        print(f"{base:<25} {suf:<12} {n:>7} {med_pp:>+8.2f} {sum_d:>+8.2f} {wins_v:>3}/{wins_b}/{ties:<3} {short_src:>9} {verdict:>14}{flag}")
 
 print()
 print("="*95)
@@ -111,21 +130,37 @@ for b in MAINS:
 
 # Group findings
 print()
-print("="*95)
-print("WINNERS (VARIANT WIN, pair_N>=10):")
-print("="*95)
-for base, suf, n, med, sd, wbt, v in results:
-    if v == "VARIANT WIN":
-        print(f"  {base+suf:<40} pair_N={n} med_dpp={med:+.2f} sum_d$={sd:+.2f} V/B/T={wbt[0]}/{wbt[1]}/{wbt[2]}")
+print("="*105)
+print("WINNERS (VARIANT WIN, pair_N>=10) — ⚠️CROSS-SRC = entry prices differ, economic win only:")
+print("="*105)
+for base, suf, n, med, sd, wbt, ss, v in results:
+    if v.startswith("VARIANT WIN"):
+        tag = " ⚠️CROSS-SRC" if ss.startswith("N") else ""
+        print(f"  {base+suf:<40} pair_N={n} med_dpp={med:+.2f} sum_d$={sd:+.2f} V/B/T={wbt[0]}/{wbt[1]}/{wbt[2]}{tag}")
 
 print()
 print("LOSERS (BASE WIN, pair_N>=10) — candidates for shadow removal:")
-for base, suf, n, med, sd, wbt, v in results:
-    if v == "BASE WIN":
-        print(f"  {base+suf:<40} pair_N={n} med_dpp={med:+.2f} sum_d$={sd:+.2f} V/B/T={wbt[0]}/{wbt[1]}/{wbt[2]}")
+for base, suf, n, med, sd, wbt, ss, v in results:
+    if v.startswith("BASE WIN"):
+        tag = " ⚠️CROSS-SRC" if ss.startswith("N") else ""
+        print(f"  {base+suf:<40} pair_N={n} med_dpp={med:+.2f} sum_d$={sd:+.2f} V/B/T={wbt[0]}/{wbt[1]}/{wbt[2]}{tag}")
 
 print()
 print("PREMATURE (need more data):")
-for base, suf, n, med, sd, wbt, v in results:
-    if v == "PREMATURE":
-        print(f"  {base+suf:<40} pair_N={n}/10")
+for base, suf, n, med, sd, wbt, ss, v in results:
+    if v.startswith("PREMATURE"):
+        tag = " ⚠️CROSS-SRC" if ss.startswith("N") else ""
+        print(f"  {base+suf:<40} pair_N={n}/10{tag}")
+
+# v144.12: same-source-only leaderboard — cleaner signal for suffix promotion decisions
+print()
+print("="*105)
+print("SAME-SOURCE WINNERS (pair_N>=10, base_src == variant_src) — PURE smoothing/polling delta:")
+print("="*105)
+pure_winners = [(b,s,n,m,sd,wbt) for b,s,n,m,sd,wbt,ss,v in results
+                if ss=="Y" and v.startswith("VARIANT WIN")]
+if pure_winners:
+    for b,s,n,m,sd,wbt in sorted(pure_winners, key=lambda x:-x[3]):
+        print(f"  {b+s:<40} pair_N={n} med_dpp={m:+.2f} sum_d$={sd:+.2f} V/B/T={wbt[0]}/{wbt[1]}/{wbt[2]}")
+else:
+    print("  (none yet — most winners are cross-source, need N≥30 same-src to confirm)")

@@ -3,6 +3,7 @@
 ## Current state
 
 **Live (50/50)** — `BE25_TP80_SL30` (median_5/240s) + `FAST_TP50_SL30` (median_3/30s + LAZY). Position 0.02 SOL (~$3.40)/trade. **max_open_positions: 6**. Exposition max 0.12 SOL ≈ $20. Daily loss limit 0.5 SOL (~$85).
+**NOT live anymore** (shadow-only, collected for data): `DTRAIL10_ACT15_SL70` (paper −$91/j/15j), `BE15_TP100_SL50` (paper +$11/j mais avg +0.30% — ratio R:R mauvais), `DTRAIL3_ACT10_SL70`, et toutes les variantes v144.x.
 
 **Paper hybrid — 12 mains + 283 shadows** (incl. 21 v144.x A/B). Alignment audit (`verify_shadow_main_parity.py`): **0 violations sur 805 shadows post-v144.3**.
 
@@ -86,6 +87,13 @@ Sweet-spot SCORE35 sur BE25 (extrapolation FAST_TP100_S35). LAZY_STRATEGIES nett
 | BE15_TP70_SL50_NZ | +$6 | N=22 |
 | NOZEROLIQ_TP200_SL40 | −$8 | 🔴 perdant N=18, retirer si pattern persiste |
 
+**Paper 14d actualisé (Apr 21, v144.12) — les 3 strats historiquement "live":**
+| Strat | N 14d | Avg% | WR% | $/jour | statut |
+|---|---|---|---|---|---|
+| FAST_TP50_SL30 | 218 | +1.94% | 41.3% | +$19.19 | live ✅ |
+| BE25_TP80_SL30 | 83 | +8.20% | 36.1% | +$48.62 | live ✅ |
+| BE15_TP100_SL50 | 226 | +0.30% | 21.2% | +$11.04 | retirée live (avg trop faible, WR 21% mauvais R:R) |
+
 **TOTAL paper 7d : ~+$2027 = +$290/jour** (positions $50/trade).
 
 ---
@@ -111,7 +119,7 @@ Sweet-spot SCORE35 sur BE25 (extrapolation FAST_TP100_S35). LAZY_STRATEGIES nett
 | **LAZY cadence FAST/MED/SLOW/XSLOW** (4) | FAST_TP50_SL30 only | Apr 25-27 |
 | **LAZYSLOW** (3) | FAST_TP50/80, BE25 | Apr 25-27 |
 | **HIGHSCORE_*_BOTH/DS/MED3/NOLAZY** (4) | nouveaux v144.2 | Apr 27-30 |
-| **v144.10 TP200/TP150 cluster** (7) | BE25_TP200_SL40_4H, TP200_SL30_2H/4H, BE50_TP200_SL30_4H, TP200_SL40_2H, TP200_SL50_4H, TP150_SL40_2H | Apr 28-Maj 02 |
+| **v144.10 TP200/TP150 cluster** (7) | BE25_TP200_SL40_4H, TP200_SL30_2H/4H, BE50_TP200_SL30_4H, TP200_SL40_2H, TP200_SL50_4H, TP150_SL40_2H | Apr 25-27 (launch 2026-04-21 09:25, couverture paired **100%** vs REF depuis, rate ~7 trades/j) |
 | **v144.10 let-it-run** (3) | MOONBAG, WIDE_RUNNER, SCALE_OUT | Apr 28-Maj 02 |
 
 **Règle** : N≥30 paired (pas raw) avant promotion. Re-run `paired_all_v144_shadows.py` quotidien.
