@@ -472,6 +472,60 @@ STRATEGIES["BE15_TP200_SL40_4H"] = [
 ]
 SHADOW_STRATEGIES.append("BE15_TP200_SL40_4H")
 
+# ============================================================
+# v144.10 — EH A/B hidden gems (Apr 21)
+# The eval_history mega sweep (Spearman rho=0.058 vs price_ticks) flagged a
+# "let-it-run" cluster at rank 44-128 with TP150-200 + tight SL + 2-4h horizons
+# that the price_ticks sweep had missed. Added as shadows — N=42-47 per config
+# in EH, needs paper paired confirmation. Plus 3 existing STRATEGIES not yet
+# in SHADOW (MOONBAG, WIDE_RUNNER, SCALE_OUT — WR 60.9%, med +8.58% on SCORE30
+# subset in EH).
+# ============================================================
+
+# Tier 1 — create new TP200/TP150 variants flagged by EH
+STRATEGIES["BE25_TP200_SL40_4H"] = [  # EH rank 46, dpd $129.5
+    {"pct": 1.0, "tp_mult": 3.00, "sl_mult": 0.60, "horizon_min": 240,
+     "be_activation": 0.25, "label": "main"},
+]
+SHADOW_STRATEGIES.append("BE25_TP200_SL40_4H")
+
+STRATEGIES["TP200_SL30_2H"] = [  # EH rank 47, dpd $129.5
+    {"pct": 1.0, "tp_mult": 3.00, "sl_mult": 0.70, "horizon_min": 120, "label": "main"},
+]
+SHADOW_STRATEGIES.append("TP200_SL30_2H")
+
+STRATEGIES["BE50_TP200_SL30_4H"] = [  # EH rank 48, dpd $128.2 — strong BE activation
+    {"pct": 1.0, "tp_mult": 3.00, "sl_mult": 0.70, "horizon_min": 240,
+     "be_activation": 0.50, "label": "main"},
+]
+SHADOW_STRATEGIES.append("BE50_TP200_SL30_4H")
+
+STRATEGIES["TP200_SL30_4H"] = [  # EH rank 49, dpd $127.8
+    {"pct": 1.0, "tp_mult": 3.00, "sl_mult": 0.70, "horizon_min": 240, "label": "main"},
+]
+SHADOW_STRATEGIES.append("TP200_SL30_4H")
+
+STRATEGIES["TP200_SL40_2H"] = [  # EH rank 57, dpd $118.3 — 2H variant of TP200_SL40_4H
+    {"pct": 1.0, "tp_mult": 3.00, "sl_mult": 0.60, "horizon_min": 120, "label": "main"},
+]
+SHADOW_STRATEGIES.append("TP200_SL40_2H")
+
+STRATEGIES["TP200_SL50_4H"] = [  # EH rank 82, dpd $113.7 — SL50 (wider safety)
+    {"pct": 1.0, "tp_mult": 3.00, "sl_mult": 0.50, "horizon_min": 240, "label": "main"},
+]
+SHADOW_STRATEGIES.append("TP200_SL50_4H")
+
+STRATEGIES["TP150_SL40_2H"] = [  # EH rank 113, dpd $107.8 — no-BE counterpart of BE15_TP150_SL40_2H
+    {"pct": 1.0, "tp_mult": 2.50, "sl_mult": 0.60, "horizon_min": 120, "label": "main"},
+]
+SHADOW_STRATEGIES.append("TP150_SL40_2H")
+
+# Tier 2 — promote existing STRATEGIES to SHADOW (let-it-run profile, WR 60.9%
+# on SCORE30 in EH — paper will tell us if it holds without the filter).
+SHADOW_STRATEGIES.append("MOONBAG")       # EH rank 246, dpd $91.1, med +8.58%
+SHADOW_STRATEGIES.append("WIDE_RUNNER")   # EH rank 243, dpd $91.1, med +8.58%
+SHADOW_STRATEGIES.append("SCALE_OUT")     # EH rank 232, dpd $94.5, med -0.13%
+
 # --- Trailing stop grid (v106) ---
 _TRAIL_STRATEGIES = {}
 for _trail_pct in [10, 15, 20, 25]:
