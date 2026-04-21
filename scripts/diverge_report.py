@@ -23,7 +23,7 @@ SINCE = os.environ.get("SINCE", "2026-04-15T00:00:00+00:00")
 OUT_JSON = os.path.join(os.path.dirname(__file__), "..", "data", "diverge_apr19.json")
 os.makedirs(os.path.dirname(OUT_JSON), exist_ok=True)
 
-COLS = ("id,strategy,symbol,status,pnl_pct,pnl_usd,paper_sim_pnl_pct,"
+COLS = ("id,strategy,symbol,status,pnl_pct,pnl_usd,paper_sim_pnl_pct,eval_history,"
         "entry_price,exit_price,paper_exit_price,execution_price,dex_spot_price_at_entry,"
         "high_price_seen,slippage_actual_bps,buy_slippage_bps,sell_slippage_bps,"
         "tp_price,sl_price,horizon_minutes,"
@@ -121,11 +121,21 @@ for tk in ticks: by_tok[tk["token_address"]].append(tk)
 print(f"  {len(ticks)} ticks")
 
 rows = []
+# v144.8: prefer eval_history replay over price_ticks reconstruction.
+# eval_history is the exact (decision, exec) stream the live bot saw at 30s;
+# price_ticks samples Jupiter at 3-min batch (lossy). paper_sim_pnl_pct remains
+# the top preference — it's the sim value computed at live-close time.
+from sim import _replay_from_eval_history as _eh_replay
 for (tok, strat), lv, pp in pairs:
     sim_pnl = lv.get("paper_sim_pnl_pct")
     if sim_pnl is None:
-        # fall back to live-replay
-        sim_pnl = replay_sim(lv, by_tok.get(tok, []), live_cfg)
+        eh = lv.get("eval_history") or []
+        if isinstance(eh, list) and len(eh) >= 2:
+            fake_lv = dict(lv); fake_lv["high_price_seen"] = float(lv["entry_price"])
+            res = _eh_replay(fake_lv, eh)
+            sim_pnl = res["pnl_pct"] if res else None
+        if sim_pnl is None:
+            sim_pnl = replay_sim(lv, by_tok.get(tok, []), live_cfg)
     sim_pct = float(sim_pnl) * 100 if sim_pnl is not None else None
     live_pct = float(lv.get("pnl_pct") or 0) * 100
     paper_pct = float(pp.get("pnl_pct") or 0) * 100
