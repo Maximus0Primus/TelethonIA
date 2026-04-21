@@ -19,6 +19,14 @@ Nightly_outlier_monitor a flaggé 4 outliers sync=True post-v144.3 (ASMORA +21pp
 ### v144.8 — Gate compares replay vs paper_sim_pnl_pct (apples-to-apples)
 Encore des "divergences" trompeuses parce que le gate comparait sim_replay vs live.pnl_pct, et live.pnl_pct inclut le fill Jupiter Ultra réel (slippage positif sur spikes, ex: $CHUCHU TP=+50% fill=+120%). Fix : compare vs `paper_sim_pnl_pct` (colonne v143.6 persistée par live_trader.py:1174 — "ce que paper aurait book avec le même input"). Colonne "Jup slip" ajoutée en info. **avg=-1.16pp → -0.61pp**, max Jup slip ±0.5pp typique confirme Ultra RFQ near-zero. Aussi migré `scripts/diverge_report.py` pour préférer eval_history.
 
+### v144.10 — 10 new shadows from EH A/B (hidden gems)
+Le Spearman ρ=0.058 entre PT et EH sweeps confirme le biais structurel de price_ticks. 10 shadows ajoutées depuis les rankings EH propres :
+- **7 nouvelles strats** dans STRATEGIES (TP200/TP150 cluster, rank EH 46-113) : `BE25_TP200_SL40_4H`, `TP200_SL30_2H`, `BE50_TP200_SL30_4H`, `TP200_SL30_4H`, `TP200_SL40_2H`, `TP200_SL50_4H`, `TP150_SL40_2H`
+- **3 existantes** promues en shadow (MOONBAG, WIDE_RUNNER, SCALE_OUT — let-it-run profile, WR 60.9% med +8.58% sur SCORE30 subset)
+- Skipped : HYST variants (v142 redundant), DIP30/DTRAIL (artifacts live), dupes TP300/500_SL50 (weak median)
+
+ETA verdict paper paired : **Apr 28-Maj 02** (N≥30 paired vs base attendu)
+
 ### v144.9 — mega_sweep A/B price_ticks vs eval_history
 Le mega_sweep (discovery de strats, dernier output = BE25_S35 + FAST_TP100_S35 v144.4/5) lisait `price_ticks` → même biais structurel 3-min Jupiter. Deux patches :
 - **A (minimaliste)** : warning coverage dans `_mega_sweep_run`. Affiche `median jup ticks/token`, `% zero_jup`, `% <10_jup`. Alerte si >15% zero_jup ⇒ résultats biaisés DS fallback.
@@ -103,6 +111,8 @@ Sweet-spot SCORE35 sur BE25 (extrapolation FAST_TP100_S35). LAZY_STRATEGIES nett
 | **LAZY cadence FAST/MED/SLOW/XSLOW** (4) | FAST_TP50_SL30 only | Apr 25-27 |
 | **LAZYSLOW** (3) | FAST_TP50/80, BE25 | Apr 25-27 |
 | **HIGHSCORE_*_BOTH/DS/MED3/NOLAZY** (4) | nouveaux v144.2 | Apr 27-30 |
+| **v144.10 TP200/TP150 cluster** (7) | BE25_TP200_SL40_4H, TP200_SL30_2H/4H, BE50_TP200_SL30_4H, TP200_SL40_2H, TP200_SL50_4H, TP150_SL40_2H | Apr 28-Maj 02 |
+| **v144.10 let-it-run** (3) | MOONBAG, WIDE_RUNNER, SCALE_OUT | Apr 28-Maj 02 |
 
 **Règle** : N≥30 paired (pas raw) avant promotion. Re-run `paired_all_v144_shadows.py` quotidien.
 
