@@ -5,7 +5,9 @@
 **Live (50/50)** — `BE25_TP80_SL30` (median_5/240s) + `FAST_TP50_SL30` (median_3/30s + LAZY). Position 0.02 SOL (~$3.40)/trade. **max_open_positions: 6**. Exposition max 0.12 SOL ≈ $20. Daily loss limit 0.5 SOL (~$85).
 **NOT live anymore** (shadow-only, collected for data): `DTRAIL10_ACT15_SL70` (paper −$91/j/15j), `BE15_TP100_SL50` (paper +$11/j mais avg +0.30% — ratio R:R mauvais), `DTRAIL3_ACT10_SL70`, et toutes les variantes v144.x.
 
-**Paper hybrid — 12 mains + 283 shadows** (incl. 21 v144.x A/B). Alignment audit (`verify_shadow_main_parity.py`): **0 violations sur 805 shadows post-v144.3**.
+**Paper hybrid — 12 mains + 294 shadows** (300 distinct strats tradées last 14d). Alignment audit (`verify_shadow_main_parity.py`): **0 violations sur 805 shadows post-v144.3**.
+
+**Jupiter Trigger V2 — DÉSACTIVÉ (Apr 21, v144.14)**. `trigger_orders_enabled=false` en DB. Raison : risque de perdre le positive slippage Jupiter Ultra (+5pp/trade observé sur FAST live vs paper_sim). Re-activable ponctuellement pour TP200 cluster (TP/SL 100% static) après validation à $10+ sur polling. Détails : `v144-14-trigger-disabled.md`.
 
 ---
 
@@ -167,9 +169,10 @@ Sweet-spot SCORE35 sur BE25 (extrapolation FAST_TP100_S35). LAZY_STRATEGIES nett
 - BE25 → remplacer par 2e FAST avec TP différent (FAST_TP80 ou FAST_TP100) après FAST_TP50 stable + N≥30
 - max_open_positions 6 → 8-10 si bankroll grandit
 - Position size live $3.40 → $10-20/trade (gain x3-x6 attendu)
+- **Trigger V2 policy au scale-up** : laisser DÉSACTIVÉ par défaut. Valider d'abord 48-72h à $10/trade sur polling pur pour mesurer si le positive slippage Jupiter Ultra (+5pp/trade) tient à cette taille. Si oui → garder trigger off. Si le positive slippage disparaît (le spread Ultra peut se compresser à position plus grosse) → envisager trigger uniquement sur TP200 cluster (TP/SL 100% static, pas de PATCH nécessaire). Ne JAMAIS activer trigger sur BE25/BE15 (activation BE impose 1 PATCH non testé en prod) ni sur DTRAIL/TRAIL/DIP (patch-à-chaque-poll = gas × 10).
 
-### 🔒 Bloqué
-- **Jupiter Trigger V2** — 0 fills historiques. Débloquer quand live_pos > $10.
+### 🔒 Bloqué / dormant
+- **Jupiter Trigger V2** — 0 fills historiques, **désactivé v144.14 (Apr 21)**. Config DB `trigger_orders_enabled=false`. Autres paramètres gardés (min_usd=10, expiry=14400, sl_slip_bps=2000). Re-activation discutée au scale-up.
 
 ---
 
@@ -267,6 +270,11 @@ Sweet-spot SCORE35 sur BE25 (extrapolation FAST_TP100_S35). LAZY_STRATEGIES nett
 
 ## Historique récent
 
+- **v144.14** (Apr 21 eve) Jupiter Trigger V2 désactivé en DB (`trigger_orders_enabled=false`). Risque de détruire le +5pp positive slippage Ultra observé sur FAST live. Re-évalué au scale-up $10+.
+- **v144.13** (Apr 21 eve) Per-family slip multiplier dans mega_sweep : ×10 DTRAIL, ×8 TRAIL, ×6 DIP, ×5 SCALP, ×4 SPLIT. Hybrides = worst-family wins. Corrige le biais 44% du sweep universe (Sprint #2b). Static TP/SL inchangés.
+- **v144.12b** (Apr 21 eve) Scope fix gate SIM-vs-PAPER : itère `paper_by_strat.keys()` pour capturer FAST/DTRAIL sans `paper_sim_pnl_pct`. Révèle +55.9% sim-drift sur FAST_TP50_SL30, +40.2% BE25.
+- **v144.12** (Apr 21 eve) Gate économique bidirectionnel (|mean|>3pp, |median|>5pp) + nouveau gate SIM-vs-PAPER ($/day paper vs sim médiane, flag |diff|>30%). Paired test cross-source aware (flag ⚠️CROSS-SRC quand price_source diffère, leaderboard SAME-SOURCE isolé).
+- **v144.11** (Apr 21 eve) Alertes live enrichies : bankroll + per-strategy breakdown sur buy/sell, bloc 🔀 Paper vs Live per-trade (paper_sim_pnl_pct + fill Δ), bloc 📊 Drift 24h par strat via `_live_paper_strategy_drift_24h` (cache 5min).
 - **v144.9** (Apr 21) mega_sweep A/B : warning coverage jup (A) + `--mega-sweep-eval-history` mode (B)
 - **v144.8** (Apr 21) Sim-align gate apples-to-apples (vs `paper_sim_pnl_pct`, Jup slip info) + diverge_report migration
 - **v144.7** (Apr 21) Sim-align gate switched from price_ticks to eval_history replay (−3.78pp → −1.16pp)
