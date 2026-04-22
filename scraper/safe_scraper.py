@@ -2181,13 +2181,8 @@ async def main():
                     # RT is healthy again — reset backoff so next outage re-alerts
                     reset_alert("rt_listener_down")
 
-                # Check API error rates (birdeye excluded — noisy, not actionable)
-                api_stats = _metrics.get_api_stats(1.0)
-                for api, stats in api_stats.items():
-                    if api == "birdeye":
-                        continue
-                    if stats["calls"] >= 5 and stats["error_rate"] > 0.30:
-                        alert_api_errors(api, stats["error_rate"], stats["errors"], stats["calls"])
+                # v144.17: API error alerts disabled (user: too noisy).
+                # Logs still capture error rates — re-enable here if needed.
 
                 # Check egress
                 egress = _metrics.get_egress_estimate()
