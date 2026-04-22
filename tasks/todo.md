@@ -1,9 +1,55 @@
-# Pipeline Status — Updated Apr 21, 2026 (v144.9 sim-align overhaul)
+# Pipeline Status — Updated Apr 22, 2026 (v144.16 — live STRATEGY_FILTERS gate)
+
+## v144.16 hotfix Apr 22 — live BOND_FAST bought non-bonding tokens
+
+**Bug :** `STRATEGY_FILTERS` (liq ≤ $3000 pour BOND_FAST) était appliqué uniquement en paper (`paper_trader._passes_strategy_filter`). Les 2 branches live de `safe_scraper.py` (hybrid L1454 + exploration L1522) itéraient `live_allocs` et appelaient `open_live_trade(...)` sans gate. Résultat : BOND_FAST live achetait n'importe quel token.
+
+**Exemple concret :** `$OOO` (id 192607) acheté @ 17:44 UTC — entry_mcap $1.13M, liq $125K (42× seuil), `rt_is_pump_fun=0`. Côté paper/shadow `BOND_FAST` : aucune ligne ouverte pour ce même token = filtre paper OK, filtre live absent.
+
+**Fix :** import `_passes_strategy_filter` dans les 2 branches live, `continue` + log `RT LIVE SKIP (filter)` si token ne passe pas. Live = miroir strict du shadow maintenant.
+
+**À faire manuel :** fermer position $OOO sur Jupiter (entrée hors-spec, position $1.76).
+
+---
+
+# Pipeline Status — Apr 22, 2026 (v144.15 — 4 live strats A/B)
 
 ## Current state
 
-**Live (50/50)** — `BE25_TP80_SL30` (median_5/240s) + `FAST_TP50_SL30` (median_3/30s + LAZY). Position 0.02 SOL (~$3.40)/trade. **max_open_positions: 6**. Exposition max 0.12 SOL ≈ $20. Daily loss limit 0.5 SOL (~$85).
-**NOT live anymore** (shadow-only, collected for data): `DTRAIL10_ACT15_SL70` (paper −$91/j/15j), `BE15_TP100_SL50` (paper +$11/j mais avg +0.30% — ratio R:R mauvais), `DTRAIL3_ACT10_SL70`, et toutes les variantes v144.x.
+**Live (4 strats)** — Allocations dans `rt_trade_config.live_trading.allocations` :
+- `BE25_TP80_SL30` : alloc 0.5 (median_5/240s, base size ~$1.70/trade) — champion courant, 6/6 jours verts live
+- `FAST_TP50_SL30` : alloc 0.5 (median_3/30s + LAZY, ~$1.70/trade)
+- `FAST_TP80_SL25` : alloc 0.5 (ds/30s, ~$1.70/trade) — **NEW v144.15** : +10.14% paper 7d N=94, single-exit crédible (R:R 3.2:1), Live>Paper attendu +5pp → cible ~+15%/trade live
+- `BOND_FAST_TP50_SL20_T20` : alloc 0.5 (hyst/60s, ~$1.70/trade) — **NEW v144.15c** : niche bonding (`max_liquidity_usd=3000`, filtre vérifié 26/26 liq=0), +23.86% paper 7d N=26 WR 50%, orthogonal aux autres (pas d'overlap). Full size — filtre auto-throttle (1-2 trades/j max), $1.70 sur pool $5-15k = 0.01-0.03% impact = négligeable
+
+Position base `max_position_sol=0.02` (~$3.40 plein). **max_open_positions: 12** (v144.15b — bumped from 6 pour garder ratio 3 slots/strat avec 4 strats). Daily loss limit 0.5 SOL (~$85).
+
+**NOT live** (shadow-only) : `DTRAIL10_ACT15_SL70` (paper −$91/j/15j), `BE15_TP100_SL50` (retirée v144.12 — avg +0.30% R:R mauvais), `DTRAIL3_ACT10_SL70`, et toutes les variantes v144.x.
+
+## v144.15 deployed Apr 22 — live A/B expansion (BE25 + FAST_TP50 + FAST_TP80 + BOND_FAST)
+
+### Rationale
+- **BE25 seule = concentration risque** : 6/6 verts (+$13.90 live) mais N=59 seulement sur 6 jours. Seule strat crédible doit pas être seule.
+- **FAST_TP80_SL25** : meilleur R:R du paper (TP 80% / SL 25% = 3.2:1), N=94 sur 7j, WR 39%, +10.14% avg. Aucune structure sim-risky (pas de trail, pas de HYST, pas de BE). Si Live>Paper +5pp se tient → ~+15%/trade en live = potentiellement meilleur que BE25.
+- **BOND_FAST_TP50_SL20_T20** : +23.86% paper N=26 WR 50% sur pump.fun bondings (liq=0). Filtre `max_liquidity_usd=3000` vérifié → **aucun overlap** avec les 3 autres strats (qui prennent tokens migrés/indexés). Size réduite 60% car slippage pump.fun bonding incertain.
+
+### ❌ Rejetés pour le live A/B (artefacts sim)
+- `FAST_TP50_SL30_LAZYMED` (+16.05% paper) — LAZY kernel = sim bias (cf. `hyst_artifacts_apr20.md`)
+- `FAST_TP100_SL20_COMBO` (+14.44%) — COMBO multi-price-source = artefact, +0.8pp vs base = bruit
+- `BE25_TP80_SL30_DS` (+16.47% paper vs +13.66% live BE25) — N=22 trop faible, +2.8pp non-significatif. Reste en shadow, paired-test vs BE25 à N≥50.
+- `DTRAIL10_ACT15_SL70` (paper +17.28% / live −3.87%) — gap 21pp confirmé artefact sim
+- `TP50_SL15` (+9.62% paper) — SL ultra-tight 15%, sim exagère hit rate
+
+### Decision rules (semaine 1-2 monitoring)
+- Si `FAST_TP80_SL25` live >= +12% avg après N≥20 → scale-up full size, candidat substitute pour FAST_TP50
+- Si `BOND_FAST` live >= +15% après N≥15 → scale à alloc 0.5 (full size)
+- Si `FAST_TP80` ou `BOND_FAST` live <= +3% ou < 0 → retirer, retour à 2 strats
+- Paired-test `BE25_DS` vs `BE25` shadow : attendre N≥50 avant décision config swap
+
+### Monitoring
+- `scripts/recap_daily.py` : PnL $/j par strat (toutes les 24h)
+- `scripts/verify_sim_live_alignment.py` : drift live vs paper_sim_pnl_pct (gate: mean<-3pp ou |med|>5pp avec N≥5 = exit 2)
+- Alerts Telegram existantes enrichies per-strategy (v144.11)
 
 **Paper hybrid — 12 mains + 294 shadows** (300 distinct strats tradées last 14d). Alignment audit (`verify_shadow_main_parity.py`): **0 violations sur 805 shadows post-v144.3**.
 

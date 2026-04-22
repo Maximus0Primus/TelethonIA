@@ -1450,8 +1450,17 @@ def _rt_open_trades(ca: str, symbol: str, price: float, mcap: float,
         if live_cfg.get("enabled", False):
             try:
                 from live_trader import open_live_trade
+                from paper_trader import _passes_strategy_filter
                 live_allocs = live_cfg.get("allocations", allocations)
                 for strat_name, alloc_pct in live_allocs.items():
+                    # v144.16: mirror paper gate — STRATEGY_FILTERS applies to live too
+                    # (was paper-only → live BOND_FAST bought non-bonding tokens, e.g. $OOO @ liq $125K).
+                    if not _passes_strategy_filter(token_entry, strat_name):
+                        logger.info("RT LIVE SKIP (filter): %s/%s liq=$%.0f rt_score=%.1f",
+                                    symbol, strat_name,
+                                    float(token_entry.get("_rt_liquidity_usd") or 0),
+                                    float(token_entry.get("_rt_score") or 0))
+                        continue
                     live_pos = round(pos_size * float(alloc_pct), 2)
                     live_res = open_live_trade(sb, token_entry, strat_name, live_pos, live_cfg)
                     if isinstance(live_res, dict) and live_res.get("success"):
@@ -1518,9 +1527,17 @@ def _rt_open_trades(ca: str, symbol: str, price: float, mcap: float,
     if live_cfg.get("enabled", False):
         try:
             from live_trader import open_live_trade
+            from paper_trader import _passes_strategy_filter
             live_allocs = live_cfg.get("allocations") or {}
             for strat_name, alloc_pct in live_allocs.items():
                 if strat_name not in STRATEGIES:
+                    continue
+                # v144.16: mirror paper gate on live (see hybrid branch).
+                if not _passes_strategy_filter(token_entry, strat_name):
+                    logger.info("RT LIVE SKIP (filter): %s/%s liq=$%.0f rt_score=%.1f",
+                                symbol, strat_name,
+                                float(token_entry.get("_rt_liquidity_usd") or 0),
+                                float(token_entry.get("_rt_score") or 0))
                     continue
                 live_pos = round(pos_size * float(alloc_pct), 2)
                 live_res = open_live_trade(sb, token_entry, strat_name, live_pos, live_cfg)
