@@ -210,6 +210,9 @@ GROUPS_DATA = {
     "dddegens": {"conviction": 7, "tier": "A"},
     "jadendegens": {"conviction": 7, "tier": "A"},
     "maythousdegens": {"conviction": 7, "tier": "A"},
+    # === v144.18 additions ===
+    "leoclub69": {"conviction": 7, "tier": "A"},
+    "markdegens": {"conviction": 7, "tier": "A"},
 }
 
 GROUPS_CONVICTION = {k: v["conviction"] for k, v in GROUPS_DATA.items()}
