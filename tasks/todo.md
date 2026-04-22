@@ -1,5 +1,52 @@
 # Pipeline Status — Updated Apr 22, 2026 (v144.16 — live STRATEGY_FILTERS gate)
 
+## Sprint #ETH-1 — Paper shadow ETH L1 (exploration, 0 capital engagé)
+
+**Objectif :** mesurer le vrai WR/EV des calls ETH sur notre dataset avant d'envisager un live. Claim user : "beaucoup de calls ETH actuellement, WR très bon". Besoin de **chiffres**, pas de feeling.
+
+**Hypothèses à valider (N≥50 calls sur 2-3 semaines) :**
+- WR ≥ 65% (vs ~50% Solana)
+- TP typique ≥ +80-100% (vs +50-80% Solana)
+- EV net après frais $15/trade aller-retour positif dès $100-200/trade
+- **Abandon si WR < 55% ou EV net < +5%/trade** — claims KOL trompeurs
+
+**Phase 1 — shadow only (1-2 semaines dev, 0€ risqué) :**
+- Ajouter colonne `chain` (default `"solana"`, enum `"ethereum"`) : `paper_trades`, `tokens`, `token_snapshots`, `mentions`, `price_ticks`
+- Détection chain auto via format CA : `0x[a-fA-F0-9]{40}` → ethereum, `[1-9A-HJ-NP-Za-km-z]{32,44}` → solana (déjà implicite)
+- Fetch prix : DexScreener `/latest/dex/tokens/{CA}` supporte ETH nativement — zéro dev externe
+- Enrichment ETH minimal : honeypot.is + GoPlus (rug detection) — skip RugCheck qui est Solana-only
+- Paper trader : nouveau bloc `_eval_ethereum_trade` avec modèle frais **$15 round-trip + 2% MEV slippage** injecté dans `pnl_net` (vs modèle Jupiter Ultra Solana)
+- **Strategies shadow initiales (3 candidats, N/A pour l'instant en l'absence de data) :**
+  - `ETH_TP100_SL50` : TP 100% / SL 50% / timeout 4h — let-it-run classique ETH
+  - `ETH_TP80_SL40_T2H` : TP 80% / SL 40% / timeout 2h — plus conservateur
+  - `ETH_BE50_TP150_SL50` : breakeven à +50%, TP 150%, SL 50% — pour KOLs à gros moves
+- **Aucune exécution, aucune clé privée EVM, aucun live_trader ETH**
+
+**Phase 2 — décision à N≥50 trades / 14 jours :**
+- Si WR ≥ 65% ET EV net ≥ +10%/trade @ $100 → passer à Phase 3 (exécution live Uniswap V3 + MEV Blocker RPC)
+- Sinon → archive la branche, on reste 100% Solana
+
+**Phase 3 — live (2-3 semaines dev, PAS lancée tant que Phase 2 non validée) :**
+- `live_trader_eth.py` séparé : web3.py + Uniswap V3 SwapRouter02 OU 1inch Aggregator v6
+- MEV protection obligatoire : RPC Flashbots Protect (`rpc.flashbots.net`) ou MEV Blocker (`rpc.mevblocker.io`)
+- Nonce management, ERC-20 approve avant premier sell, gas estimator
+- Wallet séparé (pas celui Solana), bankroll distincte (cible $500-1000)
+- Position size min **$200/trade** pour que frais ≤ 7.5%
+
+**KOLs ETH à identifier (todo user) :**
+- Lister les 3-5 KOLs qui postent activement des CA `0x...` en ce moment
+- Vérifier qu'ils sont bien dans `GROUPS_DATA` de `safe_scraper.py` (sinon ajouter comme A-tier par défaut)
+
+**Risques / pourquoi ça peut tomber à l'eau :**
+- Les KOLs sur-communiquent leurs wins (biais survivorship bias)
+- Memecoin ETH L1 = liq plus élevée mais volatilité plus basse → TP 100%+ rare en pratique
+- MEV actuel (2026) prend 2-5% sans protection — si ça passe à 6-8% le modèle de frais $15 est sous-estimé
+- Cycle Solana revient probablement en 2-6 semaines → investir dans ETH juste au moment où Solana repart serait absurde
+
+**Decision : lancer Phase 1 dev ou attendre ?** → À trancher user
+
+---
+
 ## v144.16 hotfix Apr 22 — live BOND_FAST bought non-bonding tokens
 
 **Bug :** `STRATEGY_FILTERS` (liq ≤ $3000 pour BOND_FAST) était appliqué uniquement en paper (`paper_trader._passes_strategy_filter`). Les 2 branches live de `safe_scraper.py` (hybrid L1454 + exploration L1522) itéraient `live_allocs` et appelaient `open_live_trade(...)` sans gate. Résultat : BOND_FAST live achetait n'importe quel token.
