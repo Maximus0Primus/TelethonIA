@@ -1,61 +1,63 @@
-# Pipeline Status — Updated Apr 22, 2026 (v144.16 — live STRATEGY_FILTERS gate)
+# Pipeline Status — Updated Apr 23, 2026 (v14b — ETH paper mains live)
 
-## Sprint #ETH-1 — Paper shadow ETH L1 (exploration, 0 capital engagé)
+## Sprint #ETH-1 — ETH L1 paper mains (Phase 1 LIVE, zero capital)
 
-**Objectif :** mesurer le vrai WR/EV des calls ETH sur notre dataset avant d'envisager un live. Claim user : "beaucoup de calls ETH actuellement, WR très bon". Besoin de **chiffres**, pas de feeling.
+**État : ✅ Phase 1 déployée Apr 23** — 3 strats ETH paper mains avec alertes Telegram identiques à Solana. Collecting data.
 
-**Hypothèses à valider (N≥50 calls sur 2-3 semaines) :**
+**Stack déployée** :
+- Migration `v14_chain_column.sql` appliquée Supabase : colonne `chain TEXT NOT NULL DEFAULT 'solana'` sur 5 tables + indexes compound (chain, token_address/symbol)
+- `scraper/chain_detect.py` + 25 tests : détection 0x vs base58, rejet tx hashes, normalisation lowercase ETH
+- `pipeline.extract_tokens` scanne `ETH_CA_REGEX` **en plus** du Solana base58 — tag chain dans le ca_cache
+- DexScreener chain-parameterized : `/tokens/v1/{chain}/{address}`, ranking DEX spécifique (Uniswap V3 > V2 > Sushi sur ETH)
+- Enrichers Solana-only (RugCheck, Helius, Jupiter, Bubblemaps, outcome OHLCV) skip 0x silencieusement
+- Paper trader : fee model ETH ($7.50 gas/side + 200bps MEV), `position_usd=$200` forcé (cohérence fee accounting), branche chain dans `_dynamic_sell_slip_factor` + `_override_exit_with_ultra_quote`
+- `_passes_strategy_filter` : chain gate strict — strat sans `filt["chain"]` = solana-only implicite (ETH doit déclarer)
+- Alertes Telegram `alert_kol_trade` + `alert_trade_closed` chain-aware : tag 🔷ETH, URL `dexscreener.com/{chain}/`, links Uniswap + Etherscan pour ETH
+- `scoring_config.rt_trade_config.hybrid_strategy.allocations` : 15 strats (12 Solana + 3 ETH à alloc=1)
+- 13 tests ETH pipeline + fee model + filter chain gate : 38/38 pass
+
+**3 strats ETH paper mains actives (depuis commit 9635e65)** :
+- `ETH_TP100_SL50` : TP 100% / SL 50% / timeout 4h — let-it-run
+- `ETH_TP80_SL40_T2H` : TP 80% / SL 40% / timeout 2h — conservateur
+- `ETH_BE50_TP150_SL50` : BE +50%, TP 150%, SL 50% — pour KOLs big moves
+
+**Hypothèses à valider (N≥50 calls sur 2-3 semaines)** :
 - WR ≥ 65% (vs ~50% Solana)
-- TP typique ≥ +80-100% (vs +50-80% Solana)
-- EV net après frais $15/trade aller-retour positif dès $100-200/trade
-- **Abandon si WR < 55% ou EV net < +5%/trade** — claims KOL trompeurs
+- EV net après frais $15/trade positif à $200/pos
+- **Abandon si WR < 55% ou EV net < +5%/trade**
 
-**Phase 1 — shadow only (1-2 semaines dev, 0€ risqué) :**
-- Ajouter colonne `chain` (default `"solana"`, enum `"ethereum"`) : `paper_trades`, `tokens`, `token_snapshots`, `mentions`, `price_ticks`
-- Détection chain auto via format CA : `0x[a-fA-F0-9]{40}` → ethereum, `[1-9A-HJ-NP-Za-km-z]{32,44}` → solana (déjà implicite)
-- Fetch prix : DexScreener `/latest/dex/tokens/{CA}` supporte ETH nativement — zéro dev externe
-- Enrichment ETH minimal : honeypot.is + GoPlus (rug detection) — skip RugCheck qui est Solana-only
-- Paper trader : nouveau bloc `_eval_ethereum_trade` avec modèle frais **$15 round-trip + 2% MEV slippage** injecté dans `pnl_net` (vs modèle Jupiter Ultra Solana)
-- **Strategies shadow initiales (3 candidats, N/A pour l'instant en l'absence de data) :**
-  - `ETH_TP100_SL50` : TP 100% / SL 50% / timeout 4h — let-it-run classique ETH
-  - `ETH_TP80_SL40_T2H` : TP 80% / SL 40% / timeout 2h — plus conservateur
-  - `ETH_BE50_TP150_SL50` : breakeven à +50%, TP 150%, SL 50% — pour KOLs à gros moves
-- **Aucune exécution, aucune clé privée EVM, aucun live_trader ETH**
+**Phase 2 — décision à N≥50 / 14 jours (ETA Mai 07)** :
+- Si WR ≥ 65% AND EV net ≥ +10%/trade @ $200 → Phase 3 (dev live Uniswap V3 + Flashbots Protect)
+- Sinon → archive, reste 100% Solana
 
-**Phase 2 — décision à N≥50 trades / 14 jours :**
-- Si WR ≥ 65% ET EV net ≥ +10%/trade @ $100 → passer à Phase 3 (exécution live Uniswap V3 + MEV Blocker RPC)
-- Sinon → archive la branche, on reste 100% Solana
+**Phase 3 — live ETH (PAS lancée, conditionnée Phase 2)** :
+- `live_trader_eth.py` séparé : web3.py + Uniswap V3 SwapRouter02
+- MEV Protect RPC obligatoire (`rpc.flashbots.net` ou `rpc.mevblocker.io`)
+- Wallet EVM séparé du Solana, bankroll distincte $500-1000
+- Position min $200/trade
 
-**Phase 3 — live (2-3 semaines dev, PAS lancée tant que Phase 2 non validée) :**
-- `live_trader_eth.py` séparé : web3.py + Uniswap V3 SwapRouter02 OU 1inch Aggregator v6
-- MEV protection obligatoire : RPC Flashbots Protect (`rpc.flashbots.net`) ou MEV Blocker (`rpc.mevblocker.io`)
-- Nonce management, ERC-20 approve avant premier sell, gas estimator
-- Wallet séparé (pas celui Solana), bankroll distincte (cible $500-1000)
-- Position size min **$200/trade** pour que frais ≤ 7.5%
-
-**KOLs ETH à identifier (todo user) :**
-- Lister les 3-5 KOLs qui postent activement des CA `0x...` en ce moment
-- Vérifier qu'ils sont bien dans `GROUPS_DATA` de `safe_scraper.py` (sinon ajouter comme A-tier par défaut)
-
-**Risques / pourquoi ça peut tomber à l'eau :**
-- Les KOLs sur-communiquent leurs wins (biais survivorship bias)
-- Memecoin ETH L1 = liq plus élevée mais volatilité plus basse → TP 100%+ rare en pratique
-- MEV actuel (2026) prend 2-5% sans protection — si ça passe à 6-8% le modèle de frais $15 est sous-estimé
-- Cycle Solana revient probablement en 2-6 semaines → investir dans ETH juste au moment où Solana repart serait absurde
-
-**Decision : lancer Phase 1 dev ou attendre ?** → À trancher user
+**Risques monitoring Phase 1** :
+- Si aucun call ETH détecté en 3j → vérifier que les KOLs postent bien des 0x (sinon pivot vers détection CA par URL Etherscan/Uniswap)
+- Si WR très bas dès N=10 → claims KOL étaient trompeurs (exit Phase 2 early)
+- MEV 2026 prend 2-5% sans protection — si ça passe >6% le modèle $15 gas est sous-estimé
 
 ---
 
-## v144.16 hotfix Apr 22 — live BOND_FAST bought non-bonding tokens
+## v144.19 Apr 23 — alert noise reduction + sim-align fix
 
-**Bug :** `STRATEGY_FILTERS` (liq ≤ $3000 pour BOND_FAST) était appliqué uniquement en paper (`paper_trader._passes_strategy_filter`). Les 2 branches live de `safe_scraper.py` (hybrid L1454 + exploration L1522) itéraient `live_allocs` et appelaient `open_live_trade(...)` sans gate. Résultat : BOND_FAST live achetait n'importe quel token.
+**Done (committed + deployed)** :
+1. **API health Telegram alerts désactivées** (`scraper/safe_scraper.py:524-525`) — miroir de v144.17 pour `api_errors`. Fill rates toujours loggés, juste plus d'alerte.
+2. **`paper_sim_pnl_pct` contamination fix** (`live_trader.py:1213-1221`) — retiré `_pt_ultra_override` qui capturait le fill Jupiter live au lieu d'une vraie ref sim pure. Résout les faux drift +148pp sur pumps ($MHGA, $8) détectés par sim-align-gate.
+3. **Nightly outlier monitor MEV-pump filter** (`scripts/nightly_outlier_monitor.py`) — skip les paires tp_hit/tp_hit où live > paper > 0 (edge positive-slip attendue), comptées dans `outliers_mev_pump_count`. Les vraies alertes (statuts opposés, paper > live) continuent.
 
-**Exemple concret :** `$OOO` (id 192607) acheté @ 17:44 UTC — entry_mcap $1.13M, liq $125K (42× seuil), `rt_is_pump_fun=0`. Côté paper/shadow `BOND_FAST` : aucune ligne ouverte pour ce même token = filtre paper OK, filtre live absent.
+---
 
-**Fix :** import `_passes_strategy_filter` dans les 2 branches live, `continue` + log `RT LIVE SKIP (filter)` si token ne passe pas. Live = miroir strict du shadow maintenant.
+## v144.19b Apr 23 — shadow audit nightly CI + KOL tick quality
 
-**À faire manuel :** fermer position $OOO sur Jupiter (entrée hors-spec, position $1.76).
+**Done** :
+- `.github/workflows/nightly-shadow-audit.yml` (05:00 UTC) : `verify_shadow_main_parity.py` en gate dur (alerte Telegram si régression v144.3, tolérance 5 rows ou 0.1% de N) + `paired_all_v144_shadows.py` en artefact info.
+- `scripts/kol_tick_quality.py` : leaderboard KOL par qualité intrinsèque du call (win-rate path-dependent +10% avant -20% sur price_ticks, indépendant de TP/SL/timeout). Top sur 30j : `gubbinscalls` 92.9% WR N=14.
+- Backfill `paper_sim_pnl_pct` sur 49,746 lignes historiques completed (exit 0).
 
 ---
 
@@ -224,6 +226,7 @@ Sweet-spot SCORE35 sur BE25 (extrapolation FAST_TP100_S35). LAZY_STRATEGIES nett
 ## 📋 Reste à faire
 
 ### ⏳ Data wait (laisser tourner)
+- **ETH Phase 1 N≥50 / 14j** (ETA Mai 07) — verdict go/no-go live ETH. Monitor via : `SELECT strategy, COUNT(*), AVG(pnl_pct)*100 FROM paper_trades WHERE chain='ethereum' AND status != 'open' GROUP BY 1;`
 - Verdicts paired shadows v144.x (Apr 23-30)
 - Slip per-cell N≥15 sur pump×tp_hit + non-pump×* (Apr 25)
 - Validation FAST_TP100_SL20_S35 paper paired vs base (sim dit +28%/trade)
@@ -231,26 +234,21 @@ Sweet-spot SCORE35 sur BE25 (extrapolation FAST_TP100_S35). LAZY_STRATEGIES nett
 - LIVE post-swap projection vs réel (Apr 27)
 
 ### 🟢 Maintenance rapide (faisable maintenant)
-- Backfill `paper_sim_pnl_pct` historique : `python scripts/backfill_paper_sim_pnl_pct.py` (~50K updates, lent ~3h)
-- Migrer `paired_all_v144_shadows.py` + `analyze_mega_sweep.py` + `verify_shadow_main_parity.py` en CI nightly
 - Documenter règles HYST/DTRAIL/paired-test dans `docs/known_issues.md`
+- `analyze_mega_sweep.py` en nightly CI (faible priorité — c'est un post-processeur on-demand, pas un gate quotidien)
 
-### 🔵 Sim-align follow-up (post v144.9)
-- **A/B mega sweep DONE (Apr 21)** : Spearman ρ=**0.225** (weak), 99.9% configs suspectes.
-  - `FAST_TP100_SL20_S35` : **faux positif PT** (rank 33 vs EH 404, Δ+371) — shadow-only, no harm
-  - `BE25_TP80_SL30_S35` : PT modérément optimiste (rank 21 vs EH 51, Δ+30)
-  - `HIGHSCORE_TP200_SL40` : **hidden gem massif** (PT 12665 vs EH 369, Δ−12296) → candidate scale-up post N≥30 paper
-  - `FAST_TP80_SL25` ⭐ rank 1 des DEUX sweeps → priorité absolue confirmée
-  - Famille let-it-run TP100 (DECAY/SLOW4H/6H/TP100_NOSL/SL60/SL70/MOONBAG/WIDE_RUNNER) = systématiquement sous-estimée par PT (Δ−82000). Déjà shadow.
-  - DTRAIL MCAP_MID cluster = artifact confirmé sur top 15 over-estimated
+### 🔵 Sim-align follow-up (post v144.19)
+- **Confirmer le fix v144.19** : `verify_sim_live_alignment.py` doit passer vert dès demain 04:00 UTC (avg |diff| < 5pp, within_10pp ≥ 80%). Si rouge → les 4 bugs logiques résiduels dominent la variance.
 - **Vrais bugs logiques résiduels** (gate v144.8 flagged) : 4 cas à investiguer quand N > 20 paired
   - `$BUZZED BE25` +11pp : sim `timeout_eod` mais live `timeout` — sim ne trigger pas le timeout
   - `$XBT BE25` −32pp : idem
   - `$ZACHXBT BE25` +12pp : status match (be_stop/be_stop) mais exit_price diverge — bug formule be_stop
   - `$ACHI BE25` −12pp (dont 4.7pp Jup slip) : mix logique + slippage
-- **Assouplir threshold gate** (optionnel) : `sim-align-gate.yml` passer `within_10pp >= 80%` → 70% si v144.8 ne suffit pas à le faire vert. Seuil actuel est cohérent avec le signal propre, laisser 80% pour forcer l'investigation des 4 bugs résiduels.
-- **Attendre 48-72h** : la colonne `paper_sim_pnl_pct` se remplit progressivement (17/45 trades actuels). Gate plus stable avec N≥40.
-- **Backfill eval_history** pré-v138 : N/A (pré-v138 n'a pas la colonne, laisser filtrer naturellement).
+- **A/B mega sweep rappel (Apr 21)** : Spearman ρ=**0.225** (weak), 99.9% configs suspectes.
+  - `HIGHSCORE_TP200_SL40` : **hidden gem massif** (PT 12665 vs EH 369, Δ−12296) → candidate scale-up post N≥30 paper
+  - `FAST_TP80_SL25` ⭐ rank 1 des DEUX sweeps → priorité absolue confirmée
+  - `FAST_TP100_SL20_S35` : faux positif PT — shadow-only, no harm
+  - Famille let-it-run TP100 systématiquement sous-estimée par PT (Δ−82000). Déjà shadow.
 
 ### 🟠 Actions après verdicts
 - **NOZEROLIQ_TP200_SL40** : si pattern perdant à N≥30, retirer du hybrid (~+$8/j net)
@@ -363,6 +361,13 @@ Sweet-spot SCORE35 sur BE25 (extrapolation FAST_TP100_S35). LAZY_STRATEGIES nett
 
 ## Historique récent
 
+- **v14b** (Apr 23 PM) ETH strats promues de shadow à main paper + alertes Telegram chain-aware (🔷ETH tag, `dexscreener.com/{chain}/`, Uniswap + Etherscan links). `position_usd=$200` forcé sur main path ETH aussi. 3 strats ajoutées aux `hybrid_strategy.allocations` en DB (15 total).
+- **v14** (Apr 23 PM) **Sprint #ETH-1 Phase 1 deployed** : migration `chain` column sur 5 tables, `chain_detect.py` module + 25 tests, `ETH_CA_REGEX` scan dans `extract_tokens`, DexScreener chain-parameterized, guards 0x sur RugCheck/Helius/Jupiter/Bubblemaps/outcome, fee model ETH ($15 gas + 200bps MEV), `_passes_strategy_filter` chain gate strict. 3 strats ETH initiales. 38 tests pass. Sprint #ETH-1 Phase 1 live.
+- **v144.19b** (Apr 23 AM) Nightly shadow audit CI (`verify_shadow_main_parity.py` + `paired_all_v144_shadows.py`). Crash fix + tolerance sur parity script. Backfill `paper_sim_pnl_pct` historique (49,746 rows) completed.
+- **v144.19** (Apr 23 AM) API health Telegram alerts désactivées. `paper_sim_pnl_pct` decontamination : retiré `_pt_ultra_override` dans `live_trader._paper_sim_ev` qui faisait que la ref sim stockée suivait le fill Jupiter au lieu de rester sim pure (faux drift +148pp sur pumps $MHGA/$8). Nightly outlier monitor skip les paires tp/tp MEV-pump (live>paper>0) — seuls les vrais bugs logiques alertent.
+- **v144.17-18** (Apr 22 eve) API error alerts désactivées (noisy). +2 KOLs A-tier (leoclub69, markdegens).
+- **v144.16** (Apr 22 PM) STRATEGY_FILTERS appliqué au live (paper-only avant → BOND_FAST live achetait non-bonding comme $OOO). Live = miroir strict du shadow.
+- **v144.15** (Apr 22) Live 4-strat A/B : BE25 + FAST_TP50 + FAST_TP80_SL25 (new) + BOND_FAST_TP50_SL20_T20 (new).
 - **v144.14** (Apr 21 eve) Jupiter Trigger V2 désactivé en DB (`trigger_orders_enabled=false`). Risque de détruire le +5pp positive slippage Ultra observé sur FAST live. Re-évalué au scale-up $10+.
 - **v144.13** (Apr 21 eve) Per-family slip multiplier dans mega_sweep : ×10 DTRAIL, ×8 TRAIL, ×6 DIP, ×5 SCALP, ×4 SPLIT. Hybrides = worst-family wins. Corrige le biais 44% du sweep universe (Sprint #2b). Static TP/SL inchangés.
 - **v144.12b** (Apr 21 eve) Scope fix gate SIM-vs-PAPER : itère `paper_by_strat.keys()` pour capturer FAST/DTRAIL sans `paper_sim_pnl_pct`. Révèle +55.9% sim-drift sur FAST_TP50_SL30, +40.2% BE25.
