@@ -492,6 +492,28 @@ def _build_dip_buy_grid() -> list[dict]:
 # Supabase helpers
 # ---------------------------------------------------------------------------
 
+# v14: chain filter applied to every paper_trades + price_ticks query.
+# Set once by main() from args.chain before any fetch runs. Default 'solana'
+# preserves legacy behavior — every pre-v14 sim run implicitly assumed solana.
+# Set to 'all' to disable the filter (mix solana + ethereum; only useful for
+# raw DB audits, never for PnL-based ranking since fee models differ).
+_SIM_CHAIN: str = "solana"
+
+
+def _chain_params() -> list[tuple]:
+    """Return the chain filter tuples to append to sb_get params.
+    Empty list when chain=='all' (= no filter)."""
+    if _SIM_CHAIN == "all":
+        return []
+    return [("chain", f"eq.{_SIM_CHAIN}")]
+
+
+def set_sim_chain(chain: str) -> None:
+    """Set the module-level chain filter. Called from main() after argparse."""
+    global _SIM_CHAIN
+    _SIM_CHAIN = chain
+
+
 def sb_get(table: str, params: list[tuple]) -> list[dict]:
     all_rows = []
     limit = 1000
@@ -513,34 +535,36 @@ def sb_get(table: str, params: list[tuple]) -> list[dict]:
 
 def fetch_all_trades_by_strategy(since: str) -> list[dict]:
     """Fetch ALL closed paper trades (including shadows) grouped by strategy.
-    Used by --from-trades mode: real PnL instead of OHLCV simulation."""
+    Used by --from-trades mode: real PnL instead of OHLCV simulation.
+    v14: filtered by _SIM_CHAIN (default 'solana')."""
     params = [
         ("select", "token_address,strategy,pnl_pct,status,created_at,kol_group,"
                    "position_usd,exit_minutes,high_price_seen,entry_price,exit_price,"
-                   "rt_liquidity_usd,rt_token_age_hours,is_shadow"),
+                   "rt_liquidity_usd,rt_token_age_hours,is_shadow,chain"),
         ("status", "in.(trail_stop,sl_hit,timeout,tp_hit)"),
         ("source", "eq.rt"),
         ("created_at", f"gte.{since}T00:00:00Z"),
         ("order", "created_at.asc"),
-    ]
+    ] + _chain_params()
     trades = sb_get("paper_trades", params)
-    print(f"Fetched {len(trades)} closed trades (all strategies, incl shadows) since {since}")
+    print(f"Fetched {len(trades)} closed trades (chain={_SIM_CHAIN}, all strategies, incl shadows) since {since}")
     return trades
 
 
 def fetch_paper_trades(since: str) -> list[dict]:
+    """v14: filtered by _SIM_CHAIN (default 'solana')."""
     params = [
         ("select", "id,token_address,pair_address,strategy,entry_price,exit_price,"
                    "status,pnl_pct,created_at,kol_group,source,high_price_seen,position_usd,"
                    "entry_mcap,rt_liquidity_usd,rt_volume_24h,rt_token_age_hours,"
-                   "rt_is_pump_fun,n_kol_confirmations"),
+                   "rt_is_pump_fun,n_kol_confirmations,chain"),
         ("status", "in.(trail_stop,sl_hit,timeout,tp_hit)"),
         ("source", "eq.rt"),  # v113: RT only — batch has no age/enrichment data
         ("created_at", f"gte.{since}T00:00:00Z"),
         ("order", "created_at.asc"),
-    ]
+    ] + _chain_params()
     trades = sb_get("paper_trades", params)
-    print(f"Fetched {len(trades)} closed paper trades since {since}")
+    print(f"Fetched {len(trades)} closed paper trades (chain={_SIM_CHAIN}) since {since}")
     return trades
 
 
@@ -1117,17 +1141,17 @@ def _fetch_tick_trades(since: str, include_shadows: bool = False) -> list[dict]:
                    "position_usd,status,created_at,exit_at,pnl_pct,pnl_usd,"
                    "exit_minutes,high_price_seen,kol_group,rt_liquidity_usd,"
                    "dex_spot_price_at_entry,source,exit_price,entry_mcap,"
-                   "snapshot_id,entry_score,rt_token_age_hours,rt_is_pump_fun,is_shadow"),
+                   "snapshot_id,entry_score,rt_token_age_hours,rt_is_pump_fun,is_shadow,chain"),
         ("status", "in.(trail_stop,sl_hit,timeout,tp_hit)"),
         ("source", "eq.rt"),
         ("created_at", f"gte.{since}T00:00:00Z"),
         ("order", "created_at.asc"),
-    ]
+    ] + _chain_params()
     if not include_shadows:
         params.insert(3, ("is_shadow", "eq.false"))
     trades = sb_get("paper_trades", params)
     label = "RT+shadow" if include_shadows else "RT (non-shadow)"
-    print(f"Fetched {len(trades)} closed {label} trades since {since}")
+    print(f"Fetched {len(trades)} closed {label} trades (chain={_SIM_CHAIN}) since {since}")
     return trades
 
 
@@ -1139,12 +1163,12 @@ def _fetch_ticks_for_tokens(token_ranges: dict[str, tuple]) -> dict[str, list[di
 
     for addr, (t_start, t_end) in token_ranges.items():
         params = [
-            ("select", "price_usd,fetched_at,source,volume_usd,liquidity_usd"),
+            ("select", "price_usd,fetched_at,source,volume_usd,liquidity_usd,chain"),
             ("token_address", f"eq.{addr}"),
             ("fetched_at", f"gte.{t_start}"),
             ("fetched_at", f"lte.{t_end}"),
             ("order", "fetched_at.asc"),
-        ]
+        ] + _chain_params()
         rows = sb_get("price_ticks", params)
         if rows:
             ticks_by_token[addr] = rows
@@ -3682,14 +3706,14 @@ def _eval_history_simulation(args):
         ("select", "id,token_address,symbol,strategy,tranche_label,entry_price,"
                    "sl_price,tp_price,horizon_minutes,position_usd,"
                    "rt_liquidity_usd,dex_spot_price_at_entry,created_at,"
-                   "status,pnl_pct,eval_history"),
+                   "status,pnl_pct,eval_history,chain"),
         ("status", "in.(trail_stop,sl_hit,timeout,tp_hit)"),
         ("source", "eq.rt"),
         ("created_at", f"gte.{args.since}T00:00:00Z"),
         ("eval_history", "not.is.null"),
         ("order", "created_at.asc"),
-    ])
-    print(f"Fetched {len(rows)} closed trades with eval_history since {args.since}")
+    ] + _chain_params())
+    print(f"Fetched {len(rows)} closed trades with eval_history (chain={_SIM_CHAIN}) since {args.since}")
     if not rows:
         print("No trades have eval_history yet — only trades closed after v138 deploy "
               "carry the field. Wait 24-48h for the first batch.")
@@ -4539,14 +4563,14 @@ def _mega_sweep_run_eh(args):
     # count the same token via its live copy.
     params = [
         ("select", "id,token_address,created_at,entry_price,rt_liquidity_usd,"
-                   "rt_score,kol_group,entry_mcap,source,eval_history"),
+                   "rt_score,kol_group,entry_mcap,source,eval_history,chain"),
         ("created_at", f"gte.{since}"),
         ("status", "in.(tp_hit,sl_hit,be_stop,trail_stop,timeout)"),
         ("eval_history", "not.is.null"),
         ("order", "created_at"),
-    ]
+    ] + _chain_params()
     rows = sb_get("paper_trades", params)
-    print(f"Raw: {len(rows)} trades with eval_history since {since}")
+    print(f"Raw: {len(rows)} trades with eval_history (chain={_SIM_CHAIN}) since {since}")
 
     by_token = {}
     for r in rows:
@@ -4703,11 +4727,11 @@ def _mega_sweep_run(args):
     # range_lo/range_hi loop called it with kwargs that don't exist -> TypeError.
     params = [
         ("select", "id,token_address,created_at,entry_price,rt_liquidity_usd,"
-                   "rt_score,kol_group,entry_mcap"),
+                   "rt_score,kol_group,entry_mcap,chain"),
         ("source", "eq.rt"),
         ("created_at", f"gte.{since}"),
         ("order", "created_at"),
-    ]
+    ] + _chain_params()
     rows = sb_get("paper_trades", params)
     by_token = {}
     for r in rows:
@@ -4723,12 +4747,12 @@ def _mega_sweep_run(args):
     for i, u in enumerate(universe):
         addr = u["token_address"]
         params = [
-            ("select", "price_usd,fetched_at,source"),
+            ("select", "price_usd,fetched_at,source,chain"),
             ("token_address", f"eq.{addr}"),
             ("fetched_at", f"gte.{start}"),
             ("fetched_at", f"lte.{end}"),
             ("order", "fetched_at"),
-        ]
+        ] + _chain_params()
         rs = sb_get("price_ticks", params)
         if rs:
             jp = sorted([t for t in rs if t["source"] == "jupiter"], key=lambda t: t["fetched_at"])
@@ -4841,6 +4865,11 @@ def main():
                         help="Full cross-grid: all strategies x 5 interval profiles")
     parser.add_argument("--flat-sizing", type=float, default=0,
                         help="Fixed position size in USD (default: 0 = Kelly sizing). Use ~99 to match paper trader.")
+    parser.add_argument("--chain", type=str, default="solana",
+                        choices=["solana", "ethereum", "all"],
+                        help="v14: filter trade universe + price_ticks by chain. "
+                             "'solana' (default) = legacy behavior. 'ethereum' = ETH only. "
+                             "'all' = mix (only meaningful when fee models don't matter).")
     parser.add_argument("--from-trades", action="store_true",
                         help="Use real paper trade PnL instead of OHLCV simulation (ground truth mode)")
     parser.add_argument("--from-ticks", action="store_true",
@@ -4932,6 +4961,10 @@ def main():
     parser.add_argument("--mega-since", type=str, default="2026-04-13T20:00:00Z",
                         help="Universe cutoff for --mega-sweep (default: post-v132)")
     args = parser.parse_args()
+
+    # v14: lock the chain filter for this run before any fetch fires.
+    set_sim_chain(args.chain)
+    print(f"[sim] chain filter: {args.chain}")
 
     global FLAT_POS_SIZE, USE_UNIFIED_SIM
     if args.flat_sizing > 0:
