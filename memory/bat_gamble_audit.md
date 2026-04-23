@@ -1,12 +1,28 @@
 ---
-name: bat_gamble audit — not rehabilitable
-description: High-volume KOL blacklisted pre-v108. 6617 shadows × 124 strats over 5d — zero profitable strategy. Not a parameterisation issue, structural bad signal.
+name: bat_gamble audit — likely structural, limited-confidence data
+description: High-volume KOL blacklisted pre-v108. 6617 shadows × 124 strats over 5d (Mar 24-29) — zero profitable strategy IN THE STORED PNL. But data predates price_ticks (Apr 6) and eval_history (Apr 17) so cannot tick-replay. Structural signal (median -50% 4/5 days) is robust regardless.
 type: project
 ---
 
-# bat_gamble — verdict Apr 23 2026
+# bat_gamble — verdict Apr 23 2026 (revised)
 
-**TL;DR** : pas de strat profitable sur 124 testées. Ne pas réhabiliter.
+**TL;DR** : signal structurellement mauvais (4/5 jours médiane −50%), mais les
+données datent d'avant les price_ticks (Apr 6) — on ne peut pas tick-replay
+avec le slip model + Jupiter actuels. Confiance élevée sur "pas réhabilitable
+sans refetch OHLCV + re-sim", mais pas de certitude absolue 0-strat.
+
+## Data caveat
+
+**bat_gamble = Mar 24-29, 2026**. Infrastructure disponible à l'époque :
+- `paper_trades.pnl_pct` stockés par paper_trader v108 : DexScreener poll 15-60s
+- Slip model v108 (buckets 5k/20k/50k avec valeurs différentes de v14e.6 actuel)
+- Pas de Jupiter Ultra (arrivé v121, Apr 8) → pas de positive slippage sur pumps
+- **Pas de price_ticks** (créé Apr 6, v118)
+- **Pas de eval_history** (créé Apr 17, v138)
+
+Donc l'analyse ci-dessous = replay du paper v108, pas un ground-truth tick replay.
+Biais possibles : TP ratés sur pumps courts entre deux polls, SL trigger sur wicks
+qu'un tick-replay ne confirmerait pas.
 
 ## Volume
 - 20 mains (TP100_SL50) + 6617 shadows sur 5 jours (Mar 24-29, 2026)
@@ -49,6 +65,13 @@ Par jour (TP100_SL50 main):
 ## Conclusion
 
 - Bat_gamble fait de la **quantity-over-quality** extrême
-- Aucun paramètre de TP/SL/horizon/trail ne rend ses calls profitables
+- Aucun paramètre de TP/SL/horizon/trail n'a rendu ses calls profitables **dans le
+  paper v108**. Pas re-testé avec slip v14e.6 + Jupiter Ultra.
 - Le volume est un signal NÉGATIF (plus de garbage, pas plus d'alpha)
-- **Ne pas réhabiliter** — blacklist pré-v108 était justifié
+- **Ne pas réhabiliter automatiquement**. Pour vérifier avec rigueur :
+  1. Extraire les CAs depuis `kol_mentions` pour Mar 24-29
+  2. Refetch OHLCV historique (DexPaprika → Birdeye fallback)
+  3. Tourner `sim.py --from-trades` avec strats actuelles + slip v14e.6
+  4. Si ça reste ≤ 0% sur N≥50 en re-sim → blacklist confirmée
+- La médiane −50% sur 4/5 jours reste dure à sauver même avec un meilleur sim
+  (pas un artefact de slip model), donc probabilité de réhabilitation très faible.
