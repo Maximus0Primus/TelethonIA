@@ -1400,6 +1400,15 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
                 for tranche in tranches:
                     tp_price = entry_price * tranche["tp_mult"] if tranche.get("tp_mult") else None
                     sl_price = entry_price * tranche["sl_mult"]
+                    # v144.3: real position_usd so Ultra exit + slip model match mains.
+                    # v14: ETH shadows force position_usd to ETH_MIN_POSITION_USD so the
+                    # fee model ($7.50 gas + 2% MEV) stays coherent — at $10-30 shadow
+                    # sizes gas alone is 25-75% of the trade, making pnl_pct meaningless.
+                    # is_shadow=True ensures the bankroll is not touched regardless.
+                    if token.get("chain") == "ethereum":
+                        _pos = float(ETH_MIN_POSITION_USD)
+                    else:
+                        _pos = round(shadow_alloc * tranche["pct"] * bot_ml_mult, 2)
                     shadow_rows.append({
                         **shadow_base,
                         "strategy": strat_name,
@@ -1408,8 +1417,7 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
                         "horizon_minutes": tranche["horizon_min"],
                         "tranche_pct": tranche["pct"],
                         "tranche_label": tranche["label"],
-                        # v144.3: real position_usd so Ultra exit + slip model match mains
-                        "position_usd": round(shadow_alloc * tranche["pct"] * bot_ml_mult, 2),
+                        "position_usd": _pos,
                     })
                 # v108: Mark as opened so subsequent tokens in this call don't re-insert
                 open_combos.add((addr, strat_name))
