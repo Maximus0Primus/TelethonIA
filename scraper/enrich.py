@@ -411,6 +411,10 @@ def _fetch_birdeye(mint: str, api_key: str) -> dict | None:
     """
     if not mint or not api_key:
         return None
+    # v14: Solana-only. Birdeye supports other chains but we haven't calibrated
+    # pricing/signals for ETH. Silent skip on 0x addresses prevents burning CUs.
+    if mint.startswith("0x"):
+        return None
 
     headers = {
         "X-API-KEY": api_key,
@@ -514,44 +518,82 @@ def _empty_result() -> dict:
     }
 
 
-def _fetch_dexscreener_by_address(address: str) -> dict | None:
+def _fetch_dexscreener_by_address(address: str, chain: str = "solana") -> dict | None:
     """
     v40: Fetch token data by exact contract address (not by symbol search).
     Prevents symbol collision where DexScreener search picks the wrong CA.
-    Uses the same /tokens/v1/solana/{address} endpoint as CA resolution.
+
+    v14: chain parameter — 'solana' (default, backward compat) or 'ethereum'.
+    Uses the chain-parameterized /tokens/v1/{chain}/{address} endpoint.
+    DexScreener supports every major chain behind the same URL shape.
+
+    On ETH we prefer Uniswap V3 > V2 > Sushiswap pairs (analogous to preferring
+    Raydium over pump.fun on Solana — established DEXs first, then fallbacks).
     """
+    # v14: Address-chain sanity check. A 0x address on chain='solana' or a
+    # base58 address on chain='ethereum' means the caller routed wrong;
+    # silent return prevents polluting the cache with negative results.
+    if chain == "solana" and address.startswith("0x"):
+        return None
+    if chain == "ethereum" and not address.startswith("0x"):
+        return None
+
     try:
+        url = f"https://api.dexscreener.com/tokens/v1/{chain}/{address}"
         if _monitoring:
             with _track_api_call("dexscreener", "/by-address") as _t:
-                resp = requests.get(
-                    f"https://api.dexscreener.com/tokens/v1/solana/{address}",
-                    timeout=10,
-                )
+                resp = requests.get(url, timeout=10)
                 _t.set_response(resp)
         else:
-            resp = requests.get(
-                f"https://api.dexscreener.com/tokens/v1/solana/{address}",
-                timeout=10,
-            )
+            resp = requests.get(url, timeout=10)
         if resp.status_code != 200:
-            logger.warning("DexScreener by-address %d for %s…", resp.status_code, address[:8])
+            logger.warning("DexScreener by-address %d for %s:%s…",
+                           resp.status_code, chain, address[:8])
             return None
 
         pairs = resp.json() if isinstance(resp.json(), list) else resp.json().get("pairs", [])
         if not pairs or not isinstance(pairs, list):
             return None
 
-        # Filter to pairs where baseToken.address matches our target
+        # Filter to pairs where baseToken.address matches our target + correct chain.
+        # ETH address comparison is case-insensitive (DexScreener may return
+        # checksummed while our input is lowercase).
+        def _addr_match(p: dict) -> bool:
+            got = p.get("baseToken", {}).get("address", "")
+            if chain == "ethereum":
+                return got.lower() == address.lower()
+            return got == address
+
         target_pairs = [
-            p for p in pairs
-            if p.get("baseToken", {}).get("address", "") == address
-            and p.get("chainId") == "solana"
+            p for p in pairs if _addr_match(p) and p.get("chainId") == chain
         ]
         if not target_pairs:
-            # Fallback: use all pairs (API should only return pairs for this token)
-            target_pairs = [p for p in pairs if p.get("chainId") == "solana"]
+            target_pairs = [p for p in pairs if p.get("chainId") == chain]
         if not target_pairs:
             return None
+
+        # Chain-specific DEX preference.
+        if chain == "ethereum":
+            # Uniswap V3 first (most liquidity on ETH memecoins), then V2, then everything else.
+            def _eth_rank(p: dict) -> int:
+                dex = p.get("dexId", "").lower()
+                if "uniswap" in dex and "v3" in dex:
+                    return 0
+                if "uniswap" in dex:
+                    return 1
+                if "sushi" in dex:
+                    return 2
+                return 3
+            target_pairs = sorted(target_pairs, key=_eth_rank)
+            # Among the top-rank group, pick highest 24h volume.
+            top_rank = _eth_rank(target_pairs[0])
+            preferred = [p for p in target_pairs if _eth_rank(p) == top_rank]
+            best = max(preferred, key=lambda p: float(p.get("volume", {}).get("h24", 0) or 0))
+            # Return below uses `best` — fall through to the post-processing block.
+            # But original code path expects the Solana variable name; keep compat
+            # by falling into the sort/pick below with a shortcut.
+            raydium_pairs = []
+            target_pairs = [best]
 
         # Pick highest-volume pair, preferring Raydium over pump.fun bonding curve
         raydium_pairs = [p for p in target_pairs if "raydium" in p.get("dexId", "").lower()]
@@ -692,10 +734,14 @@ def _fetch_dexscreener_by_address(address: str) -> dict | None:
             "has_telegram": has_telegram,
             "has_website": has_website,
             "social_count": social_count,
+            # v14: chain tag so downstream (paper_trader, snapshots, live_trader)
+            # can dispatch chain-specific logic without re-detecting from address.
+            "chain": chain,
         }
 
     except requests.RequestException as e:
-        logger.warning("DexScreener by-address error for %s…: %s", address[:8], e)
+        logger.warning("DexScreener by-address error for %s:%s…: %s",
+                       chain, address[:8], e)
         return None
 
 
@@ -724,10 +770,14 @@ def enrich_token(symbol: str, cache: dict, birdeye_key: str | None = None, known
     cached_ca = entry.get("token_address")
     ca_changed = known_ca and (not cached_ca or known_ca != cached_ca)
     if now - entry.get("_dex_at", 0) > TTL_DEXSCREENER or ca_changed:
-        # v40: Use exact CA lookup when available to prevent symbol collision
+        # v40: Use exact CA lookup when available to prevent symbol collision.
+        # v14: detect chain from CA shape — ETH 0x vs Solana base58.
         if known_ca:
-            dex_data = _fetch_dexscreener_by_address(known_ca)
+            from chain_detect import detect_chain
+            _chain = detect_chain(known_ca) or "solana"
+            dex_data = _fetch_dexscreener_by_address(known_ca, chain=_chain)
         else:
+            # Symbol-only lookup is Solana-specific (legacy path, no ETH support).
             dex_data = _fetch_dexscreener(symbol)
         if dex_data:
             result.update(dex_data)

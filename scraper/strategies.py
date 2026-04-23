@@ -16,12 +16,27 @@ Imported by: paper_trader.py, sim.py, sim_engines.py, live_trader.py, etc.
 import re
 
 # ---------------------------------------------------------------------------
-# Fee constants (v121: Jupiter Ultra RFQ — near-zero slippage)
+# Fee constants — Solana (v121: Jupiter Ultra RFQ — near-zero slippage)
 # ---------------------------------------------------------------------------
 BUY_SLIPPAGE_BPS = 10    # 0.1% — Jupiter Ultra platform fee
 SELL_SLIPPAGE_BPS = 10   # 0.1% — Jupiter Ultra platform fee
 BUY_FEE_BPS = 0          # 0% — folded into slippage
 SELL_FEE_BPS = 0          # 0% — folded into slippage
+
+# ---------------------------------------------------------------------------
+# Fee constants — Ethereum L1 (v14: shadow-only cost model)
+#
+# Budget assumes mainnet ETH at ~20 gwei baseline. Single Uniswap V3 swap
+# = ~150k gas = ~$7-8 at $2500/ETH. Round-trip (buy + sell) = $15.
+# MEV sandwich attacks commonly take 100-300 bps on memecoin swaps; we
+# budget 200 bps per side to reflect realistic post-Flashbots conditions.
+# If we move to private relay for live (Phase 3), drop MEV to ~50 bps.
+# ---------------------------------------------------------------------------
+ETH_GAS_COST_USD_PER_SIDE = 7.50   # $7.50 each side, $15 round-trip
+ETH_BUY_SLIPPAGE_BPS = 200         # 2% slippage on entry (MEV + pool impact)
+ETH_SELL_SLIPPAGE_BPS = 200        # 2% slippage on exit
+ETH_MIN_POSITION_USD = 200         # below $200, fees eat >7.5% of trade
+
 
 # ---------------------------------------------------------------------------
 # Default deprecated strategies — overridable via scoring_config JSONB
@@ -399,7 +414,12 @@ STRATEGIES["BOND_FAST_TP50_SL20_T20"] = [
 SHADOW_STRATEGIES.append("BOND_FAST_TP50_SL20_T20")
 
 # Entry filter for BOND_FAST — only bondings / ultra-low liq.
+# v14: `chain: solana` gate ADDED. Without it, an ETH token with liq <$3k
+# would match this filter and get traded with Solana fee model (10bps slip).
+# ETH fees are $15 round-trip + 2% MEV, so a $3k-liq ETH token is far too
+# small to profitably trade. BOND_FAST is Solana-pump.fun-specific by design.
 STRATEGY_FILTERS["BOND_FAST_TP50_SL20_T20"] = {
+    "chain": "solana",
     "max_liquidity_usd": 3_000,
 }
 # (TD2 and PTRAIL_V2 have no entry gate — all tokens eligible)
@@ -1070,6 +1090,52 @@ STRATEGIES["BE25_TP80_SL30_S35"] = [
 ]
 SHADOW_STRATEGIES.append("BE25_TP80_SL30_S35")
 STRATEGY_FILTERS["BE25_TP80_SL30_S35"] = {"min_rt_score": 35}
+
+
+# ============================================================
+# v14 (Sprint #ETH-1) — Ethereum L1 shadow strategies.
+# Shadow-only, zero capital. Entry filters require chain='ethereum'.
+# TP/SL widened vs Solana because ETH fees ($15 round-trip gas + 2% MEV
+# slippage) make tight TP30/TP50 unprofitable. Phase 2 verdict at N≥50 /
+# 14 days: go live if WR ≥ 65% AND EV net ≥ +10%/trade; else archive.
+#
+# min_liquidity_usd 25k because ETH memecoin slippage above 2% kicks in
+# below ~$20k pool depth — we'd eat our edge before TP fires.
+# ============================================================
+
+# 1) ETH_TP100_SL50 — let-it-run classic. 4h horizon because ETH moves slower
+#    than Solana memecoins (bigger pools, fewer snipers).
+STRATEGIES["ETH_TP100_SL50"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.50, "horizon_min": 240, "label": "main"},
+]
+SHADOW_STRATEGIES.append("ETH_TP100_SL50")
+STRATEGY_FILTERS["ETH_TP100_SL50"] = {
+    "chain": "ethereum",
+    "min_liquidity_usd": 25_000,
+}
+
+# 2) ETH_TP80_SL40_T2H — conservative. Shorter horizon, tighter SL.
+STRATEGIES["ETH_TP80_SL40_T2H"] = [
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.60, "horizon_min": 120, "label": "main"},
+]
+SHADOW_STRATEGIES.append("ETH_TP80_SL40_T2H")
+STRATEGY_FILTERS["ETH_TP80_SL40_T2H"] = {
+    "chain": "ethereum",
+    "min_liquidity_usd": 25_000,
+}
+
+# 3) ETH_BE50_TP150_SL50 — breakeven protection at +50%, TP +150%.
+#    For KOLs whose ETH calls tend to 2-3x. BE activation prevents round-trip
+#    on tokens that pump then dump.
+STRATEGIES["ETH_BE50_TP150_SL50"] = [
+    {"pct": 1.0, "tp_mult": 2.50, "sl_mult": 0.50, "horizon_min": 240,
+     "be_activation": 0.50, "label": "main"},
+]
+SHADOW_STRATEGIES.append("ETH_BE50_TP150_SL50")
+STRATEGY_FILTERS["ETH_BE50_TP150_SL50"] = {
+    "chain": "ethereum",
+    "min_liquidity_usd": 25_000,
+}
 
 
 # ---------------------------------------------------------------------------

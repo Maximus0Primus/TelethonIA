@@ -163,6 +163,10 @@ def enrich_tokens_bubblemaps(ranking: list[dict]) -> None:
         address = token.get("token_address")
         if not address:
             continue
+        # v14: Bubblemaps URL path is Solana-hardcoded (/maps/solana/...).
+        # Skip ETH tokens silently to avoid 404 noise + wasted API budget.
+        if address.startswith("0x") or token.get("chain") == "ethereum":
+            continue
 
         # Check cache
         if address in cache and _is_cache_fresh(cache[address]):

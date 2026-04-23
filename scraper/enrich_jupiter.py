@@ -424,6 +424,11 @@ def enrich_tokens_jupiter(ranking: list[dict]) -> list[dict]:
         mint = token.get("token_address")
         if not mint:
             continue
+        # v14: Solana-only. Jupiter is a Solana DEX aggregator — hitting it
+        # with an ETH address burns rate-limit budget and clutters logs with
+        # 404s. Skip silently; ETH tokens rely on DexScreener for price.
+        if mint.startswith("0x") or token.get("chain") == "ethereum":
+            continue
 
         # Check cache
         cache_key = f"jup_{mint}"

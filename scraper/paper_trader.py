@@ -73,11 +73,25 @@ CA_FILTER = True
 from strategies import (
     _DEFAULT_DEPRECATED, SHADOW_STRATEGIES,
     BUY_SLIPPAGE_BPS, SELL_SLIPPAGE_BPS, BUY_FEE_BPS, SELL_FEE_BPS,
+    # v14: ETH fee model constants
+    ETH_GAS_COST_USD_PER_SIDE, ETH_BUY_SLIPPAGE_BPS, ETH_SELL_SLIPPAGE_BPS,
+    ETH_MIN_POSITION_USD,
     STRATEGIES, STRATEGY_FILTERS,
     _DECAY_RE, _TRAIL_RE, _DTRAIL_RE, _DIP_RE, _DIP_SPLIT_RE, _BE_RE,
     _get_decay_end, _get_trail_config,
     LAZY_STRATEGIES, LAZY_FAST_SEC, LAZY_FAST_WINDOW, LAZY_SLOW_SEC,
 )
+
+
+def _eth_slip_bps_with_gas(pos_usd: float, base_slip_bps: int) -> int:
+    """v14: ETH round-trip cost = slippage (bps) + gas (flat USD → bps).
+    Gas dominates at small positions, slippage dominates at large. Clamped
+    to [50, 2000] bps to avoid unreasonable values on extreme sizes.
+    """
+    pos = max(float(pos_usd or 0), 1.0)
+    gas_bps = int((ETH_GAS_COST_USD_PER_SIDE / pos) * 10_000)
+    total = base_slip_bps + gas_bps
+    return max(50, min(2000, total))
 
 # v115: DIP_BUY in-memory watchlist — tracks tokens waiting for dip+bounce to open P2
 # Key: (token_address, strategy_name) → tracking state
@@ -135,6 +149,16 @@ def _passes_strategy_filter(token: dict, strategy_name: str) -> bool:
     filt = STRATEGY_FILTERS.get(strategy_name)
     if not filt:
         return True  # no filter = always pass
+
+    # v14: chain gate (first check — cheapest to fail fast). If the strategy
+    # specifies a chain, the token's chain must match exactly. Missing chain
+    # field defaults to 'solana' so pre-v14 tokens still pass Solana-only
+    # strategies. ETH strategies REQUIRE chain='ethereum' explicit in token.
+    strat_chain = filt.get("chain")
+    if strat_chain is not None:
+        token_chain = token.get("chain") or "solana"
+        if token_chain != strat_chain:
+            return False
 
     score = token.get("score", 0)
     if score < filt.get("min_score", 0) or score > filt.get("max_score", 100):
@@ -1054,6 +1078,15 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
         # Shallow liquidity → up to 3x base slippage; deep → 1x
         slip_mult = 1.0 + 2.0 * (1.0 - lds)  # 1.0 for lds=1.0, 3.0 for lds=0.0
         buy_slip_bps = int(buy_slip_bps_base * slip_mult)
+        # v14: ETH fee override — flat 200 bps slip + gas baked into bps.
+        # The liquidity-depth multiplier is not applied because ETH pool
+        # depths are measured differently (Uniswap V3 concentrated liq skews
+        # the LDS heuristic). Calibration revisited after N≥20 ETH shadows.
+        if token.get("chain") == "ethereum":
+            # pos_usd isn't set yet here — estimate from portfolio budget or
+            # default to the ETH minimum. Accurate enough for entry slip model.
+            _eth_pos = float(token.get("_rt_position_usd") or ETH_MIN_POSITION_USD)
+            buy_slip_bps = _eth_slip_bps_with_gas(_eth_pos, ETH_BUY_SLIPPAGE_BPS)
         # v142 E: shadow-sync — if live already opened this trade and passed its
         # actual Jupiter fill price via token["_rt_force_entry_price"], use it
         # directly. Fixes P1 (TP/SL status inversion) and P4 (entry_price ±9%
@@ -1064,9 +1097,14 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
         # v130: Quote Jupiter Ultra /order at live's position size — same route/fill
         # as the live swap. Single source of truth for entry_price, market_ref, and
         # high_price_seen (no DexScreener/Ultra mixing like v127 had).
+        # v14: skip Ultra on ETH — Jupiter is Solana-only. ETH entry_price comes
+        # straight from DexScreener (raw_price). Fees/slippage already modeled.
         sol_price_entry = _get_sol_price()
         ultra_price = None
-        if forced_entry and float(forced_entry) > 0:
+        is_eth = token.get("chain") == "ethereum"
+        if is_eth:
+            pass  # raw DexScreener price + ETH fee model handles everything
+        elif forced_entry and float(forced_entry) > 0:
             ultra_price = float(forced_entry)
             entry_source = "live_sync"
         elif ultra_quote_lamports > 0 and sol_price_entry > 0:
@@ -1266,6 +1304,10 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
             lds = max(0.1, min(1.0, lds)) if lds else 1.0
             slip_mult = 1.0 + 2.0 * (1.0 - lds)
             buy_slip_bps = int(buy_slip_bps_base * slip_mult)
+            # v14: ETH fee override (see open_paper_trades main loop)
+            if token.get("chain") == "ethereum":
+                _eth_pos = float(token.get("_rt_position_usd") or ETH_MIN_POSITION_USD)
+                buy_slip_bps = _eth_slip_bps_with_gas(_eth_pos, ETH_BUY_SLIPPAGE_BPS)
             # v144.3: Use SAME entry_price as main — Ultra quote with forced_entry priority,
             # cached via _jupiter_prices_cache (warmed by main loop). Tag entry_source so
             # _override_exit_with_ultra_quote applies the same SELL Ultra quote at exit.
@@ -1400,7 +1442,17 @@ def _dynamic_sell_slip_factor(trade: dict, exit_type: str, base_bps: int = 10,
 
     Offset −100 bps applied post-type to shift the overall mean toward zero.
     Non-pump stays slightly under-slipped (N=6 is noisy, wait for more data).
+
+    v14: Ethereum branch uses a separate model (200 bps base MEV slip + gas
+    cost amortized over position size). Exit-type nuance doesn't apply — ETH
+    exits hit Uniswap routers the same way regardless of TP/SL/timeout.
     """
+    # v14: ETH chain uses its own cost model, independent of Solana calibration.
+    if trade.get("chain") == "ethereum":
+        pos_usd = float(trade.get("position_usd") or ETH_MIN_POSITION_USD)
+        total_bps = _eth_slip_bps_with_gas(pos_usd, ETH_SELL_SLIPPAGE_BPS)
+        return 1 - total_bps / 10_000
+
     liq_usd = float(trade.get("rt_liquidity_usd") or 50_000)
 
     if liq_usd < 5_000:
@@ -1495,6 +1547,10 @@ def _override_exit_with_ultra_quote(client, trade: dict, ev: dict) -> dict:
     Returns the (possibly modified) ev dict.
     """
     if not ev or ev.get("status") is None:
+        return ev
+    # v14: Jupiter Ultra is Solana-only. ETH exits use formula-based exit_price
+    # with the ETH slip/gas model from _dynamic_sell_slip_factor. No override.
+    if trade.get("chain") == "ethereum":
         return ev
     # v144.3: Ultra quote applies to BOTH mains and shadows for behavioral A/B parity.
     # Legacy shadows with pos_usd=0 (pre-v144.3) still bail out below since token_amount

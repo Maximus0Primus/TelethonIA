@@ -240,9 +240,15 @@ def _get_pool_address(token_address: str, pool_cache: dict) -> str | None:
     """Get the top Solana pool address for a token.
     v93: DexScreener first (highest-volume pair, matches RT/paper trading).
     Falls back: DexScreener → GeckoTerminal → DexPaprika.
+
+    v14: ETH tokens skipped — all 3 OHLCV fallbacks are Solana-hardcoded URLs.
+    Outcome labels for ETH come from DexScreener price snapshots via the paper
+    trading tick stream, not this path. Silent skip avoids 404 noise.
     """
     global _gecko_consecutive_429s, _gecko_disabled
     if not token_address:
+        return None
+    if token_address.startswith("0x"):
         return None
 
     cached = pool_cache.get(token_address)

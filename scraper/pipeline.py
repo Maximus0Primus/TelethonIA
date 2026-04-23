@@ -35,6 +35,10 @@ TOKEN_REGEX = re.compile(r"(?<![A-Za-z0-9_])\$([A-Za-z][A-Za-z0-9]{0,14})\b")
 BARE_TOKEN_REGEX = re.compile(r"\b([A-Z][A-Z0-9]{2,14})\b")
 # Solana base58 addresses (32-44 chars, no 0/O/I/l)
 CA_REGEX = re.compile(r"\b([1-9A-HJ-NP-Za-km-z]{32,44})\b")
+# v14: ETH contract addresses (0x + 40 hex). Strict word-bounded so tx hashes
+# (64 hex) and DeFi call-data hex blobs don't match. See chain_detect.py for
+# the canonical definition + tests.
+from chain_detect import ETH_CA_REGEX  # noqa: E402
 # URL-based token discovery (DexScreener links + pump.fun links)
 DEXSCREENER_URL_REGEX = re.compile(r"dexscreener\.com/(\w+)/([a-zA-Z0-9]{20,70})")
 PUMP_FUN_URL_REGEX = re.compile(r"pump\.fun/(?:coin/)?([a-zA-Z0-9]{20,50})")
@@ -390,7 +394,11 @@ _vader = SentimentIntensityAnalyzer()
 
 _DEXSCREENER_CACHE_FILE = Path(__file__).parent / "token_cache.json"
 _DEXSCREENER_URL = "https://api.dexscreener.com/latest/dex/search"
-_DEXSCREENER_TOKEN_URL = "https://api.dexscreener.com/tokens/v1/solana/{address}"
+# v14: chain-parameterized token lookup. DexScreener supports every major chain
+# behind /tokens/v1/{chain}/{address}. Callers must pass the chain explicitly —
+# defaulting silently to solana on an ETH CA would waste a 404 round-trip and
+# mark the address as unresolvable in the cache.
+_DEXSCREENER_TOKEN_URL = "https://api.dexscreener.com/tokens/v1/{chain}/{address}"
 
 # === CA → SYMBOL CACHE ===
 
@@ -481,21 +489,30 @@ def _save_ca_cache(cache: dict[str, dict]) -> None:
         json.dump(cache, f, indent=2)
 
 
-def _resolve_ca_to_symbol(address: str, ca_cache: dict[str, dict]) -> str | None:
+def _resolve_ca_to_symbol(
+    address: str, ca_cache: dict[str, dict], chain: str = "solana",
+) -> str | None:
     """
-    Resolve a Solana contract address to its token symbol via DexScreener.
+    Resolve a contract address to its token symbol via DexScreener.
+    v14: chain parameter — 'solana' or 'ethereum'. Cache keys prefixed with
+    chain to prevent cross-chain collision (same-shaped addresses exist
+    across chains; treating them as the same symbol would be a data bug).
+
     Returns the symbol (e.g. "POPCAT") or None if unresolvable.
     """
-    # Check cache first
-    if address in ca_cache:
-        entry = ca_cache[address]
+    # v14: chain-scoped cache key. Legacy Solana keys are plain addresses;
+    # we keep reading those for backward compat, but write new entries under
+    # the prefixed key so ETH + Solana can coexist safely.
+    cache_key = address if chain == "solana" else f"{chain}:{address}"
+    if cache_key in ca_cache:
+        entry = ca_cache[cache_key]
         if time.time() - entry.get("resolved_at", 0) < _CA_CACHE_TTL:
             sym = entry.get("symbol")
             return sym if sym else None
 
     try:
         resp = requests.get(
-            _DEXSCREENER_TOKEN_URL.format(address=address),
+            _DEXSCREENER_TOKEN_URL.format(chain=chain, address=address),
             timeout=10,
         )
         if resp.status_code == 200:
@@ -503,19 +520,19 @@ def _resolve_ca_to_symbol(address: str, ca_cache: dict[str, dict]) -> str | None
             # The /tokens/v1/ endpoint returns a list of pairs directly
             if isinstance(pairs, list) and pairs:
                 base_token = pairs[0].get("baseToken", {})
-                # Pick highest-volume Solana pair
                 symbol = base_token.get("symbol", "").upper().strip()
                 # v21: fallback to name if symbol is non-ASCII (e.g. emoji tokens like 🌹)
                 if not symbol or not symbol.isascii():
                     symbol = base_token.get("name", "").upper().strip()
-                    # Remove spaces/special chars from name to make a clean ticker
                     symbol = re.sub(r"[^A-Z0-9]", "", symbol)
                 if symbol and len(symbol) <= 15 and symbol.isascii():
-                    ca_cache[address] = {"symbol": symbol, "resolved_at": time.time()}
-                    logger.info("Resolved CA %s… → $%s", address[:8], symbol)
+                    ca_cache[cache_key] = {
+                        "symbol": symbol, "resolved_at": time.time(), "chain": chain,
+                    }
+                    logger.info("Resolved CA %s:%s… → $%s", chain, address[:8], symbol)
                     return symbol
         # Not found or no pairs
-        ca_cache[address] = {"symbol": None, "resolved_at": time.time()}
+        ca_cache[cache_key] = {"symbol": None, "resolved_at": time.time(), "chain": chain}
         return None
     except requests.RequestException as e:
         logger.debug("CA resolution failed for %s…: %s", address[:8], e)
@@ -1685,14 +1702,12 @@ def extract_tokens(
     # English words (DOG, CAT, MOON, ROCK, SHOT, TOKEN, COW, JUICE...).
     # Real KOL calls always use $ prefix or post CA/URLs. Bare words = noise.
 
-    # 3) Solana contract addresses → resolve to symbol (definitive proof)
-    #    Skip addresses that are part of DexScreener/pump.fun/GMGN/Photon URLs (handled in step 4)
+    # 3) Contract addresses → resolve to symbol (definitive proof)
+    #    v14: both Solana base58 and ETH 0x addresses handled here. DexScreener
+    #    URL pair addresses are collected separately so step 4 doesn't re-hit them.
     url_addresses = set()
-    for chain, pair_addr in DEXSCREENER_URL_REGEX.findall(text):
+    for _chain, pair_addr in DEXSCREENER_URL_REGEX.findall(text):
         url_addresses.add(pair_addr)
-        # v109: Skip non-Solana chains (ETH 0x addresses, BSC, etc.)
-        if chain != "solana":
-            continue
     for pump_addr in PUMP_FUN_URL_REGEX.findall(text):
         url_addresses.add(pump_addr)
     for gmgn_addr in GMGN_URL_REGEX.findall(text):
@@ -1701,23 +1716,42 @@ def extract_tokens(
         url_addresses.add(photon_addr)
 
     if ca_cache is not None:
+        # 3a) Solana base58 addresses
         for match in CA_REGEX.findall(text):
             if match in KNOWN_PROGRAM_ADDRESSES:
                 continue
             if match in url_addresses:
                 continue  # Will be handled by URL extraction below
-            resolved = _resolve_ca_to_symbol(match, ca_cache)
+            resolved = _resolve_ca_to_symbol(match, ca_cache, chain="solana")
             if resolved:
                 symbol = f"${resolved}"
                 if resolved not in EXCLUDED_TOKENS and symbol not in seen:
-                    tokens.append((symbol, "ca", match))  # v40: CA is the match itself
+                    tokens.append((symbol, "ca", match))
                     seen.add(symbol)
                 elif symbol in seen:
                     # v56: Symbol already extracted (e.g. via $ticker) — backfill CA
-                    # so ca_by_symbol gets populated and prevents cross-contamination
                     for i, (s, src, ca) in enumerate(tokens):
                         if s == symbol and ca is None:
                             tokens[i] = (s, src, match)
+                            break
+
+        # 3b) v14 — Ethereum 0x addresses. Same resolve path, different chain arg.
+        # Lowercased at capture; ca_cache keys are prefixed with "ethereum:" inside
+        # _resolve_ca_to_symbol so they never collide with Solana entries.
+        for match in ETH_CA_REGEX.findall(text):
+            addr_lc = match.lower()
+            if addr_lc in url_addresses or match in url_addresses:
+                continue
+            resolved = _resolve_ca_to_symbol(addr_lc, ca_cache, chain="ethereum")
+            if resolved:
+                symbol = f"${resolved}"
+                if resolved not in EXCLUDED_TOKENS and symbol not in seen:
+                    tokens.append((symbol, "ca", addr_lc))
+                    seen.add(symbol)
+                elif symbol in seen:
+                    for i, (s, src, ca) in enumerate(tokens):
+                        if s == symbol and ca is None:
+                            tokens[i] = (s, src, addr_lc)
                             break
 
     # 4) DexScreener/pump.fun URLs → resolve pair/token address to symbol
@@ -1731,8 +1765,10 @@ def extract_tokens(
 
     if ca_cache is not None:
         # DexScreener: pair address → resolve via pairs API (v40: also get token CA)
+        # v14: accept both 'solana' and 'ethereum' chains from the URL. Other
+        # chains (bsc/polygon/arbitrum) still skipped until we onboard them.
         for chain, pair_addr in DEXSCREENER_URL_REGEX.findall(text):
-            if chain != "solana":  # v109: skip non-Solana chains
+            if chain not in ("solana", "ethereum"):
                 continue
             resolved, token_ca = _resolve_pair_to_symbol_and_ca(chain, pair_addr, ca_cache)
             if resolved:
