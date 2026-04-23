@@ -1,0 +1,96 @@
+name: Mega Sweep Extended (48h)
+
+# v14e.12 — génère `_mega_sweep_extended.csv` (~500K-800K configs) via
+# scraper/sim.py puis annote avec `scripts/analyze_mega_sweep.py`
+# (family_realism + FDR/Bonferroni). Tous les 2 jours à 02:00 UTC — timing
+# choisi pour éviter de chevaucher les autres crons (04:00 sim-align,
+# 04:30 outlier, 05:00 shadow audit).
+#
+# Artefacts uploadés 30j pour pouvoir comparer les rankings au cours du
+# temps (shadow promotion, slip recalibration impact, v144.13 family mult
+# drift, etc.). Pas d'alerte Telegram — post-processeur analytique, user
+# check manuel via /best /shadow ou téléchargement artifact.
+
+on:
+  schedule:
+    # "0 2 */2 * *" = tous les 2 jours à 02:00 UTC. GitHub uses UTC.
+    - cron: '0 2 */2 * *'
+  workflow_dispatch: {}
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    # sim.py --mega-sweep-extended est documenté ~3h. Buffer à 5h pour
+    # absorber les pics de Supabase lag + le post-processing.
+    timeout-minutes: 300
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install deps
+        run: |
+          pip install --upgrade pip
+          pip install supabase requests python-dotenv pandas numpy
+
+      - name: Run mega sweep extended
+        id: sweep
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          # --mega-sweep-extended : full matrix (smoothings × polling × filters),
+          # ~5× les configs de --mega-sweep. Output: _mega_sweep_extended.csv.
+          # Note: le flag cumule avec l'auto-détection eval_history si dispo,
+          # mais le CSV produit reste _mega_sweep_extended.csv (attendu par
+          # analyze_mega_sweep.py par défaut).
+          cd scraper
+          # Workers: GH runner = 4 vCPU. sim.py default = min(12, cpu_count-2)
+          # → auto-clampe à 2. Explicite via --mega-sweep-workers pour éviter
+          # l'oversubscription.
+          python sim.py --mega-sweep-extended --mega-sweep-workers 2 2>&1 | tee sweep.out
+          # Move CSV to repo root for the next step
+          if [ -f _mega_sweep_extended.csv ]; then
+            mv _mega_sweep_extended.csv ../
+            echo "✅ _mega_sweep_extended.csv produced"
+          else
+            echo "❌ sim.py did not produce _mega_sweep_extended.csv"
+            exit 1
+          fi
+
+      - name: Annotate with FDR + family realism
+        run: |
+          python scripts/analyze_mega_sweep.py \
+            --csv _mega_sweep_extended.csv \
+            --alpha 0.05 \
+            --top 30 \
+            2>&1 | tee analyze.out
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mega-sweep-${{ github.run_id }}
+          path: |
+            _mega_sweep_extended.csv
+            _mega_sweep_extended_annotated.csv
+            _mega_sweep_top_robust.csv
+            scraper/sweep.out
+            analyze.out
+          retention-days: 30
+
+      - name: Summary comment
+        if: success()
+        run: |
+          # Extrait le top 10 robust pour visibilité dans GH Actions UI
+          if [ -f _mega_sweep_top_robust.csv ]; then
+            echo "## Top 10 robust configs" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            head -11 _mega_sweep_top_robust.csv >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
