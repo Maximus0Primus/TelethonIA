@@ -1089,16 +1089,38 @@ def _handle_live(sb, args: str) -> str:
         # Today's closed live trades
         today_cutoff = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0).isoformat()
         closed_today = sb.table("paper_trades").select(
-            "pnl_usd,pnl_pct,status"
+            "pnl_usd,pnl_pct,status,strategy"
         ).eq("source", "rt_live").neq("status", "open").gte("exit_at", today_cutoff).execute().data or []
 
         today_pnl = sum(float(t.get("pnl_usd") or 0) for t in closed_today)
         today_n = len(closed_today)
         today_wins = sum(1 for t in closed_today if float(t.get("pnl_usd") or 0) > 0)
 
-        # Bankroll
-        bk = _rt_load_bankroll()
-        strat_bk = bk.get("strategy_bankrolls", {})
+        # v14e.8: per-strategy stats depuis source='rt_live' uniquement (pas
+        # strategy_bankrolls qui mélange paper + live — le bankroll est scopé
+        # par strategy name, pas par source). Les strats affichées sont celles
+        # définies dans live_trading.allocations ; on ajoute n'importe quelle
+        # strat qui a traité en live sur 30j même si elle n'est plus allouée
+        # (trace de strats retirées comme DTRAIL10, utile à voir).
+        live_allocs = set((live_cfg.get("allocations") or {}).keys())
+        live_30d = sb.table("paper_trades").select(
+            "pnl_usd,status,strategy,exit_at"
+        ).eq("source", "rt_live").neq("status", "open").gte(
+            "exit_at",
+            (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+        ).execute().data or []
+
+        per_strat: dict[str, dict] = {}
+        for t in live_30d:
+            s = t.get("strategy", "?")
+            d = per_strat.setdefault(s, {"pnl": 0.0, "n": 0, "wins": 0})
+            pnl = float(t.get("pnl_usd") or 0)
+            d["pnl"] += pnl
+            d["n"] += 1
+            if pnl > 0:
+                d["wins"] += 1
+        for s in live_allocs - per_strat.keys():
+            per_strat.setdefault(s, {"pnl": 0.0, "n": 0, "wins": 0})
 
         status_emoji = "🟢" if enabled else "🔴"
         lines = [
@@ -1124,13 +1146,16 @@ def _handle_live(sb, args: str) -> str:
         lines.append(f"  🛡 Loss limits: {daily_limit} SOL/jour, {weekly_limit} SOL/sem")
         lines.append(f"  🎯 Stratégie: {strategy}")
 
-        if strat_bk:
-            lines.append(f"\n<b>Bankroll par stratégie:</b>")
-            for s, b in sorted(strat_bk.items(), key=lambda x: -x[1].get("balance", 0)):
-                bal = b.get("balance", 0)
-                peak = b.get("peak", 0)
-                dd = (1 - bal / peak) * 100 if peak > 0 else 0
-                lines.append(f"  {_short_strat(s)}: ${bal:.0f} (DD {dd:.0f}%)")
+        if per_strat:
+            lines.append(f"\n<b>Performance live par stratégie (30j):</b>")
+            for s, d in sorted(per_strat.items(), key=lambda x: -x[1]["pnl"]):
+                active_tag = "" if s in live_allocs else " <i>(retirée)</i>"
+                if d["n"] == 0:
+                    lines.append(f"  {_short_strat(s)}: pas encore de trade{active_tag}")
+                    continue
+                wr = 100 * d["wins"] / d["n"]
+                emoji = "📈" if d["pnl"] >= 0 else "📉"
+                lines.append(f"  {emoji} {_short_strat(s)}: <b>${d['pnl']:+.2f}</b> ({d['n']}t, {wr:.0f}% WR){active_tag}")
 
         return "\n".join(lines)
     except Exception as e:
