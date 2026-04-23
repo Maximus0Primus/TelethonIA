@@ -252,19 +252,26 @@ def _exit_emoji(status: str, pnl: float) -> str:
 
 
 def _query_trades(sb, hours: int = 0, limit: int = 0, strategy: str = "",
-                  chain: str | None = None):
-    """Query closed main trades across all active strategies.
-    v116: strategy="" queries all active strategies (not just one).
-    v14e: chain filter restricts to paper_trades.chain = X; None = all chains.
-    Select list now includes chain so every display can tag it."""
-    strategies = [strategy] if strategy else _get_active_strategies(sb)
+                  chain: str | None = None, source_live: bool = False):
+    """Query closed trades.
+
+    Paper (default): main trades (is_shadow=false) across active strategies.
+    Live (source_live=True): all rt_live rows regardless of active_strategies
+    (live set differs from paper, and historic strats like DTRAIL10 matter
+    for the trailing-window display even if retired from the current rotation).
+    """
     q = (
         sb.table("paper_trades")
         .select("symbol,pnl_pct,pnl_usd,status,kol_group,exit_at,position_usd,exit_minutes,token_address,entry_price,exit_price,high_price_seen,cycle_ts,strategy,chain")
-        .eq("is_shadow", False)
-        .in_("strategy", strategies)
         .neq("status", "open")
     )
+    if source_live:
+        q = q.eq("source", "rt_live")
+        if strategy:
+            q = q.eq("strategy", strategy)
+    else:
+        strategies = [strategy] if strategy else _get_active_strategies(sb)
+        q = q.eq("is_shadow", False).in_("strategy", strategies)
     if chain:
         q = q.eq("chain", chain)
     if hours > 0:
@@ -1285,6 +1292,226 @@ def _handle_livepnl(sb, args: str) -> str:
     return "\n".join(lines)
 
 
+# ── Live parity: /livestats /livekol /livebest /liveworst /livetoday /livepnlkol ──
+# v14e.7: miroir des commandes paper pour les trades rt_live. Live = Solana-only
+# (Jupiter Ultra), donc pas de chain filter — on tag 🟣 dans les lignes pour
+# cohérence visuelle avec les commandes paper multi-chain.
+
+def _handle_livestats(sb, args: str) -> str:
+    """/livestats [période] [strat] — Performance live (source=rt_live)."""
+    remaining, strat = _split_strategy_args(args, sb)
+    s = strat or ""
+    strat_label = f" — {_short_strat(strat)}" if strat else ""
+
+    if remaining:
+        hours, label = _parse_period(remaining)
+        trades = _query_trades(sb, hours=hours, strategy=s, source_live=True)
+        d = _compute_stats(trades)
+        return f"📊 <b>LIVE PERFORMANCE{strat_label}</b>\n\n{_fmt_stats(d, label)}"
+
+    d1 = _compute_stats(_query_trades(sb, hours=24, strategy=s, source_live=True))
+    d7 = _compute_stats(_query_trades(sb, hours=168, strategy=s, source_live=True))
+    dall = _compute_stats(_query_trades(sb, strategy=s, source_live=True))
+    sections = []
+    if d1["count"] > 0 and d1["count"] < dall["count"]:
+        sections.append(_fmt_stats(d1, "24h"))
+    if d7["count"] > 0 and d7["count"] < dall["count"] and d7["count"] != d1["count"]:
+        sections.append(_fmt_stats(d7, "7 jours"))
+    sections.append(_fmt_stats(dall, "All-time"))
+    return f"📊 <b>LIVE PERFORMANCE{strat_label}</b>\n\n" + "\n\n".join(sections)
+
+
+def _handle_livekol(sb, args: str) -> str:
+    """/livekol [période] [strat] — KOL leaderboard live."""
+    remaining, strat = _split_strategy_args(args, sb)
+    hours, label = _parse_period(remaining) if remaining else (0, "All-time")
+    if strat:
+        label += f" | {_short_strat(strat)}"
+    try:
+        trades = _query_trades(sb, hours=hours, strategy=strat or "", source_live=True)
+    except Exception as e:
+        return f"❌ Erreur: {e}"
+    if not trades:
+        return f"📭 Aucun trade live ({label})."
+
+    kols: dict[str, dict] = {}
+    for t in trades:
+        k = t.get("kol_group", "?")
+        if k not in kols:
+            kols[k] = {"pnl": 0, "count": 0, "wins": 0}
+        pnl = float(t.get("pnl_usd") or 0)
+        kols[k]["pnl"] += pnl
+        kols[k]["count"] += 1
+        if pnl > 0:
+            kols[k]["wins"] += 1
+    sorted_kols = sorted(kols.items(), key=lambda x: -x[1]["pnl"])
+
+    lines = []
+    for i, (name, d) in enumerate(sorted_kols):
+        wr = d["wins"] / d["count"] * 100 if d["count"] > 0 else 0
+        if d["pnl"] > 0:
+            medal = "🥇" if i == 0 else ("🥈" if i == 1 else ("🥉" if i == 2 else "🟢"))
+        elif d["pnl"] == 0:
+            medal = "⚪"
+        else:
+            medal = "🔴"
+        lines.append(f"  {medal} <b>{name}</b> ${d['pnl']:+.2f} | {d['count']}t | {wr:.0f}%")
+
+    total_pnl = sum(d["pnl"] for d in kols.values())
+    return (
+        f"👥 <b>LIVE KOL LEADERBOARD</b> ({label})\n"
+        f"{len(kols)} KOLs | {sum(d['count'] for d in kols.values())} trades | ${total_pnl:+.2f}\n\n"
+        + "\n".join(lines)
+    )
+
+
+def _handle_livebest(sb, args: str) -> str:
+    """/livebest [strat] — Meilleur trade live all-time."""
+    strat = _parse_strategy(args.strip(), sb) if args.strip() else None
+    strat_label = f" ({_short_strat(strat)})" if strat else ""
+    try:
+        q = (
+            sb.table("paper_trades")
+            .select("symbol,pnl_pct,pnl_usd,status,kol_group,exit_at,position_usd,exit_minutes,entry_price,exit_price,high_price_seen,token_address,strategy,chain")
+            .eq("source", "rt_live")
+            .neq("status", "open")
+            .order("pnl_usd", desc=True).limit(1)
+        )
+        if strat:
+            q = q.eq("strategy", strat)
+        t = (q.execute().data or [None])[0]
+    except Exception as e:
+        return f"❌ Erreur: {e}"
+    if not t:
+        return f"📭 Aucun trade live{strat_label}."
+    return _format_highlight_trade(t, f"🏆 LIVE BEST TRADE{strat_label}")
+
+
+def _handle_liveworst(sb, args: str) -> str:
+    """/liveworst [strat] — Pire trade live all-time."""
+    strat = _parse_strategy(args.strip(), sb) if args.strip() else None
+    strat_label = f" ({_short_strat(strat)})" if strat else ""
+    try:
+        q = (
+            sb.table("paper_trades")
+            .select("symbol,pnl_pct,pnl_usd,status,kol_group,exit_at,position_usd,exit_minutes,entry_price,exit_price,high_price_seen,token_address,strategy,chain")
+            .eq("source", "rt_live")
+            .neq("status", "open")
+            .order("pnl_usd", desc=False).limit(1)
+        )
+        if strat:
+            q = q.eq("strategy", strat)
+        t = (q.execute().data or [None])[0]
+    except Exception as e:
+        return f"❌ Erreur: {e}"
+    if not t:
+        return f"📭 Aucun trade live{strat_label}."
+    return _format_highlight_trade(t, f"💀 LIVE WORST TRADE{strat_label}")
+
+
+def _handle_livetoday(sb, args: str) -> str:
+    """/livetoday — Résumé live du jour (trades + PnL + best/worst)."""
+    trades = _query_trades(sb, hours=24, source_live=True)
+    stats = _compute_stats(trades)
+    kols_today = set(t.get("kol_group", "") for t in trades if t.get("kol_group"))
+
+    # Open positions live
+    try:
+        open_live = (
+            sb.table("paper_trades").select("id,position_usd,strategy")
+            .eq("status", "open").eq("source", "rt_live").execute().data or []
+        )
+    except Exception:
+        open_live = []
+    open_n = len(open_live)
+    open_deployed = sum(float(t.get("position_usd") or 0) for t in open_live)
+
+    # Per-strategy 24h split (live n'a que 3-4 strats max, liste utile)
+    per_strat: dict[str, list] = {}
+    for t in trades:
+        per_strat.setdefault(t.get("strategy", "?"), []).append(t)
+
+    best_t = max(trades, key=lambda t: float(t.get("pnl_usd") or 0)) if trades else None
+    worst_t = min(trades, key=lambda t: float(t.get("pnl_usd") or 0)) if trades else None
+    pnl_emoji = "📈" if stats["pnl"] >= 0 else "📉"
+
+    text = f"📅 <b>LIVE RÉSUMÉ DU JOUR</b>\n\n"
+    text += f"📦 En cours: {open_n} pos (${open_deployed:.2f})\n"
+    if stats["count"] > 0:
+        wr = stats["wins"] / stats["count"] * 100
+        text += (
+            f"\n<b>Fermés (24h):</b>\n"
+            f"  {pnl_emoji} PnL: <b>${stats['pnl']:+.2f}</b>\n"
+            f"  📊 {stats['count']} trades | {wr:.0f}% WR ({stats['wins']}W/{stats['losses']}L)\n"
+            f"  👥 {len(kols_today)} KOLs actifs\n"
+        )
+        if len(per_strat) > 1:
+            text += "\n<b>Par stratégie:</b>\n"
+            for s, trs in sorted(per_strat.items(), key=lambda x: -sum(float(t.get("pnl_usd") or 0) for t in x[1])):
+                pnl = sum(float(t.get("pnl_usd") or 0) for t in trs)
+                wins = sum(1 for t in trs if float(t.get("pnl_usd") or 0) > 0)
+                text += f"  {_short_strat(s)}: ${pnl:+.2f} | {len(trs)}t | {wins}/{len(trs)}W\n"
+        if best_t:
+            bp = float(best_t.get("pnl_pct") or 0)
+            text += f"\n  🏆 Best: <b>{best_t.get('symbol','?')}</b> {bp*100:+.1f}% (${float(best_t.get('pnl_usd') or 0):+.2f}) | {best_t.get('kol_group','?')}"
+        if worst_t and float(worst_t.get("pnl_usd") or 0) < 0:
+            wp = float(worst_t.get("pnl_pct") or 0)
+            text += f"\n  💀 Worst: <b>{worst_t.get('symbol','?')}</b> {wp*100:+.1f}% (${float(worst_t.get('pnl_usd') or 0):+.2f}) | {worst_t.get('kol_group','?')}"
+    else:
+        text += "\n📭 Aucun trade live fermé aujourd'hui"
+    return text
+
+
+def _handle_livepnlkol(sb, args: str) -> str:
+    """/livepnlkol <KOL> [strat] — Live PnL d'un KOL spécifique.
+    Nommé différemment de /livepnl pour éviter la collision (/livepnl = période)."""
+    if not args:
+        return "Usage: /livepnlkol <nom_du_KOL> [stratégie]\nEx: /livepnlkol gubbinscalls"
+    remaining, strat = _split_strategy_args(args, sb)
+    kol_name = remaining.strip() if remaining else args.strip()
+    if not kol_name:
+        return "Usage: /livepnlkol <nom_du_KOL> [stratégie]"
+
+    strat_label = f" ({_short_strat(strat)})" if strat else ""
+    try:
+        q = (
+            sb.table("paper_trades")
+            .select("symbol,pnl_pct,pnl_usd,status,exit_at,position_usd,exit_minutes,strategy")
+            .eq("source", "rt_live")
+            .ilike("kol_group", f"%{kol_name}%")
+            .neq("status", "open")
+            .order("exit_at", desc=True).limit(20)
+        )
+        if strat:
+            q = q.eq("strategy", strat)
+        trades = q.execute().data or []
+    except Exception as e:
+        return f"❌ Erreur: {e}"
+    if not trades:
+        return f"📭 Aucun trade live pour « {kol_name} »{strat_label}"
+
+    stats = _compute_stats(trades)
+    wr = stats["wins"] / stats["count"] * 100 if stats["count"] > 0 else 0
+    lines = []
+    for t in trades[:10]:
+        pnl_pct = float(t.get("pnl_pct") or 0)
+        pnl_usd = float(t.get("pnl_usd") or 0)
+        emoji = _exit_emoji(t.get("status", ""), pnl_pct)
+        mins = int(t.get("exit_minutes") or 0)
+        lines.append(
+            f"  {emoji} <b>{t.get('symbol','?')}</b> {pnl_pct*100:+.1f}% (${pnl_usd:+.2f}) | {mins}min"
+            f" [{_short_strat(t.get('strategy',''))}]"
+        )
+    pnl_emoji = "📈" if stats["pnl"] >= 0 else "📉"
+    return (
+        f"👤 <b>LIVE KOL: {kol_name}{strat_label}</b>\n\n"
+        f"{pnl_emoji} PnL: <b>${stats['pnl']:+.2f}</b>\n"
+        f"📊 {stats['count']} trades | {wr:.0f}% WR ({stats['wins']}W/{stats['losses']}L)\n"
+        f"⏱ Durée moy: {stats['avg_min']:.0f}min\n\n"
+        + "\n".join(lines)
+    )
+
+
 def _handle_setpos(sb, args: str) -> str:
     """Set max position size in SOL."""
     try:
@@ -1468,6 +1695,13 @@ COMMANDS = {
     "/livepos": _handle_livepos,
     "/livetrades": _handle_livetrades,
     "/livepnl": _handle_livepnl,
+    # v14e.7 — parité analyse: miroir des commandes paper pour rt_live
+    "/livestats": _handle_livestats,
+    "/livekol": _handle_livekol,
+    "/livebest": _handle_livebest,
+    "/liveworst": _handle_liveworst,
+    "/livetoday": _handle_livetoday,
+    "/livepnlkol": _handle_livepnlkol,
     "/setpos": _handle_setpos,
     "/setmax": _handle_setmax,
     "/setlimit": _handle_setlimit,
@@ -1497,7 +1731,13 @@ HELP_TEXT = (
     "  /wallet — Balance SOL du wallet\n"
     "  /livepos — Positions live ouvertes + PnL\n"
     "  /livetrades [N] [strat] — Trades live\n"
-    "  /livepnl [période] [strat] — PnL live\n"
+    "  /livepnl [période] [strat] — PnL live global\n"
+    "  /livestats [période] [strat] — Performance détaillée live\n"
+    "  /livekol [période] [strat] — Leaderboard KOL live\n"
+    "  /livebest [strat] — Meilleur trade live\n"
+    "  /liveworst [strat] — Pire trade live\n"
+    "  /livetoday — Résumé live du jour\n"
+    "  /livepnlkol &lt;KOL&gt; [strat] — Stats d'un KOL en live\n"
     "\n<b>⚙️ Config Live:</b>\n"
     "  /setpos &lt;SOL&gt; — Position max (ex: /setpos 0.2)\n"
     "  /setmax &lt;N&gt; — Max positions simultanées\n"
