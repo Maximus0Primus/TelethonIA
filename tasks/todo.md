@@ -1,4 +1,48 @@
-# Pipeline Status — Updated Apr 23, 2026 (v14e.2 — BSC + Base paper live)
+# Pipeline Status — Updated Apr 23, 2026 (v14e.4 — full multi-chain paper)
+
+## État actuel — snapshot Apr 23 18:00 UTC
+
+**Versions déployées depuis ce matin** :
+- v14e → chain gates hard (live_trader + enrich_jupiter + safe_scraper), alertes séparées par strat, bankroll per-chain schema
+- v14e.2 → BSC + Base paper strats (3 chacune), fee models per-chain, DS routing via paper_trades.chain
+- v14e.2b → fix price_ticks 400 (jupiter tick rows missing `chain` column)
+- v14e.3 → bot commands Telegram chain-aware (tous les /cmd acceptent `sol|eth|bsc|base|all`)
+- v14e.4 → drop `min_liquidity_usd` des 9 strats EVM (fee model encode déjà le slip des pools shallow)
+
+**Registry strats actuel (post-v14e.4)** :
+- 🟣 Solana : 302 strats (12 mains + 290 shadows)
+- 🔷 Ethereum : 3 strats — ETH_TP100_SL50, ETH_TP80_SL40_T2H, ETH_BE50_TP150_SL50
+- 🟡 BSC : 3 strats — BSC_TP100_SL50, BSC_TP80_SL40_T2H, BSC_BE50_TP150_SL50
+- 🔵 Base : 3 strats — BASE_TP100_SL50, BASE_TP80_SL40_T2H, BASE_BE50_TP150_SL50
+- Filter unique : `{"chain": "<chain>"}`. Pas de min_liquidity, pas de min_score — le fee model encode le coût réel des pools.
+
+**`hybrid_strategy.allocations` en DB** : 21 strats total (12 SOL + 3 ETH + 3 BSC + 3 BASE, chacune alloc=1).
+
+**Bankroll per-chain seedé** : SOL 21 strats (preserves historique), ETH/BSC/Base 3 strats × $1000 chacune.
+
+**Cleanup DB effectué (18:00 UTC)** :
+- 2367 `paper_trades` supprimées : strats Solana (SCALE_OUT, MOONBAG, BE25…) ouvertes sur un token $PAXI (0xa9fd...) à 16:48 UTC, AVANT le deploy v14e à 16:57. Cause : token_entry n'avait pas `chain` → filter default solana → strats SOL passaient sur 0x token. Le bankroll Solana a été remboursé du −$111.31 artificiel par strategy (voir memory/cleanup_pollution_v14e2.md si créé).
+- Ticks (382 ETH, 52520 SOL) conservés — vraie market data.
+- Post-cleanup: 0 trades ETH/BSC/Base encore (attend un KOL call qui résolve vers ces chains).
+
+**Live trading (Solana-only)** :
+- 4 strats actives : BE25_TP80_SL30 + FAST_TP50_SL30 + FAST_TP80_SL25 + BOND_FAST_TP50_SL20_T20
+- BE25 : 7 jours verts consécutifs (14-22 Apr) + 1er rouge aujourd'hui (23 Apr, N=5 −$0.85, WR 20%)
+- Market-wide rouge aujourd'hui (paper main Solana −$327 N=52 WR 25%) → pas une régression du setup, mauvais jour système
+
+**Live ETH/BSC/Base** : NotImplementedError stubs. Phase 2 ETH conditionnée à WR≥65% + EV≥+10%/trade à N≥50 (ETA Mai 07). BSC/Base attendent décision Phase 2 ETH.
+
+**Décisions tranchées** :
+- ~~allocations split per-chain en DB ?~~ → NON, le naming prefix ETH_/BSC_/BASE_ + registry CHAIN_STRATEGIES suffit
+- ~~min_liquidity_usd sur strats EVM ?~~ → NON, retiré v14e.4, fee model suffit
+- ~~revert chain='ethereum' backfill des 2367 rows polluées ?~~ → delete définitif, bankroll remboursé
+
+**À surveiller** :
+- Prochain KOL call EVM → vérifier que les 3 strats (et **seulement** les 3) de la bonne chain s'ouvrent
+- Drift live vs paper sur BE25 si 2-3 jours rouges consécutifs → signal pour ajuster
+- `SELECT chain, COUNT(*), SUM(pnl_usd) FROM paper_trades WHERE source='rt' AND is_shadow=false GROUP BY chain` — validation isolation à J+3
+
+---
 
 ## v14e.2 — Apr 23 PM — BSC + Base paper strats live
 
@@ -50,16 +94,16 @@ Regression fix + architectural hardening. Three user-reported symptoms:
 - `supabase/migrations/v14e_bankroll_per_chain.sql` — widen `chain` CHECK to allow bsc/base, add `strategy_bankrolls_per_chain` JSONB (nested by chain), backfill from flat dict by ETH_/BSC_/BASE_ naming heuristic, add `risk_limits_per_chain` for per-chain daily_loss_limit + max_open_positions.
 - `scraper/safe_scraper.py` — `_rt_strategy_bankrolls_for_chain(row, chain)` reader with legacy fallback, `_rt_update_bankroll(..., chain=)` writes to both new nested and legacy flat dict.
 - `paper_trader.py` + `live_trader.py` — 4 call sites rewired to pass chain + scope alert bankroll to chain bucket.
-- `scraper/strategies.py` — `CHAIN_STRATEGIES` registry built at import + `strategies_for_chain(chain)`. Partition: 302 solana / 3 ethereum / 0 bsc / 0 base.
+- `scraper/strategies.py` — `CHAIN_STRATEGIES` registry built at import + `strategies_for_chain(chain)`. Partition post-v14e.2: 302 solana / 3 ethereum / 3 bsc / 3 base.
 - `scraper/chain_detect.py` — `resolve_evm_chain(addr)` disambiguates 0x via DexScreener chainId (ETH/BSC/Base share the same 0x+40hex shape).
 - `scraper/live_trader_eth.py` + `live_trader_bsc.py` + `live_trader_base.py` — explicit `NotImplementedError` stubs so a misrouted call fails loud, not silently.
 - `scraper/tests/test_live_trader.py` — regression tests: `test_rejects_eth_mint` for buy + sell + `TestOpenLiveTradeChainGate` (14/14 pass). All existing chain_detect + pipeline_eth tests still green (38/38).
 
-**Must apply before restart** :
-- Run `supabase/migrations/v14e_bankroll_per_chain.sql` in Supabase SQL editor. The CHECK widening lets BSC/Base writes happen; the nested bankroll column is what the new code writes to.
-- `git push` + VPS `systemctl restart kol-scraper`.
+**Applied Apr 23** ✅ :
+- Migration `v14e_bankroll_per_chain.sql` exécutée sur Supabase (CHECK widened, `strategy_bankrolls_per_chain` column, `risk_limits_per_chain` column, backfill from flat dict)
+- Code pushed + VPS restart (commits c3173d6 → 82bb143)
 
-**Decision still open** : should `live_trading.allocations` also split per-chain in DB? Today every ETH strat name is ETH_-prefixed so there's no collision risk, but if we add BSC_FAST_TP50_SL30 alongside FAST_TP50_SL30 we need the split. Defer until BSC rollout is planned.
+**Decision tranchée (v14e.2)** : allocations restent un flat dict. BSC_/BASE_ naming prefix + `_passes_strategy_filter` chain gate + CHAIN_STRATEGIES registry suffisent pour l'isolation. Pas de refactor DB nécessaire.
 
 ---
 
@@ -78,13 +122,14 @@ Regression fix + architectural hardening. Three user-reported symptoms:
 - Paper trader : fee model ETH ($7.50 gas/side + 200bps MEV), `position_usd=$200` forcé (cohérence fee accounting), branche chain dans `_dynamic_sell_slip_factor` + `_override_exit_with_ultra_quote`
 - `_passes_strategy_filter` : chain gate strict — strat sans `filt["chain"]` = solana-only implicite (ETH doit déclarer)
 - Alertes Telegram `alert_kol_trade` + `alert_trade_closed` chain-aware : tag 🔷ETH, URL `dexscreener.com/{chain}/`, links Uniswap + Etherscan pour ETH
-- `scoring_config.rt_trade_config.hybrid_strategy.allocations` : 15 strats (12 Solana + 3 ETH à alloc=1)
+- `scoring_config.rt_trade_config.hybrid_strategy.allocations` : 21 strats (12 Solana + 3 ETH + 3 BSC + 3 BASE à alloc=1) — post-v14e.2
 - 13 tests ETH pipeline + fee model + filter chain gate : 38/38 pass
 
 **3 strats ETH paper mains actives (depuis commit 9635e65)** :
 - `ETH_TP100_SL50` : TP 100% / SL 50% / timeout 4h — let-it-run
 - `ETH_TP80_SL40_T2H` : TP 80% / SL 40% / timeout 2h — conservateur
 - `ETH_BE50_TP150_SL50` : BE +50%, TP 150%, SL 50% — pour KOLs big moves
+- **v14e.4** : `min_liquidity_usd=25_000` retiré de ces 3 filters. Le fee model ($7.50 gas + 200 bps MEV, amorti sur position virtuelle $200) encode le coût réel des pools shallow. Chain gate seul.
 
 **Hypothèses à valider (N≥50 calls sur 2-3 semaines)** :
 - WR ≥ 65% (vs ~50% Solana)
