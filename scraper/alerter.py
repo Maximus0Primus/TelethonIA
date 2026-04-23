@@ -15,6 +15,19 @@ import requests
 logger = logging.getLogger(__name__)
 
 
+def chain_tag(chain: str | None) -> str:
+    """v14e: Normalized chain prefix for Telegram alerts. Every trade alert
+    MUST carry this so the user can tell SOL/ETH/BSC/BASE apart at a glance.
+    Unknown chain → unknown tag (better visible than silently defaulting)."""
+    c = (chain or "solana").lower()
+    return {
+        "solana":   " 🟣SOL",
+        "ethereum": " 🔷ETH",
+        "bsc":      " 🟡BSC",
+        "base":     " 🔵BASE",
+    }.get(c, f" ⚪{c.upper()}")
+
+
 def short_strat(name: str) -> str:
     """v116: Shorten strategy names for Telegram display.
     v118: Add [LAZY] tag for strategies using LAZY check interval."""
@@ -281,20 +294,15 @@ def alert_live_buy(symbol: str, strategy: str, position_sol: float,
 
     mcap_str = f"${mcap/1000:.0f}K" if mcap < 1_000_000 else f"${mcap/1_000_000:.1f}M"
 
-    # v144.11: per-strategy breakdown (same pattern as alert_trade_closed)
+    # v14e: scope bankroll block to THIS strategy only (user complaint:
+    # alertes mixaient toutes les strats). Other strats' bankrolls belong to
+    # their own alerts, not this trade's buy.
     strat_text = ""
-    if strategy_bankrolls:
-        parts = []
-        for sname, sdata in sorted(strategy_bankrolls.items()):
-            if active_strategies and sname not in active_strategies and sname != strategy:
-                continue
-            bal = float(sdata.get("balance", 0))
-            pnl = float(sdata.get("pnl", 0))
-            short = short_strat(sname)
-            marker = " ◀" if sname == strategy else ""
-            parts.append(f"  {short}: <b>${bal:.0f}</b> ({pnl:+.0f}){marker}")
-        if parts:
-            strat_text = "\n📊 Bankrolls:\n" + "\n".join(parts)
+    if strategy_bankrolls and strategy in strategy_bankrolls:
+        sdata = strategy_bankrolls[strategy]
+        bal = float(sdata.get("balance", 0))
+        pnl = float(sdata.get("pnl", 0))
+        strat_text = f"\n💰 {short_strat(strategy)} bankroll: <b>${bal:.0f}</b> ({pnl:+.0f})"
     elif bankroll > 0:
         deployed_after = deployed_usd + position_usd
         count_after = open_count + 1
@@ -306,7 +314,7 @@ def alert_live_buy(symbol: str, strategy: str, position_sol: float,
         )
 
     text = (
-        f"🟢 <b>LIVE BUY: ${symbol}</b>\n\n"
+        f"🟢 <b>LIVE BUY: ${symbol}</b>{chain_tag('solana')}\n\n"
         f"💰 {position_sol:.4f} SOL (${position_usd:.2f})\n"
         f"📊 Entry: ${entry_price:.8f}\n"
         f"🎯 Strat: {short_strat(strategy)}\n"
@@ -414,20 +422,13 @@ def alert_live_sell(symbol: str, strategy: str, exit_reason: str,
 
     max_gain = ((high_price / entry_price) - 1) * 100 if entry_price and high_price else 0
 
-    # v144.11: bankroll breakdown, same pattern as alert_trade_closed
+    # v14e: single-strategy scope (see alert_live_buy / alert_trade_closed).
     strat_text = ""
-    if strategy_bankrolls:
-        parts = []
-        for sname, sdata in sorted(strategy_bankrolls.items()):
-            if active_strategies and sname not in active_strategies and sname != strategy:
-                continue
-            bal = float(sdata.get("balance", 0))
-            pnl = float(sdata.get("pnl", 0))
-            short = short_strat(sname)
-            marker = " ◀" if sname == strategy else ""
-            parts.append(f"  {short}: <b>${bal:.0f}</b> ({pnl:+.0f}){marker}")
-        if parts:
-            strat_text = "\n📊 Bankrolls:\n" + "\n".join(parts)
+    if strategy_bankrolls and strategy in strategy_bankrolls:
+        sdata = strategy_bankrolls[strategy]
+        bal = float(sdata.get("balance", 0))
+        pnl = float(sdata.get("pnl", 0))
+        strat_text = f"\n💰 {short_strat(strategy)} bankroll: <b>${bal:.0f}</b> ({pnl:+.0f})"
     elif bankroll > 0:
         deployed_after = max(0, deployed_usd - position_usd)
         count_after = max(0, open_count - 1)
@@ -455,25 +456,21 @@ def alert_live_sell(symbol: str, strategy: str, exit_reason: str,
         if price_divergence_pct is not None:
             paper_block += f" | fill Δ{price_divergence_pct*100:+.1f}%"
 
-    # v144.11: rolling 24h drift per active strategy — see _live_paper_strategy_drift_24h
+    # v14e: scope 24h drift to THIS strategy only. Cross-strategy comparison
+    # goes into the daily summary, not individual trade alerts.
     drift_block = ""
-    if strategy_drift_24h:
-        lines = []
-        for sname, row in sorted(strategy_drift_24h.items()):
-            n = int(row.get("N", 0))
-            if n == 0:
-                continue
+    if strategy_drift_24h and strategy in strategy_drift_24h:
+        row = strategy_drift_24h[strategy]
+        n = int(row.get("N", 0))
+        if n > 0:
             la = float(row.get("live_avg", 0)) * 100
             pa = float(row.get("paper_avg", 0)) * 100
             d = pa - la
             warn = " ⚠️" if abs(d) > 3 and n >= 5 else ""
-            short = short_strat(sname)
-            lines.append(f"  {short}: live {la:+.1f}% vs paper {pa:+.1f}% | Δ{d:+.1f}pp (N={n}){warn}")
-        if lines:
-            drift_block = "\n📊 Drift 24h par strat:\n" + "\n".join(lines)
+            drift_block = f"\n📊 Drift 24h {short_strat(strategy)}: live {la:+.1f}% vs paper {pa:+.1f}% | Δ{d:+.1f}pp (N={n}){warn}"
 
     text = (
-        f"{emoji} <b>LIVE SELL: ${symbol}</b> — {reason_text}\n\n"
+        f"{emoji} <b>LIVE SELL: ${symbol}</b>{chain_tag('solana')} — {reason_text}\n\n"
         f"📈 PnL: <b>{pnl_pct*100:+.1f}%</b> (${pnl_usd:+.2f})\n"
         f"💰 Reçu: {sol_received:.4f} SOL (${sol_received * sol_price:.2f})\n"
         f"💵 Position: ${position_usd:.2f} | ⏱ {minutes}min\n"
@@ -627,7 +624,7 @@ def alert_kol_trade(symbol: str, kol: str, price: float, pos_usd: float,
     v116: strategy_positions = {strat_name: {"pos": 120, "balance": 500}} for per-strategy detail.
     v14: chain parameter — 'solana' default for backward compat, 'ethereum' for ETH trades."""
     bonding_tag = " 🟡BONDING" if is_bonding else ""
-    chain_tag = " 🔷ETH" if chain == "ethereum" else ""
+    c_tag = chain_tag(chain)
     tier_emoji = "⭐" if tier == "S" else "🔹"
 
     # Links
@@ -645,16 +642,21 @@ def alert_kol_trade(symbol: str, kol: str, price: float, pos_usd: float,
 
     mcap_text = f"${mcap/1000:.0f}K" if mcap > 0 else "?"
 
-    # v116: Per-strategy position breakdown replaces global bankroll line
+    # v14e: Positions block now only lists the strategies that actually opened
+    # on this call (caller already filters by chain before passing the dict).
+    # Previously all active strategies' positions leaked into every alert.
     strat_text = ""
     if strategy_positions:
         parts = []
         for sname, sdata in sorted(strategy_positions.items()):
             pos = float(sdata.get("pos", 0))
+            if pos <= 0:
+                continue
             bal = float(sdata.get("balance", 500))
             short = short_strat(sname)
             parts.append(f"  {short}: <b>${pos:.0f}</b> (bank ${bal:.0f})")
-        strat_text = "\n📊 Positions:\n" + "\n".join(parts)
+        if parts:
+            strat_text = "\n📊 Positions ouvertes:\n" + "\n".join(parts)
     elif bankroll > 0:
         # Fallback for non-hybrid mode
         deployed_after = deployed_usd + pos_usd
@@ -667,7 +669,7 @@ def alert_kol_trade(symbol: str, kol: str, price: float, pos_usd: float,
         )
 
     _send(
-        f"📢 <b>KOL CALL</b>{chain_tag}{bonding_tag}\n\n"
+        f"📢 <b>KOL CALL</b>{c_tag}{bonding_tag}\n\n"
         f"<b>{symbol}</b> called by {tier_emoji}<b>{kol}</b>\n"
         f"💰 Entry: ${price:.8f}\n"
         f"📊 MCap: {mcap_text} | Liq: ${liq_usd/1000:.0f}K | Score: {rt_score:.0f}"
@@ -716,22 +718,18 @@ def alert_trade_closed(symbol: str, strategy: str, exit_reason: str,
     # Max gain from entry
     max_gain = ((high_price / entry_price) - 1) * 100 if entry_price and high_price else 0
 
-    # v116: Per-strategy bankroll replaces global bankroll line
+    # v14e: Alert = 1 strategy = 1 trade = 1 chain. No more dumping every other
+    # strategy's bankroll into the message (user complaint: "alertes mélangées
+    # avec les différentes stratégies paper"). We only show THIS strategy's
+    # own balance/pnl, clearly scoped. strategy_bankrolls + active_strategies
+    # kept in signature for backward compat but ignored for rendering.
     strat_text = ""
-    if strategy_bankrolls:
-        parts = []
-        for sname, sdata in sorted(strategy_bankrolls.items()):
-            # v119: Only show active strategies (passed via active_strategies param)
-            if active_strategies and sname not in active_strategies and sname != strategy:
-                continue
-            bal = float(sdata.get("balance", 500))
-            pnl = float(sdata.get("pnl", 0))
-            short = short_strat(sname)
-            marker = " ◀" if sname == strategy else ""
-            parts.append(f"  {short}: <b>${bal:.0f}</b> ({pnl:+.0f}){marker}")
-        strat_text = "\n📊 Bankrolls:\n" + "\n".join(parts)
+    if strategy_bankrolls and strategy in strategy_bankrolls:
+        sdata = strategy_bankrolls[strategy]
+        bal = float(sdata.get("balance", 500))
+        pnl = float(sdata.get("pnl", 0))
+        strat_text = f"\n💰 {short_strat(strategy)} bankroll: <b>${bal:.0f}</b> ({pnl:+.0f})"
     elif bankroll > 0:
-        # Fallback for non-hybrid mode
         deployed_after = max(0, deployed_usd - pos_usd)
         count_after = max(0, open_count - 1)
         available = bankroll - deployed_after
@@ -743,10 +741,10 @@ def alert_trade_closed(symbol: str, strategy: str, exit_reason: str,
 
     # Link — v14: chain-aware DexScreener URL
     link_text = f'\n🔗 <a href="https://dexscreener.com/{chain}/{ca}">DexScreener</a>' if ca else ""
-    chain_tag = " 🔷ETH" if chain == "ethereum" else ""
+    c_tag = chain_tag(chain)
 
     _send(
-        f"{emoji} <b>TRADE {reason_text}</b>{chain_tag}\n\n"
+        f"{emoji} <b>TRADE {reason_text}</b>{c_tag}\n\n"
         f"<b>{symbol}</b> | {short_strat(strategy)}\n"
         f"👤 KOL: {kol}\n"
         f"📈 PnL: <b>{pnl_pct*100:+.1f}%</b> (${pnl_usd:+.2f})\n"

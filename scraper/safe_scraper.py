@@ -918,9 +918,46 @@ def _rt_load_bankroll() -> dict:
     return _rt_bankroll
 
 
-def _rt_update_bankroll(pnl_usd: float, n_trades: int, strategy: str = "") -> None:
+def _rt_strategy_bankrolls_for_chain(bankroll_row: dict, chain: str) -> dict:
+    """v14e: Return the per-chain strategy bankroll dict for one chain, with
+    read-only fallback to the legacy flat dict if the new column isn't yet
+    populated for this chain. Callers must NOT mutate the returned dict —
+    use _rt_update_bankroll(chain=...) for writes.
+    """
+    if not bankroll_row:
+        return {}
+    per_chain = bankroll_row.get("strategy_bankrolls_per_chain") or {}
+    if isinstance(per_chain, str):
+        try:
+            per_chain = json.loads(per_chain)
+        except Exception:
+            per_chain = {}
+    c = (chain or "solana").lower()
+    got = per_chain.get(c)
+    if got:
+        return got
+    # Legacy fallback: flat dict. Only used if the per-chain column wasn't
+    # populated (pre-v14e migration). Post-migration all reads go through the
+    # nested column.
+    flat = bankroll_row.get("strategy_bankrolls") or {}
+    if not flat:
+        return {}
+    # Only return the subset that maps to this chain by naming heuristic.
+    prefix_map = {"ethereum": "ETH_", "bsc": "BSC_", "base": "BASE_"}
+    prefix = prefix_map.get(c)
+    if prefix is None:  # solana = everything not prefixed ETH_/BSC_/BASE_
+        return {k: v for k, v in flat.items()
+                if not (k.startswith("ETH_") or k.startswith("BSC_") or k.startswith("BASE_"))}
+    return {k: v for k, v in flat.items() if k.startswith(prefix)}
+
+
+def _rt_update_bankroll(pnl_usd: float, n_trades: int, strategy: str = "",
+                        chain: str = "solana") -> None:
     """v71: Update bankroll after trades close. Read-modify-write with peak/drawdown tracking.
-    v115: Also tracks per-strategy bankroll in strategy_bankrolls JSONB."""
+    v115: Also tracks per-strategy bankroll in strategy_bankrolls JSONB.
+    v14e: Per-chain bankroll in strategy_bankrolls_per_chain — each chain has
+    its own isolated pot. Legacy flat strategy_bankrolls kept in sync for one
+    release cycle (read-only mirror, easy rollback)."""
     global _rt_bankroll, _rt_bankroll_loaded_at
     if pnl_usd == 0 and n_trades == 0:
         return
@@ -950,21 +987,39 @@ def _rt_update_bankroll(pnl_usd: float, n_trades: int, strategy: str = "") -> No
             "last_updated_at": datetime.now(timezone.utc).isoformat(),
         }
 
-        # v115: Per-strategy bankroll tracking
+        # v14e: write to per-chain nested dict. Strategy scoped to its chain.
         if strategy:
+            c = (chain or "solana").lower()
+            per_chain = row.get("strategy_bankrolls_per_chain") or {}
+            if isinstance(per_chain, str):
+                try:
+                    per_chain = json.loads(per_chain)
+                except Exception:
+                    per_chain = {}
+            chain_bucket = dict(per_chain.get(c) or {})
+            entry = dict(chain_bucket.get(strategy) or {"balance": 500, "trades": 0, "pnl": 0})
+            entry["balance"] = round(float(entry.get("balance", 500)) + pnl_usd, 2)
+            entry["pnl"] = round(float(entry.get("pnl", 0)) + pnl_usd, 2)
+            entry["trades"] = int(entry.get("trades", 0)) + n_trades
+            chain_bucket[strategy] = entry
+            per_chain[c] = chain_bucket
+            update_data["strategy_bankrolls_per_chain"] = per_chain
+
+            # Legacy mirror — keep the flat dict in sync so pre-v14e readers
+            # still see fresh numbers during rollout. Remove next release.
             strat_bankrolls = row.get("strategy_bankrolls") or {}
-            entry = strat_bankrolls.get(strategy, {"balance": 500, "trades": 0, "pnl": 0})
-            entry["balance"] = round(float(entry["balance"]) + pnl_usd, 2)
-            entry["pnl"] = round(float(entry["pnl"]) + pnl_usd, 2)
-            entry["trades"] = int(entry["trades"]) + n_trades
-            strat_bankrolls[strategy] = entry
+            legacy_entry = strat_bankrolls.get(strategy, {"balance": 500, "trades": 0, "pnl": 0})
+            legacy_entry["balance"] = round(float(legacy_entry["balance"]) + pnl_usd, 2)
+            legacy_entry["pnl"] = round(float(legacy_entry["pnl"]) + pnl_usd, 2)
+            legacy_entry["trades"] = int(legacy_entry["trades"]) + n_trades
+            strat_bankrolls[strategy] = legacy_entry
             update_data["strategy_bankrolls"] = strat_bankrolls
 
         sb.table("rt_bankroll").update(update_data).eq("id", row["id"]).execute()
 
         # Invalidate cache so next read gets fresh data
         _rt_bankroll_loaded_at = 0
-        strat_str = f" [{strategy}]" if strategy else ""
+        strat_str = f" [{chain}/{strategy}]" if strategy else ""
         logger.info("RT bankroll: $%.2f → $%.2f (pnl=$%+.2f, %d trades, peak=$%.2f, dd=%.1f%%)%s",
                      old_balance, new_balance, pnl_usd, n_trades, new_peak, new_dd, strat_str)
     except Exception as e:
@@ -1375,10 +1430,21 @@ def _rt_open_trades(ca: str, symbol: str, price: float, mcap: float,
 
     pt_config = _load_paper_trade_config(sb)
 
+    # v14e: resolve chain once, propagate on token_entry so downstream (paper
+    # fee model, strategy filter, alerter, live gate) all branch consistently.
+    # Falls back to solana if detection fails (base58 shape already guaranteed
+    # upstream by pipeline.extract_tokens / RT handler).
+    try:
+        from chain_detect import detect_chain
+        token_chain = token_info.get("chain") or detect_chain(ca) or "solana"
+    except Exception:
+        token_chain = token_info.get("chain") or "solana"
+
     # Build base token entry with RT metadata
     token_entry = {
         "symbol": symbol,
         "token_address": ca,
+        "chain": token_chain,
         "price_usd": price,
         "market_cap": mcap,
         "score": int(rt_score),
@@ -1447,7 +1513,10 @@ def _rt_open_trades(ca: str, symbol: str, price: float, mcap: float,
         # empty and paper falls back to its own Ultra quote (prior behavior).
         live_cfg = config.get("live_trading", {})
         live_fill_prices: dict[str, float] = {}  # strategy -> execution_price
-        if live_cfg.get("enabled", False):
+        # v14e: skip live branch entirely for non-Solana (Phase 2 ETH not yet
+        # approved; BSC/Base have no live adapter). Paper still runs via the
+        # loop below — only the Jupiter-backed live path is short-circuited.
+        if live_cfg.get("enabled", False) and token_chain == "solana":
             try:
                 from live_trader import open_live_trade
                 from paper_trader import _passes_strategy_filter
@@ -1524,7 +1593,8 @@ def _rt_open_trades(ca: str, symbol: str, price: float, mcap: float,
     # sync=False outliers on any future non-hybrid config.
     live_cfg = config.get("live_trading", {})
     live_fill_prices: dict[str, float] = {}
-    if live_cfg.get("enabled", False):
+    # v14e: same chain gate as hybrid branch — no live on non-Solana.
+    if live_cfg.get("enabled", False) and token_chain == "solana":
         try:
             from live_trader import open_live_trade
             from paper_trader import _passes_strategy_filter

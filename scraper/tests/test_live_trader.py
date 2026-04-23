@@ -85,12 +85,33 @@ class TestTrackPnl:
         assert abs(live_trader._monthly_pnl_sol - 0.3) < 1e-9
 
 
+# v14e: real Solana base58 mint (32 chars, all legal base58 symbols) used
+# throughout these tests. Previous tests used "SomeCA123" which isn't a valid
+# base58 shape — the new chain gate rejects it and the tests failed.
+VALID_SOL_MINT = "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R"
+VALID_ETH_ADDR = "0x65fbda4711f5a4aad6dae92baf9f3a20f5aff111"
+
+
 class TestExecuteBuy:
     def test_no_client(self, reset_live_trader_globals):
         import live_trader
-        result = live_trader.execute_buy("SomeCA", 100_000_000)
+        result = live_trader.execute_buy(VALID_SOL_MINT, 100_000_000)
         assert result["success"] is False
         assert "not initialized" in result["error"]
+
+    def test_rejects_eth_mint(self, reset_live_trader_globals, monkeypatch):
+        """v14e regression: a 0x mint must NEVER reach Jupiter. Previously
+        this call produced HTTP 400 storms in the VPS logs."""
+        import live_trader
+        mock_client = MagicMock()
+        monkeypatch.setattr(live_trader, "_ultra_client", mock_client)
+        # Order call must NOT happen. Wire it to fail the test if it does.
+        def _fail_order(*a, **kw):
+            raise AssertionError("Jupiter /ultra/v1/order called with ETH mint")
+        monkeypatch.setattr(live_trader, "_order_with_slippage", _fail_order)
+        result = live_trader.execute_buy(VALID_ETH_ADDR, 20_000_000, 300)
+        assert result["success"] is False
+        assert result["error"] == "non-solana-mint"
 
     def test_success(self, reset_live_trader_globals, monkeypatch):
         import live_trader
@@ -118,7 +139,7 @@ class TestExecuteBuy:
             }
         )
 
-        result = live_trader.execute_buy("SomeCA123", 100_000_000, 300)
+        result = live_trader.execute_buy(VALID_SOL_MINT, 100_000_000, 300)
         assert result["success"] is True
         assert result["signature"] == "abc123def456"
         assert result["input_amount"] == 100_000_000
@@ -135,9 +156,43 @@ class TestExecuteSell:
             "sol_balance": 1.0, "token_balances": {}
         })
 
-        result = live_trader.execute_sell("MissingCA123")
+        result = live_trader.execute_sell(VALID_SOL_MINT)
         assert result["success"] is False
         assert "No balance" in result["error"]
+
+    def test_rejects_eth_mint(self, reset_live_trader_globals, monkeypatch):
+        """v14e mirror of execute_buy's chain gate."""
+        import live_trader
+        mock_client = MagicMock()
+        monkeypatch.setattr(live_trader, "_ultra_client", mock_client)
+        result = live_trader.execute_sell(VALID_ETH_ADDR)
+        assert result["success"] is False
+        assert result["error"] == "non-solana-mint"
+
+
+class TestOpenLiveTradeChainGate:
+    """v14e: open_live_trade must skip non-Solana before any state mutation."""
+
+    def test_skips_ethereum_token(self, reset_live_trader_globals, monkeypatch):
+        import live_trader
+        # If the gate is missing, open_live_trade would fall through to
+        # _check_loss_limits (which touches globals) and ultimately execute_buy.
+        # We assert the short-circuit by checking no _check_loss_limits call.
+        called = {"loss_limits": False}
+        def _fake_loss(*a, **kw):
+            called["loss_limits"] = True
+            return False
+        monkeypatch.setattr(live_trader, "_check_loss_limits", _fake_loss)
+        token_entry = {
+            "token_address": VALID_ETH_ADDR,
+            "symbol": "ETHMEME",
+            "price_usd": 0.001,
+            "chain": "ethereum",
+        }
+        result = live_trader.open_live_trade(MagicMock(), token_entry, "ETH_TP100_SL50",
+                                              10.0, {"max_open_positions": 5})
+        assert result["success"] is False
+        assert called["loss_limits"] is False, "chain gate must fire BEFORE loss-limit check"
 
 
 class TestReconciliation:

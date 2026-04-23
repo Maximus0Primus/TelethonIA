@@ -267,6 +267,10 @@ def fetch_ultra_quote_price(mint: str, amount_lamports: int, sol_price_usd: floa
 
     Returns None if quote fails or decimals unavailable.
     """
+    # v14e: Defence in depth. Jupiter is Solana-only; a 0x/EVM mint would
+    # 400 the endpoint. Callers should already chain-gate, this is the backstop.
+    if not mint or (isinstance(mint, str) and mint.startswith("0x")):
+        return None
     if not sol_price_usd or sol_price_usd <= 0:
         return None
     if amount_lamports <= 0:
@@ -333,6 +337,9 @@ def fetch_ultra_sell_quote_price(mint: str, token_amount_raw: int, sol_price_usd
 
     Returns None on failure; caller falls back to _dynamic_sell_slip_factor.
     """
+    # v14e: Backstop chain gate — see fetch_ultra_quote_price.
+    if not mint or (isinstance(mint, str) and mint.startswith("0x")):
+        return None
     if not sol_price_usd or sol_price_usd <= 0:
         return None
     if token_amount_raw <= 0:

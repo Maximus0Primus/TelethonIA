@@ -32,6 +32,20 @@ WSOL_MINT = "So11111111111111111111111111111111111111112"
 LAMPORTS_PER_SOL = 1_000_000_000
 
 
+def _is_solana_mint(ca: str) -> bool:
+    """Hard gate before any Jupiter call. Rejects 0x (EVM) and any shape
+    detect_chain does not classify as solana. Defence in depth — without this,
+    ETH addresses leaked into execute_buy and produced 400 Bad Request storms
+    on /ultra/v1/order (v14 regression)."""
+    if not ca or not isinstance(ca, str):
+        return False
+    try:
+        from chain_detect import detect_chain
+        return detect_chain(ca) == "solana"
+    except Exception:
+        return not ca.startswith("0x")
+
+
 # --- v121: Trigger event logging ---
 def _log_trigger_event(client_sb, *, trade_id=None, token_ca="", token_symbol="",
                        order_id=None, event_type: str, old_sl=None, new_sl=None,
@@ -257,6 +271,9 @@ def execute_buy(ca: str, amount_sol_lamports: int, slippage_bps: int = 300) -> d
              "input_amount": int|None, "output_amount": int|None,
              "slippage_bps": int}
     """
+    if not _is_solana_mint(ca):
+        logger.error("LIVE BUY REJECTED: %s is not a Solana mint — Jupiter Ultra is Solana-only", ca[:12])
+        return {"success": False, "signature": "", "error": "non-solana-mint"}
     client = _get_ultra_client()
     if not client:
         return {"success": False, "signature": "", "error": "Ultra client not initialized"}
@@ -319,6 +336,9 @@ def execute_sell(ca: str, amount_tokens: int | None = None, slippage_bps: int = 
              "input_amount": int|None, "output_amount": int|None,
              "slippage_bps": int}
     """
+    if not _is_solana_mint(ca):
+        logger.error("LIVE SELL REJECTED: %s is not a Solana mint — Jupiter Ultra is Solana-only", ca[:12])
+        return {"success": False, "signature": "", "error": "non-solana-mint"}
     client = _get_ultra_client()
     if not client:
         return {"success": False, "signature": "", "error": "Ultra client not initialized"}
@@ -617,6 +637,16 @@ def open_live_trade(client_sb, token_entry: dict, strategy: str,
         logger.warning("live_trader: no CA for %s — skipping", symbol)
         return _FAIL
 
+    # v14e: Hard chain gate. live_trader is Solana-only (Jupiter Ultra). ETH/BSC/Base
+    # must route through their own live adapter (not yet implemented). Without this,
+    # v14b's ETH main-paper promotion caused live_trader to send 0x mints to Jupiter,
+    # producing 400 Bad Request storms.
+    token_chain = token_entry.get("chain") or "solana"
+    if token_chain != "solana" or not _is_solana_mint(ca):
+        logger.info("live_trader: %s/%s chain=%s — paper-only (no live adapter for non-Solana)",
+                    symbol, ca[:8] if ca else "?", token_chain)
+        return _FAIL
+
     entry_price = float(token_entry.get("price_usd", 0))
     if entry_price <= 0:
         logger.error("live_trader: entry_price=0 for %s — aborting live trade", symbol)
@@ -895,9 +925,12 @@ def open_live_trade(client_sb, token_entry: dict, strategy: str,
             from alerter import alert_live_buy
             _br, _strat_bals, _active = {}, {}, None
             try:
-                from safe_scraper import _rt_load_bankroll
+                from safe_scraper import _rt_load_bankroll, _rt_strategy_bankrolls_for_chain
                 _br = _rt_load_bankroll() or {}
-                _strat_bals = _br.get("strategy_bankrolls") or {}
+                # v14e: live_trader is Solana-only (chain gate above), scope
+                # per-strat display to Solana bucket so ETH/BSC entries don't
+                # pollute the live buy alert.
+                _strat_bals = _rt_strategy_bankrolls_for_chain(_br, "solana")
                 _active = list(_strat_bals.keys()) if _strat_bals else None
             except Exception:
                 pass
@@ -1042,9 +1075,10 @@ def _handle_trigger_fill(client_sb, trade: dict, order_status: dict, now) -> Non
         from alerter import alert_live_sell, _live_paper_strategy_drift_24h
         _br, _strat_bals, _active = {}, {}, None
         try:
-            from safe_scraper import _rt_load_bankroll
+            from safe_scraper import _rt_load_bankroll, _rt_strategy_bankrolls_for_chain
             _br = _rt_load_bankroll() or {}
-            _strat_bals = _br.get("strategy_bankrolls") or {}
+            # v14e: live_trader is Solana-only — scope alert bankroll display.
+            _strat_bals = _rt_strategy_bankrolls_for_chain(_br, "solana")
             _active = list(_strat_bals.keys()) if _strat_bals else None
         except Exception:
             pass
@@ -1571,9 +1605,10 @@ def check_live_trades(client_sb) -> dict:
             from alerter import alert_live_sell, _live_paper_strategy_drift_24h
             _br, _strat_bals, _active = {}, {}, None
             try:
-                from safe_scraper import _rt_load_bankroll
+                from safe_scraper import _rt_load_bankroll, _rt_strategy_bankrolls_for_chain
                 _br = _rt_load_bankroll() or {}
-                _strat_bals = _br.get("strategy_bankrolls") or {}
+                # v14e: live_trader is Solana-only — scope alert bankroll display.
+                _strat_bals = _rt_strategy_bankrolls_for_chain(_br, "solana")
                 _active = list(_strat_bals.keys()) if _strat_bals else None
             except Exception:
                 pass
@@ -1774,10 +1809,12 @@ def reconcile_positions(client_sb) -> dict:
                 # → total_pnl drifted from paper_trades ground truth by the reconciled amount.
                 try:
                     from safe_scraper import _rt_update_bankroll
+                    # v14e: live_trader is Solana-only (enforced by chain gate).
                     _rt_update_bankroll(
                         float(update_row.get("pnl_usd") or 0),
                         1,
-                        strategy="",  # live path doesn't touch strategy_bankrolls
+                        strategy="",  # reconciled close — no specific strategy bucket
+                        chain="solana",
                     )
                 except Exception as be:
                     logger.debug("reconcile: bankroll update failed for %s: %s", trade["id"], be)

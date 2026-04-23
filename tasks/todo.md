@@ -1,3 +1,33 @@
+# Pipeline Status — Updated Apr 23, 2026 (v14e — chain isolation hardening)
+
+## v14e — Apr 23 PM — hard chain isolation
+
+Regression fix + architectural hardening. Three user-reported symptoms:
+1. Jupiter 400 Bad Request storms — ETH `0x...` mints reaching `/ultra/v1/order` because v14b promoted ETH strats to main paper without a chain gate on live_trader.
+2. Telegram alerts mixing all strategies' bankrolls into every single trade close.
+3. Bankroll / strategies not isolated per chain — BSC/Base rollout blocked.
+
+**Done** :
+- `scraper/live_trader.py` — `_is_solana_mint` gate at `execute_buy` / `execute_sell` / `open_live_trade`. The 400 storm stops here.
+- `scraper/enrich_jupiter.py` — defence-in-depth 0x reject in `fetch_ultra_quote_price` + `fetch_ultra_sell_quote_price`.
+- `scraper/safe_scraper.py` — `_rt_open_trades` resolves `chain` once, propagates on `token_entry`, skips the live branch entirely for non-Solana (paper-only until Phase 2 ETH greenlit).
+- `scraper/alerter.py` — one `chain_tag()` helper (🟣SOL / 🔷ETH / 🟡BSC / 🔵BASE), used by every trade alert. Bankroll block in `alert_trade_closed` / `alert_live_buy` / `alert_live_sell` now scopes to THIS strategy only — no more cross-strategy dump. 24h drift block scoped to this strategy too.
+- `supabase/migrations/v14e_bankroll_per_chain.sql` — widen `chain` CHECK to allow bsc/base, add `strategy_bankrolls_per_chain` JSONB (nested by chain), backfill from flat dict by ETH_/BSC_/BASE_ naming heuristic, add `risk_limits_per_chain` for per-chain daily_loss_limit + max_open_positions.
+- `scraper/safe_scraper.py` — `_rt_strategy_bankrolls_for_chain(row, chain)` reader with legacy fallback, `_rt_update_bankroll(..., chain=)` writes to both new nested and legacy flat dict.
+- `paper_trader.py` + `live_trader.py` — 4 call sites rewired to pass chain + scope alert bankroll to chain bucket.
+- `scraper/strategies.py` — `CHAIN_STRATEGIES` registry built at import + `strategies_for_chain(chain)`. Partition: 302 solana / 3 ethereum / 0 bsc / 0 base.
+- `scraper/chain_detect.py` — `resolve_evm_chain(addr)` disambiguates 0x via DexScreener chainId (ETH/BSC/Base share the same 0x+40hex shape).
+- `scraper/live_trader_eth.py` + `live_trader_bsc.py` + `live_trader_base.py` — explicit `NotImplementedError` stubs so a misrouted call fails loud, not silently.
+- `scraper/tests/test_live_trader.py` — regression tests: `test_rejects_eth_mint` for buy + sell + `TestOpenLiveTradeChainGate` (14/14 pass). All existing chain_detect + pipeline_eth tests still green (38/38).
+
+**Must apply before restart** :
+- Run `supabase/migrations/v14e_bankroll_per_chain.sql` in Supabase SQL editor. The CHECK widening lets BSC/Base writes happen; the nested bankroll column is what the new code writes to.
+- `git push` + VPS `systemctl restart kol-scraper`.
+
+**Decision still open** : should `live_trading.allocations` also split per-chain in DB? Today every ETH strat name is ETH_-prefixed so there's no collision risk, but if we add BSC_FAST_TP50_SL30 alongside FAST_TP50_SL30 we need the split. Defer until BSC rollout is planned.
+
+---
+
 # Pipeline Status — Updated Apr 23, 2026 (v14b — ETH paper mains live)
 
 ## Sprint #ETH-1 — ETH L1 paper mains (Phase 1 LIVE, zero capital)

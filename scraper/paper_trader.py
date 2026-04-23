@@ -2364,12 +2364,19 @@ def check_paper_trades(client) -> dict:
                 _rt_pnl_usd += pnl_usd or 0
                 _rt_closed += 1
                 # v113: Update bankroll BEFORE alert so balance is fresh
+                _trade_chain = trade.get("chain") or "solana"
                 try:
-                    from safe_scraper import _rt_update_bankroll, _rt_load_bankroll
-                    _rt_update_bankroll(pnl_usd or 0, 1, strategy=trade.get("strategy", ""))
+                    from safe_scraper import (
+                        _rt_update_bankroll, _rt_load_bankroll,
+                        _rt_strategy_bankrolls_for_chain,
+                    )
+                    _rt_update_bankroll(pnl_usd or 0, 1,
+                                        strategy=trade.get("strategy", ""),
+                                        chain=_trade_chain)
                     _br = _rt_load_bankroll()
                     bal = float(_br.get("current_balance", 0))
-                    _strat_bals = _br.get("strategy_bankrolls") or {}
+                    # v14e: scope per-strategy block in the alert to THIS chain only
+                    _strat_bals = _rt_strategy_bankrolls_for_chain(_br, _trade_chain)
                 except Exception:
                     bal = 0
                     _strat_bals = {}
@@ -2393,7 +2400,7 @@ def check_paper_trades(client) -> dict:
                         strategy_bankrolls=_strat_bals,
                         active_strategies=_active_strats,
                         price_source="jupiter" if addr in _jupiter_overridden else "",
-                        chain=trade.get("chain") or "solana",  # v14
+                        chain=_trade_chain,  # v14
                     )
                 except Exception as e:
                     logger.warning("trade close alert failed: %s", e)
@@ -2450,12 +2457,18 @@ def check_paper_trades(client) -> dict:
                 _rt_pnl_usd += pnl_usd or 0
                 _rt_closed += 1
                 # v113: Update bankroll BEFORE alert so balance is fresh
+                _trade_chain = trade.get("chain") or "solana"
                 try:
-                    from safe_scraper import _rt_update_bankroll, _rt_load_bankroll
-                    _rt_update_bankroll(pnl_usd or 0, 1, strategy=trade.get("strategy", ""))
+                    from safe_scraper import (
+                        _rt_update_bankroll, _rt_load_bankroll,
+                        _rt_strategy_bankrolls_for_chain,
+                    )
+                    _rt_update_bankroll(pnl_usd or 0, 1,
+                                        strategy=trade.get("strategy", ""),
+                                        chain=_trade_chain)
                     _br = _rt_load_bankroll()
                     bal = float(_br.get("current_balance", 0))
-                    _strat_bals = _br.get("strategy_bankrolls") or {}
+                    _strat_bals = _rt_strategy_bankrolls_for_chain(_br, _trade_chain)
                 except Exception:
                     bal = 0
                     _strat_bals = {}
@@ -2478,7 +2491,7 @@ def check_paper_trades(client) -> dict:
                         open_count=portfolio["open_count"],
                         strategy_bankrolls=_strat_bals,
                         active_strategies=_active_strats,
-                        chain=trade.get("chain") or "solana",  # v14
+                        chain=_trade_chain,  # v14
                     )
                 except Exception as e:
                     logger.warning("SL cascade trade close alert failed: %s", e)
@@ -2710,12 +2723,18 @@ def check_paper_trades_fast(client) -> dict:
             )
             # v113: Update bankroll + alert on main RT trade close
             if trade.get("source") == "rt" and not trade.get("is_shadow"):
+                _trade_chain = trade.get("chain") or "solana"
                 try:
-                    from safe_scraper import _rt_update_bankroll, _rt_load_bankroll
-                    _rt_update_bankroll(pnl_usd or 0, 1, strategy=trade.get("strategy", ""))
+                    from safe_scraper import (
+                        _rt_update_bankroll, _rt_load_bankroll,
+                        _rt_strategy_bankrolls_for_chain,
+                    )
+                    _rt_update_bankroll(pnl_usd or 0, 1,
+                                        strategy=trade.get("strategy", ""),
+                                        chain=_trade_chain)
                     _br = _rt_load_bankroll()
                     bal = float(_br.get("current_balance", 0))
-                    _strat_bals = _br.get("strategy_bankrolls") or {}
+                    _strat_bals = _rt_strategy_bankrolls_for_chain(_br, _trade_chain)
                 except Exception:
                     bal = 0
                     _strat_bals = {}
@@ -2738,7 +2757,7 @@ def check_paper_trades_fast(client) -> dict:
                         open_count=portfolio["open_count"],
                         strategy_bankrolls=_strat_bals,
                         active_strategies=_active_strats,
-                        chain=trade.get("chain") or "solana",  # v14
+                        chain=_trade_chain,  # v14
                     )
                 except Exception as e:
                     logger.warning("paper_fast trade close alert failed: %s", e)

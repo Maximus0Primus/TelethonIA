@@ -1140,6 +1140,41 @@ STRATEGY_FILTERS["ETH_BE50_TP150_SL50"] = {
 
 
 # ---------------------------------------------------------------------------
+# v14e — Chain-indexed strategy registry.
+# ---------------------------------------------------------------------------
+# Until BSC/Base go live this is purely bookkeeping: STRATEGY_FILTERS already
+# gates each strategy by chain ("chain": "ethereum" etc.). This registry gives
+# callers (bankroll, allocations, daily summary) an O(1) "what strategies run
+# on chain X?" lookup without scanning every filter dict.
+#
+# Convention:
+#   - Solana strategies have NO "chain" key in their filter (implicit solana).
+#   - Non-Solana strategies MUST declare their chain in STRATEGY_FILTERS.
+#   - Adding a new chain: add its list here + tag each strategy with
+#     "chain": "<chain>" in STRATEGY_FILTERS. Enforcement lives in
+#     _passes_strategy_filter (paper_trader.py:153-166).
+
+def _build_chain_strategies() -> dict:
+    """Partition STRATEGIES by declared chain filter. Built on import;
+    keep the dict static — mutating at runtime would desync from DB allocs."""
+    buckets: dict = {"solana": [], "ethereum": [], "bsc": [], "base": []}
+    for sname in STRATEGIES.keys():
+        flt = STRATEGY_FILTERS.get(sname) or {}
+        c = flt.get("chain", "solana")
+        buckets.setdefault(c, []).append(sname)
+    return buckets
+
+
+CHAIN_STRATEGIES = _build_chain_strategies()
+
+
+def strategies_for_chain(chain: str) -> list[str]:
+    """Return the strategy names allowed on one chain. Stable ordering for
+    bankroll seeding + daily summary display."""
+    return sorted(CHAIN_STRATEGIES.get((chain or "solana").lower(), []))
+
+
+# ---------------------------------------------------------------------------
 # Sim config → fake trade converter
 # ---------------------------------------------------------------------------
 def sim_cfg_to_fake_trade(cfg: dict, entry_price: float, created_at: str,
