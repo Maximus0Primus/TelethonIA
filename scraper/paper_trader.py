@@ -146,19 +146,20 @@ def _bot_ml_gate(token: dict, strategy_name: str, config: dict | None = None) ->
 
 def _passes_strategy_filter(token: dict, strategy_name: str) -> bool:
     """Check if a token passes the entry filter for a given strategy."""
-    filt = STRATEGY_FILTERS.get(strategy_name)
-    if not filt:
-        return True  # no filter = always pass
+    # v14: chain gate — cheapest check, short-circuit first.
+    # Rule: a strategy opts in to a chain via filt["chain"]. An unfiltered
+    # strategy (no STRATEGY_FILTERS entry) OR filter without "chain" key is
+    # implicitly Solana-only (the historic default — every pre-v14 strategy
+    # was designed for Solana fees/liquidity). ETH strategies MUST declare
+    # chain="ethereum" explicitly in their filter.
+    token_chain = token.get("chain") or "solana"
+    filt = STRATEGY_FILTERS.get(strategy_name) or {}
+    strat_chain = filt.get("chain", "solana")
+    if token_chain != strat_chain:
+        return False
 
-    # v14: chain gate (first check — cheapest to fail fast). If the strategy
-    # specifies a chain, the token's chain must match exactly. Missing chain
-    # field defaults to 'solana' so pre-v14 tokens still pass Solana-only
-    # strategies. ETH strategies REQUIRE chain='ethereum' explicit in token.
-    strat_chain = filt.get("chain")
-    if strat_chain is not None:
-        token_chain = token.get("chain") or "solana"
-        if token_chain != strat_chain:
-            return False
+    if not filt:
+        return True  # no other filter criteria = always pass (after chain match)
 
     score = token.get("score", 0)
     if score < filt.get("min_score", 0) or score > filt.get("max_score", 100):
@@ -672,7 +673,13 @@ def _log_price_ticks(client, prices: dict[str, float], source: str = "check",
         # v123: Log DexScreener price (not Jupiter-overridden) as primary tick.
         # Sim needs both DexScreener and Jupiter price series separately.
         dex_price = _dex_prices_cache.get(addr, price)
-        row = {"token_address": addr, "price_usd": dex_price, "source": source}
+        # v14: chain tag on each tick so analytics can partition without a join.
+        # Chain inferred from address shape (0x → ethereum, else solana).
+        _tick_chain = "ethereum" if str(addr).startswith("0x") else "solana"
+        row = {
+            "token_address": addr, "price_usd": dex_price,
+            "source": source, "chain": _tick_chain,
+        }
         # v121: Enrich with volume/liquidity from DexScreener (same API call)
         extra = _last_dex_extra.get(addr)
         if extra:
@@ -1134,6 +1141,8 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
             "cycle_ts": cycle_ts.isoformat(),
             "symbol": token.get("symbol", "???"),
             "token_address": addr,
+            # v14: chain tag (Solana default for backward compat).
+            "chain": token.get("chain") or "solana",
             "rank_in_cycle": rank_idx,
             "entry_price": entry_price,
             "entry_score": int(token.get("score", 0)),
@@ -1334,6 +1343,8 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
                 "cycle_ts": cycle_ts.isoformat(),
                 "symbol": token.get("symbol", "???"),
                 "token_address": addr,
+                # v14: chain tag (Solana default for backward compat).
+                "chain": token.get("chain") or "solana",
                 "rank_in_cycle": rank_idx,
                 "entry_price": entry_price,
                 "entry_score": int(token.get("score", 0)),

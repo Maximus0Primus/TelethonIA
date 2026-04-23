@@ -1653,10 +1653,13 @@ async def _rt_on_new_message(event: events.NewMessage.Event):
     # KOLs post recaps like "100k → 700k (7x)" or "last few goated calls".
     # These contain CAs but are NOT entry signals — they refer to past gains.
     import re as _re
-    # Strip Solana addresses from text before flex matching to avoid false positives.
-    # CAs like "Dq3to3Yw..." contain substrings that match PnL patterns ("3to3").
+    # Strip Solana + Ethereum addresses from text before flex matching to avoid
+    # false positives. CAs like "Dq3to3Yw..." contain substrings that match PnL
+    # patterns ("3to3"). v14: ETH 0x addresses also stripped so hex chars don't
+    # trigger the \d+[xX] regex family.
     _SOLANA_ADDR = _re.compile(r'[1-9A-HJ-NP-Za-km-z]{32,44}')
-    _text_no_ca = _SOLANA_ADDR.sub('', text)
+    _ETH_ADDR_STRIP = _re.compile(r'0x[a-fA-F0-9]{40}')
+    _text_no_ca = _ETH_ADDR_STRIP.sub('', _SOLANA_ADDR.sub('', text))
     _FLEX_PATTERNS = [
         # --- Bot-generated messages ---
         _re.compile(r'KOLscope|KOLscopeBot', _re.IGNORECASE),
@@ -1742,9 +1745,15 @@ async def _rt_on_new_message(event: events.NewMessage.Event):
                         symbol, ca[:8], username, tier, _t_event - _t_msg)
 
             # DexScreener fetch — only hard requirement: price must exist
+            # v14: detect chain from CA shape, pass to fetch so ETH hits the right
+            # endpoint. ca_chain is threaded through the whole handler below.
             from enrich import _fetch_dexscreener_by_address
+            from chain_detect import detect_chain
+            ca_chain = detect_chain(ca) or "solana"
             loop = asyncio.get_event_loop()
-            raw = await loop.run_in_executor(None, _fetch_dexscreener_by_address, ca)
+            raw = await loop.run_in_executor(
+                None, _fetch_dexscreener_by_address, ca, ca_chain,
+            )
             _t_ds_done = time.time()
             if not raw or not raw.get("price_usd"):
                 logger.info("RT SKIP: %s — no price (only hard block)", ca[:8])
@@ -1820,6 +1829,11 @@ async def _rt_on_new_message(event: events.NewMessage.Event):
                 f" {ml_label}" if ml_label else "",
             )
 
+            # v14: propagate chain tag downstream so paper_trader dispatches
+            # the right fee model + strategy filter chain gate. Solana is the
+            # explicit default (not None) so legacy consumers don't have to
+            # care about falsy checks.
+            token_info["chain"] = ca_chain
             # Propagate timing for downstream live_trader log
             token_info["_rt_t_msg"] = _t_msg
             token_info["_rt_t_ds_done"] = _t_ds_done

@@ -400,6 +400,9 @@ def upsert_tokens(
                 "freshest_mention_hours": t.get("freshest_mention_hours"),
                 # v21: token_address for frontend DexScreener links + price_refresh simplification
                 "token_address": t.get("token_address") or "",
+                # v14: chain ('solana'|'ethereum') — lets the frontend pick the right
+                # explorer link and lets analytics partition by chain.
+                "chain": t.get("chain") or "solana",
                 # v27: market_cap for frontend display
                 "market_cap": t.get("market_cap"),
                 # v40: Track CA provenance (kol=from KOL message, dexscreener=from search)
@@ -758,14 +761,17 @@ def insert_snapshots(ranking: list[dict]) -> None:
     _dedup_ago = (datetime.now(timezone.utc) - timedelta(minutes=35)).isoformat()
     try:
         dedup_result = client.table("token_snapshots") \
-            .select("symbol, token_address") \
+            .select("symbol, token_address, chain") \
             .gte("snapshot_at", _dedup_ago) \
             .execute()
         recent_keys = set()
         for r in (dedup_result.data or []):
             key = r.get("token_address") or r.get("symbol")
             if key:
-                recent_keys.add(key.lower())
+                # v14: key dedup by (chain, address). chain defaults to solana
+                # for legacy rows where the column exists but is NULL.
+                _c = r.get("chain") or "solana"
+                recent_keys.add(f"{_c}:{key.lower()}")
     except Exception as e:
         logger.warning("Dedup query failed, proceeding without: %s", e)
         recent_keys = set()
@@ -774,8 +780,12 @@ def insert_snapshots(ranking: list[dict]) -> None:
     skipped_stale = 0
     skipped_dedup = 0
     for t in ranking:
-        # v103: 35min dedup check (was 1h in v99 — too aggressive for 30min cycles)
-        dedup_key = (t.get("token_address") or t.get("symbol", "")).lower()
+        # v14: chain-aware dedup — same address shape can exist on multiple
+        # chains (unlikely in practice for base58 vs 0x but safe). Key the
+        # dedup set by "{chain}:{addr_lower}" so a hypothetical collision
+        # doesn't block the legitimate insert on the other chain.
+        _chain = t.get("chain") or "solana"
+        dedup_key = f"{_chain}:{(t.get('token_address') or t.get('symbol', '')).lower()}"
         if dedup_key and dedup_key in recent_keys:
             skipped_dedup += 1
             continue
@@ -792,6 +802,7 @@ def insert_snapshots(ranking: list[dict]) -> None:
 
         row = {
             "symbol": t["symbol"],
+            "chain": _chain,  # v14: chain field (Solana by default)
             # Telegram features
             "mentions": t.get("mentions"),
             "sentiment": t.get("sentiment"),
