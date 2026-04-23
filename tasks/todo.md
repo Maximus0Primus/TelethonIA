@@ -418,27 +418,24 @@ Sweet-spot SCORE35 sur BE25 (extrapolation FAST_TP100_S35). LAZY_STRATEGIES nett
 - LIVE post-swap projection vs réel (Apr 27)
 
 ### 🟢 Maintenance rapide (faisable maintenant)
-- Documenter règles HYST/DTRAIL/paired-test dans `docs/known_issues.md`
-- `analyze_mega_sweep.py` en nightly CI (faible priorité — c'est un post-processeur on-demand, pas un gate quotidien)
+- ~~Documenter règles HYST/DTRAIL/paired-test dans `docs/known_issues.md`~~ ✅ v14e.6 P3
+- `analyze_mega_sweep.py` en nightly CI (faible priorité — post-processeur on-demand, pas un gate quotidien)
 
-### 🔵 Sim-align follow-up (post v144.19)
-- **Confirmer le fix v144.19** : `verify_sim_live_alignment.py` doit passer vert dès demain 04:00 UTC (avg |diff| < 5pp, within_10pp ≥ 80%). Si rouge → les 4 bugs logiques résiduels dominent la variance.
-- **Vrais bugs logiques résiduels** (gate v144.8 flagged) : 4 cas à investiguer quand N > 20 paired
-  - `$BUZZED BE25` +11pp : sim `timeout_eod` mais live `timeout` — sim ne trigger pas le timeout
-  - `$XBT BE25` −32pp : idem
-  - `$ZACHXBT BE25` +12pp : status match (be_stop/be_stop) mais exit_price diverge — bug formule be_stop
-  - `$ACHI BE25` −12pp (dont 4.7pp Jup slip) : mix logique + slippage
+### 🔵 Sim-align follow-up
+- ~~**4 bugs logiques**~~ ✅ Résolus par v144.19 (decontamination `paper_sim_pnl_pct`). Les 4 cas ont maintenant diff <5pp. Documenté `known_issues.md §7`.
+- ~~**MEV-pump filter dans le gate**~~ ✅ v14e.5 (`verify_sim_live_alignment.py` tag `[MEV]` + parse bash fix double-count N).
+- Vérif gate vert au cron 04:00 UTC demain — si rouge, réinvestiguer.
 - **A/B mega sweep rappel (Apr 21)** : Spearman ρ=**0.225** (weak), 99.9% configs suspectes.
-  - `HIGHSCORE_TP200_SL40` : **hidden gem massif** (PT 12665 vs EH 369, Δ−12296) → candidate scale-up post N≥30 paper
-  - `FAST_TP80_SL25` ⭐ rank 1 des DEUX sweeps → priorité absolue confirmée
-  - `FAST_TP100_SL20_S35` : faux positif PT — shadow-only, no harm
-  - Famille let-it-run TP100 systématiquement sous-estimée par PT (Δ−82000). Déjà shadow.
+  - ~~`HIGHSCORE_TP200_SL40` hidden gem~~ → retirée v14e.11 (avg 7d −3.5%, le PT 12665 était un faux positif).
+  - `FAST_TP80_SL25` ⭐ rank 1 des DEUX sweeps — confirmée, live candidat.
+  - `FAST_TP100_SL20_S35` : shadow-only, attend paired-test.
+  - Famille let-it-run TP100 sous-estimée par PT — à revisiter si shadows confirment sur N≥30.
 
 ### 🟠 Actions après verdicts
-- **NOZEROLIQ_TP200_SL40** : si pattern perdant à N≥30, retirer du hybrid (~+$8/j net)
-- **Top winners shadow paired** : promouvoir 1-2 en main paper si Δpp ≥ +5pp
-- **FAST_TP100_SL20_S35** (sim top robust) : si paper paired confirme → main paper + envisager live
-- **HYST + filtre** : si confirmation N≥30, scaling de la famille S30/NZS30
+- ~~**NOZEROLIQ_TP200_SL40**~~ ✅ Retirée v14e.6 P0 (N=33 perdante).
+- ~~**HYST + filtre S30/NZS30**~~ ✅ Arbitré v14e.11 : NZS30_HYST retirée (perdante), S30_HYST gardée en watch.
+- **Top winners shadow paired** : promouvoir 1-2 en main paper si Δpp ≥ +5pp (data-wait Apr 23-30).
+- **FAST_TP100_SL20_S35** (sim top robust) : si paper paired confirme → main paper + envisager live (data-wait).
 
 ### 🟡 Scale-up live (après verdict paper)
 - BE25 → remplacer par 2e FAST avec TP différent (FAST_TP80 ou FAST_TP100) après FAST_TP50 stable + N≥30
@@ -453,13 +450,10 @@ Sweet-spot SCORE35 sur BE25 (extrapolation FAST_TP100_S35). LAZY_STRATEGIES nett
 
 ## 🛠 Chantiers planifiés (sprint format)
 
-### Sprint #1 — Refinement slip model (1-2h, gain 0.3-0.5pp médiane)
-**Cible** : ETA Apr 25-28 quand N≥30 par cellule pump×exit_type
-**Quoi** :
-- Remplacer 3 buckets liq actuels (5K/20K/50K) dans `_dynamic_sell_slip_factor` par modèle continu utilisant `price_ticks.volume_24h` + `price_ticks.liquidity_usd` à exit_time
-- Calibrer sur les ~143 paires live/paper matched (`scripts/slip_per_exit_type.py`)
-- Modèle suggéré : `slip_bps = base × (1 + α × log(50K / liq)) × (1 + β × volume_volatility) × exit_type_mult`
-**Coût** : ~200 lignes paper_trader + tests + redéploiement
+### Sprint #1 — Refinement slip model ✅ DONE v14e.6 P5
+- Log-continu remplace les 3 buckets (1.0 + 0.5 × log10(50k/max(liq,500)))
+- Clamped [1.0, 2.5], 4 tests dédiés
+- **Reste (v2)** : composante volume-volatility quand N≥30 par (liq_band × exit_type × vol_band)
 
 ### Sprint #2 — Coherence sim trail/dtrail/dip family (post Apr 25)
 **Problème** : sim mega_sweep top picks famille trail/dtrail/dip alors que paper/live confirment artefact (DTRAIL10 sim top vs live 65% reconciled, slip 47×)
