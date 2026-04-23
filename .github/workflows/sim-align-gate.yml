@@ -37,11 +37,19 @@ jobs:
           echo "window: $ALIGN_SINCE"
           python scripts/verify_sim_live_alignment.py 2>&1 | tee align.out
 
-          # Parse the summary line: "Aligned on N trades. Avg diff = +X.XXpp | Max |diff| = Y.YY"
+          # v14e.5: parse fix — previous awk summed N across LOGIC + ECONOMIC
+          # breakdown blocks (each reports the same per-strat N once, so the
+          # total was doubled). Same issue with within_10pp pre-v14e.5.
+          # Take N from the single summary line and sum within_10pp from the
+          # LOGIC breakdown section only (between its header and next header).
           AVG=$(grep -oE 'Avg diff = [+-]?[0-9.]+pp' align.out | head -1 | grep -oE '[+-]?[0-9.]+')
           MAX=$(grep -oE 'Max \|diff\| = [0-9.]+' align.out | head -1 | grep -oE '[0-9.]+')
-          WITHIN_COUNT=$(grep -oE 'within_10pp=[0-9]+' align.out | awk -F= '{s+=$2} END{print s+0}')
-          N_COUNT=$(grep -oE 'N=[0-9]+' align.out | awk -F= '{s+=$2} END{print s+0}')
+          # LOGIC-only sections, delimited by their === header lines.
+          LOGIC_BLOCK=$(awk '/Per-strategy LOGIC drift/{f=1;next} /^=== /{f=0} f' align.out)
+          WITHIN_COUNT=$(echo "$LOGIC_BLOCK" | grep -oE 'within_10pp=[0-9]+' | awk -F= '{s+=$2} END{print s+0}')
+          # N = count of gate-eligible rows (post MEV-pump skip) from summary line.
+          N_COUNT=$(grep -oE 'Replay vs paper_sim on [0-9]+ trades' align.out | grep -oE '[0-9]+' | head -1)
+          N_COUNT=${N_COUNT:-0}
           echo "avg=$AVG max=$MAX within=$WITHIN_COUNT/$N_COUNT"
           echo "avg=$AVG" >> "$GITHUB_OUTPUT"
           echo "max=$MAX" >> "$GITHUB_OUTPUT"
