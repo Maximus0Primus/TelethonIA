@@ -34,20 +34,13 @@ ALTER TABLE price_ticks
 CREATE INDEX IF NOT EXISTS idx_price_ticks_chain_token
   ON price_ticks (chain, token_address, fetched_at DESC);
 
--- kol_mentions (may not exist in all envs — wrapped in DO block for idempotency)
-DO $$
-BEGIN
-  IF EXISTS (SELECT 1 FROM information_schema.tables
-             WHERE table_schema = 'public' AND table_name = 'kol_mentions') THEN
-    EXECUTE '
-      ALTER TABLE kol_mentions
-        ADD COLUMN IF NOT EXISTS chain TEXT NOT NULL DEFAULT ''solana''
-          CHECK (chain IN (''solana'', ''ethereum''));
-      CREATE INDEX IF NOT EXISTS idx_kol_mentions_chain_token
-        ON kol_mentions (chain, token_address);
-    ';
-  END IF;
-END $$;
+-- kol_mentions — note this table keys by symbol (no token_address column),
+-- so the index is (chain, symbol) not (chain, token_address).
+ALTER TABLE kol_mentions
+  ADD COLUMN IF NOT EXISTS chain TEXT NOT NULL DEFAULT 'solana'
+    CHECK (chain IN ('solana', 'ethereum'));
+CREATE INDEX IF NOT EXISTS idx_kol_mentions_chain_symbol
+  ON kol_mentions (chain, symbol);
 
 -- Note: No UPDATE needed — DEFAULT 'solana' handles existing rows at
 -- ADD COLUMN time. Every row already present is Solana by definition
