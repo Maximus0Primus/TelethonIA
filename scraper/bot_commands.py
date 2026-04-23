@@ -666,83 +666,142 @@ def _handle_stats(sb, args: str) -> str:
 # ── /shadow [period] ──
 
 def _handle_shadow(sb, args: str) -> str:
-    """v14e: /shadow [période] [chain] — Shadow vs main, scopé par chain.
-    Comparer des shadows ETH à un main Solana = bruit total, donc on force un
-    filtre chain (default: solana) quand l'user ne précise pas.
+    """v14e.10: /shadow [période] [chain] [minN] — Top shadows vs top mains.
+
+    Avant: agrégeait tous les shadows vs une moyenne unique "MAIN" combinée,
+    sans seuil N → résultats dominés par des variants N=1-3. User callait ça
+    "débile".
+
+    Maintenant:
+    - Top 10 shadows triées par avg%, min N=10 par défaut (anti-bruit)
+    - Top 5 mains actives de la même période + chain pour comparaison
+      par-stratégie, pas une moyenne unique
+    - Médaillon 🚀 si le shadow bat le meilleur main (pas juste la moyenne)
+    - Filtre optionnel `minN=X` pour ajuster le seuil (ex: /shadow 7d minN=5)
+
+    Chain par défaut: solana (ETH/BSC/Base shadows compareraient mal).
     """
     args2, chain_filter = _parse_chain_args(args)
-    # Force solana par défaut pour éviter de mélanger; user peut demander 'all' via syntaxe.
+    # Chain par défaut: solana (explicit 'all' pour désactiver)
     if chain_filter is None and " all" not in f" {args.lower()} ":
         chain_filter = "solana"
-    hours, label = _parse_period(args2) if args2 else (0, "All-time")
+
+    # Extract minN=X from args if present
+    min_n = 10
+    tokens = args2.split() if args2 else []
+    cleaned_tokens = []
+    for tok in tokens:
+        tl = tok.lower().strip()
+        if tl.startswith("minn=") or tl.startswith("min_n="):
+            try:
+                min_n = max(1, int(tl.split("=", 1)[1]))
+            except (ValueError, IndexError):
+                pass
+        else:
+            cleaned_tokens.append(tok)
+    args_clean = " ".join(cleaned_tokens)
+    hours, label = _parse_period(args_clean) if args_clean else (0, "All-time")
     if chain_filter:
         label += f" | {_chain_tag(chain_filter)} {chain_filter.upper()}"
+    label += f" | min N={min_n}"
 
-    # Query all shadow trades for the period
-    q = (
+    # ── Shadows ──
+    q_sh = (
         sb.table("paper_trades")
         .select("strategy,pnl_pct,status,chain")
         .eq("is_shadow", True)
         .neq("status", "open")
     )
     if chain_filter:
-        q = q.eq("chain", chain_filter)
+        q_sh = q_sh.eq("chain", chain_filter)
     if hours > 0:
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
-        q = q.gte("exit_at", cutoff)
+        q_sh = q_sh.gte("exit_at", cutoff)
     try:
-        shadows = q.execute().data or []
+        shadows = q_sh.execute().data or []
     except Exception as e:
         return f"❌ Erreur: {e}"
-
     if not shadows:
         return f"📭 Aucun shadow trade ({label})."
 
-    # Also get main strategy stats for comparison — same chain scope.
-    main_trades = _query_trades(sb, hours=hours, chain=chain_filter)
-    main_stats = _compute_stats(main_trades)
-
-    # Aggregate shadows by strategy
-    strats: dict[str, dict] = {}
+    # Aggregate shadows
+    sh_agg: dict[str, dict] = {}
     for t in shadows:
         s = t.get("strategy", "?")
-        if s not in strats:
-            strats[s] = {"count": 0, "wins": 0, "pnl_pct_sum": 0}
-        strats[s]["count"] += 1
-        pnl_pct = float(t.get("pnl_pct") or 0)
-        strats[s]["pnl_pct_sum"] += pnl_pct
-        if pnl_pct > 0:
-            strats[s]["wins"] += 1
+        d = sh_agg.setdefault(s, {"count": 0, "wins": 0, "pnl_sum": 0.0})
+        d["count"] += 1
+        p = float(t.get("pnl_pct") or 0)
+        d["pnl_sum"] += p
+        if p > 0:
+            d["wins"] += 1
+    for d in sh_agg.values():
+        d["avg"] = (d["pnl_sum"] / d["count"]) * 100 if d["count"] else 0
+        d["wr"] = (d["wins"] / d["count"]) * 100 if d["count"] else 0
 
-    # Sort by avg pnl_pct (since shadows have $0 position, we compare % not $)
-    for d in strats.values():
-        d["avg_pnl_pct"] = d["pnl_pct_sum"] / d["count"] if d["count"] > 0 else 0
-        d["wr"] = d["wins"] / d["count"] * 100 if d["count"] > 0 else 0
-    sorted_strats = sorted(strats.items(), key=lambda x: -x[1]["avg_pnl_pct"])
+    # Filter to min_n + sort
+    eligible_shadows = {s: d for s, d in sh_agg.items() if d["count"] >= min_n}
+    sh_rejected_low_n = len(sh_agg) - len(eligible_shadows)
+    sorted_shadows = sorted(eligible_shadows.items(), key=lambda x: -x[1]["avg"])
+    top_shadows = sorted_shadows[:10]
 
-    # v116: Main strategies line (combined)
-    main_wr = main_stats["wins"] / main_stats["count"] * 100 if main_stats["count"] > 0 else 0
-    main_avg = sum(float(t.get("pnl_pct") or 0) for t in main_trades) / len(main_trades) * 100 if main_trades else 0
-    active = _get_active_strategies(sb)
-    active_set = set(active)
+    # ── Top mains actives (même période + chain) ──
+    main_trades = _query_trades(sb, hours=hours, chain=chain_filter)
+    main_agg: dict[str, dict] = {}
+    for t in main_trades:
+        s = t.get("strategy", "?")
+        d = main_agg.setdefault(s, {"count": 0, "wins": 0, "pnl_sum": 0.0})
+        d["count"] += 1
+        p = float(t.get("pnl_pct") or 0)
+        d["pnl_sum"] += p
+        if p > 0:
+            d["wins"] += 1
+    for d in main_agg.values():
+        d["avg"] = (d["pnl_sum"] / d["count"]) * 100 if d["count"] else 0
+        d["wr"] = (d["wins"] / d["count"]) * 100 if d["count"] else 0
+    eligible_mains = {s: d for s, d in main_agg.items() if d["count"] >= min_n}
+    sorted_mains = sorted(eligible_mains.items(), key=lambda x: -x[1]["avg"])
+    top_mains = sorted_mains[:5]
+    best_main_avg = top_mains[0][1]["avg"] if top_mains else float("-inf")
 
-    lines = [f"  ⭐ <b>MAIN ({len(active)} strats)</b> avg {main_avg:+.1f}% | {main_stats['count']}t | {main_wr:.0f}% WR"]
+    # ── Render ──
+    lines = []
 
-    for s_name, d in sorted_strats[:10]:
-        if s_name in active_set:
-            continue  # Don't show active strategies in shadow list
-        better = d["avg_pnl_pct"] * 100 > main_avg
-        indicator = "🟢" if better else "🔴"
-        lines.append(
-            f"  {indicator} <b>{s_name}</b>"
-            f" avg {d['avg_pnl_pct']*100:+.1f}%"
-            f" | {d['count']}t | {d['wr']:.0f}%"
-        )
+    # Top mains section
+    if top_mains:
+        lines.append(f"⭐ <b>Top 5 MAIN</b> ({len(eligible_mains)} avec N≥{min_n}):")
+        for s, d in top_mains:
+            lines.append(f"  <b>{_short_strat(s)}</b> avg {d['avg']:+.1f}% | {d['count']}t | {d['wr']:.0f}% WR")
+    else:
+        lines.append(f"⭐ <b>MAIN</b>: aucune strat avec N≥{min_n} sur la période")
+
+    lines.append("")
+
+    # Top shadows section
+    if top_shadows:
+        lines.append(f"🔬 <b>Top 10 SHADOWS</b> ({len(eligible_shadows)} avec N≥{min_n}):")
+        for s, d in top_shadows:
+            if d["avg"] > best_main_avg:
+                medal = "🚀"  # bat le meilleur main
+            elif d["avg"] > 0:
+                medal = "🟢"
+            else:
+                medal = "🔴"
+            lines.append(
+                f"  {medal} <b>{_short_strat(s)}</b> avg {d['avg']:+.1f}% | {d['count']}t | {d['wr']:.0f}% WR"
+            )
+    else:
+        lines.append(f"🔬 <b>SHADOWS</b>: aucune avec N≥{min_n}")
+
+    footer_bits = []
+    if sh_rejected_low_n:
+        footer_bits.append(f"{sh_rejected_low_n} shadow(s) masquée(s) N<{min_n}")
+    footer_bits.append("🚀 bat top main, 🟢 avg>0, 🔴 avg<0")
+    footer = "\n\n<i>" + " · ".join(footer_bits) + "</i>"
 
     return (
-        f"🔬 <b>SHADOW COMPARISON</b> ({label})\n"
-        f"⭐ = stratégie active, 🟢 = bat le main, 🔴 = pire\n\n"
+        f"🔬 <b>SHADOW LEADERBOARD</b> ({label})\n\n"
         + "\n".join(lines)
+        + footer
     )
 
 
@@ -1800,7 +1859,7 @@ HELP_TEXT = (
     "  /stats [période] [chain] [strat] — Performance\n"
     "  /kol [période] [chain] [strat] — Leaderboard KOL\n"
     "  /pnl &lt;KOL&gt; [chain] [strat] — Stats d'un KOL\n"
-    "  /shadow [période] [chain] — Shadow vs main (sol par défaut)\n"
+    "  /shadow [période] [chain] [minN=X] — Top 10 shadows vs top 5 mains (sol par défaut, minN=10)\n"
     "\n<b>💎 Live Trading (Solana-only):</b>\n"
     "  /live — Status live (wallet, positions, PnL)\n"
     "  /live on|off — Activer/désactiver le live\n"
