@@ -1,3 +1,34 @@
+# Pipeline Status — Updated Apr 23, 2026 (v14e.11 — audit paper + refresh)
+
+## v14e.11 — Apr 23 PM — audit paper mains + retrait 3 perdantes
+
+Les 11 strats Solana mains auditées sur 7d + 14d N≥30 :
+
+| Statut | Strats |
+|---|---|
+| ✅ Gardées (top earners) | FAST_TP50_SL30 (+$361), FAST_TP80_SL25 (+$329), TP50_SL15 (+$277), FAST_TP40_SL30 (+$256), BE25_TP80_SL30 (+$202) |
+| 🟡 Gardées watch | FAST_TP100_SL20 (+$170, avg +4.2%), BE25_TP80_SL30_S30_HYST (+$83), FAST_TP50_SL30_HYST (+$48) |
+| 🔴 **Retirées** | BE25_TP80_SL30_NZS30_HYST (−$32), BE15_TP70_SL50_NZ (−$46), HIGHSCORE_TP200_SL40 (−$70) |
+
+Total évité : **−$148/7j = +$21/jour** libérés.
+
+**17 allocations restantes** : 8 SOL mains + 3 ETH + 3 BSC + 3 BASE
+```
+BE25_TP80_SL30, BE25_TP80_SL30_S30_HYST, FAST_TP100_SL20,
+FAST_TP40_SL30, FAST_TP50_SL30, FAST_TP50_SL30_HYST,
+FAST_TP80_SL25, TP50_SL15
++ 3 ETH_* + 3 BSC_* + 3 BASE_*
+```
+
+**Pas de promotion de shadow** — les top shadows (DTRAIL10_ACT10_SL70 +10.6%, DTRAIL10_ACT30_SL50 +9.6%, DIP30_B10_T10_A20_SL60_120m +9.5%) sont famille trail/dtrail/dip = **artefact sim** (cf. `docs/known_issues.md §2`, slip 47× live vs paper). Les seuls safe candidats single-exit sont des variants kernel (MED3/LAZY/JUPITER) de mains déjà actives → attendre paired-test.
+
+**Watch list** (rétrograde si pattern persiste 14j) :
+- FAST_TP50_SL30_HYST +$48 / +1.4% → borderline, garder N≥60 avant décision
+- BE25_TP80_SL30_S30_HYST +$83 / +4.0% → single filter HYST, garder mais watch
+- FAST_TP100_SL20 avg 14d +3.7% (vs 7d +4.2%) — stable mais sous la médiane des top 5
+
+---
+
 # Pipeline Status — Updated Apr 23, 2026 (v14e.6 — 6 tâches batch)
 
 ## v14e.5 + v14e.6 — Apr 23 PM — batch P0-P5
