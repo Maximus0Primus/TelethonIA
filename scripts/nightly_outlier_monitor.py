@@ -69,16 +69,28 @@ def main():
 
     outliers_synced = []
     outliers_unsynced = 0
+    outliers_mev_pump = 0  # v144.19: expected Jupiter Ultra positive-slip edge
     for lv, pp in matched:
-        dpp = (float(lv.get("pnl_pct") or 0) - float(pp.get("pnl_pct") or 0)) * 100
+        pnl_lv = float(lv.get("pnl_pct") or 0)
+        pnl_pp = float(pp.get("pnl_pct") or 0)
+        dpp = (pnl_lv - pnl_pp) * 100
         if abs(dpp) <= THRESHOLD_PP:
+            continue
+        # v144.19: skip tp_hit/tp_hit where live caught a MEV pump above paper's
+        # clean TP exit. This is expected execution edge (positive Jupiter Ultra
+        # slippage on pumps, documented v144-11-live-paper-divergence.md), NOT a
+        # logic bug. Still alerts on: opposite statuses, paper > live (sim
+        # over-estimate), or any non-TP tp/sl asymmetry.
+        if (lv.get("status") == "tp_hit" and pp.get("status") == "tp_hit"
+                and pnl_lv > pnl_pp > 0):
+            outliers_mev_pump += 1
             continue
         synced = (lv.get("entry_source") == "live_sync") or (pp.get("entry_source") == "live_sync")
         if synced:
             outliers_synced.append({
                 "symbol": lv["symbol"], "strategy": lv["strategy"],
-                "pnl_live": round(float(lv.get("pnl_pct") or 0)*100, 2),
-                "pnl_paper": round(float(pp.get("pnl_pct") or 0)*100, 2),
+                "pnl_live": round(pnl_lv * 100, 2),
+                "pnl_paper": round(pnl_pp * 100, 2),
                 "delta_pp": round(dpp, 2),
                 "status_live": lv["status"], "status_paper": pp["status"],
                 "exit_at": lv.get("exit_at"),
@@ -87,9 +99,11 @@ def main():
         else:
             outliers_unsynced += 1
 
-    print(f"\n  outliers |L-P|>{THRESHOLD_PP}pp : {len(outliers_synced)+outliers_unsynced} total")
-    print(f"    sync=False (expected, historic): {outliers_unsynced}")
-    print(f"    sync=True  (BUG SIGNAL):         {len(outliers_synced)}")
+    print(f"\n  outliers |L-P|>{THRESHOLD_PP}pp : "
+          f"{len(outliers_synced)+outliers_unsynced+outliers_mev_pump} total")
+    print(f"    sync=False (expected, historic):  {outliers_unsynced}")
+    print(f"    MEV-pump tp/tp (expected edge):   {outliers_mev_pump}")
+    print(f"    sync=True  (BUG SIGNAL):          {len(outliers_synced)}")
 
     # Emit JSON for CI to parse + upload
     out_path = os.path.join(os.path.dirname(__file__), "..", "data", "nightly_outliers.json")
@@ -102,6 +116,7 @@ def main():
             "sim_live_median_pp": st.median(sim_diffs) if sim_diffs else None,
             "outliers_synced": outliers_synced,
             "outliers_unsynced_count": outliers_unsynced,
+            "outliers_mev_pump_count": outliers_mev_pump,
         }, f, indent=2, default=str)
     print(f"  saved -> {out_path}")
 

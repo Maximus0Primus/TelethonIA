@@ -1201,7 +1201,6 @@ def check_live_trades(client_sb) -> dict:
                 from paper_trader import (
                     SELL_FEE_BPS as _PT_SELL_FEE_BPS,
                     SELL_SLIPPAGE_BPS as _PT_SELL_SLIP_BPS,
-                    _override_exit_with_ultra_quote as _pt_ultra_override,
                 )
                 _paper_slip_factor = 1 - _PT_SELL_SLIP_BPS / 10_000
                 _paper_sim_ev = _evaluate_trade_exit(
@@ -1210,8 +1209,13 @@ def check_live_trades(client_sb) -> dict:
                     sell_fee_bps=_PT_SELL_FEE_BPS,
                     decision_price=decision_price,
                 )
-                if _paper_sim_ev is not None:
-                    _paper_sim_ev = _pt_ultra_override(client_sb, trade, _paper_sim_ev)
+                # v144.19: do NOT apply _pt_ultra_override here. Fetching an Ultra
+                # SELL quote at live-exit moment contaminates paper_sim_pnl_pct
+                # with the same MEV-boosted fill the live sell just got (e.g.
+                # $MHGA pump: paper_sim stored +235% instead of the TP80 sim value
+                # +87%). Keep this as pure-sim reference: formula exit_price + flat
+                # slip. Real Jupiter fill divergence is already captured by
+                # pnl_pct vs paper_sim_pnl_pct (execution drift = real edge).
             except Exception as _e:
                 logger.debug("paper_sim_ev compute failed for %s: %s", trade.get("symbol"), _e)
 

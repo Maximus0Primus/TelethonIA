@@ -521,11 +521,8 @@ def process_and_push(messages_data: dict[str, list[dict]], dump: bool = False,
         insert_snapshots(all_24h)
         logger.info("Inserted %d snapshots (24h): %d penalized",
                      len(all_24h), penalized_24h)
-        # v80: Proactive API health check
-        try:
-            _check_api_health(all_24h)
-        except Exception as e:
-            logger.debug("api health check failed: %s", e)
+        # v144.19: API health Telegram alerts disabled (user: too noisy).
+        # Fill-rate computation still available via _check_api_health() if needed.
 
     # Also insert snapshots for 7d window (covers tokens not in 24h)
     all_7d = all_enriched_by_window.get("7d", [])
