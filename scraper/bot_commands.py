@@ -76,6 +76,58 @@ _PERIODS = {
     "all": 0, "tout": 0,
 }
 
+# v14e: chain filter tokens. Accept common aliases (sol/eth/bsc/base).
+# `all` / `allchains` disables filter; if the user types nothing, default is
+# per-command (usually "all chains"). Every handler that queries paper_trades
+# must pass the resolved chain to _query_trades to avoid mixing chains.
+_CHAIN_ALIASES: dict[str, str] = {
+    "sol": "solana", "solana": "solana", "solona": "solana",
+    "eth": "ethereum", "ethereum": "ethereum", "ether": "ethereum",
+    "bsc": "bsc", "bnb": "bsc",
+    "base": "base",
+}
+
+
+def _chain_tag(chain: str | None) -> str:
+    """Compact chain emoji for inline display in lists. Keep 1-char +
+    whitespace so lines stay readable on mobile."""
+    c = (chain or "solana").lower()
+    return {
+        "solana":   "🟣",
+        "ethereum": "🔷",
+        "bsc":      "🟡",
+        "base":     "🔵",
+    }.get(c, "⚪")
+
+
+def _explorer_url(chain: str, ca: str) -> str:
+    """Canonical block explorer URL per chain for /best and /worst links."""
+    c = (chain or "solana").lower()
+    if c == "ethereum":
+        return f"https://etherscan.io/token/{ca}"
+    if c == "bsc":
+        return f"https://bscscan.com/token/{ca}"
+    if c == "base":
+        return f"https://basescan.org/token/{ca}"
+    return f"https://solscan.io/token/{ca}"
+
+
+def _parse_chain_args(args: str) -> tuple[str, str | None]:
+    """Pop a chain filter token from args. Returns (remaining_args, chain_or_None).
+    Accepts sol/eth/bsc/base and common aliases. 'all'/'allchains' returns
+    (remaining, None) explicitly — used by handlers that want to distinguish
+    'user asked for all' from 'no filter'."""
+    if not args:
+        return "", None
+    parts = args.split()
+    for i, p in enumerate(parts):
+        low = p.lower().strip()
+        if low in ("all", "allchains", "allchain", "toutes"):
+            return " ".join(parts[:i] + parts[i+1:]).strip(), None
+        if low in _CHAIN_ALIASES:
+            return " ".join(parts[:i] + parts[i+1:]).strip(), _CHAIN_ALIASES[low]
+    return args, None
+
 
 # ── Helpers ──
 
@@ -199,17 +251,22 @@ def _exit_emoji(status: str, pnl: float) -> str:
     return "📊"
 
 
-def _query_trades(sb, hours: int = 0, limit: int = 0, strategy: str = ""):
+def _query_trades(sb, hours: int = 0, limit: int = 0, strategy: str = "",
+                  chain: str | None = None):
     """Query closed main trades across all active strategies.
-    v116: strategy="" queries all active strategies (not just one)."""
+    v116: strategy="" queries all active strategies (not just one).
+    v14e: chain filter restricts to paper_trades.chain = X; None = all chains.
+    Select list now includes chain so every display can tag it."""
     strategies = [strategy] if strategy else _get_active_strategies(sb)
     q = (
         sb.table("paper_trades")
-        .select("symbol,pnl_pct,pnl_usd,status,kol_group,exit_at,position_usd,exit_minutes,token_address,entry_price,exit_price,high_price_seen,cycle_ts,strategy")
+        .select("symbol,pnl_pct,pnl_usd,status,kol_group,exit_at,position_usd,exit_minutes,token_address,entry_price,exit_price,high_price_seen,cycle_ts,strategy,chain")
         .eq("is_shadow", False)
         .in_("strategy", strategies)
         .neq("status", "open")
     )
+    if chain:
+        q = q.eq("chain", chain)
     if hours > 0:
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
         q = q.gte("exit_at", cutoff)
@@ -246,45 +303,70 @@ def _fmt_stats(d: dict, label: str) -> str:
 # ── /bank ──
 
 def _handle_bank(sb, args: str) -> str:
+    """v14e: /bank [chain] — Bankroll groupé par chain.
+    Sans argument: montre les 4 chains côte à côte (skip celles vides).
+    Avec chain: détail par stratégie de la chain demandée."""
     from paper_trader import get_open_portfolio
     from safe_scraper import _rt_load_bankroll
 
+    _, chain_filter = _parse_chain_args(args)
+
     try:
         bk = _rt_load_bankroll()
-        strat_bals = bk.get("strategy_bankrolls") or {}
+        per_chain = bk.get("strategy_bankrolls_per_chain") or {}
+        if not per_chain:
+            # v14e legacy fallback: partition the flat dict by strategy prefix.
+            from safe_scraper import _rt_strategy_bankrolls_for_chain
+            per_chain = {c: _rt_strategy_bankrolls_for_chain(bk, c)
+                         for c in ("solana", "ethereum", "bsc", "base")}
     except Exception:
         bk = {}
-        strat_bals = {}
+        per_chain = {}
 
     portfolio = get_open_portfolio(sb)
     n_open = portfolio["open_count"]
     deployed = portfolio["deployed_usd"]
 
-    # v116: Per-strategy bankroll display
-    parts = []
-    total_bal = 0
-    total_pnl = 0
-    for sname, sdata in sorted(strat_bals.items()):
-        bal = float(sdata.get("balance", 500))
-        pnl = float(sdata.get("pnl", 0))
-        trades = int(sdata.get("trades", 0))
-        short = _short_strat(sname)
-        emoji = "📈" if pnl >= 0 else "📉"
-        parts.append(f"  {emoji} <b>{short}</b>: ${bal:.0f} ({pnl:+.0f}) | {trades}t")
-        total_bal += bal
-        total_pnl += pnl
+    sections: list[str] = []
+    grand_bal = 0.0
+    grand_pnl = 0.0
+    for c in ("solana", "ethereum", "bsc", "base"):
+        if chain_filter and c != chain_filter:
+            continue
+        strat_bals = per_chain.get(c) or {}
+        if not strat_bals:
+            continue
+        c_bal = 0.0
+        c_pnl = 0.0
+        lines = []
+        for sname, sdata in sorted(strat_bals.items()):
+            bal = float(sdata.get("balance", 500))
+            pnl = float(sdata.get("pnl", 0))
+            trades = int(sdata.get("trades", 0))
+            short = _short_strat(sname)
+            emoji = "📈" if pnl >= 0 else "📉"
+            lines.append(f"  {emoji} <b>{short}</b>: ${bal:.0f} ({pnl:+.0f}) | {trades}t")
+            c_bal += bal
+            c_pnl += pnl
+        sections.append(
+            f"{_chain_tag(c)} <b>{c.upper()}</b> — ${c_bal:.0f} ({c_pnl:+.0f})\n" + "\n".join(lines)
+        )
+        grand_bal += c_bal
+        grand_pnl += c_pnl
 
-    if not parts:
-        total_bal = float(bk.get("current_balance", 0))
-        total_pnl = float(bk.get("total_pnl", 0))
+    if not sections:
+        if chain_filter:
+            return f"📭 Aucune stratégie active sur {_chain_tag(chain_filter)} {chain_filter.upper()}"
+        grand_bal = float(bk.get("current_balance", 0))
+        grand_pnl = float(bk.get("total_pnl", 0))
+        sections.append("  Aucune stratégie")
 
-    strat_text = "\n".join(parts) if parts else "  Aucune stratégie"
-    available = total_bal - deployed
-
+    available = grand_bal - deployed
+    header = f"💰 <b>BANKROLL{f' — {_chain_tag(chain_filter)} {chain_filter.upper()}' if chain_filter else ''}</b>"
     return (
-        f"💰 <b>BANKROLL</b>\n\n"
-        f"📊 <b>Stratégies:</b>\n{strat_text}\n"
-        f"\n💵 Total: <b>${total_bal:.0f}</b> ({total_pnl:+.0f})\n"
+        f"{header}\n\n"
+        + "\n\n".join(sections)
+        + f"\n\n💵 Total: <b>${grand_bal:.0f}</b> ({grand_pnl:+.0f})\n"
         f"📦 Déployé: ${deployed:.0f} ({n_open} pos)"
         f" | Dispo: ${available:.0f}"
     )
@@ -293,46 +375,67 @@ def _handle_bank(sb, args: str) -> str:
 # ── /pos ──
 
 def _handle_pos(sb, args: str) -> str:
+    """v14e: /pos [chain] — Positions ouvertes groupées par chain puis stratégie."""
+    _, chain_filter = _parse_chain_args(args)
     try:
-        result = (
+        q = (
             sb.table("paper_trades")
-            .select("symbol,strategy,position_usd,entry_price,kol_group,cycle_ts")
+            .select("symbol,strategy,position_usd,entry_price,kol_group,cycle_ts,chain")
             .eq("status", "open").eq("is_shadow", False)
-            .order("cycle_ts", desc=True).limit(30).execute()
+            .order("cycle_ts", desc=True).limit(50)
         )
+        if chain_filter:
+            q = q.eq("chain", chain_filter)
+        result = q.execute()
         trades = result.data or []
     except Exception as e:
         return f"❌ Erreur: {e}"
 
     if trades:
-        # v116: Group by strategy
-        by_strat: dict[str, list] = {}
+        # v14e: group by (chain, strategy). Chain first so the reader scans
+        # "how exposed am I on each chain" before drilling into strats.
+        by_chain: dict[str, dict[str, list]] = {}
         for t in trades:
+            c = t.get("chain") or "solana"
             s = t.get("strategy", "?")
-            by_strat.setdefault(s, []).append(t)
+            by_chain.setdefault(c, {}).setdefault(s, []).append(t)
 
         total = sum(float(t.get("position_usd") or 0) for t in trades)
-        lines = [f"📦 <b>{len(trades)} POSITIONS OUVERTES</b> (${total:.0f})\n"]
-        for sname, strades in sorted(by_strat.items()):
-            short = _short_strat(sname)
-            stot = sum(float(t.get("position_usd") or 0) for t in strades)
-            lines.append(f"\n<b>{short}</b> (${stot:.0f}):")
-            for t in strades:
-                lines.append(
-                    f"  • <b>{t.get('symbol','?')}</b> ${float(t.get('position_usd') or 0):.0f}"
-                    f" | {t.get('kol_group','?')} | {_age_str(t.get('cycle_ts',''))}"
-                )
+        header = f"📦 <b>{len(trades)} POSITIONS OUVERTES</b> (${total:.0f})"
+        if chain_filter:
+            header = f"📦 <b>{len(trades)} POS {_chain_tag(chain_filter)} {chain_filter.upper()}</b> (${total:.0f})"
+        lines = [header]
+
+        chain_order = ["solana", "ethereum", "bsc", "base"]
+        for c in chain_order:
+            if c not in by_chain:
+                continue
+            c_trades = [t for strades in by_chain[c].values() for t in strades]
+            c_total = sum(float(t.get("position_usd") or 0) for t in c_trades)
+            if not chain_filter:
+                lines.append(f"\n{_chain_tag(c)} <b>{c.upper()}</b> — {len(c_trades)} pos (${c_total:.0f})")
+            for sname, strades in sorted(by_chain[c].items()):
+                short = _short_strat(sname)
+                stot = sum(float(t.get("position_usd") or 0) for t in strades)
+                lines.append(f"\n  <b>{short}</b> (${stot:.0f}):")
+                for t in strades:
+                    lines.append(
+                        f"    • <b>{t.get('symbol','?')}</b> ${float(t.get('position_usd') or 0):.0f}"
+                        f" | {t.get('kol_group','?')} | {_age_str(t.get('cycle_ts',''))}"
+                    )
         return "\n".join(lines)
 
-    # No open positions — show last closed
-    strategies = _get_active_strategies(sb)
+    # No open positions — show last closed (respects chain filter)
     try:
-        last = (
+        q = (
             sb.table("paper_trades")
-            .select("symbol,pnl_pct,pnl_usd,status,kol_group,exit_at")
-            .eq("is_shadow", False).in_("strategy", strategies)
-            .neq("status", "open").order("exit_at", desc=True).limit(1).execute()
+            .select("symbol,pnl_pct,pnl_usd,status,kol_group,exit_at,chain")
+            .eq("is_shadow", False).in_("strategy", _get_active_strategies(sb))
+            .neq("status", "open").order("exit_at", desc=True).limit(1)
         )
+        if chain_filter:
+            q = q.eq("chain", chain_filter)
+        last = q.execute()
         t = (last.data or [None])[0]
     except Exception:
         t = None
@@ -340,10 +443,11 @@ def _handle_pos(sb, args: str) -> str:
     if t:
         pnl_pct = float(t.get("pnl_pct") or 0)
         emoji = _exit_emoji(t.get("status", ""), pnl_pct)
+        c_tag = _chain_tag(t.get("chain"))
         return (
-            f"📭 <b>Aucune position ouverte</b>\n\n"
+            f"📭 <b>Aucune position ouverte{(' ' + c_tag + ' ' + chain_filter.upper()) if chain_filter else ''}</b>\n\n"
             f"Dernier trade ({_age_str(t.get('exit_at',''))}):\n"
-            f"  {emoji} <b>{t.get('symbol','?')}</b>"
+            f"  {emoji} {c_tag} <b>{t.get('symbol','?')}</b>"
             f" {pnl_pct*100:+.1f}% (${float(t.get('pnl_usd') or 0):+.2f})"
             f" | {t.get('kol_group','?')} | {t.get('status','?')}"
         )
@@ -353,18 +457,31 @@ def _handle_pos(sb, args: str) -> str:
 # ── /trades [N] ──
 
 def _handle_trades(sb, args: str) -> str:
-    remaining, strat = _split_strategy_args(args, sb)
+    """v14e: /trades [N] [chain] [strat] — Derniers trades avec tag chain sur chaque ligne."""
+    args2, chain_filter = _parse_chain_args(args)
+    remaining, strat = _split_strategy_args(args2, sb)
     n = _parse_int(remaining, 5) if remaining else 5
     try:
-        trades = _query_trades(sb, limit=n, strategy=strat or "")
+        trades = _query_trades(sb, limit=n, strategy=strat or "", chain=chain_filter)
     except Exception as e:
         return f"❌ Erreur: {e}"
 
     if not trades:
-        return f"📭 Aucun trade fermé{f' ({_short_strat(strat)})' if strat else ''}."
+        empty_label = ""
+        if chain_filter:
+            empty_label += f" {_chain_tag(chain_filter)} {chain_filter.upper()}"
+        if strat:
+            empty_label += f" ({_short_strat(strat)})"
+        return f"📭 Aucun trade fermé{empty_label}."
 
     total_pnl = sum(float(t.get("pnl_usd") or 0) for t in trades)
-    strat_label = f" — {_short_strat(strat)}" if strat else ""
+    label_bits = []
+    if chain_filter:
+        label_bits.append(f"{_chain_tag(chain_filter)} {chain_filter.upper()}")
+    if strat:
+        label_bits.append(_short_strat(strat))
+    label = " — " + " | ".join(label_bits) if label_bits else ""
+
     lines = []
     for t in trades:
         pnl_pct = float(t.get("pnl_pct") or 0)
@@ -372,15 +489,18 @@ def _handle_trades(sb, args: str) -> str:
         emoji = _exit_emoji(t.get("status", ""), pnl_pct)
         mins = int(t.get("exit_minutes") or 0)
         strat_tag = "" if strat else f" [{_short_strat(t.get('strategy',''))}]"
+        # v14e: always tag chain when the user didn't filter — essential for
+        # reading a mixed list. When filtered, skip the tag to save width.
+        c_tag = "" if chain_filter else f"{_chain_tag(t.get('chain'))} "
         lines.append(
-            f"  {emoji} <b>{t.get('symbol','?')}</b>"
+            f"  {emoji} {c_tag}<b>{t.get('symbol','?')}</b>"
             f" {pnl_pct*100:+.1f}% (${pnl_usd:+.2f})"
             f" | {t.get('kol_group','?')}"
             f" | {mins}min{strat_tag}"
         )
 
     return (
-        f"📋 <b>{len(trades)} DERNIERS TRADES{strat_label}</b>\n"
+        f"📋 <b>{len(trades)} DERNIERS TRADES{label}</b>\n"
         f"PnL: <b>${total_pnl:+.2f}</b>\n\n"
         + "\n".join(lines)
     )
@@ -389,12 +509,16 @@ def _handle_trades(sb, args: str) -> str:
 # ── /kol [period] ──
 
 def _handle_kol(sb, args: str) -> str:
-    remaining, strat = _split_strategy_args(args, sb)
+    """v14e: /kol [période] [chain] [strat] — KOL leaderboard scoped per chain."""
+    args2, chain_filter = _parse_chain_args(args)
+    remaining, strat = _split_strategy_args(args2, sb)
     hours, label = _parse_period(remaining) if remaining else (0, "All-time")
+    if chain_filter:
+        label += f" | {_chain_tag(chain_filter)} {chain_filter.upper()}"
     if strat:
         label += f" | {_short_strat(strat)}"
     try:
-        trades = _query_trades(sb, hours=hours, strategy=strat or "")
+        trades = _query_trades(sb, hours=hours, strategy=strat or "", chain=chain_filter)
     except Exception as e:
         return f"❌ Erreur: {e}"
 
@@ -440,19 +564,41 @@ def _handle_kol(sb, args: str) -> str:
 # ── /stats [period] ──
 
 def _handle_stats(sb, args: str) -> str:
-    remaining, strat = _split_strategy_args(args, sb)
+    """v14e: /stats [période] [chain] [strat].
+    Sans chain: breakdown 24h/7d/all-time PAR chain si multi-chain actif.
+    Avec chain: stats restreintes à cette chain."""
+    args2, chain_filter = _parse_chain_args(args)
+    remaining, strat = _split_strategy_args(args2, sb)
     s = strat or ""
-    strat_label = f" — {_short_strat(strat)}" if strat else ""
 
+    label_bits = []
+    if chain_filter:
+        label_bits.append(f"{_chain_tag(chain_filter)} {chain_filter.upper()}")
+    if strat:
+        label_bits.append(_short_strat(strat))
+    header_suffix = " — " + " | ".join(label_bits) if label_bits else ""
+
+    # User specified a period → single window
     if remaining:
         hours, label = _parse_period(remaining)
-        trades = _query_trades(sb, hours=hours, strategy=s)
+        trades = _query_trades(sb, hours=hours, strategy=s, chain=chain_filter)
+        # When no chain filter, break down by chain inside the single window.
+        if not chain_filter:
+            by_chain: dict[str, list] = {}
+            for t in trades:
+                by_chain.setdefault(t.get("chain") or "solana", []).append(t)
+            parts = [_fmt_stats(_compute_stats(trades), label + " — TOTAL")]
+            for c in ("solana", "ethereum", "bsc", "base"):
+                if c in by_chain:
+                    parts.append(_fmt_stats(_compute_stats(by_chain[c]),
+                                            f"{_chain_tag(c)} {c.upper()}"))
+            return f"📊 <b>PERFORMANCE{header_suffix}</b>\n\n" + "\n\n".join(parts)
         d = _compute_stats(trades)
-        return f"📊 <b>PERFORMANCE{strat_label}</b>\n\n{_fmt_stats(d, label)}"
+        return f"📊 <b>PERFORMANCE{header_suffix}</b>\n\n{_fmt_stats(d, label)}"
 
-    d1 = _compute_stats(_query_trades(sb, hours=24, strategy=s))
-    d7 = _compute_stats(_query_trades(sb, hours=168, strategy=s))
-    dall = _compute_stats(_query_trades(sb, strategy=s))
+    d1 = _compute_stats(_query_trades(sb, hours=24, strategy=s, chain=chain_filter))
+    d7 = _compute_stats(_query_trades(sb, hours=168, strategy=s, chain=chain_filter))
+    dall = _compute_stats(_query_trades(sb, strategy=s, chain=chain_filter))
 
     sections = []
     if d1["count"] > 0 and d1["count"] < dall["count"]:
@@ -461,22 +607,33 @@ def _handle_stats(sb, args: str) -> str:
         sections.append(_fmt_stats(d7, "7 jours"))
     sections.append(_fmt_stats(dall, "All-time"))
 
-    return f"📊 <b>PERFORMANCE{strat_label}</b>\n\n" + "\n\n".join(sections)
+    return f"📊 <b>PERFORMANCE{header_suffix}</b>\n\n" + "\n\n".join(sections)
 
 
 # ── /shadow [period] ──
 
 def _handle_shadow(sb, args: str) -> str:
-    """Compare shadow strategies vs main. Shows top performers."""
-    hours, label = _parse_period(args) if args else (0, "All-time")
+    """v14e: /shadow [période] [chain] — Shadow vs main, scopé par chain.
+    Comparer des shadows ETH à un main Solana = bruit total, donc on force un
+    filtre chain (default: solana) quand l'user ne précise pas.
+    """
+    args2, chain_filter = _parse_chain_args(args)
+    # Force solana par défaut pour éviter de mélanger; user peut demander 'all' via syntaxe.
+    if chain_filter is None and " all" not in f" {args.lower()} ":
+        chain_filter = "solana"
+    hours, label = _parse_period(args2) if args2 else (0, "All-time")
+    if chain_filter:
+        label += f" | {_chain_tag(chain_filter)} {chain_filter.upper()}"
 
     # Query all shadow trades for the period
     q = (
         sb.table("paper_trades")
-        .select("strategy,pnl_pct,status")
+        .select("strategy,pnl_pct,status,chain")
         .eq("is_shadow", True)
         .neq("status", "open")
     )
+    if chain_filter:
+        q = q.eq("chain", chain_filter)
     if hours > 0:
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
         q = q.gte("exit_at", cutoff)
@@ -488,8 +645,8 @@ def _handle_shadow(sb, args: str) -> str:
     if not shadows:
         return f"📭 Aucun shadow trade ({label})."
 
-    # Also get main strategy stats for comparison
-    main_trades = _query_trades(sb, hours=hours)
+    # Also get main strategy stats for comparison — same chain scope.
+    main_trades = _query_trades(sb, hours=hours, chain=chain_filter)
     main_stats = _compute_stats(main_trades)
 
     # Aggregate shadows by strategy
@@ -539,47 +696,53 @@ def _handle_shadow(sb, args: str) -> str:
 # ── /today ──
 
 def _handle_today(sb, args: str) -> str:
-    """Today's summary: trades, PnL, active KOLs, per-strategy bankroll."""
+    """v14e: /today [chain] — Résumé du jour avec breakdown par chain."""
     from safe_scraper import _rt_load_bankroll
 
-    # Trades closed today
-    trades = _query_trades(sb, hours=24)
-    stats = _compute_stats(trades)
+    _, chain_filter = _parse_chain_args(args)
 
-    # Active KOLs today
+    # Trades closed today (respect chain filter)
+    trades = _query_trades(sb, hours=24, chain=chain_filter)
+    stats = _compute_stats(trades)
     kols_today = set(t.get("kol_group", "") for t in trades if t.get("kol_group"))
 
-    # v116: Per-strategy bankroll
+    # Bankroll per-chain
     try:
         bk = _rt_load_bankroll()
-        strat_bals = bk.get("strategy_bankrolls") or {}
+        per_chain = bk.get("strategy_bankrolls_per_chain") or {}
+        if not per_chain:
+            from safe_scraper import _rt_strategy_bankrolls_for_chain
+            per_chain = {c: _rt_strategy_bankrolls_for_chain(bk, c)
+                         for c in ("solana", "ethereum", "bsc", "base")}
     except Exception:
-        strat_bals = {}
+        per_chain = {}
 
-    # Open positions
     from paper_trader import get_open_portfolio
     portfolio = get_open_portfolio(sb)
 
-    # Best and worst trade today
     best_t = max(trades, key=lambda t: float(t.get("pnl_usd") or 0)) if trades else None
     worst_t = min(trades, key=lambda t: float(t.get("pnl_usd") or 0)) if trades else None
-
     pnl_emoji = "📈" if stats["pnl"] >= 0 else "📉"
 
-    # Strategy bankroll lines
-    strat_parts = []
-    total_bal = 0
-    for sname, sdata in sorted(strat_bals.items()):
-        bal = float(sdata.get("balance", 500))
-        pnl = float(sdata.get("pnl", 0))
-        short = _short_strat(sname)
-        e = "📈" if pnl >= 0 else "📉"
-        strat_parts.append(f"  {e} {short}: <b>${bal:.0f}</b> ({pnl:+.0f})")
-        total_bal += bal
+    # Bankroll rendering: per-chain rollup (total per chain).
+    chain_parts = []
+    grand_bal = 0.0
+    for c in ("solana", "ethereum", "bsc", "base"):
+        if chain_filter and c != chain_filter:
+            continue
+        strat_bals = per_chain.get(c) or {}
+        if not strat_bals:
+            continue
+        c_bal = sum(float(sd.get("balance", 500)) for sd in strat_bals.values())
+        c_pnl = sum(float(sd.get("pnl", 0)) for sd in strat_bals.values())
+        e = "📈" if c_pnl >= 0 else "📉"
+        chain_parts.append(f"  {e} {_chain_tag(c)} <b>{c.upper()}</b>: ${c_bal:.0f} ({c_pnl:+.0f})")
+        grand_bal += c_bal
 
-    text = f"📅 <b>RÉSUMÉ DU JOUR</b>\n\n"
-    if strat_parts:
-        text += "\n".join(strat_parts) + "\n"
+    header_suffix = f" — {_chain_tag(chain_filter)} {chain_filter.upper()}" if chain_filter else ""
+    text = f"📅 <b>RÉSUMÉ DU JOUR{header_suffix}</b>\n\n"
+    if chain_parts:
+        text += "\n".join(chain_parts) + "\n"
     text += f"📦 En cours: {portfolio['open_count']} pos (${portfolio['deployed_usd']:.0f})\n"
 
     if stats["count"] > 0:
@@ -590,12 +753,28 @@ def _handle_today(sb, args: str) -> str:
             f"  📊 {stats['count']} trades | {wr:.0f}% WR ({stats['wins']}W/{stats['losses']}L)\n"
             f"  👥 {len(kols_today)} KOLs actifs\n"
         )
+        # Per-chain 24h breakdown (only when not filtered — otherwise redundant)
+        if not chain_filter:
+            by_chain: dict[str, list] = {}
+            for t in trades:
+                by_chain.setdefault(t.get("chain") or "solana", []).append(t)
+            if len(by_chain) > 1:
+                text += "\n<b>Par chain:</b>\n"
+                for c in ("solana", "ethereum", "bsc", "base"):
+                    if c not in by_chain:
+                        continue
+                    c_trades = by_chain[c]
+                    c_pnl = sum(float(t.get("pnl_usd") or 0) for t in c_trades)
+                    c_wins = sum(1 for t in c_trades if float(t.get("pnl_usd") or 0) > 0)
+                    c_wr = c_wins / len(c_trades) * 100
+                    text += f"  {_chain_tag(c)} {c.upper()}: ${c_pnl:+.2f} | {len(c_trades)}t | {c_wr:.0f}% WR\n"
+
         if best_t:
             bp = float(best_t.get("pnl_pct") or 0)
-            text += f"\n  🏆 Best: <b>{best_t.get('symbol','?')}</b> {bp*100:+.1f}% (${float(best_t.get('pnl_usd') or 0):+.2f}) | {best_t.get('kol_group','?')}"
+            text += f"\n  🏆 Best: {_chain_tag(best_t.get('chain'))} <b>{best_t.get('symbol','?')}</b> {bp*100:+.1f}% (${float(best_t.get('pnl_usd') or 0):+.2f}) | {best_t.get('kol_group','?')}"
         if worst_t and float(worst_t.get("pnl_usd") or 0) < 0:
             wp = float(worst_t.get("pnl_pct") or 0)
-            text += f"\n  💀 Worst: <b>{worst_t.get('symbol','?')}</b> {wp*100:+.1f}% (${float(worst_t.get('pnl_usd') or 0):+.2f}) | {worst_t.get('kol_group','?')}"
+            text += f"\n  💀 Worst: {_chain_tag(worst_t.get('chain'))} <b>{worst_t.get('symbol','?')}</b> {wp*100:+.1f}% (${float(worst_t.get('pnl_usd') or 0):+.2f}) | {worst_t.get('kol_group','?')}"
     else:
         text += "\n📭 Aucun trade fermé aujourd'hui"
 
@@ -680,29 +859,37 @@ def _handle_config(sb, args: str) -> str:
 # ── /pnl <KOL> ──
 
 def _handle_pnl(sb, args: str) -> str:
-    """PnL for a specific KOL. Usage: /pnl FrenzGems [strategy]"""
+    """v14e: /pnl <KOL> [chain] [strat] — KOL stats, chain-scoped if passed."""
     if not args:
-        return "Usage: /pnl <nom_du_KOL> [stratégie]\nExemple: /pnl FrenzGems dtrail10"
+        return "Usage: /pnl <nom_du_KOL> [sol|eth|bsc|base] [stratégie]\nExemple: /pnl FrenzGems eth"
 
-    remaining, strat = _split_strategy_args(args, sb)
-    kol_name = remaining.strip() if remaining else args.strip()
+    args2, chain_filter = _parse_chain_args(args)
+    remaining, strat = _split_strategy_args(args2, sb)
+    kol_name = remaining.strip() if remaining else args2.strip()
     if not kol_name:
-        return "Usage: /pnl <nom_du_KOL> [stratégie]"
+        return "Usage: /pnl <nom_du_KOL> [sol|eth|bsc|base] [stratégie]"
 
     strategies = [strat] if strat else _get_active_strategies(sb)
-    strat_label = f" ({_short_strat(strat)})" if strat else ""
+    label_bits = []
+    if chain_filter:
+        label_bits.append(f"{_chain_tag(chain_filter)} {chain_filter.upper()}")
+    if strat:
+        label_bits.append(_short_strat(strat))
+    strat_label = f" ({' | '.join(label_bits)})" if label_bits else ""
     try:
-        result = (
+        q = (
             sb.table("paper_trades")
-            .select("symbol,pnl_pct,pnl_usd,status,exit_at,position_usd,exit_minutes,strategy")
+            .select("symbol,pnl_pct,pnl_usd,status,exit_at,position_usd,exit_minutes,strategy,chain")
             .eq("is_shadow", False)
             .in_("strategy", strategies)
             .ilike("kol_group", f"%{kol_name}%")
             .neq("status", "open")
             .order("exit_at", desc=True)
             .limit(20)
-            .execute()
         )
+        if chain_filter:
+            q = q.eq("chain", chain_filter)
+        result = q.execute()
         trades = result.data or []
     except Exception as e:
         return f"❌ Erreur: {e}"
@@ -714,20 +901,21 @@ def _handle_pnl(sb, args: str) -> str:
     wr = stats["wins"] / stats["count"] * 100 if stats["count"] > 0 else 0
 
     lines = []
-    for t in trades[:10]:  # Show max 10
+    for t in trades[:10]:
         pnl_pct = float(t.get("pnl_pct") or 0)
         pnl_usd = float(t.get("pnl_usd") or 0)
         emoji = _exit_emoji(t.get("status", ""), pnl_pct)
         mins = int(t.get("exit_minutes") or 0)
+        c_tag = "" if chain_filter else f"{_chain_tag(t.get('chain'))} "
         lines.append(
-            f"  {emoji} <b>{t.get('symbol','?')}</b>"
+            f"  {emoji} {c_tag}<b>{t.get('symbol','?')}</b>"
             f" {pnl_pct*100:+.1f}% (${pnl_usd:+.2f})"
             f" | {mins}min"
         )
 
     pnl_emoji = "📈" if stats["pnl"] >= 0 else "📉"
     return (
-        f"👤 <b>KOL: {kol_name}</b>\n\n"
+        f"👤 <b>KOL: {kol_name}{strat_label}</b>\n\n"
         f"{pnl_emoji} PnL: <b>${stats['pnl']:+.2f}</b>\n"
         f"📊 {stats['count']} trades | {wr:.0f}% WR ({stats['wins']}W/{stats['losses']}L)\n"
         f"⏱ Durée moy: {stats['avg_min']:.0f}min\n\n"
@@ -738,18 +926,27 @@ def _handle_pnl(sb, args: str) -> str:
 # ── /best ──
 
 def _handle_best(sb, args: str) -> str:
-    """Best trade all-time. Optional: /best dtrail10"""
-    strat = _parse_strategy(args.strip(), sb) if args.strip() else None
+    """v14e: /best [chain] [strat] — Meilleur trade all-time."""
+    args2, chain_filter = _parse_chain_args(args)
+    strat = _parse_strategy(args2.strip(), sb) if args2.strip() else None
     strategies = [strat] if strat else _get_active_strategies(sb)
-    strat_label = f" ({_short_strat(strat)})" if strat else ""
+    label_bits = []
+    if chain_filter:
+        label_bits.append(f"{_chain_tag(chain_filter)} {chain_filter.upper()}")
+    if strat:
+        label_bits.append(_short_strat(strat))
+    strat_label = f" ({' | '.join(label_bits)})" if label_bits else ""
     try:
-        result = (
+        q = (
             sb.table("paper_trades")
-            .select("symbol,pnl_pct,pnl_usd,status,kol_group,exit_at,position_usd,exit_minutes,entry_price,exit_price,high_price_seen,token_address,strategy")
+            .select("symbol,pnl_pct,pnl_usd,status,kol_group,exit_at,position_usd,exit_minutes,entry_price,exit_price,high_price_seen,token_address,strategy,chain")
             .eq("is_shadow", False).in_("strategy", strategies)
             .neq("status", "open")
-            .order("pnl_usd", desc=True).limit(1).execute()
+            .order("pnl_usd", desc=True).limit(1)
         )
+        if chain_filter:
+            q = q.eq("chain", chain_filter)
+        result = q.execute()
         t = (result.data or [None])[0]
     except Exception as e:
         return f"❌ Erreur: {e}"
@@ -761,18 +958,27 @@ def _handle_best(sb, args: str) -> str:
 
 
 def _handle_worst(sb, args: str) -> str:
-    """Worst trade all-time. Optional: /worst dtrail10"""
-    strat = _parse_strategy(args.strip(), sb) if args.strip() else None
+    """v14e: /worst [chain] [strat] — Pire trade all-time."""
+    args2, chain_filter = _parse_chain_args(args)
+    strat = _parse_strategy(args2.strip(), sb) if args2.strip() else None
     strategies = [strat] if strat else _get_active_strategies(sb)
-    strat_label = f" ({_short_strat(strat)})" if strat else ""
+    label_bits = []
+    if chain_filter:
+        label_bits.append(f"{_chain_tag(chain_filter)} {chain_filter.upper()}")
+    if strat:
+        label_bits.append(_short_strat(strat))
+    strat_label = f" ({' | '.join(label_bits)})" if label_bits else ""
     try:
-        result = (
+        q = (
             sb.table("paper_trades")
-            .select("symbol,pnl_pct,pnl_usd,status,kol_group,exit_at,position_usd,exit_minutes,entry_price,exit_price,high_price_seen,token_address,strategy")
+            .select("symbol,pnl_pct,pnl_usd,status,kol_group,exit_at,position_usd,exit_minutes,entry_price,exit_price,high_price_seen,token_address,strategy,chain")
             .eq("is_shadow", False).in_("strategy", strategies)
             .neq("status", "open")
-            .order("pnl_usd", desc=False).limit(1).execute()
+            .order("pnl_usd", desc=False).limit(1)
         )
+        if chain_filter:
+            q = q.eq("chain", chain_filter)
+        result = q.execute()
         t = (result.data or [None])[0]
     except Exception as e:
         return f"❌ Erreur: {e}"
@@ -784,6 +990,8 @@ def _handle_worst(sb, args: str) -> str:
 
 
 def _format_highlight_trade(t: dict, title: str) -> str:
+    """v14e: DexScreener URL + block explorer chosen per chain (Solscan for SOL,
+    Etherscan/BscScan/BaseScan for EVM)."""
     pnl_pct = float(t.get("pnl_pct") or 0)
     pnl_usd = float(t.get("pnl_usd") or 0)
     pos = float(t.get("position_usd") or 0)
@@ -793,13 +1001,22 @@ def _format_highlight_trade(t: dict, title: str) -> str:
     mins = int(t.get("exit_minutes") or 0)
     max_gain = ((high / entry) - 1) * 100 if entry and high else 0
     ca = t.get("token_address", "")
-    link = f'\n🔗 <a href="https://dexscreener.com/solana/{ca}">DexScreener</a>' if ca else ""
+    chain = (t.get("chain") or "solana").lower()
+    c_tag = _chain_tag(chain)
+
+    link = ""
+    if ca:
+        ds = f'<a href="https://dexscreener.com/{chain}/{ca}">DexScreener</a>'
+        exp_url = _explorer_url(chain, ca)
+        exp_name = {"solana": "Solscan", "ethereum": "Etherscan",
+                    "bsc": "BscScan", "base": "BaseScan"}.get(chain, "Explorer")
+        link = f'\n🔗 {ds} | <a href="{exp_url}">{exp_name}</a>'
 
     emoji = _exit_emoji(t.get("status", ""), pnl_pct)
 
     return (
         f"{emoji} <b>{title}</b>\n\n"
-        f"<b>{t.get('symbol','?')}</b> | {t.get('status','?')}\n"
+        f"{c_tag} <b>{t.get('symbol','?')}</b> | {t.get('status','?')}\n"
         f"👤 KOL: {t.get('kol_group','?')}\n"
         f"📈 PnL: <b>{pnl_pct*100:+.1f}%</b> (${pnl_usd:+.2f})\n"
         f"💵 Position: ${pos:.0f} | ⏱ {mins}min\n"
@@ -878,7 +1095,8 @@ def _handle_live(sb, args: str) -> str:
 
         status_emoji = "🟢" if enabled else "🔴"
         lines = [
-            f"{status_emoji} <b>LIVE TRADING {'ACTIF' if enabled else 'INACTIF'}</b>\n",
+            f"{status_emoji} <b>LIVE TRADING {'ACTIF' if enabled else 'INACTIF'}</b> {_chain_tag('solana')} Solana-only\n",
+            f"<i>ETH/BSC/Base restent en paper tant que leurs live adapters ne sont pas livrés.</i>\n",
             f"<b>Wallet:</b>",
             f"  💰 {sol_bal:.4f} SOL",
             f"  🪙 {n_tokens} token(s) en portefeuille",
@@ -1153,7 +1371,7 @@ def _handle_setstrat(sb, args: str) -> str:
 
 
 def _handle_sell(sb, args: str) -> str:
-    """Sell a specific live position by symbol."""
+    """v14e: Solana-only — Jupiter Ultra. ETH/BSC/Base rejetés explicitement."""
     symbol = args.strip().upper()
     if not symbol:
         return "❌ Usage: /sell &lt;SYMBOL&gt;\nEx: /sell $MOJO"
@@ -1161,9 +1379,8 @@ def _handle_sell(sb, args: str) -> str:
         symbol = "$" + symbol
 
     try:
-        # Find the open live trade
         trades = sb.table("paper_trades").select(
-            "id,symbol,token_address,position_sol,entry_price"
+            "id,symbol,token_address,position_sol,entry_price,chain"
         ).eq("status", "open").eq("source", "rt_live").eq("symbol", symbol).execute().data or []
 
         if not trades:
@@ -1171,6 +1388,13 @@ def _handle_sell(sb, args: str) -> str:
 
         trade = trades[0]
         ca = trade["token_address"]
+        t_chain = trade.get("chain") or "solana"
+        if t_chain != "solana":
+            return (
+                f"⛔ <b>{symbol}</b> est sur {_chain_tag(t_chain)} {t_chain.upper()}.\n"
+                f"Le live trading n'est disponible que sur Solana (Jupiter Ultra).\n"
+                f"L'adapter live pour {t_chain.upper()} n'est pas encore livré."
+            )
 
         from live_trader import execute_sell
         result = execute_sell(ca)
@@ -1192,7 +1416,7 @@ def _handle_sellall(sb, args: str) -> str:
 
     try:
         trades = sb.table("paper_trades").select(
-            "id,symbol,token_address,position_sol"
+            "id,symbol,token_address,position_sol,chain"
         ).eq("status", "open").eq("source", "rt_live").execute().data or []
 
         if not trades:
@@ -1200,7 +1424,14 @@ def _handle_sellall(sb, args: str) -> str:
 
         from live_trader import execute_sell
         results = []
+        skipped = 0
         for t in trades:
+            # v14e: execute_sell has a Solana-only guard; skip non-Solana loudly
+            # rather than get 'non-solana-mint' errors silently in the batch.
+            if (t.get("chain") or "solana") != "solana":
+                results.append(f"  ⚠️ {t['symbol']} — {_chain_tag(t.get('chain'))} skip (pas de live non-Solana)")
+                skipped += 1
+                continue
             try:
                 r = execute_sell(t["token_address"])
                 status = "✅" if r.get("success") else "❌"
@@ -1208,7 +1439,10 @@ def _handle_sellall(sb, args: str) -> str:
             except Exception as e:
                 results.append(f"  ❌ {t['symbol']}: {e}")
 
-        return f"🚨 <b>SELLALL — {len(trades)} positions</b>\n" + "\n".join(results)
+        header = f"🚨 <b>SELLALL — {len(trades)} positions</b>"
+        if skipped:
+            header += f" <i>({skipped} non-Solana skipped)</i>"
+        return header + "\n" + "\n".join(results)
     except Exception as e:
         return f"❌ Erreur sellall: {e}"
 
@@ -1245,19 +1479,19 @@ COMMANDS = {
 HELP_TEXT = (
     "🤖 <b>Commandes</b>\n\n"
     "<b>Portfolio:</b>\n"
-    "  /bank — Bankroll + portfolio\n"
-    "  /pos — Positions ouvertes (paper)\n"
-    "  /today — Résumé du jour\n"
+    "  /bank [chain] — Bankroll per-chain\n"
+    "  /pos [chain] — Positions ouvertes (paper)\n"
+    "  /today [chain] — Résumé du jour\n"
     "\n<b>Trades:</b>\n"
-    "  /trades [N] [strat] — Derniers trades\n"
-    "  /best [strat] — Meilleur trade\n"
-    "  /worst [strat] — Pire trade\n"
+    "  /trades [N] [chain] [strat] — Derniers trades\n"
+    "  /best [chain] [strat] — Meilleur trade\n"
+    "  /worst [chain] [strat] — Pire trade\n"
     "\n<b>Analyse:</b>\n"
-    "  /stats [période] [strat] — Performance\n"
-    "  /kol [période] [strat] — Leaderboard KOL\n"
-    "  /pnl &lt;KOL&gt; [strat] — Stats d'un KOL\n"
-    "  /shadow [période] — Shadow vs main\n"
-    "\n<b>💎 Live Trading:</b>\n"
+    "  /stats [période] [chain] [strat] — Performance\n"
+    "  /kol [période] [chain] [strat] — Leaderboard KOL\n"
+    "  /pnl &lt;KOL&gt; [chain] [strat] — Stats d'un KOL\n"
+    "  /shadow [période] [chain] — Shadow vs main (sol par défaut)\n"
+    "\n<b>💎 Live Trading (Solana-only):</b>\n"
     "  /live — Status live (wallet, positions, PnL)\n"
     "  /live on|off — Activer/désactiver le live\n"
     "  /wallet — Balance SOL du wallet\n"
@@ -1270,13 +1504,14 @@ HELP_TEXT = (
     "  /setlimit &lt;daily|weekly|monthly&gt; &lt;SOL&gt;\n"
     "  /setstrat &lt;strategy&gt; — Stratégie live\n"
     "\n<b>🚨 Actions:</b>\n"
-    "  /sell &lt;SYMBOL&gt; — Vendre une position\n"
-    "  /sellall confirm — PANIC SELL tout\n"
+    "  /sell &lt;SYMBOL&gt; — Vendre une position (Solana)\n"
+    "  /sellall confirm — PANIC SELL Solana\n"
     "\n<b>Système:</b>\n"
     "  /config — Config active\n"
     "  /help — Cette aide\n"
-    "\n<b>Périodes:</b> 1h 6h 24h 7d 14d 30d all\n"
-    "<b>Filtre strat:</b> dtrail10, tp100, etc."
+    "\n<b>Chains:</b> sol 🟣 / eth 🔷 / bsc 🟡 / base 🔵 / all\n"
+    "<b>Périodes:</b> 1h 6h 24h 7d 14d 30d all\n"
+    "<b>Filtre strat:</b> fast_tp50, bsc_tp100, etc."
 )
 
 
