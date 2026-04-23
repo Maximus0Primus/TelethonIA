@@ -750,12 +750,14 @@ def _log_price_ticks(client, prices: dict[str, float], source: str = "check",
         rows.append(row)
 
         # v122: Log Jupiter price as separate tick for ALL tokens with Jupiter pricing
+        # v14e: Jupiter is Solana-only; any non-Solana here is a bug — tag explicitly.
         jup_price = _jupiter_prices_cache.get(addr)
         if jup_price and jup_price > 0:
             rows.append({
                 "token_address": addr,
                 "price_usd": jup_price,
                 "source": "jupiter",
+                "chain": "solana",
             })
 
     if not rows:
