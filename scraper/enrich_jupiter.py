@@ -145,7 +145,12 @@ def _fetch_jupiter_prices(mints: list[str]) -> dict[str, float]:
     """
     Batch price lookup via Jupiter Price API v3.
     Returns { mint: price_usd } for tokens that have prices.
+
+    v14: 0x addresses filtered out — Jupiter is a Solana DEX aggregator,
+    can't price ETH tokens. Prevents wasted API budget + spurious cache
+    pollution in paper_trader._jupiter_prices_cache.
     """
+    mints = [m for m in (mints or []) if m and not str(m).startswith("0x")]
     if not mints:
         return {}
 

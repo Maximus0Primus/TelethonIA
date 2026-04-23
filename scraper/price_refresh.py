@@ -41,8 +41,10 @@ def _two_phase_decay(hours_ago: float) -> float:
     return math.exp(-SCORING_PARAMS["decay_lambda"] * hours_ago)
 
 
-DEXSCREENER_TOKEN_URL = "https://api.dexscreener.com/tokens/v1/solana/{address}"
-DEXSCREENER_BATCH_URL = "https://api.dexscreener.com/tokens/v1/solana/{addresses}"
+# v14: chain-parameterized endpoints. Callers split addresses by chain shape
+# (0x → ethereum, else solana) before querying.
+DEXSCREENER_TOKEN_URL = "https://api.dexscreener.com/tokens/v1/{chain}/{address}"
+DEXSCREENER_BATCH_URL = "https://api.dexscreener.com/tokens/v1/{chain}/{addresses}"
 BATCH_SIZE = 30  # DexScreener max per batch call
 REFRESH_TOP_N = 20
 REFRESH_INTERVAL_SECONDS = 3 * 60  # 3 minutes
@@ -74,64 +76,71 @@ def _fetch_dexscreener_batch(addresses: list[str]) -> dict[str, dict]:
         return {}
 
     result = {}
-    # Split into chunks of BATCH_SIZE
-    for i in range(0, len(addresses), BATCH_SIZE):
-        chunk = addresses[i:i + BATCH_SIZE]
-        addr_str = ",".join(chunk)
-        try:
-            resp = requests.get(
-                DEXSCREENER_BATCH_URL.format(addresses=addr_str),
-                timeout=15,
-            )
-            if resp.status_code != 200:
-                logger.warning("DexScreener batch %d for %d tokens", resp.status_code, len(chunk))
-                continue
+    # v14: bucket by chain then query each separately. DexScreener path segment
+    # is the chain, so cross-chain batches return 0.
+    sol_addrs = [a for a in addresses if not str(a).startswith("0x")]
+    eth_addrs = [a.lower() for a in addresses if str(a).startswith("0x")]
 
-            pairs = resp.json() if isinstance(resp.json(), list) else resp.json().get("pairs", [])
-            if not isinstance(pairs, list):
-                continue
-
-            # Group pairs by base token address, pick highest-volume pair per token
-            by_address: dict[str, list] = {}
-            for p in pairs:
-                addr = p.get("baseToken", {}).get("address", "")
-                if addr:
+    def _batch_one_chain(chain_name: str, addrs: list[str]) -> None:
+        for i in range(0, len(addrs), BATCH_SIZE):
+            chunk = addrs[i:i + BATCH_SIZE]
+            addr_str = ",".join(chunk)
+            try:
+                resp = requests.get(
+                    DEXSCREENER_BATCH_URL.format(chain=chain_name, addresses=addr_str),
+                    timeout=15,
+                )
+                if resp.status_code != 200:
+                    logger.warning("DexScreener %s batch %d for %d tokens",
+                                   chain_name, resp.status_code, len(chunk))
+                    continue
+                pairs = resp.json() if isinstance(resp.json(), list) else resp.json().get("pairs", [])
+                if not isinstance(pairs, list):
+                    continue
+                by_address: dict[str, list] = {}
+                for p in pairs:
+                    addr = p.get("baseToken", {}).get("address", "")
+                    if not addr:
+                        continue
+                    if chain_name == "ethereum":
+                        addr = addr.lower()
                     by_address.setdefault(addr, []).append(p)
+                for addr, token_pairs in by_address.items():
+                    best = max(token_pairs, key=lambda p: float(p.get("volume", {}).get("h24", 0) or 0))
+                    price_changes = best.get("priceChange", {})
+                    volumes = best.get("volume", {})
+                    txns_h1 = best.get("txns", {}).get("h1", {})
+                    txns_m5 = best.get("txns", {}).get("m5", {})
+                    result[addr] = {
+                        "price_usd": _safe_float(best.get("priceUsd"), 0),
+                        "price_change_5m": _safe_float(price_changes.get("m5")),
+                        "price_change_1h": _safe_float(price_changes.get("h1")),
+                        "price_change_6h": _safe_float(price_changes.get("h6")),
+                        "price_change_24h": _safe_float(price_changes.get("h24")),
+                        "volume_24h": _safe_float(volumes.get("h24"), 0),
+                        "volume_6h": _safe_float(volumes.get("h6"), 0),
+                        "volume_1h": _safe_float(volumes.get("h1"), 0),
+                        "volume_5m": _safe_float(volumes.get("m5"), 0),
+                        "liquidity_usd": _safe_float(best.get("liquidity", {}).get("usd"), 0),
+                        "market_cap": _safe_float(best.get("marketCap"), 0) or _safe_float(best.get("fdv"), 0),
+                        "buy_sell_ratio_1h": int(txns_h1.get("buys", 0) or 0) / max(1, int(txns_h1.get("buys", 0) or 0) + int(txns_h1.get("sells", 0) or 0)),
+                        "buy_sell_ratio_5m": int(txns_m5.get("buys", 0) or 0) / max(1, int(txns_m5.get("buys", 0) or 0) + int(txns_m5.get("sells", 0) or 0)),
+                    }
+            except requests.RequestException as e:
+                logger.warning("DexScreener %s batch error: %s", chain_name, e)
 
-            for addr, token_pairs in by_address.items():
-                best = max(token_pairs, key=lambda p: float(p.get("volume", {}).get("h24", 0) or 0))
-                price_changes = best.get("priceChange", {})
-                volumes = best.get("volume", {})
-                txns_h1 = best.get("txns", {}).get("h1", {})
-                txns_m5 = best.get("txns", {}).get("m5", {})
-
-                result[addr] = {
-                    "price_usd": _safe_float(best.get("priceUsd"), 0),
-                    "price_change_5m": _safe_float(price_changes.get("m5")),
-                    "price_change_1h": _safe_float(price_changes.get("h1")),
-                    "price_change_6h": _safe_float(price_changes.get("h6")),
-                    "price_change_24h": _safe_float(price_changes.get("h24")),
-                    "volume_24h": _safe_float(volumes.get("h24"), 0),
-                    "volume_6h": _safe_float(volumes.get("h6"), 0),
-                    "volume_1h": _safe_float(volumes.get("h1"), 0),
-                    "volume_5m": _safe_float(volumes.get("m5"), 0),
-                    "liquidity_usd": _safe_float(best.get("liquidity", {}).get("usd"), 0),
-                    "market_cap": _safe_float(best.get("marketCap"), 0) or _safe_float(best.get("fdv"), 0),
-                    "buy_sell_ratio_1h": int(txns_h1.get("buys", 0) or 0) / max(1, int(txns_h1.get("buys", 0) or 0) + int(txns_h1.get("sells", 0) or 0)),
-                    "buy_sell_ratio_5m": int(txns_m5.get("buys", 0) or 0) / max(1, int(txns_m5.get("buys", 0) or 0) + int(txns_m5.get("sells", 0) or 0)),
-                }
-
-        except requests.RequestException as e:
-            logger.warning("DexScreener batch error: %s", e)
-
+    _batch_one_chain("solana", sol_addrs)
+    _batch_one_chain("ethereum", eth_addrs)
     return result
 
 
 def _fetch_dexscreener_by_address(address: str) -> dict | None:
-    """Fetch fresh market data for a token by its Solana address."""
+    """Fetch fresh market data for a token by its address.
+    v14: chain inferred from address shape (0x → ethereum, else solana)."""
+    chain = "ethereum" if str(address).startswith("0x") else "solana"
     try:
         resp = requests.get(
-            DEXSCREENER_TOKEN_URL.format(address=address),
+            DEXSCREENER_TOKEN_URL.format(chain=chain, address=address),
             timeout=10,
         )
         if resp.status_code != 200:

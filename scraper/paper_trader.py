@@ -47,7 +47,11 @@ try:
 except ImportError:
     _monitoring = False
 
-DEXSCREENER_BATCH_URL = "https://api.dexscreener.com/tokens/v1/solana/{addresses}"
+# v14: chain-parameterized batch endpoint. DexScreener supports the same shape
+# for every major chain: /tokens/v1/{chain}/{addresses}. Addresses must be split
+# by chain before calling because mixing 0x + base58 in one request returns 0
+# results (API filters by chain of the path segment).
+DEXSCREENER_BATCH_URL = "https://api.dexscreener.com/tokens/v1/{chain}/{addresses}"
 BATCH_SIZE = 30
 
 # v122: Track which addresses got Jupiter price override (for alert annotation + tick logging)
@@ -191,10 +195,17 @@ def _passes_strategy_filter(token: dict, strategy_name: str) -> bool:
 
 def _fetch_price_fallback(address: str) -> float | None:
     """Fallback: fetch price from GeckoTerminal (no API key needed, on-chain data).
-    Catches pool migrations and tokens DexScreener hasn't indexed yet."""
+    Catches pool migrations and tokens DexScreener hasn't indexed yet.
+
+    v14: chain inferred from address shape. GeckoTerminal networks:
+    'solana' for base58 addresses, 'eth' for 0x (note: ETH network code is
+    'eth', not 'ethereum', on GeckoTerminal API)."""
+    if not address:
+        return None
+    network = "eth" if str(address).startswith("0x") else "solana"
     try:
         resp = requests.get(
-            f"https://api.geckoterminal.com/api/v2/networks/solana/tokens/{address}",
+            f"https://api.geckoterminal.com/api/v2/networks/{network}/tokens/{address}",
             timeout=10,
         )
         if resp.status_code != 200:
@@ -743,42 +754,61 @@ def _fetch_prices_batch(addresses: list[str]) -> dict[str, float]:
         return cached
 
     prices = {}
-    for i in range(0, len(addresses), BATCH_SIZE):
-        chunk = addresses[i:i + BATCH_SIZE]
-        addr_str = ",".join(chunk)
-        try:
-            resp = requests.get(
-                DEXSCREENER_BATCH_URL.format(addresses=addr_str),
-                timeout=15,
-            )
-            if resp.status_code != 200:
-                logger.warning("paper_trader: DexScreener batch %d", resp.status_code)
-                continue
-            data = resp.json()
-            pairs = data if isinstance(data, list) else data.get("pairs", [])
-            if not isinstance(pairs, list):
-                continue
-            # Pick highest-volume pair per base token address
-            by_addr: dict[str, list] = {}
-            for p in pairs:
-                addr = p.get("baseToken", {}).get("address", "")
-                if addr:
+    # v14: split by chain — DexScreener rejects cross-chain batches (path segment
+    # is the chain). Build two buckets from address shape and query each chain
+    # separately. Address→chain map also used below to match case-insensitive on
+    # the ETH side since DexScreener returns checksummed while we store lowercase.
+    sol_addrs = [a for a in addresses if not str(a).startswith("0x")]
+    eth_addrs = [a.lower() for a in addresses if str(a).startswith("0x")]
+
+    def _query_chain(chain_name: str, addrs: list[str]) -> None:
+        if not addrs:
+            return
+        for i in range(0, len(addrs), BATCH_SIZE):
+            chunk = addrs[i:i + BATCH_SIZE]
+            addr_str = ",".join(chunk)
+            try:
+                resp = requests.get(
+                    DEXSCREENER_BATCH_URL.format(chain=chain_name, addresses=addr_str),
+                    timeout=15,
+                )
+                if resp.status_code != 200:
+                    logger.warning("paper_trader: DexScreener %s batch %d",
+                                   chain_name, resp.status_code)
+                    continue
+                data = resp.json()
+                pairs = data if isinstance(data, list) else data.get("pairs", [])
+                if not isinstance(pairs, list):
+                    continue
+                by_addr: dict[str, list] = {}
+                for p in pairs:
+                    addr = p.get("baseToken", {}).get("address", "")
+                    if not addr:
+                        continue
+                    # ETH addresses: DexScreener returns checksummed — canonicalize
+                    # to lowercase so the key matches what callers stored.
+                    if chain_name == "ethereum":
+                        addr = addr.lower()
                     by_addr.setdefault(addr, []).append(p)
-            for addr, token_pairs in by_addr.items():
-                best = max(token_pairs, key=lambda p: float(p.get("volume", {}).get("h24", 0) or 0))
-                price = best.get("priceUsd")
-                if price:
-                    try:
-                        prices[addr] = float(price)
-                        # v121: Cache volume/liquidity for price tick enrichment
-                        _last_dex_extra[addr] = {
-                            "volume_usd": float(best.get("volume", {}).get("h24", 0) or 0),
-                            "liquidity_usd": float(best.get("liquidity", {}).get("usd", 0) or 0),
-                        }
-                    except (ValueError, TypeError):
-                        pass
-        except requests.RequestException as e:
-            logger.warning("paper_trader: DexScreener batch error: %s", e)
+                for addr, token_pairs in by_addr.items():
+                    best = max(token_pairs,
+                               key=lambda p: float(p.get("volume", {}).get("h24", 0) or 0))
+                    price = best.get("priceUsd")
+                    if price:
+                        try:
+                            prices[addr] = float(price)
+                            _last_dex_extra[addr] = {
+                                "volume_usd": float(best.get("volume", {}).get("h24", 0) or 0),
+                                "liquidity_usd": float(best.get("liquidity", {}).get("usd", 0) or 0),
+                            }
+                        except (ValueError, TypeError):
+                            pass
+            except requests.RequestException as e:
+                logger.warning("paper_trader: DexScreener %s batch error: %s",
+                               chain_name, e)
+
+    _query_chain("solana", sol_addrs)
+    _query_chain("ethereum", eth_addrs)
 
     # v107: GeckoTerminal fallback for tokens DexScreener missed (pool migration, deindexing)
     missing = [a for a in addresses if a not in prices]
