@@ -25,12 +25,26 @@ class TestStrategiesDict:
 
 
 class TestFetchPricesBatch:
+    def _reset_cache(self):
+        """v14e: _fetch_prices_batch has a 5s DS cache keyed on _last_ds_ts /
+        _last_ds_addrs function attributes. Tests must reset it or they leak
+        across each other (test_parses_response populates the cache, then
+        test_handles_api_error hits the stale entry instead of the mocked error)."""
+        import paper_trader
+        paper_trader._dex_prices_cache.clear()
+        paper_trader._jupiter_prices_cache.clear()
+        for attr in ("_last_ds_ts", "_last_ds_addrs", "_last_jup_ts"):
+            if hasattr(paper_trader._fetch_prices_batch, attr):
+                delattr(paper_trader._fetch_prices_batch, attr)
+
     def test_empty_list(self):
+        self._reset_cache()
         from paper_trader import _fetch_prices_batch
         result = _fetch_prices_batch([])
         assert result == {}
 
     def test_parses_response(self, monkeypatch):
+        self._reset_cache()
         from paper_trader import _fetch_prices_batch
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -48,6 +62,7 @@ class TestFetchPricesBatch:
         assert abs(result["addr1"] - 0.00123) < 1e-8
 
     def test_handles_api_error(self, monkeypatch):
+        self._reset_cache()
         import requests as req
         from paper_trader import _fetch_prices_batch
         monkeypatch.setattr("paper_trader.requests.get",

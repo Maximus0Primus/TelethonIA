@@ -1177,12 +1177,17 @@ def check_live_trades(client_sb) -> dict:
         return result_counts
 
     # Batch fetch current prices
+    # v14e: live_trader only ever handles Solana (chain gate in open_live_trade),
+    # but pass the map explicitly so a future bug can't silently route ETH DS
+    # calls from here.
     addresses = list({t["token_address"] for t in open_trades})
-    prices = _fetch_prices_batch(addresses)
+    _chain_map = {t["token_address"]: (t.get("chain") or "solana") for t in open_trades}
+    prices = _fetch_prices_batch(addresses, chain_by_addr=_chain_map)
 
     # v121: Log price ticks at 15s resolution for live trades
     from paper_trader import _log_price_ticks, _log_cache_snapshot
-    _log_price_ticks(client_sb, prices, "live", live_tokens=set(addresses))
+    _log_price_ticks(client_sb, prices, "live", live_tokens=set(addresses),
+                     chain_by_addr=_chain_map)
     _log_cache_snapshot(client_sb)  # v138 D: snapshot full cache state from live loop too
 
     for trade in open_trades:

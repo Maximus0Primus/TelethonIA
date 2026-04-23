@@ -80,6 +80,11 @@ from strategies import (
     # v14: ETH fee model constants
     ETH_GAS_COST_USD_PER_SIDE, ETH_BUY_SLIPPAGE_BPS, ETH_SELL_SLIPPAGE_BPS,
     ETH_MIN_POSITION_USD,
+    # v14e: BSC + Base fee model constants
+    BSC_GAS_COST_USD_PER_SIDE, BSC_BUY_SLIPPAGE_BPS, BSC_SELL_SLIPPAGE_BPS,
+    BSC_MIN_POSITION_USD,
+    BASE_GAS_COST_USD_PER_SIDE, BASE_BUY_SLIPPAGE_BPS, BASE_SELL_SLIPPAGE_BPS,
+    BASE_MIN_POSITION_USD,
     STRATEGIES, STRATEGY_FILTERS,
     _DECAY_RE, _TRAIL_RE, _DTRAIL_RE, _DIP_RE, _DIP_SPLIT_RE, _BE_RE,
     _get_decay_end, _get_trail_config,
@@ -87,15 +92,45 @@ from strategies import (
 )
 
 
-def _eth_slip_bps_with_gas(pos_usd: float, base_slip_bps: int) -> int:
-    """v14: ETH round-trip cost = slippage (bps) + gas (flat USD → bps).
-    Gas dominates at small positions, slippage dominates at large. Clamped
-    to [50, 2000] bps to avoid unreasonable values on extreme sizes.
-    """
+# v14e: per-chain fee tables consolidated. Solana uses Jupiter Ultra RFQ
+# (separate codepath, near-zero slippage) and is NOT present here by design —
+# _evm_fee_params callers gate on chain != 'solana' first.
+_EVM_FEE_PARAMS = {
+    "ethereum": (ETH_GAS_COST_USD_PER_SIDE, ETH_BUY_SLIPPAGE_BPS, ETH_SELL_SLIPPAGE_BPS, ETH_MIN_POSITION_USD),
+    "bsc":      (BSC_GAS_COST_USD_PER_SIDE, BSC_BUY_SLIPPAGE_BPS, BSC_SELL_SLIPPAGE_BPS, BSC_MIN_POSITION_USD),
+    "base":     (BASE_GAS_COST_USD_PER_SIDE, BASE_BUY_SLIPPAGE_BPS, BASE_SELL_SLIPPAGE_BPS, BASE_MIN_POSITION_USD),
+}
+
+
+def _evm_min_position_usd(chain: str) -> float:
+    """v14e: min position threshold per EVM chain. Below this, gas eats the edge."""
+    params = _EVM_FEE_PARAMS.get(chain)
+    return float(params[3]) if params else float(ETH_MIN_POSITION_USD)
+
+
+def _evm_slip_bps_with_gas(pos_usd: float, chain: str, side: str) -> int:
+    """v14e: EVM round-trip cost = slippage (bps) + gas (flat USD → bps).
+    Used by paper entry+exit paths to compute realistic fills. side = 'buy' | 'sell'.
+    Gas dominates at small positions, slippage dominates at large. Clamped [50, 2000]."""
+    params = _EVM_FEE_PARAMS.get(chain)
+    if not params:
+        # Unknown EVM → fall back to ETH conservatives so we don't under-cost.
+        gas_usd, buy_slip, sell_slip, _ = _EVM_FEE_PARAMS["ethereum"]
+    else:
+        gas_usd, buy_slip, sell_slip, _ = params
+    base_slip = buy_slip if side == "buy" else sell_slip
     pos = max(float(pos_usd or 0), 1.0)
-    gas_bps = int((ETH_GAS_COST_USD_PER_SIDE / pos) * 10_000)
-    total = base_slip_bps + gas_bps
-    return max(50, min(2000, total))
+    gas_bps = int((gas_usd / pos) * 10_000)
+    return max(50, min(2000, base_slip + gas_bps))
+
+
+def _eth_slip_bps_with_gas(pos_usd: float, base_slip_bps: int) -> int:
+    """v14: kept as a thin wrapper for backward compat. New callers should use
+    _evm_slip_bps_with_gas(pos_usd, chain, side) directly so BSC/Base get the
+    right gas + slippage constants.
+    """
+    side = "buy" if base_slip_bps == ETH_BUY_SLIPPAGE_BPS else "sell"
+    return _evm_slip_bps_with_gas(pos_usd, "ethereum", side)
 
 # v115: DIP_BUY in-memory watchlist — tracks tokens waiting for dip+bounce to open P2
 # Key: (token_address, strategy_name) → tracking state
@@ -662,10 +697,14 @@ def _get_sol_price() -> float:
 
 
 def _log_price_ticks(client, prices: dict[str, float], source: str = "check",
-                     live_tokens: set | None = None):
+                     live_tokens: set | None = None,
+                     chain_by_addr: dict[str, str] | None = None):
     """Log DexScreener spot prices to price_ticks table.
     v121: Includes volume/liquidity. Throttle: 15s for live trades, 60s for paper.
-    v122: Also logs Jupiter price ticks for pump.fun bonding curve tokens (source='jupiter')."""
+    v122: Also logs Jupiter price ticks for pump.fun bonding curve tokens (source='jupiter').
+    v14e: chain_by_addr lets the caller pass authoritative chain (from paper_trades
+    or live trades). Without it, 0x falls back to 'ethereum' — which mislabels
+    BSC/Base ticks. Analytics that partition by chain rely on the correct tag."""
     if not prices or not client:
         return
     now = _time_mod.time()
@@ -684,9 +723,13 @@ def _log_price_ticks(client, prices: dict[str, float], source: str = "check",
         # v123: Log DexScreener price (not Jupiter-overridden) as primary tick.
         # Sim needs both DexScreener and Jupiter price series separately.
         dex_price = _dex_prices_cache.get(addr, price)
-        # v14: chain tag on each tick so analytics can partition without a join.
-        # Chain inferred from address shape (0x → ethereum, else solana).
-        _tick_chain = "ethereum" if str(addr).startswith("0x") else "solana"
+        # v14/v14e: chain tag on each tick. Prefer caller-provided map; else
+        # shape-infer (0x → ethereum fallback). Callers with BSC/Base trades
+        # open MUST pass chain_by_addr or the ticks will be mislabeled.
+        if chain_by_addr and addr in chain_by_addr:
+            _tick_chain = chain_by_addr[addr]
+        else:
+            _tick_chain = "ethereum" if str(addr).startswith("0x") else "solana"
         row = {
             "token_address": addr, "price_usd": dex_price,
             "source": source, "chain": _tick_chain,
@@ -723,13 +766,17 @@ def _log_price_ticks(client, prices: dict[str, float], source: str = "check",
         logger.debug("price_ticks insert failed (%d rows): %s", len(rows), e)
 
 
-def _fetch_prices_batch(addresses: list[str]) -> dict[str, float]:
+def _fetch_prices_batch(addresses: list[str],
+                        chain_by_addr: dict[str, str] | None = None) -> dict[str, float]:
     """Batch fetch current USD prices. DexScreener primary, Jupiter fallback.
     v107: Jupiter fallback catches pool migrations that DexScreener misses.
     v143.6: short DS cache TTL (5s) mirroring the 14s Jupiter cooldown, so
     paper_fast and live_trader — called back-to-back in the same loop tick —
     read the same DS snapshot instead of two fresh fetches seconds apart.
-    Prevents micro-divergence on ds / hybrid / twin_confirm / confirm strategies.
+    v14e: optional chain_by_addr lets the caller pass the authoritative chain
+    per address (from paper_trades.chain or resolve_evm_chain). Without it,
+    0x addresses default to 'ethereum' — which silently returns empty for BSC
+    and Base tokens (the "token pair not found" DS response user reported).
     """
     if not addresses:
         return {}
@@ -754,12 +801,23 @@ def _fetch_prices_batch(addresses: list[str]) -> dict[str, float]:
         return cached
 
     prices = {}
-    # v14: split by chain — DexScreener rejects cross-chain batches (path segment
-    # is the chain). Build two buckets from address shape and query each chain
-    # separately. Address→chain map also used below to match case-insensitive on
-    # the ETH side since DexScreener returns checksummed while we store lowercase.
-    sol_addrs = [a for a in addresses if not str(a).startswith("0x")]
-    eth_addrs = [a.lower() for a in addresses if str(a).startswith("0x")]
+    # v14/v14e: split by chain — DexScreener rejects cross-chain batches (path
+    # segment is the chain). When chain_by_addr is provided, use it; else
+    # infer from shape (0x → ethereum, base58 → solana). Shape inference is
+    # wrong for BSC/Base, so callers with authoritative chain info should
+    # always pass chain_by_addr.
+    buckets: dict[str, list[str]] = {"solana": [], "ethereum": [], "bsc": [], "base": []}
+    for a in addresses:
+        key = str(a)
+        if chain_by_addr and key in chain_by_addr:
+            c = chain_by_addr[key]
+        elif key.startswith("0x"):
+            c = "ethereum"
+        else:
+            c = "solana"
+        # EVM addresses lowercased; Solana case-preserved.
+        stored = key.lower() if c in ("ethereum", "bsc", "base") else key
+        buckets.setdefault(c, []).append(stored)
 
     def _query_chain(chain_name: str, addrs: list[str]) -> None:
         if not addrs:
@@ -785,9 +843,9 @@ def _fetch_prices_batch(addresses: list[str]) -> dict[str, float]:
                     addr = p.get("baseToken", {}).get("address", "")
                     if not addr:
                         continue
-                    # ETH addresses: DexScreener returns checksummed — canonicalize
-                    # to lowercase so the key matches what callers stored.
-                    if chain_name == "ethereum":
+                    # EVM addresses returned checksummed — canonicalize to lowercase
+                    # so the key matches what callers stored.
+                    if chain_name in ("ethereum", "bsc", "base"):
                         addr = addr.lower()
                     by_addr.setdefault(addr, []).append(p)
                 for addr, token_pairs in by_addr.items():
@@ -807,8 +865,8 @@ def _fetch_prices_batch(addresses: list[str]) -> dict[str, float]:
                 logger.warning("paper_trader: DexScreener %s batch error: %s",
                                chain_name, e)
 
-    _query_chain("solana", sol_addrs)
-    _query_chain("ethereum", eth_addrs)
+    for chain_name, addrs in buckets.items():
+        _query_chain(chain_name, addrs)
 
     # v107: GeckoTerminal fallback for tokens DexScreener missed (pool migration, deindexing)
     missing = [a for a in addresses if a not in prices]
@@ -1115,15 +1173,13 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
         # Shallow liquidity → up to 3x base slippage; deep → 1x
         slip_mult = 1.0 + 2.0 * (1.0 - lds)  # 1.0 for lds=1.0, 3.0 for lds=0.0
         buy_slip_bps = int(buy_slip_bps_base * slip_mult)
-        # v14: ETH fee override — flat 200 bps slip + gas baked into bps.
-        # The liquidity-depth multiplier is not applied because ETH pool
-        # depths are measured differently (Uniswap V3 concentrated liq skews
-        # the LDS heuristic). Calibration revisited after N≥20 ETH shadows.
-        if token.get("chain") == "ethereum":
-            # pos_usd isn't set yet here — estimate from portfolio budget or
-            # default to the ETH minimum. Accurate enough for entry slip model.
-            _eth_pos = float(token.get("_rt_position_usd") or ETH_MIN_POSITION_USD)
-            buy_slip_bps = _eth_slip_bps_with_gas(_eth_pos, ETH_BUY_SLIPPAGE_BPS)
+        # v14/v14e: EVM fee override — each chain has its own gas + MEV model.
+        # Skips the liquidity-depth multiplier (concentrated-liq pools break the
+        # Solana LDS heuristic). Per-chain calibration revisited after N≥20.
+        _tc = token.get("chain")
+        if _tc in ("ethereum", "bsc", "base"):
+            _pos = float(token.get("_rt_position_usd") or _evm_min_position_usd(_tc))
+            buy_slip_bps = _evm_slip_bps_with_gas(_pos, _tc, "buy")
         # v142 E: shadow-sync — if live already opened this trade and passed its
         # actual Jupiter fill price via token["_rt_force_entry_price"], use it
         # directly. Fixes P1 (TP/SL status inversion) and P4 (entry_price ±9%
@@ -1138,9 +1194,13 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
         # straight from DexScreener (raw_price). Fees/slippage already modeled.
         sol_price_entry = _get_sol_price()
         ultra_price = None
-        is_eth = token.get("chain") == "ethereum"
-        if is_eth:
-            pass  # raw DexScreener price + ETH fee model handles everything
+        # v14/v14e: any EVM chain skips the Jupiter Ultra entry quote.
+        # entry_price comes from DexScreener (raw_price). EVM fee model
+        # already applied above.
+        is_evm = token.get("chain") in ("ethereum", "bsc", "base")
+        is_eth = token.get("chain") == "ethereum"  # kept for downstream refs
+        if is_evm:
+            pass  # raw DexScreener price + EVM fee model handles everything
         elif forced_entry and float(forced_entry) > 0:
             ultra_price = float(forced_entry)
             entry_source = "live_sync"
@@ -1272,12 +1332,13 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
                 tp_price = entry_price * tranche["tp_mult"] if tranche["tp_mult"] else None
                 sl_price = entry_price * tranche["sl_mult"]
 
-                # v14: ETH main trades force position_usd=$200 so the fee model
-                # (gas + MEV) produces coherent pnl_pct. Paper side only — no
-                # bankroll impact at that size (user's RT budget is ~$30 and
-                # ETH main strats carry their own virtual $200 for measurement).
-                if token.get("chain") == "ethereum":
-                    _pos = float(ETH_MIN_POSITION_USD)
+                # v14/v14e: EVM main trades force position_usd=min_position for
+                # the chain so the fee model (gas + MEV) produces coherent
+                # pnl_pct. Paper-only — no bankroll impact at that virtual size.
+                # ETH=$200, BSC=$50, Base=$50 (gas-amortized thresholds).
+                _tc_row = token.get("chain")
+                if _tc_row in ("ethereum", "bsc", "base"):
+                    _pos = _evm_min_position_usd(_tc_row)
                 else:
                     _pos = round(alloc_usd * tranche["pct"] * bot_ml_mult, 2)
 
@@ -1352,10 +1413,11 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
             lds = max(0.1, min(1.0, lds)) if lds else 1.0
             slip_mult = 1.0 + 2.0 * (1.0 - lds)
             buy_slip_bps = int(buy_slip_bps_base * slip_mult)
-            # v14: ETH fee override (see open_paper_trades main loop)
-            if token.get("chain") == "ethereum":
-                _eth_pos = float(token.get("_rt_position_usd") or ETH_MIN_POSITION_USD)
-                buy_slip_bps = _eth_slip_bps_with_gas(_eth_pos, ETH_BUY_SLIPPAGE_BPS)
+            # v14/v14e: EVM fee override (see open_paper_trades main loop)
+            _tc_sh = token.get("chain")
+            if _tc_sh in ("ethereum", "bsc", "base"):
+                _pos_sh = float(token.get("_rt_position_usd") or _evm_min_position_usd(_tc_sh))
+                buy_slip_bps = _evm_slip_bps_with_gas(_pos_sh, _tc_sh, "buy")
             # v144.3: Use SAME entry_price as main — Ultra quote with forced_entry priority,
             # cached via _jupiter_prices_cache (warmed by main loop). Tag entry_source so
             # _override_exit_with_ultra_quote applies the same SELL Ultra quote at exit.
@@ -1440,12 +1502,13 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
                     tp_price = entry_price * tranche["tp_mult"] if tranche.get("tp_mult") else None
                     sl_price = entry_price * tranche["sl_mult"]
                     # v144.3: real position_usd so Ultra exit + slip model match mains.
-                    # v14: ETH shadows force position_usd to ETH_MIN_POSITION_USD so the
-                    # fee model ($7.50 gas + 2% MEV) stays coherent — at $10-30 shadow
-                    # sizes gas alone is 25-75% of the trade, making pnl_pct meaningless.
-                    # is_shadow=True ensures the bankroll is not touched regardless.
-                    if token.get("chain") == "ethereum":
-                        _pos = float(ETH_MIN_POSITION_USD)
+                    # v14/v14e: EVM shadows force position_usd to the chain's
+                    # min_position so the fee model stays coherent (gas as % of
+                    # position would be meaningless at $10 shadow sizes).
+                    # is_shadow=True → no bankroll impact regardless.
+                    _tc_shdw = token.get("chain")
+                    if _tc_shdw in ("ethereum", "bsc", "base"):
+                        _pos = _evm_min_position_usd(_tc_shdw)
                     else:
                         _pos = round(shadow_alloc * tranche["pct"] * bot_ml_mult, 2)
                     shadow_rows.append({
@@ -1502,13 +1565,15 @@ def _dynamic_sell_slip_factor(trade: dict, exit_type: str, base_bps: int = 10,
     Non-pump stays slightly under-slipped (N=6 is noisy, wait for more data).
 
     v14: Ethereum branch uses a separate model (200 bps base MEV slip + gas
-    cost amortized over position size). Exit-type nuance doesn't apply — ETH
-    exits hit Uniswap routers the same way regardless of TP/SL/timeout.
+    cost amortized over position size). Exit-type nuance doesn't apply — EVM
+    exits hit routers the same way regardless of TP/SL/timeout.
+    v14e: extended to BSC ($0.30 gas + 250 bps) and Base ($0.10 gas + 150 bps).
     """
-    # v14: ETH chain uses its own cost model, independent of Solana calibration.
-    if trade.get("chain") == "ethereum":
-        pos_usd = float(trade.get("position_usd") or ETH_MIN_POSITION_USD)
-        total_bps = _eth_slip_bps_with_gas(pos_usd, ETH_SELL_SLIPPAGE_BPS)
+    # v14/v14e: EVM chains use their own cost model, independent of Solana.
+    _tc_exit = trade.get("chain")
+    if _tc_exit in ("ethereum", "bsc", "base"):
+        pos_usd = float(trade.get("position_usd") or _evm_min_position_usd(_tc_exit))
+        total_bps = _evm_slip_bps_with_gas(pos_usd, _tc_exit, "sell")
         return 1 - total_bps / 10_000
 
     liq_usd = float(trade.get("rt_liquidity_usd") or 50_000)
@@ -1606,9 +1671,9 @@ def _override_exit_with_ultra_quote(client, trade: dict, ev: dict) -> dict:
     """
     if not ev or ev.get("status") is None:
         return ev
-    # v14: Jupiter Ultra is Solana-only. ETH exits use formula-based exit_price
-    # with the ETH slip/gas model from _dynamic_sell_slip_factor. No override.
-    if trade.get("chain") == "ethereum":
+    # v14/v14e: Jupiter Ultra is Solana-only. Any EVM chain (ETH/BSC/Base)
+    # keeps the formula-based exit_price with that chain's slip/gas model.
+    if trade.get("chain") in ("ethereum", "bsc", "base"):
         return ev
     # v144.3: Ultra quote applies to BOTH mains and shadows for behavioral A/B parity.
     # Legacy shadows with pos_usd=0 (pre-v144.3) still bail out below since token_amount
@@ -2205,8 +2270,11 @@ def check_paper_trades(client) -> dict:
     for (waddr, _) in _dip_watchlist:
         if waddr not in addresses:
             addresses.append(waddr)
-    prices = _fetch_prices_batch(addresses)
-    _log_price_ticks(client, prices, "full")
+    # v14e: authoritative chain from paper_trades.chain, keyed by token_address.
+    # DS batch URL is chain-specific: wrong chain = "token pair not found".
+    _chain_map = {t["token_address"]: (t.get("chain") or "solana") for t in open_trades}
+    prices = _fetch_prices_batch(addresses, chain_by_addr=_chain_map)
+    _log_price_ticks(client, prices, "full", chain_by_addr=_chain_map)
     _log_cache_snapshot(client)  # v138 D: snapshot full cache state
 
     # v115: Process dip watchlist on full check too
@@ -2556,7 +2624,9 @@ def correct_closed_prices(client) -> int:
 
     # Dedup addresses
     addresses = list({t["token_address"] for t in closed_trades})
-    prices = _fetch_prices_batch(addresses)
+    # v14e: route DS batch per chain using paper_trades.chain.
+    _chain_map = {t["token_address"]: (t.get("chain") or "solana") for t in closed_trades}
+    prices = _fetch_prices_batch(addresses, chain_by_addr=_chain_map)
 
     corrected = 0
     for trade in closed_trades:
@@ -2622,8 +2692,10 @@ def check_paper_trades_fast(client) -> dict:
     for (waddr, _) in _dip_watchlist:
         if waddr not in addresses:
             addresses.append(waddr)
-    prices = _fetch_prices_batch(addresses) if addresses else {}
-    _log_price_ticks(client, prices, "fast")
+    # v14e: route DS batch per chain for paper_fast path too.
+    _chain_map = {t["token_address"]: (t.get("chain") or "solana") for t in recent_trades}
+    prices = _fetch_prices_batch(addresses, chain_by_addr=_chain_map) if addresses else {}
+    _log_price_ticks(client, prices, "fast", chain_by_addr=_chain_map)
     _log_cache_snapshot(client)  # v138 D: snapshot full cache state
 
     # v115: Process dip watchlist every 30s

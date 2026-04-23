@@ -1,3 +1,38 @@
+# Pipeline Status — Updated Apr 23, 2026 (v14e.2 — BSC + Base paper live)
+
+## v14e.2 — Apr 23 PM — BSC + Base paper strats live
+
+User wants symmetric paper trading for BSC + Base (same 3 strategies as ETH).
+Alerts must clearly tag the chain on every KOL trade / close with correct
+DEX + block-explorer links. Solana must stay untouched.
+
+**Done** :
+- `scraper/strategies.py` — 3 BSC strats + 3 Base strats added (TP100/SL50, TP80/SL40, BE50/TP150). Fee constants `BSC_*` ($0.30 gas, 250 bps) and `BASE_*` ($0.10 gas, 150 bps) parallel to `ETH_*`. CHAIN_STRATEGIES registry now shows 302 SOL / 3 ETH / 3 BSC / 3 BASE — zero leakage asserted.
+- `scraper/paper_trader.py` — consolidated fee branches: `_EVM_FEE_PARAMS` + `_evm_slip_bps_with_gas(pos, chain, side)` + `_evm_min_position_usd(chain)` replace the ETH-only override. Entry slip, shadow slip, exit slip, min-position, Jupiter skip — all cover ETH/BSC/Base uniformly. Solana path unchanged (Jupiter Ultra RFQ + `_dynamic_sell_slip_factor` legacy).
+- `scraper/paper_trader.py::_fetch_prices_batch` — accepts `chain_by_addr` map. Without it, 0x addresses fall to ethereum (the "dexscreener token pair not found" cause when CA was BSC/Base). `check_paper_trades`, `check_paper_trades_fast`, `correct_closed_prices`, `live_trader.check_live_trades`, `bot_commands.cmd_positions_live` all pass the map built from `paper_trades.chain`.
+- `_log_price_ticks` accepts `chain_by_addr` too so price_ticks.chain rows are correct on BSC/Base tokens.
+- `scraper/enrich.py::_fetch_dexscreener_by_address` — chain support for BSC (PancakeSwap V3 > V2 > Biswap) and Base (Uniswap V3 > Aerodrome). Address-shape sanity check widened to all EVM chains.
+- `scraper/safe_scraper.py::_rt_open_trades` handler — 0x CA now disambiguated via `resolve_evm_chain(ca)` (DexScreener chainId lookup), cached in `_rt_evm_chain_cache`. Eliminates silent mislabel where a BSC token was queried against ETH endpoints.
+- `scraper/alerter.py::alert_kol_trade` — BSC adds PancakeSwap + BscScan links; Base adds Uniswap + BaseScan. Every trade open alert wears `chain_tag` (🟣SOL / 🔷ETH / 🟡BSC / 🔵BASE).
+- `scraper/alerter.py::alert_trade_closed` — per-chain explorer link appended next to DexScreener.
+- `scraper/safe_scraper.py::alert_kol_trade call site` — per-strategy positions filtered by `_passes_strategy_filter` on the token's chain. Strats of other chains no longer appear in the alert (fix of user complaint: "alertes mélangées avec les différentes stratégies paper").
+- Supabase migration v14e_bankroll_per_chain applied. 9 new bankroll entries seeded at $1000 each (3 ETH + 3 BSC + 3 BASE). `rt_trade_config.hybrid_strategy.allocations` updated — 21 strategies total (12 SOL + 3 ETH + 3 BSC + 3 BASE).
+- Tests: 97/100 pass (3 skipped — pre-existing pipeline skips). `test_paper_trader.TestFetchPricesBatch` made deterministic (cache reset). New smoke checks confirm Solana alert template unchanged and BSC/Base alerts carry the right links.
+
+**Verified non-regression on Solana** :
+- 302 SOL strats kept in registry — same count as before v14e
+- Solana tokens still pass Solana strats, still reject ETH/BSC/Base strats
+- `alert_kol_trade(..., chain='solana')` still outputs `dexscreener.com/solana/{ca}` with bonding pump.fun fallback
+- `_fetch_prices_batch` default shape-inference preserves pre-v14e behaviour for callers that don't pass `chain_by_addr`
+- Jupiter Ultra path (paper entry + live) gated by `chain == "solana"` — ETH/BSC/Base skip it deterministically
+
+**Next** (when data flows) :
+- Monitor N≥30 per chain in `paper_trades` at 7-day horizon
+- Validate no cross-chain bankroll drift: `SELECT chain, SUM(pnl_usd) FROM paper_trades WHERE source='rt' AND is_shadow=false GROUP BY chain`
+- BSC/Base KOL discovery: today relies on existing Solana KOLs happening to post 0x addresses. If zero calls in 3 days, add chain-specific KOL groups.
+
+---
+
 # Pipeline Status — Updated Apr 23, 2026 (v14e — chain isolation hardening)
 
 ## v14e — Apr 23 PM — hard chain isolation

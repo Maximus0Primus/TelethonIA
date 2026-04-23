@@ -725,6 +725,11 @@ _rt_kol_whitelist: dict = {}           # {kol_group: {wr, total, hits, approved}
 _rt_kol_whitelist_loaded_at: float = 0.0
 _rt_bankroll: dict = {}                # single row from rt_bankroll table
 _rt_bankroll_loaded_at: float = 0.0
+# v14e: 0x → chain cache. Populated by resolve_evm_chain on first sight so
+# repeated KOL mentions of the same ETH/BSC/Base CA don't re-hit DexScreener.
+# Keyed by lowercased address. Never expired in-process — the CA→chain
+# mapping doesn't change within a token's lifetime.
+_rt_evm_chain_cache: dict[str, str] = {}
 RT_KOL_WHITELIST_TTL = 3600  # 1h
 RT_BANKROLL_TTL = 60          # 1min
 
@@ -1815,11 +1820,23 @@ async def _rt_on_new_message(event: events.NewMessage.Event):
                         symbol, ca[:8], username, tier, _t_event - _t_msg)
 
             # DexScreener fetch — only hard requirement: price must exist
-            # v14: detect chain from CA shape, pass to fetch so ETH hits the right
-            # endpoint. ca_chain is threaded through the whole handler below.
+            # v14/v14e: Chain detection. Base58 → solana immediately. 0x requires
+            # disambiguation across ETH/BSC/Base (same shape) — use DexScreener's
+            # multi-chain tokens endpoint once per CA, cached for this session.
             from enrich import _fetch_dexscreener_by_address
-            from chain_detect import detect_chain
-            ca_chain = detect_chain(ca) or "solana"
+            from chain_detect import detect_chain, resolve_evm_chain
+            shape_chain = detect_chain(ca) or "solana"
+            if shape_chain == "ethereum":  # ambiguous — could be ETH/BSC/Base
+                cached = _rt_evm_chain_cache.get(ca.lower())
+                if cached:
+                    ca_chain = cached
+                else:
+                    ca_chain = await asyncio.get_event_loop().run_in_executor(
+                        None, resolve_evm_chain, ca,
+                    ) or "ethereum"  # default to ETH if DS lookup fails
+                    _rt_evm_chain_cache[ca.lower()] = ca_chain
+            else:
+                ca_chain = shape_chain
             loop = asyncio.get_event_loop()
             raw = await loop.run_in_executor(
                 None, _fetch_dexscreener_by_address, ca, ca_chain,
@@ -1925,21 +1942,34 @@ async def _rt_on_new_message(event: events.NewMessage.Event):
                 # v109: Alert on KOL trade (for live monitoring)
                 try:
                     from alerter import alert_kol_trade
-                    from paper_trader import get_open_portfolio
+                    from paper_trader import get_open_portfolio, _passes_strategy_filter
                     try:
                         from paper_trader import STRATEGIES as _STRATS
                         _br = _rt_load_bankroll()
                         bal = float(_br.get("current_balance", 0))
-                        # v116: Build per-strategy position detail for alert
-                        _strat_bals = _br.get("strategy_bankrolls") or {}
+                        # v14e: scope per-strat positions to THIS chain only.
+                        # Strats of other chains would fail _passes_strategy_filter
+                        # anyway; listing them in the alert was pure noise.
+                        _strat_bals = _rt_strategy_bankrolls_for_chain(_br, ca_chain)
                         _hybrid_cfg = config.get("hybrid_strategy", {})
                         strat_positions = None
                         if _hybrid_cfg.get("enabled"):
                             _allocs = _hybrid_cfg.get("allocations", {})
                             strat_positions = {}
                             total_pos = 0
+                            # token_entry built above in _rt_open_trades carries
+                            # chain + rt_liquidity; rebuild a minimal dict here
+                            # for the filter check (we don't have the full one).
+                            _tok_for_filter = {
+                                "chain": ca_chain,
+                                "_rt_liquidity_usd": liq_usd,
+                                "_rt_score": rt_score,
+                            }
                             for s, apct in _allocs.items():
                                 if s not in _STRATS:
+                                    continue
+                                # Filter: same chain + min_liq/rt_score pass.
+                                if not _passes_strategy_filter(_tok_for_filter, s):
                                     continue
                                 s_pos = _rt_position_size(rt_score, kol_info, token_info, tier, config, strategy=s)
                                 s_pos = round(s_pos * float(apct), 2)
@@ -1964,7 +1994,7 @@ async def _rt_on_new_message(event: events.NewMessage.Event):
                         deployed_usd=portfolio["deployed_usd"],
                         open_count=portfolio["open_count"],
                         strategy_positions=strat_positions,
-                        chain=ca_chain,  # v14: 'solana' or 'ethereum'
+                        chain=ca_chain,  # v14/v14e: solana | ethereum | bsc | base
                     )
                 except Exception as e:
                     logger.warning("KOL trade alert failed: %s", e)

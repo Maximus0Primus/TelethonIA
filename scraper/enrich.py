@@ -523,19 +523,23 @@ def _fetch_dexscreener_by_address(address: str, chain: str = "solana") -> dict |
     v40: Fetch token data by exact contract address (not by symbol search).
     Prevents symbol collision where DexScreener search picks the wrong CA.
 
-    v14: chain parameter — 'solana' (default, backward compat) or 'ethereum'.
+    v14: chain parameter — 'solana', 'ethereum', 'bsc', 'base'.
     Uses the chain-parameterized /tokens/v1/{chain}/{address} endpoint.
     DexScreener supports every major chain behind the same URL shape.
 
-    On ETH we prefer Uniswap V3 > V2 > Sushiswap pairs (analogous to preferring
-    Raydium over pump.fun on Solana — established DEXs first, then fallbacks).
+    Per-chain DEX preference:
+      - ETH:  Uniswap V3 > V2 > Sushiswap
+      - BSC:  PancakeSwap V3 > V2 > Biswap
+      - Base: Uniswap V3 > Aerodrome
+      - SOL:  Raydium (handled in the tail of this function)
     """
-    # v14: Address-chain sanity check. A 0x address on chain='solana' or a
-    # base58 address on chain='ethereum' means the caller routed wrong;
+    # v14/v14e: Address-chain sanity check. A 0x address on chain='solana' or a
+    # base58 address on an EVM chain means the caller routed wrong;
     # silent return prevents polluting the cache with negative results.
+    is_evm = chain in ("ethereum", "bsc", "base")
     if chain == "solana" and address.startswith("0x"):
         return None
-    if chain == "ethereum" and not address.startswith("0x"):
+    if is_evm and not address.startswith("0x"):
         return None
 
     try:
@@ -560,7 +564,7 @@ def _fetch_dexscreener_by_address(address: str, chain: str = "solana") -> dict |
         # checksummed while our input is lowercase).
         def _addr_match(p: dict) -> bool:
             got = p.get("baseToken", {}).get("address", "")
-            if chain == "ethereum":
+            if is_evm:
                 return got.lower() == address.lower()
             return got == address
 
@@ -573,25 +577,39 @@ def _fetch_dexscreener_by_address(address: str, chain: str = "solana") -> dict |
             return None
 
         # Chain-specific DEX preference.
-        if chain == "ethereum":
-            # Uniswap V3 first (most liquidity on ETH memecoins), then V2, then everything else.
-            def _eth_rank(p: dict) -> int:
+        if is_evm:
+            # Per-chain DEX rankings. Lower rank = preferred.
+            def _evm_rank(p: dict) -> int:
                 dex = p.get("dexId", "").lower()
-                if "uniswap" in dex and "v3" in dex:
-                    return 0
-                if "uniswap" in dex:
-                    return 1
-                if "sushi" in dex:
-                    return 2
+                if chain == "ethereum":
+                    if "uniswap" in dex and "v3" in dex:
+                        return 0
+                    if "uniswap" in dex:
+                        return 1
+                    if "sushi" in dex:
+                        return 2
+                    return 3
+                if chain == "bsc":
+                    if "pancakeswap" in dex and "v3" in dex:
+                        return 0
+                    if "pancakeswap" in dex:
+                        return 1
+                    if "biswap" in dex:
+                        return 2
+                    return 3
+                if chain == "base":
+                    if "uniswap" in dex and "v3" in dex:
+                        return 0
+                    if "aerodrome" in dex:
+                        return 1
+                    if "uniswap" in dex:
+                        return 2
+                    return 3
                 return 3
-            target_pairs = sorted(target_pairs, key=_eth_rank)
-            # Among the top-rank group, pick highest 24h volume.
-            top_rank = _eth_rank(target_pairs[0])
-            preferred = [p for p in target_pairs if _eth_rank(p) == top_rank]
+            target_pairs = sorted(target_pairs, key=_evm_rank)
+            top_rank = _evm_rank(target_pairs[0])
+            preferred = [p for p in target_pairs if _evm_rank(p) == top_rank]
             best = max(preferred, key=lambda p: float(p.get("volume", {}).get("h24", 0) or 0))
-            # Return below uses `best` — fall through to the post-processing block.
-            # But original code path expects the Solana variable name; keep compat
-            # by falling into the sort/pick below with a shortcut.
             raydium_pairs = []
             target_pairs = [best]
 

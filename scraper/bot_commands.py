@@ -945,15 +945,16 @@ def _handle_livepos(sb, args: str) -> str:
         from paper_trader import _fetch_prices_batch
         trades = sb.table("paper_trades").select(
             "id,symbol,token_address,entry_price,position_usd,position_sol,"
-            "created_at,strategy,high_price_seen"
+            "created_at,strategy,high_price_seen,chain"
         ).eq("status", "open").eq("source", "rt_live").execute().data or []
 
         if not trades:
             return "📭 Aucune position live ouverte"
 
-        # Fetch current prices
+        # v14e: route DS batch per chain.
         addrs = list({t["token_address"] for t in trades})
-        prices = _fetch_prices_batch(addrs)
+        _chain_map = {t["token_address"]: (t.get("chain") or "solana") for t in trades}
+        prices = _fetch_prices_batch(addrs, chain_by_addr=_chain_map)
 
         lines = [f"📊 <b>{len(trades)} position(s) live</b>\n"]
         total_pnl = 0

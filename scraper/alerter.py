@@ -627,15 +627,21 @@ def alert_kol_trade(symbol: str, kol: str, price: float, pos_usd: float,
     c_tag = chain_tag(chain)
     tier_emoji = "⭐" if tier == "S" else "🔹"
 
-    # Links
+    # v14/v14e: chain-aware links. DexScreener URL uses the chain path segment.
+    # For EVM chains we add the canonical DEX + block explorer. Solana bonding
+    # curves get the pump.fun link for quick inspection.
     links = []
     if ca:
-        # v14: chain-aware DexScreener URL. Uniswap link added for ETH instead
-        # of the Solana-specific pump.fun fallback.
         links.append(f'<a href="https://dexscreener.com/{chain}/{ca}">DexScreener</a>')
         if chain == "ethereum":
             links.append(f'<a href="https://app.uniswap.org/explore/tokens/ethereum/{ca}">Uniswap</a>')
             links.append(f'<a href="https://etherscan.io/token/{ca}">Etherscan</a>')
+        elif chain == "bsc":
+            links.append(f'<a href="https://pancakeswap.finance/swap?outputCurrency={ca}">PancakeSwap</a>')
+            links.append(f'<a href="https://bscscan.com/token/{ca}">BscScan</a>')
+        elif chain == "base":
+            links.append(f'<a href="https://app.uniswap.org/explore/tokens/base/{ca}">Uniswap</a>')
+            links.append(f'<a href="https://basescan.org/token/{ca}">BaseScan</a>')
         elif is_bonding:
             links.append(f'<a href="https://pump.fun/{ca}">Pump.fun</a>')
     links_text = " | ".join(links) if links else ""
@@ -739,8 +745,18 @@ def alert_trade_closed(symbol: str, strategy: str, exit_reason: str,
             f" | ${available:.0f} dispo"
         )
 
-    # Link — v14: chain-aware DexScreener URL
-    link_text = f'\n🔗 <a href="https://dexscreener.com/{chain}/{ca}">DexScreener</a>' if ca else ""
+    # v14/v14e: chain-aware links. Mirror alert_kol_trade so the close alert
+    # carries the same navigation affordance as the open one.
+    link_text = ""
+    if ca:
+        parts = [f'<a href="https://dexscreener.com/{chain}/{ca}">DexScreener</a>']
+        if chain == "ethereum":
+            parts.append(f'<a href="https://etherscan.io/token/{ca}">Etherscan</a>')
+        elif chain == "bsc":
+            parts.append(f'<a href="https://bscscan.com/token/{ca}">BscScan</a>')
+        elif chain == "base":
+            parts.append(f'<a href="https://basescan.org/token/{ca}">BaseScan</a>')
+        link_text = "\n🔗 " + " | ".join(parts)
     c_tag = chain_tag(chain)
 
     _send(

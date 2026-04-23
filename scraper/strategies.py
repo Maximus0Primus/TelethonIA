@@ -37,6 +37,32 @@ ETH_BUY_SLIPPAGE_BPS = 200         # 2% slippage on entry (MEV + pool impact)
 ETH_SELL_SLIPPAGE_BPS = 200        # 2% slippage on exit
 ETH_MIN_POSITION_USD = 200         # below $200, fees eat >7.5% of trade
 
+# ---------------------------------------------------------------------------
+# Fee constants — BSC (v14e: paper-only cost model)
+#
+# BSC gas ~3 gwei at 5-figure gas = ~$0.15-0.30 per PancakeSwap swap. Pools
+# are typically deeper than ETH L1 but MEV sandwiching is rampant on
+# PancakeSwap (no private relay equivalent). Budget 250 bps/side for MEV.
+# Position floor $50 — gas dominates under that. PancakeSwap V3 fee tier
+# (0.25% usually for memecoins) is folded into the slippage budget.
+# ---------------------------------------------------------------------------
+BSC_GAS_COST_USD_PER_SIDE = 0.30
+BSC_BUY_SLIPPAGE_BPS = 250
+BSC_SELL_SLIPPAGE_BPS = 250
+BSC_MIN_POSITION_USD = 50
+
+# ---------------------------------------------------------------------------
+# Fee constants — Base L2 (v14e: paper-only cost model)
+#
+# Base is an L2 → gas ~$0.05-0.10 per swap (basefee in the 0.001 gwei range).
+# MEV is less aggressive than L1/BSC but present on Aerodrome/Uniswap V3.
+# Budget 150 bps/side + $0.10 gas. Position floor $50 by parity with BSC.
+# ---------------------------------------------------------------------------
+BASE_GAS_COST_USD_PER_SIDE = 0.10
+BASE_BUY_SLIPPAGE_BPS = 150
+BASE_SELL_SLIPPAGE_BPS = 150
+BASE_MIN_POSITION_USD = 50
+
 
 # ---------------------------------------------------------------------------
 # Default deprecated strategies — overridable via scoring_config JSONB
@@ -1136,6 +1162,73 @@ STRATEGIES["ETH_BE50_TP150_SL50"] = [
 STRATEGY_FILTERS["ETH_BE50_TP150_SL50"] = {
     "chain": "ethereum",
     "min_liquidity_usd": 25_000,
+}
+
+# ============================================================
+# v14e — BSC L1 paper strats (Phase 1 shadow, zero capital).
+#
+# Three strategies symmetrical to ETH's so we can compare apples-to-apples
+# across chains once data starts flowing. Min liquidity raised to $20k —
+# PancakeSwap memecoins below that routinely slip >5% on $50 trades.
+# Prefix `BSC_` is load-bearing: it's what _build_chain_strategies + the
+# v14e migration routing heuristic use to partition the bankroll bucket.
+# ============================================================
+
+STRATEGIES["BSC_TP100_SL50"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.50, "horizon_min": 240, "label": "main"},
+]
+STRATEGY_FILTERS["BSC_TP100_SL50"] = {
+    "chain": "bsc",
+    "min_liquidity_usd": 20_000,
+}
+
+STRATEGIES["BSC_TP80_SL40_T2H"] = [
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.60, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["BSC_TP80_SL40_T2H"] = {
+    "chain": "bsc",
+    "min_liquidity_usd": 20_000,
+}
+
+STRATEGIES["BSC_BE50_TP150_SL50"] = [
+    {"pct": 1.0, "tp_mult": 2.50, "sl_mult": 0.50, "horizon_min": 240,
+     "be_activation": 0.50, "label": "main"},
+]
+STRATEGY_FILTERS["BSC_BE50_TP150_SL50"] = {
+    "chain": "bsc",
+    "min_liquidity_usd": 20_000,
+}
+
+# ============================================================
+# v14e — Base L2 paper strats (Phase 1 shadow, zero capital).
+#
+# L2 → cheaper gas → smaller min_liquidity ($15k) works without fees eating
+# the edge. Same 3 shapes as ETH/BSC for coherent cross-chain comparison.
+# ============================================================
+
+STRATEGIES["BASE_TP100_SL50"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.50, "horizon_min": 240, "label": "main"},
+]
+STRATEGY_FILTERS["BASE_TP100_SL50"] = {
+    "chain": "base",
+    "min_liquidity_usd": 15_000,
+}
+
+STRATEGIES["BASE_TP80_SL40_T2H"] = [
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.60, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["BASE_TP80_SL40_T2H"] = {
+    "chain": "base",
+    "min_liquidity_usd": 15_000,
+}
+
+STRATEGIES["BASE_BE50_TP150_SL50"] = [
+    {"pct": 1.0, "tp_mult": 2.50, "sl_mult": 0.50, "horizon_min": 240,
+     "be_activation": 0.50, "label": "main"},
+]
+STRATEGY_FILTERS["BASE_BE50_TP150_SL50"] = {
+    "chain": "base",
+    "min_liquidity_usd": 15_000,
 }
 
 
