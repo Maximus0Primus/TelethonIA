@@ -1242,6 +1242,15 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
                 tp_price = entry_price * tranche["tp_mult"] if tranche["tp_mult"] else None
                 sl_price = entry_price * tranche["sl_mult"]
 
+                # v14: ETH main trades force position_usd=$200 so the fee model
+                # (gas + MEV) produces coherent pnl_pct. Paper side only — no
+                # bankroll impact at that size (user's RT budget is ~$30 and
+                # ETH main strats carry their own virtual $200 for measurement).
+                if token.get("chain") == "ethereum":
+                    _pos = float(ETH_MIN_POSITION_USD)
+                else:
+                    _pos = round(alloc_usd * tranche["pct"] * bot_ml_mult, 2)
+
                 row = {
                     **base_row,
                     "strategy": strat_name,
@@ -1250,7 +1259,7 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
                     "horizon_minutes": tranche["horizon_min"],
                     "tranche_pct": tranche["pct"],
                     "tranche_label": tranche["label"],
-                    "position_usd": round(alloc_usd * tranche["pct"] * bot_ml_mult, 2),
+                    "position_usd": _pos,
                 }
 
                 try:
@@ -2354,6 +2363,7 @@ def check_paper_trades(client) -> dict:
                         strategy_bankrolls=_strat_bals,
                         active_strategies=_active_strats,
                         price_source="jupiter" if addr in _jupiter_overridden else "",
+                        chain=trade.get("chain") or "solana",  # v14
                     )
                 except Exception as e:
                     logger.warning("trade close alert failed: %s", e)
@@ -2438,6 +2448,7 @@ def check_paper_trades(client) -> dict:
                         open_count=portfolio["open_count"],
                         strategy_bankrolls=_strat_bals,
                         active_strategies=_active_strats,
+                        chain=trade.get("chain") or "solana",  # v14
                     )
                 except Exception as e:
                     logger.warning("SL cascade trade close alert failed: %s", e)
@@ -2697,6 +2708,7 @@ def check_paper_trades_fast(client) -> dict:
                         open_count=portfolio["open_count"],
                         strategy_bankrolls=_strat_bals,
                         active_strategies=_active_strats,
+                        chain=trade.get("chain") or "solana",  # v14
                     )
                 except Exception as e:
                     logger.warning("paper_fast trade close alert failed: %s", e)

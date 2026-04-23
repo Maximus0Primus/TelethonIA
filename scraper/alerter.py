@@ -621,17 +621,25 @@ def alert_kol_trade(symbol: str, kol: str, price: float, pos_usd: float,
                     ca: str = "", mcap: float = 0, tier: str = "",
                     bankroll: float = 0, deployed_usd: float = 0,
                     open_count: int = 0,
-                    strategy_positions: dict | None = None):
+                    strategy_positions: dict | None = None,
+                    chain: str = "solana"):
     """v109: Alert when a whitelisted KOL calls a token and a paper trade is opened.
-    v116: strategy_positions = {strat_name: {"pos": 120, "balance": 500}} for per-strategy detail."""
+    v116: strategy_positions = {strat_name: {"pos": 120, "balance": 500}} for per-strategy detail.
+    v14: chain parameter — 'solana' default for backward compat, 'ethereum' for ETH trades."""
     bonding_tag = " 🟡BONDING" if is_bonding else ""
+    chain_tag = " 🔷ETH" if chain == "ethereum" else ""
     tier_emoji = "⭐" if tier == "S" else "🔹"
 
     # Links
     links = []
     if ca:
-        links.append(f'<a href="https://dexscreener.com/solana/{ca}">DexScreener</a>')
-        if is_bonding:
+        # v14: chain-aware DexScreener URL. Uniswap link added for ETH instead
+        # of the Solana-specific pump.fun fallback.
+        links.append(f'<a href="https://dexscreener.com/{chain}/{ca}">DexScreener</a>')
+        if chain == "ethereum":
+            links.append(f'<a href="https://app.uniswap.org/explore/tokens/ethereum/{ca}">Uniswap</a>')
+            links.append(f'<a href="https://etherscan.io/token/{ca}">Etherscan</a>')
+        elif is_bonding:
             links.append(f'<a href="https://pump.fun/{ca}">Pump.fun</a>')
     links_text = " | ".join(links) if links else ""
 
@@ -659,7 +667,7 @@ def alert_kol_trade(symbol: str, kol: str, price: float, pos_usd: float,
         )
 
     _send(
-        f"📢 <b>KOL CALL</b>{bonding_tag}\n\n"
+        f"📢 <b>KOL CALL</b>{chain_tag}{bonding_tag}\n\n"
         f"<b>{symbol}</b> called by {tier_emoji}<b>{kol}</b>\n"
         f"💰 Entry: ${price:.8f}\n"
         f"📊 MCap: {mcap_text} | Liq: ${liq_usd/1000:.0f}K | Score: {rt_score:.0f}"
@@ -678,7 +686,8 @@ def alert_trade_closed(symbol: str, strategy: str, exit_reason: str,
                        open_count: int = 0,
                        strategy_bankrolls: dict | None = None,
                        active_strategies: list | None = None,
-                       price_source: str = ""):
+                       price_source: str = "",
+                       chain: str = "solana"):
     """v110: Alert when a main trade closes (trail_stop, sl_hit, timeout).
     v115: Shows per-strategy bankroll comparison.
     v119: active_strategies filters bankroll display to only active ones."""
@@ -732,11 +741,12 @@ def alert_trade_closed(symbol: str, strategy: str, exit_reason: str,
             f" | ${available:.0f} dispo"
         )
 
-    # Link
-    link_text = f'\n🔗 <a href="https://dexscreener.com/solana/{ca}">DexScreener</a>' if ca else ""
+    # Link — v14: chain-aware DexScreener URL
+    link_text = f'\n🔗 <a href="https://dexscreener.com/{chain}/{ca}">DexScreener</a>' if ca else ""
+    chain_tag = " 🔷ETH" if chain == "ethereum" else ""
 
     _send(
-        f"{emoji} <b>TRADE {reason_text}</b>\n\n"
+        f"{emoji} <b>TRADE {reason_text}</b>{chain_tag}\n\n"
         f"<b>{symbol}</b> | {short_strat(strategy)}\n"
         f"👤 KOL: {kol}\n"
         f"📈 PnL: <b>{pnl_pct*100:+.1f}%</b> (${pnl_usd:+.2f})\n"

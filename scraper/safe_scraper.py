@@ -1894,6 +1894,7 @@ async def _rt_on_new_message(event: events.NewMessage.Event):
                         deployed_usd=portfolio["deployed_usd"],
                         open_count=portfolio["open_count"],
                         strategy_positions=strat_positions,
+                        chain=ca_chain,  # v14: 'solana' or 'ethereum'
                     )
                 except Exception as e:
                     logger.warning("KOL trade alert failed: %s", e)

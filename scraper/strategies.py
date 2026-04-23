@@ -1105,10 +1105,13 @@ STRATEGY_FILTERS["BE25_TP80_SL30_S35"] = {"min_rt_score": 35}
 
 # 1) ETH_TP100_SL50 — let-it-run classic. 4h horizon because ETH moves slower
 #    than Solana memecoins (bigger pools, fewer snipers).
+# v14b: promoted to MAIN paper (not shadow) — user wants Telegram alerts +
+# paper_trades.is_shadow=False so the flow is identical to a Solana main.
+# Must be added to scoring_config.rt_trade_config.hybrid_strategy.allocations
+# for RT path to actually open them.
 STRATEGIES["ETH_TP100_SL50"] = [
     {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.50, "horizon_min": 240, "label": "main"},
 ]
-SHADOW_STRATEGIES.append("ETH_TP100_SL50")
 STRATEGY_FILTERS["ETH_TP100_SL50"] = {
     "chain": "ethereum",
     "min_liquidity_usd": 25_000,
@@ -1118,7 +1121,6 @@ STRATEGY_FILTERS["ETH_TP100_SL50"] = {
 STRATEGIES["ETH_TP80_SL40_T2H"] = [
     {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.60, "horizon_min": 120, "label": "main"},
 ]
-SHADOW_STRATEGIES.append("ETH_TP80_SL40_T2H")
 STRATEGY_FILTERS["ETH_TP80_SL40_T2H"] = {
     "chain": "ethereum",
     "min_liquidity_usd": 25_000,
@@ -1131,7 +1133,6 @@ STRATEGIES["ETH_BE50_TP150_SL50"] = [
     {"pct": 1.0, "tp_mult": 2.50, "sl_mult": 0.50, "horizon_min": 240,
      "be_activation": 0.50, "label": "main"},
 ]
-SHADOW_STRATEGIES.append("ETH_BE50_TP150_SL50")
 STRATEGY_FILTERS["ETH_BE50_TP150_SL50"] = {
     "chain": "ethereum",
     "min_liquidity_usd": 25_000,
