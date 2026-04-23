@@ -1,0 +1,77 @@
+name: Nightly Shadow Audit
+
+# v144.19 — daily check on shadow↔main parity + paired A/B tracking.
+# verify_shadow_main_parity.py is the hard gate (exit 1 alerts Telegram on
+# v144.3 invariant violations). paired_all_v144_shadows.py is informational
+# — uploaded as artifact so we can spot promotable variants without noisy
+# Telegram alerts on every minor flip.
+#
+# analyze_mega_sweep.py is NOT run here: it post-processes a mega_sweep CSV
+# that's produced on-demand via sim.py --mega-sweep, not nightly.
+
+on:
+  schedule:
+    - cron: '0 5 * * *'  # 05:00 UTC, 30min after outlier monitor
+  workflow_dispatch: {}
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install deps
+        run: pip install supabase requests python-dotenv
+
+      - name: Shadow↔main parity (hard gate)
+        id: parity
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          python scripts/verify_shadow_main_parity.py 2>&1 | tee parity.out
+          # Surface the last summary line for the Telegram alert body.
+          LAST=$(tail -n 5 parity.out | tr '\n' ' ' | head -c 500)
+          echo "last_lines=${LAST}" >> "$GITHUB_OUTPUT"
+
+      - name: Alert on parity violation
+        if: failure() && steps.parity.conclusion == 'failure'
+        env:
+          MONITOR_BOT_TOKEN: ${{ secrets.MONITOR_BOT_TOKEN }}
+          MONITOR_CHAT_ID: ${{ secrets.MONITOR_CHAT_ID }}
+        run: |
+          if [ -n "$MONITOR_BOT_TOKEN" ] && [ -n "$MONITOR_CHAT_ID" ]; then
+            MSG="<b>SHADOW-MAIN PARITY VIOLATION</b>%0Av144.3 invariants failed — shadow rows diverging from mains.%0A%0A<code>${{ steps.parity.outputs.last_lines }}</code>%0A%0ARun audit manually: scripts/verify_shadow_main_parity.py"
+            curl -s -X POST "https://api.telegram.org/bot${MONITOR_BOT_TOKEN}/sendMessage" \
+              -d chat_id="${MONITOR_CHAT_ID}" \
+              -d text="${MSG}" \
+              -d parse_mode=HTML \
+              -d disable_web_page_preview=true || true
+          fi
+
+      - name: Paired A/B shadow tracking (informational, no alert)
+        if: always()
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          # Never fail the job on paired-test output — it has no exit code
+          # and we just want the report as an artifact.
+          python scripts/paired_all_v144_shadows.py 2>&1 | tee paired.out || true
+
+      - name: Upload audit reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shadow-audit-reports
+          path: |
+            parity.out
+            paired.out
+          retention-days: 14

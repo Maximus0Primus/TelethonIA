@@ -71,6 +71,9 @@ scraper/_mega_sweep_*.csv
 scraper/_mega_sweep_*.log
 scraper/_from_trades_*.log
 
+# === LOCAL RUNTIME LOGS (backfill, ad-hoc scripts) ===
+logs/
+
 # === WINDOWS ARTIFACTS ===
 nul
 
