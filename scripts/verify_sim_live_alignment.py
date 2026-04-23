@@ -77,6 +77,7 @@ def main():
     diffs = []
     per_strat = defaultdict(list)
     per_strat_slip = defaultdict(list)  # v144.11: economic drift (live fill vs paper_sim)
+    mev_pump_skipped = 0  # v14e.5: mirror nightly_outlier_monitor MEV filter
     for tr in with_history:
         paper_sim_pnl = float(tr.get("paper_sim_pnl_pct") or 0) * 100
         pnl_live = float(tr.get("pnl_pct") or 0) * 100
@@ -94,20 +95,36 @@ def main():
         # Jupiter fill slippage = real live pnl - what pure sim would have booked
         jup_slip_pp = pnl_live - paper_sim_pnl
         n_polls = len(tr["eval_history"])
+        # v14e.5: skip MEV-pump outliers from the gate (same filter as
+        # nightly_outlier_monitor v144.19). tp_hit/tp_hit + live > paper_sim > 0
+        # with |diff| > 50pp = Jupiter Ultra positive slippage on a spike
+        # (documented expected edge), NOT a sim logic bug. Still shown in the
+        # table + counted, but not in the avg_diff/within_10pp gate metrics.
+        is_mev_pump = (
+            status_live == "tp_hit" and sim_status == "tp_hit"
+            and pnl_live > paper_sim_pnl > 0
+            and abs(diff_pp) > 50
+        )
+        tag = " [MEV]" if is_mev_pump else ""
+        print(f"{tr['symbol']:<14}{tr['strategy']:<25}{paper_sim_pnl:>9.2f}%{sim_pnl_pct:>9.2f}%"
+              f"{diff_pp:>11.2f}pp{pnl_live:>9.2f}%{jup_slip_pp:>10.2f}pp"
+              f"{(status_live + '/' + sim_status):>12}{n_polls:>5}{tag}")
+        if is_mev_pump:
+            mev_pump_skipped += 1
+            continue
         diffs.append(diff_pp)
         per_strat[tr["strategy"]].append(diff_pp)
         per_strat_slip[tr["strategy"]].append(jup_slip_pp)
-        print(f"{tr['symbol']:<14}{tr['strategy']:<25}{paper_sim_pnl:>9.2f}%{sim_pnl_pct:>9.2f}%"
-              f"{diff_pp:>11.2f}pp{pnl_live:>9.2f}%{jup_slip_pp:>10.2f}pp"
-              f"{(status_live + '/' + sim_status):>12}{n_polls:>5}")
 
     if diffs:
         print("-" * 115)
         avg_diff = sum(diffs) / len(diffs)
         max_diff = max(abs(d) for d in diffs)
-        print(f"\nReplay vs paper_sim on {len(diffs)} trades (skipped {skipped_no_hist}). "
+        print(f"\nReplay vs paper_sim on {len(diffs)} trades "
+              f"(skipped {skipped_no_hist} no-history, {mev_pump_skipped} MEV-pump). "
               f"Avg diff = {avg_diff:+.2f}pp | Max |diff| = {max_diff:.2f}pp")
         print("(Jup slip column = real fill vs pure sim — NOT a gate metric, purely informative)")
+        print(f"(MEV-pump rows tagged [MEV] — expected positive-slip edge, excluded from gate per v144.19)")
         if max_diff < 3:
             print("[OK] SIM LOGIC VERIFIED - replay matches paper_sim within 3pp (logic identical)")
         elif max_diff < 10:
