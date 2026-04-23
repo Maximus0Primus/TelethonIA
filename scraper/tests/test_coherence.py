@@ -100,6 +100,45 @@ class TestSimSlippageMatchesProduction:
             f"sim._exit must match production slippage, got {result['pnl_pct']}"
 
 
+class TestLiqSlipMultiplierContinuous:
+    """v14e.6: log-continuous liq model replaces 3-bucket step function."""
+
+    def test_anchors(self):
+        from paper_trader import _liq_slip_multiplier
+        # Deep pool: no penalty
+        assert _liq_slip_multiplier(50_000) == 1.0
+        assert _liq_slip_multiplier(100_000) == 1.0
+        # Floor at $500 input → mult 2.0
+        assert abs(_liq_slip_multiplier(500) - 2.0) < 0.01
+        # Zero or negative → floor to 500 → mult 2.0
+        assert abs(_liq_slip_multiplier(0) - 2.0) < 0.01
+        assert abs(_liq_slip_multiplier(-100) - 2.0) < 0.01
+
+    def test_monotone_decreasing(self):
+        from paper_trader import _liq_slip_multiplier
+        liqs = [500, 1_000, 2_000, 5_000, 10_000, 20_000, 50_000, 100_000]
+        mults = [_liq_slip_multiplier(l) for l in liqs]
+        assert mults == sorted(mults, reverse=True), \
+            f"liq_mult must decrease with liq: {list(zip(liqs, mults))}"
+
+    def test_no_step_discontinuities(self):
+        """The old buckets jumped 54% at liq=5k (2.0→1.3) and 23% at 20k
+        (1.3→1.0). Continuous model: every $100 step changes mult by <0.05."""
+        from paper_trader import _liq_slip_multiplier
+        prev = _liq_slip_multiplier(500)
+        for liq in range(600, 100_000, 100):
+            cur = _liq_slip_multiplier(liq)
+            assert abs(cur - prev) < 0.05, f"discontinuity at ${liq}: {prev:.3f} -> {cur:.3f}"
+            prev = cur
+
+    def test_clamped_range(self):
+        from paper_trader import _liq_slip_multiplier
+        # Nothing should go below 1.0 or above 2.5 regardless of input
+        for liq in [0, 1, 100, 500, 50_000, 1_000_000_000]:
+            m = _liq_slip_multiplier(liq)
+            assert 1.0 <= m <= 2.5
+
+
 class TestDedup24hSliding:
     """Gap #3 regression: sim dedup must honour 24h cooldown like paper/live."""
 

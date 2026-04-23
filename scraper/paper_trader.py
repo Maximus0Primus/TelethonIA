@@ -1553,18 +1553,56 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
     return opened
 
 
+def _liq_slip_multiplier(liq_usd: float) -> float:
+    """v14e.6: continuous log-linear liquidity → slip multiplier.
+
+    Replaces the 3-bucket step function (5k/20k/50k → 2.0/1.3/1.0) with a
+    smooth curve anchored on the same endpoints:
+
+        mult(liq) = 1.0 + 0.5 * max(0, log10(50_000 / max(liq, 500)))
+
+        liq=50k+ → 1.00   (deep pool: paper's 1x slip stays unchanged)
+        liq=20k  → 1.20   (vs old 1.30 — slightly gentler)
+        liq=10k  → 1.35   (between old buckets)
+        liq=5k   → 1.50   (vs old 2.00 — old was over-penalising)
+        liq=2k   → 1.70
+        liq=500  → 2.00   (floor on input, mirror of old <5k behaviour)
+
+    Motivation: the 3-bucket model had two failure modes. (1) discontinuities
+    at 5k and 20k — two trades at liq=4999 and liq=5001 get 54% different slip
+    multiplier, which distorts paired-test comparisons on the band edges.
+    (2) the <5k bucket at 2.0× was calibrated pre-v14e.4, before we removed
+    `min_liquidity_usd` filters — today we actually encounter more sub-5k
+    pools, and 2.0× turned out to be systematically over-penalising on paper
+    vs observed live slip.
+
+    Clamped to [1.0, 2.5] — floor is 1.0 (no benefit below 0, that's captured
+    by the type_bps + GLOBAL_OFFSET already), ceiling is 2.5 in case someone
+    passes 0 or near-zero liq on a bonding curve token (shouldn't happen since
+    BOND_FAST has max_liquidity_usd=3000, but safety rail).
+
+    Volume-volatility component deferred until we have N≥30 per (liq_band ×
+    exit_type × vol_band) cell to calibrate a second term without overfit.
+    """
+    import math
+    safe_liq = max(float(liq_usd or 0), 500.0)
+    if safe_liq >= 50_000:
+        return 1.0
+    mult = 1.0 + 0.5 * math.log10(50_000.0 / safe_liq)
+    return max(1.0, min(2.5, mult))
+
+
 def _dynamic_sell_slip_factor(trade: dict, exit_type: str, base_bps: int = 10,
                               fee_bps: int = SELL_FEE_BPS) -> float:
-    """v144: v138.5 baselines + global −100bps overshoot offset.
+    """v14e.6: continuous liq model. Previous v144 used 3 buckets (5k/20k/50k),
+    now log-linear via `_liq_slip_multiplier`.
 
-    Measured per-pair delta (pnl_live − pnl_paper) on 77 live/paper twins
-    (Apr 13-19, DTRAIL excl.): median +115 bps pump (N=71), -328 non-pump (N=6).
-    Pump/liq/mcap splits all yield the same pooled std (~2920 bps) — no bucket
-    reduces variance meaningfully. Going with a single global offset instead of
-    split until N non-pump ≥ 30 (ETA Apr 25).
+    Base per-pair delta (pnl_live − pnl_paper) on 77 live/paper twins (Apr
+    13-19, DTRAIL excl.): median +115 bps pump (N=71), −328 non-pump (N=6).
+    Pump/liq/mcap splits all yield pooled std ~2920 bps — a single global
+    offset captures the mean, and the liq curve captures the dispersion.
 
     Offset −100 bps applied post-type to shift the overall mean toward zero.
-    Non-pump stays slightly under-slipped (N=6 is noisy, wait for more data).
 
     v14: Ethereum branch uses a separate model (200 bps base MEV slip + gas
     cost amortized over position size). Exit-type nuance doesn't apply — EVM
@@ -1579,13 +1617,7 @@ def _dynamic_sell_slip_factor(trade: dict, exit_type: str, base_bps: int = 10,
         return 1 - total_bps / 10_000
 
     liq_usd = float(trade.get("rt_liquidity_usd") or 50_000)
-
-    if liq_usd < 5_000:
-        liq_mult = 2.0
-    elif liq_usd < 20_000:
-        liq_mult = 1.3
-    else:
-        liq_mult = 1.0
+    liq_mult = _liq_slip_multiplier(liq_usd)
 
     if exit_type == "trail_crash":
         type_bps = 1000

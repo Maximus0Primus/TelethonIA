@@ -1,3 +1,46 @@
+# Pipeline Status — Updated Apr 23, 2026 (v14e.6 — 6 tâches batch)
+
+## v14e.5 + v14e.6 — Apr 23 PM — batch P0-P5
+
+- **P0 ✅** : `NOZEROLIQ_TP200_SL40` retiré de `hybrid_strategy.allocations`
+  (N=33 sur 7j, avg −5.1%, WR 24%, PnL −$85 → seuil N≥30 + pattern perdant
+  atteint). 20 strats actives désormais (12 SOL - 1 + 3 ETH + 3 BSC + 3 BASE).
+- **P1 ✅** : 4 bugs sim-align ($BUZZED/$XBT/$ZACHXBT/$ACHI) déjà résolus par
+  v144.19 (decontamination paper_sim_pnl_pct). Tous les 4 ont maintenant
+  live vs sim <5pp. Replay drift résiduel sur be_stop historiques (ex $WIF2
+  +17.61pp) = divergence code actuel vs paper_sim stocké — résoluble par
+  `scripts/backfill_paper_sim_pnl_pct.py` si besoin.
+- **P2 ✅** : `sim-align-gate.yml` FAIL depuis 5 jours (avg −11.33pp à cause
+  de 2 MEV-pumps). Fix v14e.5: `verify_sim_live_alignment.py` tag `[MEV]`
+  et exclut les rows `tp_hit/tp_hit + live > paper > 0 + |diff| > 50pp` du
+  gate metric (mirror nightly_outlier_monitor v144.19). Bonus: fixé bug
+  parse bash qui double-comptait N (32/66 → 32/33). Manual run post-fix:
+  avg=+1.31pp, within=100% (après exclusion MEV).
+- **P3 ✅** : `docs/known_issues.md` créé (10 règles : HYST/DTRAIL/paired-test/
+  family-slip-mult/MEV-pump/be_stop replay drift/chain gates/LAZY
+  throttling/`_pt_ultra_override` ban/hygiène générale).
+- **P4 ✅** : Audit 4 tables (paper_trades, price_ticks, token_snapshots,
+  tokens) + 0 leak shape vs chain. **Leak résiduelle trouvée** : 11 orphelins
+  bankroll dans `strategy_bankrolls_per_chain['ethereum']` qui étaient des
+  strats Solana (résidu rollback post-cleanup). Nettoyage SQL :
+  `jsonb_object_agg WHERE key LIKE 'ETH_%'` — chaque bucket EVM ne contient
+  maintenant QUE ses strats. Post-fix: SOL 21 / ETH 3 / BSC 3 / BASE 3, purs.
+- **P5 ✅** : Slip model refinement v14e.6. `_dynamic_sell_slip_factor` passe
+  de 3 buckets (5k/20k/50k → 2.0/1.3/1.0) à courbe log-continue
+  `1.0 + 0.5 × log10(50_000 / max(liq, 500))`. Motivation: éliminer les
+  discontinuités 54% à 5k / 23% à 20k qui biaisaient les paired-tests sur
+  les bords. Valeurs: 500→2.00, 5k→1.50 (vs 2.00 ancien, plus doux), 10k→1.35,
+  20k→1.20, 50k+→1.00. Clamped [1.0, 2.5]. 4 tests dédiés (anchors, monotone,
+  continuity, clamped) + compatibilité EVM branches préservée.
+
+**Reste ouvert pour plus tard** :
+- Volume-volatility component dans slip model (P5 v2) : quand N≥30 par
+  (liq_band × exit_type × vol_band).
+- Legacy `strategy_bankrolls` flat dict (mirror) → removal au prochain reset
+  bankroll. Aujourd'hui kept for backward compat.
+
+---
+
 # Pipeline Status — Updated Apr 23, 2026 (v14e.4 — full multi-chain paper)
 
 ## État actuel — snapshot Apr 23 18:00 UTC
