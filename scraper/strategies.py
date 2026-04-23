@@ -1138,31 +1138,21 @@ STRATEGY_FILTERS["BE25_TP80_SL30_S35"] = {"min_rt_score": 35}
 STRATEGIES["ETH_TP100_SL50"] = [
     {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.50, "horizon_min": 240, "label": "main"},
 ]
-STRATEGY_FILTERS["ETH_TP100_SL50"] = {
-    "chain": "ethereum",
-    "min_liquidity_usd": 25_000,
-}
+# v14e.4: min_liquidity_usd removed for Phase 1 — let fee model (gas + dynamic
+# slippage) encode the real cost on shallow pools instead of pre-filtering.
+# Same rationale for BSC/Base below. The chain gate is the only hard filter.
+STRATEGY_FILTERS["ETH_TP100_SL50"] = {"chain": "ethereum"}
 
-# 2) ETH_TP80_SL40_T2H — conservative. Shorter horizon, tighter SL.
 STRATEGIES["ETH_TP80_SL40_T2H"] = [
     {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.60, "horizon_min": 120, "label": "main"},
 ]
-STRATEGY_FILTERS["ETH_TP80_SL40_T2H"] = {
-    "chain": "ethereum",
-    "min_liquidity_usd": 25_000,
-}
+STRATEGY_FILTERS["ETH_TP80_SL40_T2H"] = {"chain": "ethereum"}
 
-# 3) ETH_BE50_TP150_SL50 — breakeven protection at +50%, TP +150%.
-#    For KOLs whose ETH calls tend to 2-3x. BE activation prevents round-trip
-#    on tokens that pump then dump.
 STRATEGIES["ETH_BE50_TP150_SL50"] = [
     {"pct": 1.0, "tp_mult": 2.50, "sl_mult": 0.50, "horizon_min": 240,
      "be_activation": 0.50, "label": "main"},
 ]
-STRATEGY_FILTERS["ETH_BE50_TP150_SL50"] = {
-    "chain": "ethereum",
-    "min_liquidity_usd": 25_000,
-}
+STRATEGY_FILTERS["ETH_BE50_TP150_SL50"] = {"chain": "ethereum"}
 
 # ============================================================
 # v14e — BSC L1 paper strats (Phase 1 shadow, zero capital).
@@ -1177,27 +1167,18 @@ STRATEGY_FILTERS["ETH_BE50_TP150_SL50"] = {
 STRATEGIES["BSC_TP100_SL50"] = [
     {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.50, "horizon_min": 240, "label": "main"},
 ]
-STRATEGY_FILTERS["BSC_TP100_SL50"] = {
-    "chain": "bsc",
-    "min_liquidity_usd": 20_000,
-}
+STRATEGY_FILTERS["BSC_TP100_SL50"] = {"chain": "bsc"}
 
 STRATEGIES["BSC_TP80_SL40_T2H"] = [
     {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.60, "horizon_min": 120, "label": "main"},
 ]
-STRATEGY_FILTERS["BSC_TP80_SL40_T2H"] = {
-    "chain": "bsc",
-    "min_liquidity_usd": 20_000,
-}
+STRATEGY_FILTERS["BSC_TP80_SL40_T2H"] = {"chain": "bsc"}
 
 STRATEGIES["BSC_BE50_TP150_SL50"] = [
     {"pct": 1.0, "tp_mult": 2.50, "sl_mult": 0.50, "horizon_min": 240,
      "be_activation": 0.50, "label": "main"},
 ]
-STRATEGY_FILTERS["BSC_BE50_TP150_SL50"] = {
-    "chain": "bsc",
-    "min_liquidity_usd": 20_000,
-}
+STRATEGY_FILTERS["BSC_BE50_TP150_SL50"] = {"chain": "bsc"}
 
 # ============================================================
 # v14e — Base L2 paper strats (Phase 1 shadow, zero capital).
@@ -1209,27 +1190,18 @@ STRATEGY_FILTERS["BSC_BE50_TP150_SL50"] = {
 STRATEGIES["BASE_TP100_SL50"] = [
     {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.50, "horizon_min": 240, "label": "main"},
 ]
-STRATEGY_FILTERS["BASE_TP100_SL50"] = {
-    "chain": "base",
-    "min_liquidity_usd": 15_000,
-}
+STRATEGY_FILTERS["BASE_TP100_SL50"] = {"chain": "base"}
 
 STRATEGIES["BASE_TP80_SL40_T2H"] = [
     {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.60, "horizon_min": 120, "label": "main"},
 ]
-STRATEGY_FILTERS["BASE_TP80_SL40_T2H"] = {
-    "chain": "base",
-    "min_liquidity_usd": 15_000,
-}
+STRATEGY_FILTERS["BASE_TP80_SL40_T2H"] = {"chain": "base"}
 
 STRATEGIES["BASE_BE50_TP150_SL50"] = [
     {"pct": 1.0, "tp_mult": 2.50, "sl_mult": 0.50, "horizon_min": 240,
      "be_activation": 0.50, "label": "main"},
 ]
-STRATEGY_FILTERS["BASE_BE50_TP150_SL50"] = {
-    "chain": "base",
-    "min_liquidity_usd": 15_000,
-}
+STRATEGY_FILTERS["BASE_BE50_TP150_SL50"] = {"chain": "base"}
 
 
 # ---------------------------------------------------------------------------

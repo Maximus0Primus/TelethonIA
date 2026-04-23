@@ -101,14 +101,16 @@ class TestStrategyFilterChainGate:
         }
         assert _passes_strategy_filter(eth_token, "ETH_TP100_SL50") is True
 
-    def test_eth_strategy_rejects_low_liquidity(self):
+    def test_eth_strategy_accepts_low_liquidity_after_v14e4(self):
+        """v14e.4: min_liquidity_usd removed from EVM strats — fee model (gas +
+        dynamic slippage) now encodes the cost of shallow pools instead of a
+        hard pre-gate. Phase 1 wants the full KOL call distribution."""
         from paper_trader import _passes_strategy_filter
         eth_token = {
             "symbol": "$ETHTOK", "chain": "ethereum",
             "score": 50, "market_cap": 5_000_000, "_rt_liquidity_usd": 10_000,
         }
-        # min_liquidity_usd = 25_000 on ETH strats
-        assert _passes_strategy_filter(eth_token, "ETH_TP100_SL50") is False
+        assert _passes_strategy_filter(eth_token, "ETH_TP100_SL50") is True
 
     def test_bond_fast_rejects_eth_token(self):
         """BOND_FAST got chain=solana guard in v14 — must reject ETH tokens
