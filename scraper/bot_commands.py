@@ -46,6 +46,33 @@ _active_strategies_cache: list[str] = []
 _active_strategies_ts: float = 0
 
 
+def _parse_all_flag(args: str) -> tuple[str, bool]:
+    """v14e.9: pop 'all' / 'toutes' keyword from args. True = opt-in to show
+    retired (non-allocated) strategies in bankroll/summary views."""
+    if not args:
+        return "", False
+    parts = args.split()
+    for i, p in enumerate(parts):
+        if p.lower() in ("all", "toutes", "retired", "archive"):
+            return " ".join(parts[:i] + parts[i+1:]).strip(), True
+    return args, False
+
+
+def _active_strategy_set(sb) -> set[str]:
+    """v14e.9: set of currently-allocated strategy names across ALL chains.
+    Used to filter out retired strats from /bank /today bankroll displays.
+    Pulls from scoring_config.rt_trade_config.hybrid_strategy.allocations —
+    the single source of truth for 'what's running right now'."""
+    try:
+        result = sb.table("scoring_config").select("rt_trade_config").eq("id", 1).execute()
+        if result.data:
+            hybrid = (result.data[0].get("rt_trade_config") or {}).get("hybrid_strategy", {})
+            return set((hybrid.get("allocations") or {}).keys())
+    except Exception:
+        pass
+    return set()
+
+
 def _get_active_strategies(sb) -> list[str]:
     """Load active strategies from scoring_config. Cached 5min."""
     global _active_strategies_cache, _active_strategies_ts
@@ -310,13 +337,18 @@ def _fmt_stats(d: dict, label: str) -> str:
 # ── /bank ──
 
 def _handle_bank(sb, args: str) -> str:
-    """v14e: /bank [chain] — Bankroll groupé par chain.
-    Sans argument: montre les 4 chains côte à côte (skip celles vides).
+    """v14e: /bank [chain] [all] — Bankroll groupé par chain.
+    Par défaut: n'affiche que les stratégies actuellement ALLOUÉES (dans
+    hybrid_strategy.allocations). Ajouter 'all' pour voir aussi les retraités
+    qui gardent un bankroll historique.
+    Sans chain: les 4 chains côte à côte (skip celles vides).
     Avec chain: détail par stratégie de la chain demandée."""
     from paper_trader import get_open_portfolio
     from safe_scraper import _rt_load_bankroll
 
-    _, chain_filter = _parse_chain_args(args)
+    args2, chain_filter = _parse_chain_args(args)
+    _, show_all = _parse_all_flag(args2)
+    active = _active_strategy_set(sb)
 
     try:
         bk = _rt_load_bankroll()
@@ -337,22 +369,32 @@ def _handle_bank(sb, args: str) -> str:
     sections: list[str] = []
     grand_bal = 0.0
     grand_pnl = 0.0
+    retired_hidden = 0
     for c in ("solana", "ethereum", "bsc", "base"):
         if chain_filter and c != chain_filter:
             continue
         strat_bals = per_chain.get(c) or {}
         if not strat_bals:
             continue
+        # v14e.9: filter to active (hybrid allocations) unless 'all'.
+        if show_all:
+            visible = strat_bals
+        else:
+            visible = {s: d for s, d in strat_bals.items() if s in active}
+            retired_hidden += len(strat_bals) - len(visible)
+        if not visible:
+            continue
         c_bal = 0.0
         c_pnl = 0.0
         lines = []
-        for sname, sdata in sorted(strat_bals.items()):
+        for sname, sdata in sorted(visible.items()):
             bal = float(sdata.get("balance", 500))
             pnl = float(sdata.get("pnl", 0))
             trades = int(sdata.get("trades", 0))
             short = _short_strat(sname)
             emoji = "📈" if pnl >= 0 else "📉"
-            lines.append(f"  {emoji} <b>{short}</b>: ${bal:.0f} ({pnl:+.0f}) | {trades}t")
+            retired_tag = "" if sname in active else " <i>(retirée)</i>"
+            lines.append(f"  {emoji} <b>{short}</b>{retired_tag}: ${bal:.0f} ({pnl:+.0f}) | {trades}t")
             c_bal += bal
             c_pnl += pnl
         sections.append(
@@ -366,16 +408,20 @@ def _handle_bank(sb, args: str) -> str:
             return f"📭 Aucune stratégie active sur {_chain_tag(chain_filter)} {chain_filter.upper()}"
         grand_bal = float(bk.get("current_balance", 0))
         grand_pnl = float(bk.get("total_pnl", 0))
-        sections.append("  Aucune stratégie")
+        sections.append("  Aucune stratégie active")
 
     available = grand_bal - deployed
     header = f"💰 <b>BANKROLL{f' — {_chain_tag(chain_filter)} {chain_filter.upper()}' if chain_filter else ''}</b>"
+    footer_hint = ""
+    if retired_hidden and not show_all:
+        footer_hint = f"\n<i>💡 {retired_hidden} stratégie(s) retirée(s) masquée(s) — /bank all pour voir</i>"
     return (
         f"{header}\n\n"
         + "\n\n".join(sections)
         + f"\n\n💵 Total: <b>${grand_bal:.0f}</b> ({grand_pnl:+.0f})\n"
         f"📦 Déployé: ${deployed:.0f} ({n_open} pos)"
         f" | Dispo: ${available:.0f}"
+        + footer_hint
     )
 
 
@@ -703,17 +749,19 @@ def _handle_shadow(sb, args: str) -> str:
 # ── /today ──
 
 def _handle_today(sb, args: str) -> str:
-    """v14e: /today [chain] — Résumé du jour avec breakdown par chain."""
+    """v14e: /today [chain] — Résumé du jour avec breakdown par chain.
+    v14e.9: le bloc bankroll ne totalise que les strats ACTIVES (allouées)."""
     from safe_scraper import _rt_load_bankroll
 
     _, chain_filter = _parse_chain_args(args)
+    active = _active_strategy_set(sb)
 
     # Trades closed today (respect chain filter)
     trades = _query_trades(sb, hours=24, chain=chain_filter)
     stats = _compute_stats(trades)
     kols_today = set(t.get("kol_group", "") for t in trades if t.get("kol_group"))
 
-    # Bankroll per-chain
+    # Bankroll per-chain — SEULEMENT strats actives (pas le legacy).
     try:
         bk = _rt_load_bankroll()
         per_chain = bk.get("strategy_bankrolls_per_chain") or {}
@@ -732,16 +780,19 @@ def _handle_today(sb, args: str) -> str:
     pnl_emoji = "📈" if stats["pnl"] >= 0 else "📉"
 
     # Bankroll rendering: per-chain rollup (total per chain).
+    # v14e.9: n'agrège que les strats ACTIVES — une strat retirée n'apparaît
+    # ni dans le total ni dans le breakdown, même si son entry bankroll existe.
     chain_parts = []
     grand_bal = 0.0
     for c in ("solana", "ethereum", "bsc", "base"):
         if chain_filter and c != chain_filter:
             continue
         strat_bals = per_chain.get(c) or {}
-        if not strat_bals:
+        active_bals = {s: d for s, d in strat_bals.items() if s in active}
+        if not active_bals:
             continue
-        c_bal = sum(float(sd.get("balance", 500)) for sd in strat_bals.values())
-        c_pnl = sum(float(sd.get("pnl", 0)) for sd in strat_bals.values())
+        c_bal = sum(float(sd.get("balance", 500)) for sd in active_bals.values())
+        c_pnl = sum(float(sd.get("pnl", 0)) for sd in active_bals.values())
         e = "📈" if c_pnl >= 0 else "📉"
         chain_parts.append(f"  {e} {_chain_tag(c)} <b>{c.upper()}</b>: ${c_bal:.0f} ({c_pnl:+.0f})")
         grand_bal += c_bal
@@ -1738,9 +1789,9 @@ COMMANDS = {
 HELP_TEXT = (
     "🤖 <b>Commandes</b>\n\n"
     "<b>Portfolio:</b>\n"
-    "  /bank [chain] — Bankroll per-chain\n"
+    "  /bank [chain] [all] — Bankroll per-chain (actives only, 'all' = aussi retirées)\n"
     "  /pos [chain] — Positions ouvertes (paper)\n"
-    "  /today [chain] — Résumé du jour\n"
+    "  /today [chain] — Résumé du jour (bankroll = actives only)\n"
     "\n<b>Trades:</b>\n"
     "  /trades [N] [chain] [strat] — Derniers trades\n"
     "  /best [chain] [strat] — Meilleur trade\n"
