@@ -223,12 +223,11 @@ GROUPS_DATA = {
     "batman_gem": {"conviction": 7, "tier": "A"},
     "venom_gambles": {"conviction": 7, "tier": "A"},
     "ryoshigamble": {"conviction": 7, "tier": "A"},
-    # v14e.14c: ryoshikushama removed — Telegram personal user account, not a
-    # channel (Ryoshi 耀西). Telethon can't join User entities. Confirmed via
-    # get_entity probe: kind=User, broadcast=0, megagroup=0. ryoshidegen does
-    # not exist. ryoshigamble (already kept) is the correct channel. Other
-    # candidates `ryoshi_gamble` + `ryoshigambles` also exist as channels —
-    # can be added later if the user wants broader Ryoshi coverage.
+    # v14e.14c: ryoshikushama dropped (Telegram user, not a channel).
+    # v14e.14d: ryoshikdegen added — Channel "Ryoshi Degen" (broadcast=1),
+    # the correct user-intended target. ryoshidegen doesn't exist, but
+    # ryoshikdegen / ryoshi_degen both resolve to this same channel title.
+    "ryoshikdegen": {"conviction": 7, "tier": "A"},
     "mad_apes_gambles": {"conviction": 7, "tier": "A"},
     "maestrodegen": {"conviction": 7, "tier": "A"},
     "bat_gamble": {"conviction": 7, "tier": "A"},  # re-added v14e.14 (removed v108)

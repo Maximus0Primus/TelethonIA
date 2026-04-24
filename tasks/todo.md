@@ -1,3 +1,47 @@
+# Pipeline Status — Updated Apr 24, 2026 (v14e.14d — ryoshikdegen + skip-audit reminder)
+
+## 🔔 REMINDER — À faire le dimanche 26 Apr 2026 ~14:30 UTC (48h post-fix)
+
+**Audit manuel des raisons de skip RT pipeline** (Option C choisie par l'user).
+
+Le remote agent a été rejeté car il ne peut pas SSH le VPS ni lire
+`scraper/.env` local. Option C = tu le lances manuellement.
+
+Commande à lancer (copie-colle) :
+
+```bash
+# 1) Pull + aggregate logs VPS
+ssh vps "journalctl -u kol-scraper --since '48h ago' --no-pager" > /tmp/kol_48h.log
+
+# 2) Count skip reasons
+grep -oP 'RT SKIP: .+?— \S+' /tmp/kol_48h.log | sort | uniq -c | sort -rn | head -20
+grep -cE 'RT detect:' /tmp/kol_48h.log         # denominator
+grep -cE 'RT: unmatched chat_id' /tmp/kol_48h.log
+grep -cE 'RT LIVE SKIP \(kol blacklist' /tmp/kol_48h.log  # v14e.14 fire count
+grep -cE '\$WETH' /tmp/kol_48h.log             # should be ~0 post-v14e.15
+```
+
+Ou lance Claude Code à ce moment avec : "fais l'audit des raisons de skip RT
+sur les 48 dernières heures de logs VPS + cross-ref avec Supabase (calls →
+detects → skips → trades funnel)".
+
+Objectif : identifier si le taux 45% de CAs non-enrich baisse post-v14e.15
+(WETH exclu). Cibler la plus grosse catégorie de skip restante pour next fix.
+
+---
+
+## v14e.14d — Apr 24 — ryoshikdegen (correct channel)
+
+`ryoshikushama` retiré précédemment (user, pas channel). Après probe
+Telegram : **`ryoshikdegen` = Channel "Ryoshi Degen" (broadcast=1)**, ajouté
+en remplacement. `ryoshidegen` (sans le "k") n'existe pas.
+
+**Blacklist live finale (9 KOLs)** :
+`bagcalls, bat_gamble, batman_gem, mad_apes_gambles, maestrodegen,
+reapergamble, ryoshigamble, ryoshikdegen, venom_gambles`.
+
+---
+
 # Pipeline Status — Updated Apr 24, 2026 (v14e.14b + v14e.15 — trim blacklist + fix WETH noise)
 
 ## v14e.15 — Apr 24 PM — WETH/wrapped tokens excluded (enrichment noise fix)
