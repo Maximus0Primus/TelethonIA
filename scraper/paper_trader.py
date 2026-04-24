@@ -1661,11 +1661,20 @@ def _should_evaluate_exit(trade: dict, now: datetime) -> bool:
     get the same throttling as mains — true behavioral A/B.
     v144.6: live_sync shadows (v142E paper mirror of a live trade) bypass LAZY —
     their whole purpose is 1:1 cadence parity with the live_trader, which does
-    not apply LAZY throttling. Fixes 4 nightly_outlier_monitor sync=True flags."""
+    not apply LAZY throttling. Fixes 4 nightly_outlier_monitor sync=True flags.
+    v144.20: live trades (source=rt_live) ALSO bypass LAZY. v144.6 assumed
+    live_trader already bypassed, but it calls _evaluate_trade_exit which
+    re-enters this throttle, so live mains WERE throttled while their shadow
+    mirrors (live_sync) weren't — asymmetric A/B. A/B on 14d/75 LAZY live
+    trades showed bypass impact = -$0.03 total (pure noise), so the throttle
+    was not paying; keeping it just broke sim↔paper↔live coherence. After
+    this fix: config `polling_sec=30` is honored end-to-end."""
     strat = trade.get("strategy", "")
     if strat not in LAZY_STRATEGIES:
         return True
     if trade.get("entry_source") == "live_sync":
+        return True
+    if trade.get("source") == "rt_live":
         return True
 
     trade_id = str(trade.get("id", ""))

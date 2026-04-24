@@ -133,6 +133,57 @@ class TestExitLogic:
         assert elapsed < trade["horizon_minutes"]
 
 
+class TestShouldEvaluateExitLazyBypass:
+    """v144.20: live (rt_live) and live_sync bypass LAZY throttling.
+
+    Paper mains keep LAZY throttle (v144.3 invariant — behavioral A/B baseline).
+    Validated by A/B on 14d / 75 LAZY live trades: bypass impact = -$0.03 total
+    (noise). Throttle wasn't paying, only breaking sim↔paper↔live coherence.
+    """
+
+    def _trade(self, **overrides):
+        from datetime import datetime, timezone
+        base = {
+            "id": 999,
+            "strategy": "FAST_TP80_SL25",  # confirmed in LAZY_STRATEGIES
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "source": "rt",
+            "entry_source": "ultra",
+        }
+        base.update(overrides)
+        return base
+
+    def test_lazy_strategy_throttles_plain_paper_main(self):
+        from datetime import datetime, timezone
+        from paper_trader import _should_evaluate_exit, _last_eval_ts, LAZY_STRATEGIES
+        assert "FAST_TP80_SL25" in LAZY_STRATEGIES
+        tr = self._trade(id=1001)
+        _last_eval_ts.pop("1001", None)
+        now = datetime.now(timezone.utc)
+        assert _should_evaluate_exit(tr, now) is True  # first eval always allowed
+        assert _should_evaluate_exit(tr, now) is False  # throttled (paper main)
+
+    def test_lazy_strategy_bypassed_for_live_sync_shadow(self):
+        from datetime import datetime, timezone
+        from paper_trader import _should_evaluate_exit, _last_eval_ts
+        tr = self._trade(id=1002, entry_source="live_sync")
+        _last_eval_ts.pop("1002", None)
+        now = datetime.now(timezone.utc)
+        assert _should_evaluate_exit(tr, now) is True
+        assert _should_evaluate_exit(tr, now) is True  # never throttled
+
+    def test_lazy_strategy_bypassed_for_rt_live_trade(self):
+        """Live trades must bypass LAZY to stay symmetric with their live_sync
+        shadow mirror. A/B showed throttle = noise in $ terms."""
+        from datetime import datetime, timezone
+        from paper_trader import _should_evaluate_exit, _last_eval_ts
+        tr = self._trade(id=1003, source="rt_live", entry_source="ultra")
+        _last_eval_ts.pop("1003", None)
+        now = datetime.now(timezone.utc)
+        assert _should_evaluate_exit(tr, now) is True
+        assert _should_evaluate_exit(tr, now) is True  # never throttled
+
+
 class TestSlippage:
     def test_buy_slippage_increases_entry_price(self):
         """Entry price should be adjusted upward by buy slippage + fees."""

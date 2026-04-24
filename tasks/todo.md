@@ -1,3 +1,35 @@
+# Pipeline Status — Updated Apr 24, 2026 (v144.20 — fix LAZY live/shadow asymmetry)
+
+## v144.20 — Apr 24 — alignement LAZY throttle live ↔ shadow
+
+**Alerte reçue** : `PAPER-LIVE OUTLIER (sync=True)` — 7 outliers |L−P|>10pp sur 33 pairs, pire : $AINI / FAST_TP80_SL25 Δ=+59.89pp.
+
+**Root cause** (non post-v143.5 bug) : asymétrie LAZY throttle.
+- `paper_trader._should_evaluate_exit` throttle LAZY strats à 1 eval/180s (v118).
+- v144.6 a fait bypass LAZY pour paper shadows `entry_source=live_sync`.
+- MAIS live trades (`source=rt_live`) passent par le même code → **étaient throttled** contrairement au comment v144.6.
+- Résultat : shadow réactif à chaque wick Jupiter, live skippait 180s → divergence structurelle.
+- Exemple $AINI : Jupiter wick à −25.04% à 22:28:56 sur pump.fun liq $75k. Shadow SL (bypass LAZY), live skippé 3s avant la prochaine eval (177s/180s), puis rebond à +32%.
+
+**A/B 14j / 75 LAZY live trades** (`scripts/_ab_lazy_bypass_live.py`) :
+- Impact total bypass = **−$0.03** (noise pur).
+- FAST_TP50_SL30 : +$1.67 (+116%) avec bypass.
+- FAST_TP80_SL25 : −$1.69 (−105%) avec bypass. **MAIS N=16 sur 48h de marché bear (Apr 23 = −14.71% avg / 21% WR) — verdict prématuré**.
+- Les deux strats se compensent exactement au total.
+
+**Fix appliqué** : `paper_trader.py:1672-1673` — live `rt_live` bypass LAZY comme les shadows. Paper mains gardent le throttle (A/B baseline v144.3 inchangée).
+
+**Cleanup** :
+- `nightly_outlier_monitor.py` : retour code propre (pas de filtre hack LAZY — le fix règle l'asymétrie à la racine).
+- `tests/test_paper_trader.py::TestShouldEvaluateExitLazyBypass` : 3 tests régression.
+- Les 7 outliers historiques Apr 22-23 vont rester visibles ~48h le temps que la fenêtre 48h roule. Nouveaux trades post-deploy : zéro asymétrie LAZY.
+
+**TODO dans 7-10j** : re-run `_ab_lazy_bypass_live.py` avec N≥30 FAST_TP80 sur fenêtre marché mixte. Trancher garder/killer. Même règle que la memory pour shadows (N≥30 paired-test).
+
+**Allocs live inchangées** : décision explicite — pas de kill FAST_TP80 sur N=16 + 48h bear. Re-score post-fix sur data solide.
+
+---
+
 # Pipeline Status — Updated Apr 23, 2026 (v14e.11 — audit paper + refresh)
 
 ## v14e.11 — Apr 23 PM — audit paper mains + retrait 3 perdantes
