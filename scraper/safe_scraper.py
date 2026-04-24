@@ -223,11 +223,12 @@ GROUPS_DATA = {
     "batman_gem": {"conviction": 7, "tier": "A"},
     "venom_gambles": {"conviction": 7, "tier": "A"},
     "ryoshigamble": {"conviction": 7, "tier": "A"},
-    # ryoshikushama: Telegram user account (not a channel/group). Telethon join
-    # returned `Cannot cast InputPeerUser to any kind of InputChannel` on Apr 24.
-    # Keep entry for potential symbol-based mentions picked up via other groups'
-    # messages, but scraper can't join his personal chat directly.
-    "ryoshikushama": {"conviction": 7, "tier": "A"},
+    # v14e.14c: ryoshikushama removed — Telegram personal user account, not a
+    # channel (Ryoshi 耀西). Telethon can't join User entities. Confirmed via
+    # get_entity probe: kind=User, broadcast=0, megagroup=0. ryoshidegen does
+    # not exist. ryoshigamble (already kept) is the correct channel. Other
+    # candidates `ryoshi_gamble` + `ryoshigambles` also exist as channels —
+    # can be added later if the user wants broader Ryoshi coverage.
     "mad_apes_gambles": {"conviction": 7, "tier": "A"},
     "maestrodegen": {"conviction": 7, "tier": "A"},
     "bat_gamble": {"conviction": 7, "tier": "A"},  # re-added v14e.14 (removed v108)
