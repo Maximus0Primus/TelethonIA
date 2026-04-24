@@ -68,6 +68,11 @@ EXCLUDED_TOKENS = {
     "USD", "USDT", "USDC", "BUSD", "DAI", "TUSD",
     # L1/L2 blue chips (not memecoins — these have their own markets)
     "SOL", "ETH", "BTC", "BNB", "XRP", "ADA", "DOT", "AVAX", "MATIC",
+    # v14e.15: wrapped L1 tokens. KOLs post Uniswap/Pancake/Raydium swap links
+    # that contain the wrapped contract address (e.g. 0xc02aaa... = WETH).
+    # ETH_CA_REGEX catches them as "$WETH calls" — 87 fake callers / 25 groups
+    # on a single week (Apr 17-24). These tokens never enrich as memecoins.
+    "WETH", "WBTC", "WSOL", "WBNB", "WMATIC", "WAVAX", "WFTM",
     # Major Solana DEX/protocol tokens — legit projects, not memecoins.
     # $ORCA leaked max_price_24h=$83 vs price_at_snapshot<$1 (SOL-scale OHLCV bleed).
     "ORCA", "JUP", "RAY", "SRM", "MNGO", "PYTH", "JTO", "KMNO", "DRIFT",

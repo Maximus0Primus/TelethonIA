@@ -1,3 +1,54 @@
+# Pipeline Status — Updated Apr 24, 2026 (v14e.14b + v14e.15 — trim blacklist + fix WETH noise)
+
+## v14e.15 — Apr 24 PM — WETH/wrapped tokens excluded (enrichment noise fix)
+
+**Signal découvert** : **45.1% des tokens calls ne sont jamais enrich** sur 7j
+(200 CAs manqués sur 443, cf. diagnostic AIB). Top cas : **$WETH, 87 callers
+sur 25 groupes** — c'est `0xc02aaa39b223fe8d0a0e5c4f27ea` = le contrat
+Wrapped ETH natif, extrait à tort quand les KOLs postent des liens Uniswap.
+
+**Fix immédiat** : ajouté `WETH, WBTC, WSOL, WBNB, WMATIC, WAVAX, WFTM` à
+`EXCLUDED_TOKENS` dans `pipeline.py`. L'extraction via `ETH_CA_REGEX` va
+toujours matcher le CA mais `_resolve_ca_to_symbol` retourne "WETH" qui est
+maintenant filtré avant d'être ajouté à `tokens`. Économie estimée : ~87
+faux callers/semaine = 12/jour de bruit retiré.
+
+**Reste à investiguer** (NON FAIT — nécessite trace logs VPS) :
+- Les 113 autres CAs missing avec ≥3 callers. Causes possibles :
+  - Pump.fun bonding curve pre-migration (DS pas indexé) — comme $AIB.
+  - DS API failure ponctuel (rate limit, 500).
+  - Token rug avant enrichment (liquidité < $500).
+- Cf. top manquants : $ELIEN (70), $ASTEROID (35, EVM), $FLORK (21),
+  $AIB (18), $AYYLIEN (16), $CRYPTOCURRENCY (14), $BRITAIN (14).
+- **Action suggérée** : activer DEBUG log dans `_rt_open_trades` pour tracer
+  où exactement chaque call skip (no data / low_liq / low_score / dedup). Sur
+  24h on saura où vont les 12-30 calls/jour perdus.
+
+---
+
+## v14e.14b — Apr 24 PM — trim blacklist (retirer KOLs déjà présents)
+
+Per-user : `TheReaperGems` était déjà dans `GROUPS_DATA` avant v14e.14 donc
+était déjà live-eligible implicitement. Retiré de `live_trading.kol_blacklist`.
+Variants `thereapergems` retiré aussi (aucun risque de mismatch casse).
+
+**Blacklist live finale (9 KOLs vraiment nouveaux)** :
+`bagcalls, bat_gamble, batman_gem, mad_apes_gambles, maestrodegen,
+reapergamble, ryoshigamble, ryoshikushama, venom_gambles`
+
+## v14e.14 join status
+
+- **99 groupes rejoints** (vs 91 avant) → +8 succès.
+- **1 fail : `ryoshikushama`** — c'est un **user individuel Telegram**, pas un
+  channel. Erreur : `Cannot cast InputPeerUser to any kind of InputChannel`.
+  Telethon ne peut pas join un user comme un channel. Action user requise :
+  soit donner un lien vers le channel où cet user poste ses calls, soit
+  retirer de la liste. Pour l'instant gardé dans `GROUPS_DATA` avec commentaire
+  — le symbole peut potentiellement apparaître via d'autres groupes qui
+  forward ses messages.
+
+---
+
 # Pipeline Status — Updated Apr 24, 2026 (v14e.14 — 10 KOLs paper-only test)
 
 ## v14e.14 — Apr 24 — 10 nouveaux KOLs paper+shadow, exclus du live

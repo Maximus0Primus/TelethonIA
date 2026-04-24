@@ -223,6 +223,10 @@ GROUPS_DATA = {
     "batman_gem": {"conviction": 7, "tier": "A"},
     "venom_gambles": {"conviction": 7, "tier": "A"},
     "ryoshigamble": {"conviction": 7, "tier": "A"},
+    # ryoshikushama: Telegram user account (not a channel/group). Telethon join
+    # returned `Cannot cast InputPeerUser to any kind of InputChannel` on Apr 24.
+    # Keep entry for potential symbol-based mentions picked up via other groups'
+    # messages, but scraper can't join his personal chat directly.
     "ryoshikushama": {"conviction": 7, "tier": "A"},
     "mad_apes_gambles": {"conviction": 7, "tier": "A"},
     "maestrodegen": {"conviction": 7, "tier": "A"},

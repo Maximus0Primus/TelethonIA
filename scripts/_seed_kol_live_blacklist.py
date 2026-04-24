@@ -26,8 +26,9 @@ NEW_KOLS = [
     "mad_apes_gambles",
     "maestrodegen",
     "bat_gamble",
-    "TheReaperGems",  # already in GROUPS_DATA — blacklist applies too (Telegram case-insensitive)
-    "thereapergems",  # lowercase variant in case msg author resolved differently
+    # v14e.14b: TheReaperGems + thereapergems removed per user — already in
+    # GROUPS_DATA before v14e.14, should remain live-eligible. Only the truly
+    # new KOLs (9 entries below) are blacklisted from live.
     "reapergamble",
     "bagcalls",
 ]
