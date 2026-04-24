@@ -1,4 +1,31 @@
-# Pipeline Status — Updated Apr 24, 2026 (v144.20 — fix LAZY live/shadow asymmetry)
+# Pipeline Status — Updated Apr 24, 2026 (v144.20 + ETH first blood)
+
+## ETH Phase 1 — premiers trades (Apr 23-24)
+
+**12 paper trades ETH** sur 4 tokens, 28h (first blood depuis v14b Apr 23) :
+
+| Token | Time | BE50_TP150_SL50 | TP80_T2H | TP100_SL50 |
+|---|---|---|---|---|
+| $ASTEROID | 23/19:59 | sl_hit −$106 | **tp_hit +$139** | **tp_hit +$177** |
+| $GENZ | 23/22:12 | sl_hit −$106 | sl_hit −$87 | sl_hit −$106 |
+| $CHINESEASTEROID | 23/23:57 | timeout −$12 | timeout −$14 | timeout −$12 |
+| $EIB | 24/00:21 | sl_hit −$106 | sl_hit −$87 | sl_hit −$106 |
+
+- **Total −$525** (paper, zéro capital réel).
+- **WR 3/12 = 25%** (vs thèse Phase 2 ≥65%).
+- **Par strat** : TP100 −$47, TP80 −$48, BE50 −$430.
+- **SL 50% full-slip = −53% net** sur position $200 (fee model $15 gas + 200 bps MEV + slip). Chaque trade perdant mange 53%.
+
+**Signaux précoces (N=12, trop petit pour trancher)** :
+- BE50_TP150_SL50 n'a jamais activé le BE (peak < +50% sur les 4 tokens) → joue juste SL 50%. À watcher si N≥30 continue ce pattern, retirer.
+- 3/4 tokens full dump → sélection KOL EVM à questionner. Les KOLs Solana postent parfois des 0x mais pas pour autant leurs meilleurs calls.
+- $ASTEROID = seule win → pump réel ~2x. R:R d'un TP100 fire = +88% net après frais = compense ~1.7 SL.
+
+**Règle Phase 2** (v14b) : décision à N≥50 / 14j, seuils WR ≥65% + EV net ≥+10%/trade. **ETA Mai 07**. On est à N=12 / J+1. Trop tôt pour kill — mais si le pattern 25% WR persiste à N=30, Phase 2 sera no-go mécanique.
+
+**Pas d'action immédiate** : laisser tourner, monitorer. Alert si N=30 avec WR < 40% → review précoce + éventuelle pause allocations ETH.
+
+---
 
 ## v144.20 — Apr 24 — alignement LAZY throttle live ↔ shadow
 
