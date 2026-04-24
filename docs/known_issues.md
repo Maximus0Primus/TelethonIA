@@ -153,14 +153,30 @@ le problème.
 
 ---
 
-## 9. LAZY throttling — règle v144.6
+## 9. LAZY throttling — règles v144.6 + v144.20
 
-**Règle :** les paper rows `entry_source="live_sync"` bypass le LAZY
-throttling. Elles doivent mirror la cadence live (30s) pour que le
-shadow-sync A/B reste valide. Shadows A/B purs gardent LAZY.
+**Règle :** le LAZY throttle (180s FAST window, 600s SLOW window) doit être
+bypassé pour DEUX populations :
 
-Ne pas revert ce bypass. Si tu vois des outliers `sync=True` avec +20pp drift,
-vérifier que le bypass est bien en place dans `_should_evaluate_exit`.
+1. **paper rows `entry_source="live_sync"`** (v144.6) — shadow-sync mirror,
+   doit avoir la cadence live (30s).
+2. **live rows `source="rt_live"`** (v144.20) — les live mains passent par
+   `_evaluate_trade_exit` → `_should_evaluate_exit` comme les paper, donc
+   étaient throttlées contrairement au comment v144.6. Asymétrie résolue.
+
+Paper **mains** (`source="rt"`, pas `live_sync`) gardent LAZY comme baseline
+A/B v144.3 — ne pas toucher.
+
+Ne pas revert ces bypass. Si tu vois des outliers `sync=True` avec divergence
+LAZY live>paper (Jupiter wick + 177/180s skip), vérifier que **les deux**
+bypass sont bien présents dans `_should_evaluate_exit`. L'A/B 14j / 75 LAZY
+live trades a montré que le bypass coûte **$0 net** (noise pur) — le throttle
+ne paye pas, il casse juste la coherence sim↔paper↔live.
+
+**Root cause du cas** : pump.fun faible liq (<$100k), Jupiter quote wick
+transient (<30s), strat LAZY, poll live à 177s/180s du seuil → eval skippée,
+wick disparaît au poll suivant. Le fix évalue le SL à chaque poll 30s comme
+la config le déclare (`polling_sec=30`).
 
 ---
 
