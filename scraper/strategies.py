@@ -1154,6 +1154,33 @@ STRATEGIES["ETH_BE50_TP150_SL50"] = [
 ]
 STRATEGY_FILTERS["ETH_BE50_TP150_SL50"] = {"chain": "ethereum"}
 
+# v14e.13 (Apr 24) — 3 BE20/BE30 variants added after grid sim on the first
+# 4 ETH tokens (ASTEROID/GENZ/CHINESEASTEROID/EIB). Discovery: BE20-BE30
+# transforms full -53% dumps into a BE stop at ~-$19 (gas + slip only)
+# because 3/4 tokens peaked >+20% before dumping. Grid total: +$129 over
+# 4 tokens vs -$75 for ETH_TP100_SL50 and -$269 for ETH_BE50_TP150_SL50
+# (which never activated BE because no token peaked >+50%). BE50 is
+# structurally dead on this early ETH memecoin universe, hence the lower
+# activation thresholds here. N=4 is statistically nothing, so these stay
+# paper until the Phase 2 gate (N>=50, WR>=65%, EV>=+10% net, Mai 07).
+STRATEGIES["ETH_BE20_TP100_SL50"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.50, "horizon_min": 240,
+     "be_activation": 0.20, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_BE20_TP100_SL50"] = {"chain": "ethereum"}
+
+STRATEGIES["ETH_BE30_TP100_SL40"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.60, "horizon_min": 240,
+     "be_activation": 0.30, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_BE30_TP100_SL40"] = {"chain": "ethereum"}
+
+STRATEGIES["ETH_BE20_TP80_SL40_T2H"] = [
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.60, "horizon_min": 120,
+     "be_activation": 0.20, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_BE20_TP80_SL40_T2H"] = {"chain": "ethereum"}
+
 # ============================================================
 # v14e — BSC L1 paper strats (Phase 1 shadow, zero capital).
 #

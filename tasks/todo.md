@@ -25,6 +25,23 @@
 
 **Pas d'action immédiate** : laisser tourner, monitorer. Alert si N=30 avec WR < 40% → review précoce + éventuelle pause allocations ETH.
 
+### v14e.13 — 3 nouveaux ETH BE variants paper (Apr 24)
+
+Grid sim (`scripts/_sim_eth_grid.py`) sur les 4 tokens révèle que **BE20/BE30** transforme les 3 dumps en BE stop à ~−$19 (gas + slip seulement) au lieu de −$106 full SL. Le peak des 4 tokens a atteint >+20% avant de dumper, mais JAMAIS >+50% → BE50_TP150_SL50 structurellement dead.
+
+Grid total sur 4 tokens (paper, $200/trade, fee model ETH) :
+- `BE20_TP100_SL50_H240` : **+$129** (vs −$72 ETH_TP100_SL50, −$269 BE50_TP150_SL50)
+- 3 perdants limités à −$19 chacun (BE stop), ASTEROID +$177 préservé.
+
+**Ajoutés paper (not live)** :
+- `ETH_BE20_TP100_SL50` : mirror TP100_SL50 + BE active à +20%
+- `ETH_BE30_TP100_SL40` : SL plus serré (−40%) + BE +30%
+- `ETH_BE20_TP80_SL40_T2H` : mirror TP80 + BE +20%
+
+DB patched : `hybrid_strategy.allocations` 17→20, `strategy_bankrolls_per_chain.ethereum` 3→6 (seed $1000 each). Aucun tick supplémentaire requis — les 3 shadows partagent les mêmes `_fetch_prices_batch` que les 3 mains existantes sur chaque token ETH.
+
+**N=4 est statistiquement rien** — mais si le pattern "peak>+20% avant dump" tient à N=30, BE50 sera retirée avant Mai 07 et BE20/BE30 pourraient candidater pour Phase 2.
+
 ---
 
 ## v144.20 — Apr 24 — alignement LAZY throttle live ↔ shadow
