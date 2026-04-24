@@ -213,6 +213,22 @@ GROUPS_DATA = {
     # === v144.18 additions ===
     "leoclub69": {"conviction": 7, "tier": "A"},
     "markdegens": {"conviction": 7, "tier": "A"},
+    # === v14e.14 additions (Apr 24) — paper+shadow test only, NOT live ===
+    # Force-excluded from live via rt_trade_config.live_trading.kol_blacklist.
+    # Objective: build N>=30 paper trades per KOL to detect if any of them
+    # (or a combo) yields a profitable strategy before allowing live exposure.
+    # bat_gamble re-added after v108 removal — user wants to re-test since the
+    # scoring engine evolved heavily since then (v108->v144). TheReaperGems
+    # was already in the registry (capitalized there) so not re-added.
+    "batman_gem": {"conviction": 7, "tier": "A"},
+    "venom_gambles": {"conviction": 7, "tier": "A"},
+    "ryoshigamble": {"conviction": 7, "tier": "A"},
+    "ryoshikushama": {"conviction": 7, "tier": "A"},
+    "mad_apes_gambles": {"conviction": 7, "tier": "A"},
+    "maestrodegen": {"conviction": 7, "tier": "A"},
+    "bat_gamble": {"conviction": 7, "tier": "A"},  # re-added v14e.14 (removed v108)
+    "reapergamble": {"conviction": 7, "tier": "A"},
+    "bagcalls": {"conviction": 7, "tier": "A"},
 }
 
 GROUPS_CONVICTION = {k: v["conviction"] for k, v in GROUPS_DATA.items()}
@@ -1521,7 +1537,17 @@ def _rt_open_trades(ca: str, symbol: str, price: float, mcap: float,
         # v14e: skip live branch entirely for non-Solana (Phase 2 ETH not yet
         # approved; BSC/Base have no live adapter). Paper still runs via the
         # loop below — only the Jupiter-backed live path is short-circuited.
-        if live_cfg.get("enabled", False) and token_chain == "solana":
+        # v14e.14: per-KOL live opt-out. KOLs in live_trading.kol_blacklist
+        # execute paper + shadow normally but never open live trades. Used
+        # to test unproven KOLs (spammers, re-added blacklisted ones) without
+        # putting capital at risk while N<30 paper sample builds.
+        live_kol_blacklist = set(live_cfg.get("kol_blacklist", []))
+        if kol_username in live_kol_blacklist:
+            logger.info(
+                "RT LIVE SKIP (kol blacklist v14e.14): %s — paper/shadow only",
+                kol_username,
+            )
+        elif live_cfg.get("enabled", False) and token_chain == "solana":
             try:
                 from live_trader import open_live_trade
                 from paper_trader import _passes_strategy_filter

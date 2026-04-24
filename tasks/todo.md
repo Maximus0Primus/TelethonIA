@@ -1,3 +1,64 @@
+# Pipeline Status — Updated Apr 24, 2026 (v14e.14 — 10 KOLs paper-only test)
+
+## v14e.14 — Apr 24 — 10 nouveaux KOLs paper+shadow, exclus du live
+
+**Ajoutés dans `GROUPS_DATA`** (9 nouveaux + `TheReaperGems` déjà présent capitalisé) :
+batman_gem, venom_gambles, ryoshigamble, ryoshikushama, mad_apes_gambles,
+maestrodegen, bat_gamble (re-ajout post-v108), reapergamble, bagcalls.
++ thereapergems (variant lowercase, juste au cas où).
+
+**Nouveau gate** `live_trading.kol_blacklist` dans `safe_scraper._rt_open_trades` :
+KOLs listés exécutent **paper + shadow normalement** mais bypass la branche
+`open_live_trade`. Capital live zéro pour ces 10 pendant la phase test.
+
+### Objectifs de l'expérimentation
+
+1. **Build N≥30 paper trades par KOL** (attendu 1-2 semaines sur les spammers,
+   plus long sur les autres).
+2. **Mesurer rentabilité individuelle** par KOL : `avg pnl_pct`, WR, $/jour
+   sur l'ensemble des 8 strats mains actives. Seuil promotion live : pnl >$0
+   sur N≥30 sur 14j (aligné kol_filter v92).
+3. **Détecter combos profitables** : certains KOLs sont profitables **uniquement
+   quand ils overlapent** avec un autre caller (confirmation multi-sources).
+   Script `scripts/kol_combo_analysis.py` à créer — analyser les trades où
+   ≥2 KOLs de la liste + ≥1 existant = confirmation.
+4. **Verdict bat_gamble v2** : en v108 il était −11.18% avg PnL / −248K% cumul
+   sur 22K shadows. Mais scoring engine a bcp évolué (v108→v144). Si N≥50
+   confirme le pattern perdant, re-noter dans la memory comme *définitivement*
+   bloqué (doc `docs/known_issues.md`).
+5. **Anti-spam detection** : certains (batman_gem, bat_gamble, reapergames)
+   sont connus pour spammer. Mesurer si leurs 20e-30e calls/jour dilue le
+   signal (WR tombe avec le volume) — indicateur anti-KOL vs bon signal.
+
+### Règles de décision (ETA 14 jours = Mai 08)
+
+| Résultat | Action |
+|---|---|
+| `pnl > 0` et `WR ≥ 50%` sur N≥30 | Retirer de kol_blacklist → live activé |
+| `pnl > 0` mais `WR < 50%` (asymétrique) | Laisser paper, surveillance N=60 |
+| `pnl < 0` avec `N ≥ 30` | Garder blacklist, considerer blacklist scraping aussi |
+| `pnl < -$50` avec `N ≥ 30` | Retirer de `GROUPS_DATA` (comme v108 bat_gamble) |
+| Spam signal (>30 calls/jour) avec `WR < 40%` | Downweight conviction 7→3 ou exclure totalement |
+
+### Monitoring
+
+- `scripts/kol_stats.py` si existant, sinon query directe paper_trades group by kol_group.
+- Alerte Telegram nightly via `alerter._kol_leaderboard_24h` (déjà en place).
+- Vérifier logs VPS : chercher `RT LIVE SKIP (kol blacklist v14e.14)` pour
+  confirmer que le gate fire bien.
+
+### À noter — $AIB / bounty_journal investigation
+
+L'user a demandé pourquoi `$AIB` (call bounty_journal Apr 23 22:53) n'a pas
+été tradé. Root cause : **token jamais enrich** (0 rows dans `tokens`, 0
+rows dans `token_snapshots`). 20+ KOLs l'ont call mais DexScreener n'a
+probablement pas indexé ce bonding curve pump.fun (CA ending `bonk`) au
+moment des calls → `_rt_open_trades` skip car pas de données enrichies.
+Pas un bug spécifique à bounty_journal. Pattern classique sur très-jeunes
+pump.fun bondings. Rien à fixer côté code.
+
+---
+
 # Pipeline Status — Updated Apr 24, 2026 (v144.20 + ETH first blood)
 
 ## ETH Phase 1 — premiers trades (Apr 23-24)
