@@ -1,3 +1,50 @@
+# Pipeline Status — Updated Apr 24, 2026 (v14e.16 — age-window A/B shadows)
+
+## v14e.16 — Apr 24 — A/B test fenêtre d'âge (paper-only, zero-regression)
+
+### Contexte (audit logs 48h)
+
+- **79.2% des skips sont "token too old"** (175/220 detects).
+- Sim naïf sur `token_snapshots` : relax 12h → 72h donnerait **+$3.16 / 48h** sur 27 tokens observables, mais **biais optimiste** (seulement 17-28% coverage, les dumps sans trace sont invisibles).
+- Verdict : **ne pas relaxer aveuglément**. A/B-test propre avec shadows paper-only.
+
+### Design A/B
+
+Global RT gate `max_token_age_hours_rt` relaxé 12h → **72h** (safe_scraper:1916).
+Existant intact : chaque strat sans `max_age_hours` dans son filter ignore le check → comportement pre-v14e.16 préservé.
+
+**3 nouvelles shadows FAST_TP50_SL30** en fenêtres **disjointes** :
+
+| Strat | Fenêtre | Mesure |
+|---|---|---|
+| `AGE24_FAST_TP50_SL30` | `[12, 24]h` | Incrément de relaxer 12→24h |
+| `AGE48_FAST_TP50_SL30` | `[24, 48]h` | Incrément 24→48h |
+| `AGE72_FAST_TP50_SL30` | `[48, 72]h` | Incrément 48→72h |
+
+Somme des 3 = PnL total du full relax 12→72h.
+
+### Safeguards
+
+- Paper-only : **aucune** de ces 3 n'est dans `live_trading.allocations`. Zéro risque capital.
+- `_passes_strategy_filter` applique age filter uniquement si `max_age_hours`/`min_age_hours` explicitement déclarés (opt-in). Toutes les strats existantes inchangées.
+- 4 tests de régression ajoutés (`TestStrategyAgeFilter`).
+- Bankroll seeded $1000 chacune, disjoint SOL.
+
+### Règles de décision (N≥30 par bucket, ETA ~10-14j)
+
+| Bucket | PnL net < $0 | PnL net > 0, avg < $0.05/trade | PnL net > 0, avg ≥ $0.05/trade |
+|---|---|---|---|
+| AGE24 | retire | garder shadow, watch | promote 12h → 24h global |
+| AGE48 | retire | retire | promote si AGE24 aussi promote |
+| AGE72 | retire | retire | rare — garder shadow N=60 avant trancher |
+
+### Monitoring
+
+- Query `paper_trades` WHERE strategy LIKE 'AGE%' GROUP BY strategy (N, PnL, WR).
+- Si aucun trade après 48h → vérifier que le flag `token_age_hours` est bien populated dans token_info RT (DexScreener sortie `pair_created_at`).
+
+---
+
 # Pipeline Status — Updated Apr 24, 2026 (v14e.14d — ryoshikdegen + skip-audit reminder)
 
 ## 🔔 REMINDER — À faire le dimanche 26 Apr 2026 ~14:30 UTC (48h post-fix)

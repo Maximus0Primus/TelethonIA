@@ -1913,7 +1913,13 @@ async def _rt_on_new_message(event: events.NewMessage.Event):
             # v109: Skip old tokens — real memecoin calls are on tokens < 24h old.
             # Tokens with age > 24h are likely re-calls, recaps, or flex posts that
             # slipped past the text filter (e.g. "WHAT A REVERSE FROM 3M BOTTOM").
-            max_age_hours = float(config.get("max_token_age_hours_rt", 12))
+            # v14e.16 (Apr 24): default relaxed 12h → 72h so tokens in the 12-72h
+            # band reach the strategy-level filter. Existing mains + shadows keep
+            # max_age_hours=12 via STRATEGY_FILTERS default (zero-regression). New
+            # AGE24_* / AGE48_* / AGE72_* shadows declare their own disjoint
+            # [min_age, max_age] windows to A/B-test relaxing the gate without
+            # touching baseline.
+            max_age_hours = float(config.get("max_token_age_hours_rt", 72))
             token_age = token_info.get("token_age_hours", 0)
             if token_age > max_age_hours:
                 logger.info("RT SKIP: %s — token too old (%.0fh > %.0fh max)",

@@ -225,6 +225,25 @@ def _passes_strategy_filter(token: dict, strategy_name: str) -> bool:
     rt_score = float(token.get("_rt_score") or token.get("rt_score") or 0)
     if rt_score < filt.get("min_rt_score", 0):
         return False
+    # v14e.16: per-strategy token-age window. Applied ONLY when the strategy
+    # filter explicitly declares `max_age_hours` / `min_age_hours`. That way
+    # every pre-v14e.16 strategy keeps its current behavior (global RT 12h
+    # gate + no per-strat age filter downstream). AGE24_* / AGE48_* / AGE72_*
+    # shadows opt-in with their own disjoint [min, max] bands to A/B-test
+    # relaxing the global 12h gate. Token age field: RT path sets
+    # `_rt_token_age_hours`; batch path sets `token_age_hours`.
+    max_age = filt.get("max_age_hours")
+    min_age = filt.get("min_age_hours")
+    if max_age is not None or min_age is not None:
+        token_age_h = float(
+            token.get("_rt_token_age_hours")
+            or token.get("token_age_hours")
+            or 0
+        )
+        if max_age is not None and token_age_h > float(max_age):
+            return False
+        if min_age is not None and token_age_h < float(min_age):
+            return False
     return True
 
 

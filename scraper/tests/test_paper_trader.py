@@ -133,6 +133,51 @@ class TestExitLogic:
         assert elapsed < trade["horizon_minutes"]
 
 
+class TestStrategyAgeFilter:
+    """v14e.16: per-strategy max_age_hours / min_age_hours disjoint bands.
+
+    Guards against regression on existing strats (no age filter applied when
+    neither key is declared) and locks the AGE24/48/72 shadow disjoint bands.
+    """
+
+    def _token(self, age_h, chain="solana", rt_score=50, liq=50_000):
+        return {
+            "chain": chain,
+            "_rt_token_age_hours": age_h,
+            "_rt_score": rt_score,
+            "_rt_liquidity_usd": liq,
+            "score": rt_score,
+            "market_cap": 100_000,
+        }
+
+    def test_no_age_filter_on_existing_strat(self):
+        """FAST_TP50_SL30 has no age keys in STRATEGY_FILTERS -> no filtering."""
+        from paper_trader import _passes_strategy_filter
+        # 100h old token still passes when no age filter is declared
+        assert _passes_strategy_filter(self._token(100), "FAST_TP50_SL30") is True
+
+    def test_age24_shadow_band(self):
+        from paper_trader import _passes_strategy_filter
+        # Token 18h old -> inside [12, 24]
+        assert _passes_strategy_filter(self._token(18), "AGE24_FAST_TP50_SL30") is True
+        # Token 11h old -> below min (belongs to baseline 12h gate)
+        assert _passes_strategy_filter(self._token(11), "AGE24_FAST_TP50_SL30") is False
+        # Token 30h old -> above max (belongs to AGE48 band)
+        assert _passes_strategy_filter(self._token(30), "AGE24_FAST_TP50_SL30") is False
+
+    def test_age48_shadow_band(self):
+        from paper_trader import _passes_strategy_filter
+        assert _passes_strategy_filter(self._token(30), "AGE48_FAST_TP50_SL30") is True
+        assert _passes_strategy_filter(self._token(20), "AGE48_FAST_TP50_SL30") is False
+        assert _passes_strategy_filter(self._token(60), "AGE48_FAST_TP50_SL30") is False
+
+    def test_age72_shadow_band(self):
+        from paper_trader import _passes_strategy_filter
+        assert _passes_strategy_filter(self._token(60), "AGE72_FAST_TP50_SL30") is True
+        assert _passes_strategy_filter(self._token(40), "AGE72_FAST_TP50_SL30") is False
+        assert _passes_strategy_filter(self._token(80), "AGE72_FAST_TP50_SL30") is False
+
+
 class TestShouldEvaluateExitLazyBypass:
     """v144.20: live (rt_live) and live_sync bypass LAZY throttling.
 

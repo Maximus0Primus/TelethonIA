@@ -1119,6 +1119,47 @@ STRATEGY_FILTERS["BE25_TP80_SL30_S35"] = {"min_rt_score": 35}
 
 
 # ============================================================
+# v14e.16 (Apr 24) — Age-window A/B shadows.
+#
+# Goal: measure the marginal PnL of relaxing the 12h token-age gate without
+# risking the baseline. Three paper-only shadows, each covering a DISJOINT
+# age band (12-24h, 24-48h, 48-72h). Clone of FAST_TP50_SL30 — our top live
+# earner — to isolate the age-window variable. Sum of the 3 buckets = total
+# impact of raising the gate to 72h.
+#
+# Why disjoint: with overlapping windows (e.g. AGE48 covering 0-48h) all
+# three would trade the same <=12h tokens redundantly. Disjoint bands give
+# a clean incremental-win measurement per band.
+#
+# Not in live_trading.allocations → paper-only by construction. Existing
+# strats keep max_age_hours=12 default in _passes_strategy_filter (zero
+# regression). Global gate in safe_scraper relaxed 12h -> 72h so tokens in
+# these bands actually reach the per-strategy filter.
+# ============================================================
+
+STRATEGIES["AGE24_FAST_TP50_SL30"] = [
+    {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.70, "horizon_min": 30, "label": "main"},
+]
+STRATEGY_FILTERS["AGE24_FAST_TP50_SL30"] = {
+    "chain": "solana", "min_age_hours": 12, "max_age_hours": 24,
+}
+
+STRATEGIES["AGE48_FAST_TP50_SL30"] = [
+    {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.70, "horizon_min": 30, "label": "main"},
+]
+STRATEGY_FILTERS["AGE48_FAST_TP50_SL30"] = {
+    "chain": "solana", "min_age_hours": 24, "max_age_hours": 48,
+}
+
+STRATEGIES["AGE72_FAST_TP50_SL30"] = [
+    {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.70, "horizon_min": 30, "label": "main"},
+]
+STRATEGY_FILTERS["AGE72_FAST_TP50_SL30"] = {
+    "chain": "solana", "min_age_hours": 48, "max_age_hours": 72,
+}
+
+
+# ============================================================
 # v14 (Sprint #ETH-1) — Ethereum L1 shadow strategies.
 # Shadow-only, zero capital. Entry filters require chain='ethereum'.
 # TP/SL widened vs Solana because ETH fees ($15 round-trip gas + 2% MEV
