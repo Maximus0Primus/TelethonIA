@@ -164,7 +164,7 @@ class TestKolLiveBlacklistGate(unittest.TestCase):
         """The 9 KOLs the seed script adds — sanity."""
         expected = {
             "bagcalls", "bat_gamble", "batman_gem",
-            "mad_apes_gambles", "maestrodegen", "reapergamble",
+            "mad_apes_gambles", "MaestrosDegen", "reapergamble",
             "ryoshigamble", "ryoshikdegen", "venom_gambles",
         }
         self.assertEqual(len(expected), 9)

@@ -229,7 +229,9 @@ GROUPS_DATA = {
     # ryoshikdegen / ryoshi_degen both resolve to this same channel title.
     "ryoshikdegen": {"conviction": 7, "tier": "A"},
     "mad_apes_gambles": {"conviction": 7, "tier": "A"},
-    "maestrodegen": {"conviction": 7, "tier": "A"},
+    # v14e.14e: maestrodegen was wrong handle (fetched 0 msgs every cycle).
+    # Correct channel = MaestrosDegen.
+    "MaestrosDegen": {"conviction": 7, "tier": "A"},
     "bat_gamble": {"conviction": 7, "tier": "A"},  # re-added v14e.14 (removed v108)
     "reapergamble": {"conviction": 7, "tier": "A"},
     "bagcalls": {"conviction": 7, "tier": "A"},

@@ -24,7 +24,7 @@ NEW_KOLS = [
     "ryoshigamble",
     "ryoshikushama",
     "mad_apes_gambles",
-    "maestrodegen",
+    "MaestrosDegen",  # v14e.14e: was maestrodegen (wrong handle, silent channel)
     "bat_gamble",
     # v14e.14b: TheReaperGems + thereapergems removed per user — already in
     # GROUPS_DATA before v14e.14, should remain live-eligible. Only the truly
