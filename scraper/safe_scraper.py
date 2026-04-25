@@ -232,7 +232,12 @@ GROUPS_DATA = {
     # v14e.14e: maestrodegen was wrong handle (fetched 0 msgs every cycle).
     # Correct channel = MaestrosDegen.
     "MaestrosDegen": {"conviction": 7, "tier": "A"},
-    "bat_gamble": {"conviction": 7, "tier": "A"},  # re-added v14e.14 (removed v108)
+    # v14e.17: bat_gamble restricted to ETH paper trades only. Solana paper
+    # trades bled -$11,386 across 9 strats (727 closes); ETH paper trades
+    # earned +$1,627 across 6 strats (23 closes). Solana history wiped, refund
+    # credited back to SOL bankrolls. Per-KOL chain whitelist enforced in the
+    # RT trade gate below.
+    "bat_gamble": {"conviction": 7, "tier": "A", "chains": ["ethereum"]},
     "reapergamble": {"conviction": 7, "tier": "A"},
     "bagcalls": {"conviction": 7, "tier": "A"},
 }
@@ -1466,6 +1471,18 @@ def _rt_open_trades(ca: str, symbol: str, price: float, mcap: float,
         token_chain = token_info.get("chain") or detect_chain(ca) or "solana"
     except Exception:
         token_chain = token_info.get("chain") or "solana"
+
+    # v14e.17: per-KOL chain whitelist. If GROUPS_DATA[kol]["chains"] is set,
+    # the KOL only opens paper/live trades on tokens whose chain is in that
+    # list. Default (no `chains` field) = all chains allowed.
+    # Used for bat_gamble (ETH-only): SOL calls bleed, ETH calls profit.
+    kol_chain_whitelist = GROUPS_DATA.get(kol_username, {}).get("chains")
+    if kol_chain_whitelist and token_chain not in kol_chain_whitelist:
+        logger.info(
+            "RT SKIP (kol chain filter v14e.17): %s on %s — KOL allowed only on %s",
+            kol_username, token_chain, kol_chain_whitelist,
+        )
+        return 0
 
     # Build base token entry with RT metadata
     token_entry = {
