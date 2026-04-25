@@ -201,3 +201,44 @@ La ref sim stockée DOIT rester pure (sans le slippage positif live).
 - Tout commit qui ajoute une stratégie paper doit venir avec son filter
   chain explicite, un seed bankroll, et un update `hybrid_strategy.allocations`
   en DB — sinon la strat ne s'ouvre jamais en RT.
+
+## §11. Routing ideas tested Apr 25 — saved from re-testing
+
+Sur 22,475 trades closed paper since v138.3 reset (Apr 17 → Apr 25, exclu
+bat_gamble), 4 idées de routing ont été testées via
+`scripts/_analyze_routing_ideas.py`. Résultats :
+
+### ❌ Cooccurrence / multi-KOL confirmation gate
+**Hypothesis**: trades where ≥2 KOLs called the same token in last 4h
+outperform single-KOL. **Result**: 970 main trades on 95 unique tokens —
+quasi-aucun chevauchement entre KOLs détecté (cooccurrence=1 partout).
+**Verdict**: invalide sur ce dataset — pas assez d'overlap entre KOLs
+pour mesurer. **Re-tester quand** : N tokens > 200 ET overlap >5% entre
+KOLs (ou utiliser table `kol_mentions` brute pour fenêtre plus large
+que les seuls trades fermés).
+
+### ❌ Per-KOL custom timeout
+**Hypothesis**: certains KOLs gagnent/perdent significativement plus tôt/tard
+que le timeout 30min. **Result**: les patterns timing existent (BatmanSafuCalls
+tp_med=0min, Luca_Apes 46min, TheReaperGems 57min) mais sur les 90 trades
+slow-KOL qui ont timeout-out, 49 ferment perdants même avec timeout étendu —
+les pumps ne se réveillent pas, ils dump. Δ uplift estimé = +0.3pp seulement.
+**Verdict**: ROI marginal, ne pas implémenter avant d'avoir stratégies
+elles-mêmes profitables sur les KOLs concernés. **Re-tester quand**: nouvelle
+batch d'algos ou si les slow-KOLs deviennent positifs net.
+
+### ✅ Score-band routing : Δ +14.0pp
+**Hypothesis**: l'optimal strat dépend du score band. **Result**: band <30
+(low-conviction) bat avec TP50_SL15 (+29.2% N=41) vs BE25_TP80_SL30 (+15.2%
+N=18). Bands 30-40 / 40-50 ont peu de samples post artefact-filter — conclure
+quand plus de data.
+**To implement**: gate par score band dans `_passes_strategy_filter` ou route
+explicit dans `_rt_open_trades`.
+
+### ✅ Per-KOL strategy specialization : Δ +13.72pp ⭐
+**Hypothesis**: certains KOLs ont une préférence forte non-default.
+**Result**: 23/29 KOLs (N≥100 clean) ont Δ ≥ 3pp avec une famille non-BE.
+Smart-route global = +15.6% vs BE25 +1.8% (Δ +13.7pp sur N=2011).
+**To implement**: table `kol_optimal_family` keyed par kol_group, lookup
+in `_rt_open_trades` avant alloc.
+
