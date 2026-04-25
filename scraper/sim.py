@@ -4407,6 +4407,55 @@ def _filter_trail_families(pool: dict, include_trails: bool) -> dict:
     return kept
 
 
+# v14e.20: standalone _HYST strats are confirmed sim artefacts on real paper data.
+# Paired test on N=55-90 (Apr 17→25 SOL paper main, exclu bat_gamble):
+#   FAST_TP50_SL30_HYST   = +3.4% vs base FAST_TP50_SL30 +12.2% → −8.9pp
+#   FAST_TP80_SL25_HYST   = +0.4% vs base FAST_TP80_SL25 +10.0% → −9.6pp
+#   BE25_TP80_SL30_HYST   = −5.7% (no base recovery)
+#   FAST_TP100_SL20_HYST  = −8.0% (no base recovery)
+# HYST + filter SCORE30 still passes (BE25_TP80_SL30_S30_HYST +1.5pp paired-test),
+# so we keep "_S\d+_HYST" / "_NZ.*_HYST" which already gate via filter.
+_MEGA_EXCLUDE_HYST_STANDALONE = _trail_re.compile(
+    r"_HYST$"
+)
+_MEGA_KEEP_HYST_WITH_FILTER = _trail_re.compile(
+    r"_(S\d+|NZ\w*?)_HYST$", _trail_re.IGNORECASE
+)
+
+
+def _filter_hyst_standalone(pool: dict, include_hyst: bool) -> dict:
+    """Drop standalone `_HYST` strats. Keep `_S30_HYST` / `_NZS30_HYST` (filter-gated)."""
+    if include_hyst:
+        return pool
+    def keep(name: str) -> bool:
+        if not _MEGA_EXCLUDE_HYST_STANDALONE.search(name):
+            return True
+        # Has _HYST suffix — only keep if combined with a quality filter.
+        return bool(_MEGA_KEEP_HYST_WITH_FILTER.search(name))
+    kept = {k: v for k, v in pool.items() if keep(k)}
+    dropped = len(pool) - len(kept)
+    if dropped:
+        print(f"v14e.20: excluded {dropped} standalone _HYST strats (use --include-hyst to keep)")
+    return kept
+
+
+def _filter_smoothings_default(smoothings: list, include_smoothing_artefacts: bool) -> list:
+    """Drop documented sim-artefact smoothings unless opted-in.
+
+    `hysteresis` and `winsor_p95` consistently dominate mega-sweep tops because the
+    kernel hides whipsaw that hits real paper execution. `dual_confirm` and the
+    median variants are kept (they have legitimate use cases on dual-stream sources).
+    """
+    if include_smoothing_artefacts:
+        return smoothings
+    artefact = {"hysteresis", "winsor_p95"}
+    kept = [s for s in smoothings if s not in artefact]
+    dropped = len(smoothings) - len(kept)
+    if dropped:
+        print(f"v14e.20: excluded {dropped} artefact smoothings ({sorted(artefact & set(smoothings))})")
+    return kept
+
+
 def _mega_family_slip_mult(strat_name: str) -> float:
     """Return slip multiplier for strategy family. 1.0 if static TP/SL strat.
 
@@ -4562,6 +4611,7 @@ def _mega_sweep_run_eh(args):
     smoothings = _MEGA_EXT_SMOOTHINGS if getattr(args, "mega_sweep_extended", False) else _MEGA_SMOOTHINGS
     polling_modes = _MEGA_EXT_POLLING_MODES if getattr(args, "mega_sweep_extended", False) else _MEGA_POLLING_MODES
     filters = _MEGA_EXT_FILTERS if getattr(args, "mega_sweep_extended", False) else _MEGA_FILTERS
+    smoothings = _filter_smoothings_default(smoothings, getattr(args, "include_smoothing_artefacts", False))
     print(f"\n*** MEGA SWEEP — EVAL_HISTORY MODE (v144.9) ***")
     print(f"  sources={len(sources)} smoothings={len(smoothings)} polling={len(polling_modes)} filters={len(filters)}")
     print(f"  per-strat configs: {len(sources)*len(smoothings)*len(polling_modes)*len(filters)}")
@@ -4579,6 +4629,7 @@ def _mega_sweep_run_eh(args):
         full_pool[name] = (tp, sl, h, be_act)
     full_pool.update(_MEGA_NEW_STRATS)
     full_pool = _filter_trail_families(full_pool, getattr(args, "include_trail_families", False))
+    full_pool = _filter_hyst_standalone(full_pool, getattr(args, "include_hyst", False))
     print(f"Strategies: {len(full_pool)}")
 
     # Fetch closed trades with eval_history — both paper and live contribute.
@@ -4727,6 +4778,7 @@ def _mega_sweep_run(args):
         smoothings = _MEGA_SMOOTHINGS
         polling_modes = _MEGA_POLLING_MODES
         filters = _MEGA_FILTERS
+    smoothings = _filter_smoothings_default(smoothings, getattr(args, "include_smoothing_artefacts", False))
     print(f"  sources={len(sources)} smoothings={len(smoothings)} polling={len(polling_modes)} filters={len(filters)}")
     print(f"  per-strat configs: {len(sources)*len(smoothings)*len(polling_modes)*len(filters)}")
 
@@ -4745,6 +4797,7 @@ def _mega_sweep_run(args):
         full_pool[name] = (tp, sl, h, be_act)
     full_pool.update(_MEGA_NEW_STRATS)
     full_pool = _filter_trail_families(full_pool, getattr(args, "include_trail_families", False))
+    full_pool = _filter_hyst_standalone(full_pool, getattr(args, "include_hyst", False))
     print(f"Strategies: {len(full_pool)} (incl. {len(_MEGA_NEW_STRATS)} new TP200+ variants)")
 
     # v142: sb_get() paginates internally via offset+limit; the previous manual
@@ -4990,6 +5043,16 @@ def main():
                              "Default excluded (documented sim artefact: live slip 47× "
                              "paper, position_reconciler closes 50-65% before trail fires). "
                              "Cuts sweep size by ~60% and cleans rankings.")
+    parser.add_argument("--include-hyst", action="store_true",
+                        help="v14e.20: opt-in to keep standalone `_HYST` strats. Default "
+                             "excluded — paired-test on N>=55 paper main shows −8.9 to "
+                             "−9.6pp vs base on FAST_TP50/TP80, and BE25_HYST/FAST_TP100_HYST "
+                             "are net negative ($-171/$-220). `_S30_HYST` / `_NZS30_HYST` "
+                             "(filter-gated) are kept regardless.")
+    parser.add_argument("--include-smoothing-artefacts", action="store_true",
+                        help="v14e.20: opt-in to keep `hysteresis` and `winsor_p95` smoothings "
+                             "in the sweep dimension. Default excluded — both kernels hide "
+                             "whipsaw that hits real paper execution and dominate sweep tops.")
     args = parser.parse_args()
 
     # v14: lock the chain filter for this run before any fetch fires.
