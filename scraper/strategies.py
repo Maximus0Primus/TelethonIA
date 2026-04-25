@@ -1223,6 +1223,49 @@ STRATEGIES["ETH_BE20_TP80_SL40_T2H"] = [
 STRATEGY_FILTERS["ETH_BE20_TP80_SL40_T2H"] = {"chain": "ethereum"}
 
 # ============================================================
+# v14e.21 — ETH FAST family (sim mega-sweep top picks Apr 25, post v14e.20
+# clean-up of trail/dip/hyst artefacts). Hypothesis: ETH memecoins pump and
+# dump faster than 2-4h timeouts capture; shorter timeouts (30-60min) +
+# higher TP targets convert peaks to fills before reversal.
+# Sim ranks vs current ETH mains (avg% / $/d on N=23 universe):
+#   ETH_FAST_TP100_SL50    +30.7% / $277  (#1 sim)
+#   ETH_FAST_TP100_SL20    +30.1% / $271
+#   ETH_FAST_TP500_SL40_60M +30.1% / $270  (moonshot — TP 500%, SL 40%, 60min)
+#   ETH_FAST60_TP100_SL50  +29.8% / $268  (60min timeout variant)
+#   ETH_FAST_TP40_SL30 (SCORE30) +42.8% / $235  N=14
+# Activated as MAIN paper (Telegram alerts on, paper_trades.is_shadow=False)
+# alongside the 5 existing ETH mains. Paired-test verdict at N>=15-20 each
+# expected ~Mai 02-09. NOT in live_trading.allocations — paper only.
+# ============================================================
+
+STRATEGIES["ETH_FAST_TP100_SL50"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.50, "horizon_min": 30, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_FAST_TP100_SL50"] = {"chain": "ethereum"}
+
+STRATEGIES["ETH_FAST_TP100_SL20"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.80, "horizon_min": 30, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_FAST_TP100_SL20"] = {"chain": "ethereum"}
+
+STRATEGIES["ETH_FAST60_TP100_SL50"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.50, "horizon_min": 60, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_FAST60_TP100_SL50"] = {"chain": "ethereum"}
+
+STRATEGIES["ETH_FAST_TP500_SL40_60M"] = [
+    {"pct": 1.0, "tp_mult": 6.00, "sl_mult": 0.60, "horizon_min": 60, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_FAST_TP500_SL40_60M"] = {"chain": "ethereum"}
+
+STRATEGIES["ETH_FAST_TP40_SL30"] = [
+    {"pct": 1.0, "tp_mult": 1.40, "sl_mult": 0.70, "horizon_min": 30, "label": "main"},
+]
+# SCORE30 filter applied — sim showed +42.8% gated vs +24% un-gated on the same
+# TP/SL/horizon, so we keep the gate to avoid washing the signal on weak callers.
+STRATEGY_FILTERS["ETH_FAST_TP40_SL30"] = {"chain": "ethereum", "min_score": 30}
+
+# ============================================================
 # v14e — BSC L1 paper strats (Phase 1 shadow, zero capital).
 #
 # Three strategies symmetrical to ETH's so we can compare apples-to-apples
