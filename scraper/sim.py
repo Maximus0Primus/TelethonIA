@@ -4384,6 +4384,28 @@ _MEGA_FAMILY_SLIP_MULT = {
     "SPLIT":    4.0,   #  40 bps — partial exits compound slippage
 }
 
+# v14e.19: families excluded by default from --mega-sweep / --mega-sweep-eval-history.
+# These are documented sim artefacts (`docs/known_issues.md §2`, `dtrail_shadow_artifact_apr20.md`):
+# sim over-estimates by 47× the live slip for trail-style exits, and `position_reconciler`
+# closes 50-65% of trades before the trail can fire. Result: every mega sweep ranks them
+# at the top of the leaderboard, polluting reads. Use --include-trail-families to opt-in.
+import re as _trail_re
+_MEGA_EXCLUDE_TRAIL_RE = _trail_re.compile(
+    r"^(DTRAIL|TRAIL|DIP|PTRAIL|SPLIT|SCALE_OUT|MOONBAG|WIDE_RUNNER)",
+    _trail_re.IGNORECASE,
+)
+
+
+def _filter_trail_families(pool: dict, include_trails: bool) -> dict:
+    """Drop trail/dip/split/etc strats unless --include-trail-families set."""
+    if include_trails:
+        return pool
+    kept = {k: v for k, v in pool.items() if not _MEGA_EXCLUDE_TRAIL_RE.match(k)}
+    dropped = len(pool) - len(kept)
+    if dropped:
+        print(f"v14e.19: excluded {dropped} trail/dip/split strats (use --include-trail-families to keep)")
+    return kept
+
 
 def _mega_family_slip_mult(strat_name: str) -> float:
     """Return slip multiplier for strategy family. 1.0 if static TP/SL strat.
@@ -4556,6 +4578,7 @@ def _mega_sweep_run_eh(args):
         be_act = int(be_m.group(1)) / 100 if be_m else None
         full_pool[name] = (tp, sl, h, be_act)
     full_pool.update(_MEGA_NEW_STRATS)
+    full_pool = _filter_trail_families(full_pool, getattr(args, "include_trail_families", False))
     print(f"Strategies: {len(full_pool)}")
 
     # Fetch closed trades with eval_history — both paper and live contribute.
@@ -4721,6 +4744,7 @@ def _mega_sweep_run(args):
         be_act = int(be_m.group(1)) / 100 if be_m else None
         full_pool[name] = (tp, sl, h, be_act)
     full_pool.update(_MEGA_NEW_STRATS)
+    full_pool = _filter_trail_families(full_pool, getattr(args, "include_trail_families", False))
     print(f"Strategies: {len(full_pool)} (incl. {len(_MEGA_NEW_STRATS)} new TP200+ variants)")
 
     # v142: sb_get() paginates internally via offset+limit; the previous manual
@@ -4960,6 +4984,12 @@ def main():
                         help="Output CSV for --mega-sweep (default: scraper/_mega_sweep_full.csv)")
     parser.add_argument("--mega-since", type=str, default="2026-04-13T20:00:00Z",
                         help="Universe cutoff for --mega-sweep (default: post-v132)")
+    parser.add_argument("--include-trail-families", action="store_true",
+                        help="v14e.19: opt-in to keep DTRAIL/TRAIL/DIP/PTRAIL/SPLIT/"
+                             "SCALE_OUT/MOONBAG/WIDE_RUNNER families in mega-sweep. "
+                             "Default excluded (documented sim artefact: live slip 47× "
+                             "paper, position_reconciler closes 50-65% before trail fires). "
+                             "Cuts sweep size by ~60% and cleans rankings.")
     args = parser.parse_args()
 
     # v14: lock the chain filter for this run before any fetch fires.
