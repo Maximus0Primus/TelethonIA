@@ -1,4 +1,33 @@
-# Pipeline Status — Updated Apr 25, 2026 (v14e.23 — ETH LIVE TRADER ROLLOUT)
+# Pipeline Status — Updated Apr 25, 2026 (v14e.26 — REGIME-AWARE MEGA SWEEP)
+
+## 🎯 TÂCHE 0 — Post-mortem mega sweep regime-aware (en cours, 21:51 UTC)
+
+**Contexte** : 7-month boucle slip recalibration closed (v14e.24 = 10→225 bps empirical, v14e.25 = sim/paper/shadow tous alignés sur strategies.BUY_SLIPPAGE_BPS). Ensuite ajout v14e.26 = 5 features regime-aware au mega sweep pour ne plus se faire piéger par le marché SOL mort des 3 derniers jours.
+
+**Run actif** : `gh run` 24941515693, ETA ~00:07 UTC (2h15min). Master HEAD = `e8239b4`.
+
+**À faire au retour du run** (post 00:07 UTC) :
+- [ ] **0.1** Download artifacts : `gh run download 24941515693 --dir /tmp/megasweep_v14e26`
+- [ ] **0.2** Inspect logs sweep : combien de jours classifés active/quiet/dead sur la fenêtre 8d ?
+  - **Si 0 jour active** → la fenêtre est non-représentative. Filtre `cross_regime_robust` sera trop strict (top_robust risque vide). Élargir à 14d ou re-courir avec fallback (active+quiet only).
+  - **Si ≥2 jours active** → on a la base nécessaire pour comparer régimes.
+- [ ] **0.3** Lire `_mega_sweep_top_robust.csv` (filtré cross_regime_robust=True) → vue **stratégies robustes long terme**
+- [ ] **0.4** Query annotated CSV trié par `wf_test_pnl_pct` desc → vue **strats actuelles (last 3d)**
+  ```python
+  df.query("n_dead >= 5 and family_realism >= 0.5").sort_values("wf_test_pnl_pct", ascending=False).head(20)
+  ```
+- [ ] **0.5** Comparer vs ranking pré-v14e.24 (run 24933694207, top robust) — voir comment le slip alignment + cross_regime filter ont changé le top
+- [ ] **0.6** Décider : promouvoir 1-2 strats en paper main si elles passent (cross_regime AND wf_consistent AND rank_stability ≥ 0.7) ?
+- [ ] **0.7** Optionnel — re-runner avec `--exclude-dead-days` pour voir le ranking forward-only (vue "alpha pur conditional sur marché actif")
+
+**Outils livrés v14e.26** :
+- `sim.py::_compute_day_regime` (active/quiet/dead via pump_rate ≥ +50% en 2h, thresholds 30%/15%)
+- 9 nouvelles colonnes CSV : `n_active/quiet/dead`, `pnl_active/quiet/dead_pct`, `wf_train/test_pnl_pct`, `wf_consistent`, `daily_pnl_json`
+- `analyze_mega_sweep.py` : bootstrap rank stability (300× resampling), `cross_regime_robust` flag (filtre top_robust)
+- CLI flag `--exclude-dead-days` (filtre universe avant sweep)
+- Backward-compat : analyze.py degrade silencieusement sur CSVs pré-v14e.26
+
+---
 
 ## 🎯 TÂCHE PRINCIPALE — déployer ETH live trading
 
@@ -847,7 +876,7 @@ Sweet-spot SCORE35 sur BE25 (extrapolation FAST_TP100_S35). LAZY_STRATEGIES nett
 ### ⏳ Data wait (laisser tourner)
 - **ETH Phase 1 N≥50 / 14j** (ETA Mai 07) — verdict go/no-go live ETH. Monitor via : `SELECT strategy, COUNT(*), AVG(pnl_pct)*100 FROM paper_trades WHERE chain='ethereum' AND status != 'open' GROUP BY 1;`
 - **bat_gamble ETH-only** (v14e.17, Apr 25) — re-vérifier dans 5-7j que le filtre tient (logs `RT SKIP (kol chain filter v14e.17)`) et que les 6 ETH strats restent positifs sur N≥10/strat
-- **Slip drift POST v14e.6** — recheck Apr 30 avec N≥80 trades post-Apr-23. PRE 9.57pp → POST (N=28) 3.16pp ; si converge stable <3pp on garde, si signed bias persiste >−1pp sur 5-20k tighten +5-10%
+- ~~**Slip drift POST v14e.6** — recheck Apr 30~~ ✅ **SUPERSEDED v14e.24-25 (Apr 25 PM)** : empirical recalibration on N=229 live trades a remplacé v14e.6 sur le BUY (10 bps → 225 bps, R²=5%). Sell garde le modèle dynamic v14e.6 inchangé (déjà bien calibré sur N=77 twins). Single source of truth = `strategies.BUY_SLIPPAGE_BPS`, propagé à sim.py + sim_engines + paper. Re-check buy slip Mai 9 (`scripts/_calibrate_buy_slip.py`) si median drift > ±50bps.
 - Verdicts paired shadows v144.x (Apr 23-30)
 - Validation FAST_TP100_SL20_S35 paper paired vs base (sim dit +28%/trade)
 - Validation BE25_TP80_SL30_S35 paper paired vs base
@@ -886,10 +915,11 @@ Sweet-spot SCORE35 sur BE25 (extrapolation FAST_TP100_S35). LAZY_STRATEGIES nett
 
 ## 🛠 Chantiers planifiés (sprint format)
 
-### Sprint #1 — Refinement slip model ✅ DONE v14e.6 P5
-- Log-continu remplace les 3 buckets (1.0 + 0.5 × log10(50k/max(liq,500)))
-- Clamped [1.0, 2.5], 4 tests dédiés
-- **Reste (v2)** : composante volume-volatility quand N≥30 par (liq_band × exit_type × vol_band)
+### Sprint #1 — Refinement slip model ✅ DONE v14e.24-25 (Apr 25 PM)
+- v14e.6 P5 : SELL log-continu (1.0 + 0.5 × log10(50k/max(liq,500))), clamped [1.0, 2.5] — gardé tel quel
+- **v14e.24** : BUY recalib empirique 10→225 bps (median N=229). R²=5%, accept variance comme bruit Monte Carlo.
+- **v14e.25** : alignement sim/paper/shadow → `strategies.BUY_SLIPPAGE_BPS` single source of truth (sim.py:1247, sim_engines.BUY_SLIPPAGE/compute_buy_slippage, optimize_strategies all import from strategies).
+- **Reste (v2 — DEAD)** : ~~composante volume-volatility~~ → empirical R²=5% confirmé que liq/age/latency/pump features ne prédisent pas le slip individuel. Toute future complexity = over-engineering. Re-calibrer la constante via `_calibrate_buy_slip.py` quand N≥400 trades (Mai 9).
 
 ### Sprint #2 — Coherence sim trail/dtrail/dip family (post Apr 25)
 **Problème** : sim mega_sweep top picks famille trail/dtrail/dip alors que paper/live confirment artefact (DTRAIL10 sim top vs live 65% reconciled, slip 47×)
@@ -920,8 +950,11 @@ Sweet-spot SCORE35 sur BE25 (extrapolation FAST_TP100_S35). LAZY_STRATEGIES nett
 - **sim per-trade ↔ paper** : ρ ≈ +0.9
 - **sim per-strategy ↔ paper** : ρ ≈ +0.7 (excluant shadow v144 polluants : ρ +0.71)
 
-### Slip calibration v144 + v14e.6
-`_dynamic_sell_slip_factor` : offset global −100 bps + courbe log-continue v14e.6 sur liq mult (1.0 + 0.5·log10(50k/liq), clamped [1.0, 2.5]). Audit Apr 25 N=28 POST : mean |Δ| 3.16pp (vs 9.57pp PRE), max 17.7pp (vs 215pp), 0 outliers >50pp. Recheck Apr 30 avec N≥80 ; tighten +5-10% sur 5-20k si signed bias persiste <−1pp.
+### Slip calibration — état post v14e.25 (Apr 25 PM)
+- **BUY** (v14e.24) : `strategies.BUY_SLIPPAGE_BPS = 225` constante (median empirique N=229 live). R²=5% sur 6 features → variance irréductible, on accepte.
+- **SELL** (v14e.6) : `_dynamic_sell_slip_factor` = base 10 bps + liq_mult log-continu (1.0 + 0.5·log10(50k/liq) clamped [1.0,2.5]) + type_bps + GLOBAL_OFFSET=−100 bps. Audit Apr 25 N=28 POST : mean |Δ| 3.16pp, max 17.7pp.
+- **Cohérence** (v14e.25) : sim.py + sim_engines + optimize_strategies importent tous depuis `strategies.py` → single source of truth, future calib = 1 ligne.
+- **Re-check** : Mai 9, `python scripts/_calibrate_buy_slip.py` quand N≥400. Tighten only si median drift > ±50 bps.
 
 ### CI Monitoring
 - `sim-align-gate.yml` (04:00 UTC) — alert si drift > 5pp
@@ -952,7 +985,8 @@ Sweet-spot SCORE35 sur BE25 (extrapolation FAST_TP100_S35). LAZY_STRATEGIES nett
 | Standard sweep | `--mega-sweep` | price_ticks | ⚠️ biaisé | Discovery legacy (warning coverage depuis v144.9) |
 | Extended sweep | `--mega-sweep-extended` | price_ticks | ⚠️ biaisé | 874K configs (~3h) |
 | **Ground truth sweep** | `--mega-sweep-eval-history` | eval_history | ✅ 30s | **v144.9 — A/B vs legacy, discover sans biais** |
-| Annotation | `analyze_mega_sweep.py` | — | — | Multi-test correction (FDR/Bonferroni) + family_realism flag |
+| **Dead-days excluded** (v14e.26) | `--mega-sweep-extended --exclude-dead-days` | price_ticks | ⚠️ biaisé sur slip | Forward-looking : drop dead-day trades du universe (regime!=dead). Cross-check vs full run. |
+| Annotation | `analyze_mega_sweep.py` | — | — | Multi-test correction (FDR/Bonferroni) + family_realism flag + **v14e.26: bootstrap rank stability + cross_regime_robust gate** |
 
 ## Scripts (`scripts/`)
 
