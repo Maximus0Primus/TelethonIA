@@ -72,6 +72,20 @@ jobs:
             --top 30 \
             2>&1 | tee analyze.out
 
+      - name: Routing ideas refresh (per-KOL specialization + score-band gate)
+        # v14e.22: re-test the 4 routing hypotheses on the latest paper data
+        # alongside the strat-pool sweep. Apples-to-apples comparison on the
+        # same opportunity set. Output a sidecar JSON with verdicts so a
+        # future session can see if signals strengthen as data accumulates.
+        # Negative findings are also captured so we don't re-litigate them.
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          mkdir -p data
+          python scripts/_analyze_routing_ideas.py 2>&1 | tee routing.out || true
+          python scripts/_quantify_routing_dollar_day.py 2>&1 | tee routing_dollar_day.out || true
+
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -83,6 +97,9 @@ jobs:
             _mega_sweep_top_robust.csv
             scraper/sweep.out
             analyze.out
+            routing.out
+            routing_dollar_day.out
+            data/routing_ideas_*.json
           retention-days: 30
 
       - name: Summary comment

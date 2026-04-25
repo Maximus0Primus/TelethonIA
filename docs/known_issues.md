@@ -227,18 +227,34 @@ les pumps ne se réveillent pas, ils dump. Δ uplift estimé = +0.3pp seulement.
 elles-mêmes profitables sur les KOLs concernés. **Re-tester quand**: nouvelle
 batch d'algos ou si les slow-KOLs deviennent positifs net.
 
-### ✅ Score-band routing : Δ +14.0pp
-**Hypothesis**: l'optimal strat dépend du score band. **Result**: band <30
-(low-conviction) bat avec TP50_SL15 (+29.2% N=41) vs BE25_TP80_SL30 (+15.2%
-N=18). Bands 30-40 / 40-50 ont peu de samples post artefact-filter — conclure
-quand plus de data.
-**To implement**: gate par score band dans `_passes_strategy_filter` ou route
-explicit dans `_rt_open_trades`.
+### ✅/❓ Score-band routing : +$3.34/d live (+$1,217/yr) — modeste
+**Hypothesis**: l'optimal strat dépend du score band.
+**Result naïf** (sans correction sample bias): band <30 → TP50_SL15 +29.2%
+vs BE25 +15.2% (Δ +14pp brut, mais N=41 vs N=18, opportunités différentes).
+**Apples-to-apples** sur N=52 events intersection
+(`scripts/_quantify_routing_dollar_day.py`) : avg +11.34% vs BE25 +9.41%
+= **+1.93pp réel** sur les MÊMES tokens/KOLs. Live extrapolation à
+$1.74/trade × 99 trades/d : **+$3.34/d → +$1,217/yr** annualisé. Mécanisme
+plausible : SL serré (-15%) sur calls low-conviction évite drawdown long ;
+TP +50% suffit car les pumps score<30 sont rarement >+50%.
+**To implement**: nouvelle strat `LOWSCORE_TP50_SL15` (filter
+`max_score=29`) ajoutée aux allocs.
+**Caveat N**: N=52 trop petit pour IC serré — re-confirmer après 2-3
+semaines de data. Le mega-sweep workflow re-runnera
+`_quantify_routing_dollar_day.py` chaque 48h pour tracker la dérive.
 
-### ✅ Per-KOL strategy specialization : Δ +13.72pp ⭐
-**Hypothesis**: certains KOLs ont une préférence forte non-default.
-**Result**: 23/29 KOLs (N≥100 clean) ont Δ ≥ 3pp avec une famille non-BE.
-Smart-route global = +15.6% vs BE25 +1.8% (Δ +13.7pp sur N=2011).
-**To implement**: table `kol_optimal_family` keyed par kol_group, lookup
-in `_rt_open_trades` avant alloc.
+### ❌ Per-KOL strategy specialization : NEGATIVE en apples-to-apples (corrigé Apr 25)
+**Hypothesis**: certains KOLs préfèrent une famille non-default.
+**Result naïf**: 23/29 KOLs avec Δ ≥ 3pp sur strat preference, smart-route
+moyenne +15.6% vs BE25 baseline +1.8% (Δ +13.7pp sur N=2011 vs N=1742).
+**MAIS gros biais d'échantillonnage** — les 2 sets portaient sur
+opportunités DIFFÉRENTES (le smart-route excluait les KOLs sans préférence
+claire = ceux qui sont les KOLs neutres / fallback BE).
+**Apples-to-apples** sur N=52 events où les 2 scénarios sont calculables
+sur les MÊMES (KOL, token) : routing +8.53% vs BE25 +9.41% =
+**−0.88pp (NEGATIVE), live extrapolation = −$1.51/d soit −$551/yr**.
+**Verdict**: la "préférence KOL" était dominée par les events où BE25 est
+déjà le best-fit. Effet réel <1pp, probablement structurellement insignifiant.
+**Re-tester quand**: N>150 events apples-to-apples (~3 semaines plus de data).
+Ne PAS implémenter de table `kol_optimal_family` avant confirmation N≥150.
 
