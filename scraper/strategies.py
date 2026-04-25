@@ -16,10 +16,21 @@ Imported by: paper_trader.py, sim.py, sim_engines.py, live_trader.py, etc.
 import re
 
 # ---------------------------------------------------------------------------
-# Fee constants — Solana (v121: Jupiter Ultra RFQ — near-zero slippage)
+# Fee constants — Solana
+#
+# v121 (Apr 8): set to 10 bps assuming Jupiter Ultra RFQ near-zero fills.
+# v14e.24 (Apr 25): empirical recalibration. 229 live rt_live trades since
+# Apr 8 yielded median buy slip = +225 bps (vs assumed 10), p95 = +2598 bps,
+# std = 1424 bps. OLS fit on 6 features (liq, pos, age, latency, pump, pos/liq)
+# yields R² = 5.8% — slip is dominated by price-drift between DexScreener
+# spot fetch and Ultra fill (~700ms) which we cannot observe ex-ante.
+# Full-fit MAE 717 bps vs constant-median MAE 738 bps → 2.8% gain only.
+# Honest baseline: use the median, accept variance as Monte Carlo noise.
+# Sell slip stays dynamic via _dynamic_sell_slip_factor (liq-aware).
+# Calibration script: scripts/_calibrate_buy_slip.py → data/buy_slip_calibration.json
 # ---------------------------------------------------------------------------
-BUY_SLIPPAGE_BPS = 10    # 0.1% — Jupiter Ultra platform fee
-SELL_SLIPPAGE_BPS = 10   # 0.1% — Jupiter Ultra platform fee
+BUY_SLIPPAGE_BPS = 225   # 2.25% — empirical median (v14e.24)
+SELL_SLIPPAGE_BPS = 10   # 0.1% — base; dynamic adjuster applies liq_mult + type_bps on top
 BUY_FEE_BPS = 0          # 0% — folded into slippage
 SELL_FEE_BPS = 0          # 0% — folded into slippage
 
