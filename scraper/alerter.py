@@ -406,12 +406,22 @@ def alert_live_sell(symbol: str, strategy: str, exit_reason: str,
     solscan = f"https://solscan.io/tx/{signature}"
     dex = f"https://dexscreener.com/solana/{ca}" if ca else ""
 
+    max_gain = ((high_price / entry_price) - 1) * 100 if entry_price and high_price else 0
+
     # Emoji
     if exit_reason == "trail_stop":
         emoji = "🟢" if pnl_pct > 0.5 else ("✅" if pnl_pct > 0 else "🟡")
         reason_text = "TRAIL STOP"
     elif exit_reason == "tp_hit":
         emoji, reason_text = "🎯", "TP HIT"
+        # v14e.18: tag TP fired but execution slipped (peak hit target, fill
+        # came back near/below entry due to Solana sell latency on dumping
+        # tokens). Heuristic: peak ≥ +30% AND realized < peak − 20pp →
+        # surface the slip in the title so the alert isn't misleading.
+        slip_pp = max_gain - (pnl_pct * 100)
+        if max_gain >= 30 and slip_pp >= 20:
+            reason_text = f"TP HIT (slip −{slip_pp:.0f}pp)"
+            emoji = "⚠️🎯"
     elif exit_reason == "sl_hit":
         emoji, reason_text = "🔴", "SL HIT"
     elif exit_reason == "timeout":
@@ -419,8 +429,6 @@ def alert_live_sell(symbol: str, strategy: str, exit_reason: str,
         reason_text = "TIMEOUT"
     else:
         emoji, reason_text = "📊", exit_reason.upper()
-
-    max_gain = ((high_price / entry_price) - 1) * 100 if entry_price and high_price else 0
 
     # v14e: single-strategy scope (see alert_live_buy / alert_trade_closed).
     strat_text = ""
@@ -699,6 +707,9 @@ def alert_trade_closed(symbol: str, strategy: str, exit_reason: str,
     """v110: Alert when a main trade closes (trail_stop, sl_hit, timeout).
     v115: Shows per-strategy bankroll comparison.
     v119: active_strategies filters bankroll display to only active ones."""
+    # Max gain from entry
+    max_gain = ((high_price / entry_price) - 1) * 100 if entry_price and high_price else 0
+
     # Emoji based on outcome
     if exit_reason == "trail_stop":
         if pnl_pct > 0.5:
@@ -711,6 +722,12 @@ def alert_trade_closed(symbol: str, strategy: str, exit_reason: str,
     elif exit_reason == "tp_hit":
         emoji = "🎯"
         reason_text = "TP HIT"
+        # v14e.18: same slip tag as alert_live_sell — peak hit TP but fill
+        # came back near entry (Solana sell latency on dumping pools).
+        slip_pp = max_gain - (pnl_pct * 100)
+        if max_gain >= 30 and slip_pp >= 20:
+            reason_text = f"TP HIT (slip −{slip_pp:.0f}pp)"
+            emoji = "⚠️🎯"
     elif exit_reason == "sl_hit":
         emoji = "🔴"
         reason_text = "SL HIT"
@@ -720,9 +737,6 @@ def alert_trade_closed(symbol: str, strategy: str, exit_reason: str,
     else:
         emoji = "📊"
         reason_text = exit_reason.upper()
-
-    # Max gain from entry
-    max_gain = ((high_price / entry_price) - 1) * 100 if entry_price and high_price else 0
 
     # v14e: Alert = 1 strategy = 1 trade = 1 chain. No more dumping every other
     # strategy's bankroll into the message (user complaint: "alertes mélangées
