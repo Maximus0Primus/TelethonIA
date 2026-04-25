@@ -1241,11 +1241,12 @@ def _build_fake_trade(trade: dict, strategy_override: str = None,
     entry_price = float(trade["entry_price"])
 
     if sim_live_entry:
-        # Simulate buy slippage: entry_price becomes the "fill" (worse than quote).
-        # Use liquidity to estimate slippage: low liq = more slippage.
-        liq = float(trade.get("rt_liquidity_usd") or 50_000)
-        # Slippage model: 50K+ liq = 2%, 10K liq = 4%, 5K liq = 6%, 1K = 10%
-        slip_pct = max(0.02, min(0.10, 0.02 + 0.08 * (1 - min(liq, 50_000) / 50_000)))
+        # v14e.24: use the production constant (strategies.BUY_SLIPPAGE_BPS = 225)
+        # for a single source of truth across paper / sim / shadow / live.
+        # Previously a piecewise liq curve (2-10%) — empirical fit R²=5% showed
+        # liq doesn't predict slip; the constant median is the honest baseline.
+        from strategies import BUY_SLIPPAGE_BPS as _PT_BUY_SLIP_BPS
+        slip_pct = _PT_BUY_SLIP_BPS / 10_000
         fill_price = entry_price * (1 + slip_pct)  # fill is HIGHER (you pay more)
         # dex_spot = market price at entry (for trail activation reference)
         dex_spot = entry_price

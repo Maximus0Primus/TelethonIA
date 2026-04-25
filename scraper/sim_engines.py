@@ -7,26 +7,34 @@ Each engine takes (candles, entry_price, cfg) and returns:
 Slippage constants are applied at exit.
 """
 
+from strategies import BUY_SLIPPAGE_BPS as _PT_BUY_SLIPPAGE_BPS
+
 # ---------------------------------------------------------------------------
 # Slippage constants
 # ---------------------------------------------------------------------------
 # v126: Legacy fallback only. _exit() now calls production _dynamic_sell_slip_factor
 # from paper_trader, matching live behavior (10bps base + liq/exit multipliers).
 # These constants remain for data-end exits and the DIP_BUY buy-side.
+# v14e.24 (Apr 25): BUY_SLIPPAGE / compute_buy_slippage now mirror the
+# empirical median (strategies.BUY_SLIPPAGE_BPS = 225) — single source of truth
+# across paper / sim / shadow. AMM impact term dropped: empirical R²=5%, the
+# liquidity feature does not predict slip, so the previous theoretical
+# `BASE_FEE + position/(liq+position)` was over-engineering.
 SLIPPAGE_TRAIL = 0.025   # legacy fallback — 2.5% for trail/timeout/TP
 SLIPPAGE_SL = 0.025      # legacy fallback — 2.5% for SL
-BUY_SLIPPAGE = 0.015     # 1.5% for DIP_BUY re-entries (matches live: 1% buy + 0.5% fee)
+BUY_SLIPPAGE = _PT_BUY_SLIPPAGE_BPS / 10_000  # mirrors strategies.BUY_SLIPPAGE_BPS
 
 
 def compute_buy_slippage(position_usd: float, liquidity_usd: float,
                          n_simultaneous: int = 1) -> float:
-    """Liquidity-aware buy slippage: base fee + AMM price impact."""
-    BASE_FEE = 0.010  # 1% swap fee + MEV
-    if liquidity_usd <= 0:
-        return BUY_SLIPPAGE  # fallback flat 1.5%
-    total_vol = position_usd * n_simultaneous
-    impact = total_vol / (liquidity_usd + total_vol)
-    return BASE_FEE + impact
+    """v14e.24: returns the production constant (mirrors paper_trader).
+
+    Previously a theoretical AMM impact model (BASE_FEE + pos/(liq+pos)).
+    Empirical fit on 229 live trades showed R²=5%, so the liq-aware term
+    didn't predict slip. Now returns the same constant as paper to keep
+    sim ↔ paper ↔ shadow ↔ live aligned on a single source of truth.
+    """
+    return BUY_SLIPPAGE
 
 
 # ---------------------------------------------------------------------------

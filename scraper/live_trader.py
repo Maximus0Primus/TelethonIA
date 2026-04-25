@@ -852,7 +852,7 @@ def open_live_trade(client_sb, token_entry: dict, strategy: str,
         trade_id = insert_res.data[0]["id"] if insert_res.data else None
         logger.info(
             "LIVE TRADE OPENED: %s %s @ $%.8f | %.4f SOL ($%.2f) | sig: %s",
-            symbol, strategy, entry_price, position_sol, position_usd, result["signature"][:16],
+            symbol, strategy, execution_price, position_sol, position_usd, result["signature"][:16],
         )
         _t_msg = token_entry.get("_rt_t_msg")
         _t_ds_done = token_entry.get("_rt_t_ds_done")

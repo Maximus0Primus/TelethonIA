@@ -39,9 +39,8 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-# --- Slippage (same as paper_trader.py) ---
-BUY_SLIPPAGE_BPS = 150   # 1.5%
-SELL_SLIPPAGE_BPS = 300   # 3.0%
+# --- Slippage — single source of truth in strategies.py (v14e.24) ---
+from strategies import BUY_SLIPPAGE_BPS, SELL_SLIPPAGE_BPS  # noqa: E402
 
 # --- Supabase ---
 SUPABASE_URL = os.environ["SUPABASE_URL"]
