@@ -1,4 +1,90 @@
-# Pipeline Status — Updated Apr 25, 2026 (v14e.22 — LOWSCORE shadow + routing audit)
+# Pipeline Status — Updated Apr 25, 2026 (v14e.23 — ETH LIVE TRADER ROLLOUT)
+
+## 🎯 TÂCHE PRINCIPALE — déployer ETH live trading
+
+**Contexte** : ETH paper performe mieux que SOL en ce moment (+$617/d à $200/trade vs SOL qui saigne 3j). User veut passer en live ETH à $50/trade. Mes estimations gas ($15 round-trip) sont théoriques — non validées chain. v14e.23 commit `880f0ea` livre le tooling pour mesurer empiriquement.
+
+### Phase A — Calibration empirique du fee model (à faire MAINTENANT)
+
+**Côté user (5 étapes, ~30 min total)** :
+
+- [ ] **A1.** Créer un wallet EVM dédié sur Phantom (NE PAS utiliser le main).
+  - Phantom → menu → "Create new wallet" → Ethereum
+  - Récupérer la clé privée : Phantom → ⚙ → Show private key
+- [ ] **A2.** Funder le wallet dédié avec **0.05-0.1 ETH** (~$130-260) depuis le main.
+- [ ] **A3.** Ajouter dans `scraper/.env` :
+  ```
+  ETH_PRIVATE_KEY=0x...                       # clé privée du wallet dédié
+  # ETH_RPC_URL=https://rpc.flashbots.net    # optionnel, default Flashbots Protect (free)
+  ```
+- [ ] **A4.** Installer deps web3 :
+  ```
+  pip install -r scraper/requirements.txt
+  ```
+- [ ] **A5.** Lancer DRY-RUN sur PEPE (zéro tx, gratuit) :
+  ```
+  python scripts/_eth_live_smoke_test.py --token 0x6982508145454Ce325dDbE47a25d4ec3d2311933 --eth-amount 0.005
+  ```
+  → Lit le bloc `=== GAS ESTIMATE ===` du report. Tells us if gas est vraiment ~$15 ou pas.
+- [ ] **A6.** Si dry-run montre gas raisonnable → swap réel test :
+  ```
+  python scripts/_eth_live_smoke_test.py --token 0x6982508145454Ce325dDbE47a25d4ec3d2311933 --eth-amount 0.005 --execute
+  ```
+  Confirmation `yes` requise. Tx envoyée, ~30s plus tard tu as gas réel + slippage réel.
+- [ ] **A7.** Reporter les chiffres `=== ACTUAL RESULTS ===` dans le chat.
+
+### Phase B — Recalibration paper + decision go/no-go
+
+**Côté Claude après réception des chiffres user** :
+
+- [ ] **B1.** Si gas réel < $15 round-trip : recalibrer `_evm_slip_bps_with_gas` dans `paper_trader.py` avec les vraies valeurs (gas fixe + MEV bps + slip bps).
+- [ ] **B2.** Recalculer P&L net à $50/trade avec les vrais coûts. Si :
+  - Net > +5%/trade → GO live
+  - Net 0 à +5%/trade → live possible mais marginal, tester d'abord en micro-size $25
+  - Net négatif → STOP, position min profitable est plus haute, choisir Base/BSC à la place
+- [ ] **B3.** Documenter la calibration empirique dans `docs/known_issues.md` pour ne plus revivre cet aveugle.
+
+### Phase C — Branchement live trader (si Phase B = GO)
+
+- [ ] **C1.** Add config flag `eth_live_enabled=true` dans `rt_trade_config` Supabase.
+- [ ] **C2.** Wire `live_trader_eth.execute_buy/sell` dans `safe_scraper._rt_open_trades` chain=ethereum branch (actuellement `NotImplementedError` short-circuit le live).
+- [ ] **C3.** Add ETH bankroll budget + daily_loss_limit_eth dans `risk_limits_per_chain`.
+- [ ] **C4.** Activer SEULEMENT 2 strats live ETH initiales : ETH_BE30_TP100_SL40 (+12.6% paper) + ETH_TP100_SL50 (+7.8% paper).
+- [ ] **C5.** Position size **$25/trade pour les 50 premiers** (Phase A1 du plan original) — pas $50, on commence prudent.
+- [ ] **C6.** Daily loss limit ETH = $30/jour ($25 × 1.2 = max 1 SL hit avant pause).
+- [ ] **C7.** Telegram alerts ETH live (déjà chain-aware via `alert_kol_trade(chain='ethereum')`, juste vérifier que les liens Etherscan tagged 🔷 sont OK).
+
+### Phase D — Monitoring + scale-up
+
+- [ ] **D1.** 7 jours / 50+ trades en live à $25/trade.
+- [ ] **D2.** Mesurer **paper-live drift réel** : avg pnl_pct paper vs live + écart median + max abs.
+  - Drift <5pp → scale-up Phase E
+  - Drift 5-10pp → ajuster fee model + re-tester 7j
+  - Drift >10pp → kill ETH live, retour 100% paper
+- [ ] **D3.** Vérifier que Flashbots Protect bloque vraiment les sandwich attacks (compter `tx_hash` reverted vs success).
+- [ ] **D4.** Identifier les KOLs ETH les plus rentables en LIVE (différent de paper potentiellement) — re-runner per-KOL sur live data.
+
+### Phase E — Scale-up ($100/trade)
+
+- [ ] **E1.** Si Phase D drift OK : passer à $100/trade.
+- [ ] **E2.** Activer les 5 strats ETH actives (BE20/BE30/TP80/TP100 family).
+- [ ] **E3.** Daily loss limit $100/jour.
+- [ ] **E4.** Re-monitor 7j, decision pour Phase F ($200 = paper-tested size).
+
+### Phase F — Production normale ($200/trade)
+
+- [ ] **F1.** Toutes les strats ETH actives, $200/trade comme paper.
+- [ ] **F2.** Enable les 5 nouvelles `ETH_FAST*` strats (v14e.21) si paper-side validation OK à ce moment.
+- [ ] **F3.** Stratégies live ETH = source principale de revenus du bot (10-20× le revenu SOL actuel).
+
+### Risques connus
+
+- **Pool rug** : Flashbots Protect blocks sandwich MEV mais NE PROTÈGE PAS d'un rug pull (LP retirée par dev). Mitigation : seuils de score + filtre liquidité min sur ETH.
+- **Failed tx (revert)** : si slippage trop tight ou pool migré, tx revert. On perd le gas (~$5-15) mais pas le capital. Compter dans le drift.
+- **Block latency** : ETH block 12s vs Solana ~0.4s. Notre polling 30s est OK mais entry latency = +6-12s vs Solana → on rate les pumps les plus rapides.
+- **Wallet compromise** : clé privée séparée, exposure = balance du wallet dédié uniquement. Jamais le main Phantom.
+
+---
 
 ## v14e.22 — Apr 25 PM — LOWSCORE_TP50_SL15 shadow + 4 routing ideas tested
 
