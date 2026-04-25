@@ -4232,14 +4232,86 @@ _MEGA_LAZY_SLOW_SEC = 600
 
 # Worker-global ticks cache (loaded by _mega_init_worker from JSON)
 _MEGA_TICKS = None
+_MEGA_DAY_REGIME = {}  # v14e.26: {date_str: "active"/"quiet"/"dead"}
+_MEGA_TEST_DAYS = set()  # v14e.26: walk-forward test set (last 3 days)
 
 
-def _mega_init_worker(ticks_path):
+def _mega_init_worker(ticks_path, day_regime_path=None):
     """multiprocessing initializer — loads ticks JSON once per worker process."""
     import json
-    global _MEGA_TICKS
+    global _MEGA_TICKS, _MEGA_DAY_REGIME, _MEGA_TEST_DAYS
     with open(ticks_path) as f:
         _MEGA_TICKS = json.load(f)
+    if day_regime_path:
+        with open(day_regime_path) as f:
+            _meta = json.load(f)
+        _MEGA_DAY_REGIME = _meta.get("day_regime", {})
+        _MEGA_TEST_DAYS = set(_meta.get("test_days", []))
+
+
+def _compute_day_regime(universe, ticks, peak_window_min=120, pump_threshold_pct=50,
+                        active_rate=0.30, quiet_rate=0.15):
+    """v14e.26: classify each calendar day in the universe as active/quiet/dead.
+
+    Definition: pump_rate(day) = fraction of tokens entered on `day` whose
+    intra-window peak (entry_price → max within `peak_window_min`) exceeds
+    `pump_threshold_pct`%. Thresholds:
+        active: pump_rate >= 30%
+        quiet:  15% <= pump_rate < 30%
+        dead:   pump_rate < 15%
+
+    Returns: ({day_str: regime}, pump_rates_by_day) for inspection.
+    Days with <5 tokens are tagged "unknown" (excluded from regime stats).
+    """
+    from collections import defaultdict
+    by_day = defaultdict(list)
+    for u in universe:
+        addr = u["token_address"]
+        td = ticks.get(addr)
+        if not td:
+            continue
+        try:
+            entry_p = float(u["entry_price"])
+            if entry_p <= 0:
+                continue
+        except (TypeError, ValueError):
+            continue
+        try:
+            entry_dt = datetime.fromisoformat(u["created_at"].replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            continue
+        end_iso = (entry_dt + timedelta(minutes=peak_window_min)).isoformat().replace("+00:00", "Z")
+        all_ticks = []
+        for t in td.get("jp", []) + td.get("ds", []):
+            ft = t.get("fetched_at")
+            if ft and u["created_at"] <= ft <= end_iso:
+                try:
+                    p = float(t["price_usd"])
+                    if p > 0:
+                        all_ticks.append(p)
+                except (TypeError, ValueError):
+                    pass
+        if not all_ticks:
+            continue
+        peak_pct = (max(all_ticks) / entry_p - 1) * 100
+        day = u["created_at"][:10]
+        by_day[day].append(peak_pct >= pump_threshold_pct)
+
+    day_regime = {}
+    pump_rates = {}
+    for day, hits in by_day.items():
+        if len(hits) < 5:
+            day_regime[day] = "unknown"
+            continue
+        rate = sum(hits) / len(hits)
+        pump_rates[day] = rate
+        if rate >= active_rate:
+            day_regime[day] = "active"
+        elif rate >= quiet_rate:
+            day_regime[day] = "quiet"
+        else:
+            day_regime[day] = "dead"
+    return day_regime, pump_rates
 
 
 def _mega_poll_offsets(polling_mode, horizon_sec):
@@ -4541,9 +4613,12 @@ def _mega_replay_one(tp_mult, sl_mult, horizon_min, be_act,
 
 def _mega_process_config(args):
     import numpy as np
+    import json as _json
+    from collections import defaultdict
     (strat_name, tp_mult, sl_mult, horizon_min, be_act,
      fname, source, smoothing, polling_mode, universe) = args
     pnls = []
+    pnls_by_day = defaultdict(list)  # v14e.26: track per-day pnls
     for u in universe:
         if not _mega_apply_filter(u, fname): continue
         addr = u["token_address"]
@@ -4559,7 +4634,9 @@ def _mega_process_config(args):
                               source, smoothing, polling_mode,
                               u.get("rt_liquidity_usd"),
                               strat_name=strat_name)
-        if pnl is not None: pnls.append(pnl)
+        if pnl is not None:
+            pnls.append(pnl)
+            pnls_by_day[u["created_at"][:10]].append(pnl)
     n = len(pnls)
     if n < 10: return None
     arr = np.array(pnls)
@@ -4574,6 +4651,38 @@ def _mega_process_config(args):
     n_pass = sum(1 for u in universe if _mega_apply_filter(u, fname))
     trade_rate = n_pass / max(1, len(universe)) * 18
     dollars_day = 50 * (avg / 100) * trade_rate
+
+    # v14e.26 — Feature 1+2: Per-regime breakdown
+    pnl_by_regime = defaultdict(list)
+    for day, day_pnls in pnls_by_day.items():
+        regime = _MEGA_DAY_REGIME.get(day, "unknown")
+        if regime == "unknown":
+            continue
+        pnl_by_regime[regime].extend(day_pnls)
+    pnl_active = float(np.mean(pnl_by_regime["active"]) * 100) if pnl_by_regime.get("active") else None
+    pnl_quiet = float(np.mean(pnl_by_regime["quiet"]) * 100) if pnl_by_regime.get("quiet") else None
+    pnl_dead = float(np.mean(pnl_by_regime["dead"]) * 100) if pnl_by_regime.get("dead") else None
+    n_active = len(pnl_by_regime["active"])
+    n_quiet = len(pnl_by_regime["quiet"])
+    n_dead = len(pnl_by_regime["dead"])
+
+    # v14e.26 — Feature 3: Walk-forward train/test split (last 3 days = test)
+    train_pnls = []
+    test_pnls = []
+    for day, day_pnls in pnls_by_day.items():
+        (test_pnls if day in _MEGA_TEST_DAYS else train_pnls).extend(day_pnls)
+    wf_train_pnl = float(np.mean(train_pnls) * 100) if train_pnls else None
+    wf_test_pnl = float(np.mean(test_pnls) * 100) if test_pnls else None
+    wf_consistent = False
+    if wf_train_pnl is not None and wf_test_pnl is not None:
+        same_sign = (wf_train_pnl > 0) == (wf_test_pnl > 0)
+        denom = max(abs(wf_train_pnl), 0.5)
+        magnitude_ok = abs(wf_test_pnl - wf_train_pnl) / denom < 0.6
+        wf_consistent = bool(same_sign and magnitude_ok)
+
+    # v14e.26 — daily_pnl_json: needed for Feature 4 (bootstrap rank stability) in analyze step
+    daily_pnl = {day: round(float(np.mean(p) * 100), 3) for day, p in pnls_by_day.items()}
+
     return {
         "strategy": strat_name, "filter": fname, "source": source,
         "smoothing": smoothing, "polling_mode": polling_mode,
@@ -4581,6 +4690,15 @@ def _mega_process_config(args):
         "avg_pnl_pct": round(avg, 3), "median_pnl_pct": round(med, 3),
         "sharpe": round(sharpe, 4), "max_dd_pct": round(dd, 2),
         "dollars_per_day": round(dollars_day, 2), "horizon_min": horizon_min,
+        # v14e.26 regime + walk-forward columns
+        "n_active": n_active, "n_quiet": n_quiet, "n_dead": n_dead,
+        "pnl_active_pct": round(pnl_active, 3) if pnl_active is not None else None,
+        "pnl_quiet_pct": round(pnl_quiet, 3) if pnl_quiet is not None else None,
+        "pnl_dead_pct": round(pnl_dead, 3) if pnl_dead is not None else None,
+        "wf_train_pnl_pct": round(wf_train_pnl, 3) if wf_train_pnl is not None else None,
+        "wf_test_pnl_pct": round(wf_test_pnl, 3) if wf_test_pnl is not None else None,
+        "wf_consistent": wf_consistent,
+        "daily_pnl_json": _json.dumps(daily_pnl, separators=(",", ":")),
     }
 
 
@@ -4864,6 +4982,36 @@ def _mega_sweep_run(args):
         _json.dump(ticks, f)
     print(f"  ticks JSON: {ticks_path} ({os.path.getsize(ticks_path)/1e6:.1f} MB)")
 
+    # v14e.26 — Per-day regime classification (active/quiet/dead) + walk-forward split
+    print("\nClassifying day regimes (peak_window=120min, pump_threshold=+50%)...")
+    day_regime, pump_rates = _compute_day_regime(universe, ticks)
+    sorted_days = sorted(day_regime.keys())
+    test_days = set(sorted_days[-3:])  # last 3 days = walk-forward test set
+    counts = {"active": 0, "quiet": 0, "dead": 0, "unknown": 0}
+    for d, r in day_regime.items():
+        counts[r] = counts.get(r, 0) + 1
+    print(f"  Days classified: {len(day_regime)}")
+    for r, c in sorted(counts.items()):
+        print(f"    {r:<8} {c}")
+    print(f"  Walk-forward test days (last 3): {sorted(test_days)}")
+    if pump_rates:
+        for d in sorted(pump_rates):
+            r = day_regime[d]
+            mark = " <- TEST" if d in test_days else ""
+            print(f"    {d}  pump_rate={pump_rates[d]*100:>5.1f}%  regime={r:<8}{mark}")
+
+    # Persist regime metadata for workers
+    regime_path = os.path.join(os.path.dirname(csv_out), "_mega_regime_tmp.json")
+    with open(regime_path, "w") as f:
+        _json.dump({"day_regime": day_regime, "test_days": sorted(test_days),
+                    "pump_rates": pump_rates}, f)
+
+    # v14e.26 BONUS — `--exclude-dead-days` filter universe before sweep
+    if getattr(args, "exclude_dead_days", False):
+        before = len(universe)
+        universe = [u for u in universe if day_regime.get(u["created_at"][:10]) != "dead"]
+        print(f"\n[--exclude-dead-days] Universe filtered: {before} -> {len(universe)} (dropped {before - len(universe)} dead-day trades)")
+
     jobs = []
     for strat_name, (tp, sl, h, be) in full_pool.items():
         for fname in filters:
@@ -4876,7 +5024,7 @@ def _mega_sweep_run(args):
     print(f"Launching {n_workers} workers...\n")
     results = []
     t_start = _time.time()
-    with mp.Pool(n_workers, initializer=_mega_init_worker, initargs=(ticks_path,)) as pool:
+    with mp.Pool(n_workers, initializer=_mega_init_worker, initargs=(ticks_path, regime_path)) as pool:
         for i, r in enumerate(pool.imap_unordered(_mega_process_config, jobs, chunksize=50)):
             if r is not None: results.append(r)
             if (i+1) % 2000 == 0:
@@ -4886,6 +5034,8 @@ def _mega_sweep_run(args):
                 print(f"  {i+1}/{total} ({pct:.1f}%) in {el:.0f}s, ETA {eta:.0f}s", flush=True)
 
     try: os.remove(ticks_path)
+    except Exception: pass
+    try: os.remove(regime_path)
     except Exception: pass
 
     df = pd.DataFrame(results)
@@ -5019,6 +5169,11 @@ def main():
     parser.add_argument("--mega-sweep", action="store_true",
                         help="v140: Full mega sweep — all STRATEGIES + new TP200 variants × 7 filters × "
                              "2 sources × 8 smoothings × 5 polling modes. Multiprocessing. ~30-45min.")
+    parser.add_argument("--exclude-dead-days", action="store_true",
+                        help="v14e.26 BONUS: drop dead-day trades from the universe before the "
+                             "mega sweep. Dead = pump_rate < 15%% (fraction of tokens reaching peak >= +50%% "
+                             "in 2h). Useful when the recent SOL market regime is non-representative "
+                             "(e.g. 3+ days of mort) and would distort the ranking. Cross-check vs full run.")
     parser.add_argument("--mega-sweep-extended", action="store_true",
                         help="v144: EXTENDED mega sweep — 12 filters × 3 sources × 9 smoothings × "
                              "10 polling modes (adds source=both, 4 LAZY cadence variants, 5 finer "

@@ -1,21 +1,31 @@
 """Post-process mega_sweep_extended.csv with multi-test correction + family realism flag.
 
-Adds 4 columns:
+Adds columns:
   p_value         — one-sample t-test vs zero (avg_pnl_pct = 0)
   p_corrected     — Bonferroni (× N_configs)
   fdr_q           — Benjamini-Hochberg q-value
   family_realism  — 1.0 = clean (TP/SL/BE/FAST/HIGHSCORE), 0.5 = HYST nu, 0.1 = trail/dtrail/dip/split
 
+v14e.26 — Feature 4 (bootstrap rank stability) + Feature 5 (cross-regime robust):
+  bootstrap_rank_pct  — median rank percentile across N resamples of trading days
+                        (1.0 = always top, 0.5 = median, 0.0 = always bottom).
+                        Computed only if `daily_pnl_json` column present.
+  rank_stability      — 1.0 - rank_std (normalized std of rank across resamples).
+                        High (>0.7) = rank is stable across day permutations.
+  cross_regime_robust — bool: pnl_active>0 AND pnl_quiet>0 AND wf_consistent
+
 Outputs:
   _mega_sweep_extended_annotated.csv   — full table with new columns
-  _mega_sweep_top_robust.csv           — top 30 with fdr_q < 0.05 AND family_realism >= 0.5
+  _mega_sweep_top_robust.csv           — top 30 robust (FDR<0.05, family>=0.5,
+                                          cross_regime_robust if regime data present)
 
 Usage:
   python scripts/analyze_mega_sweep.py [--csv _mega_sweep_extended.csv] [--alpha 0.05]
 """
-import argparse, math, sys
+import argparse, math, sys, json
 from pathlib import Path
 import pandas as pd
+import numpy as np
 
 # Family realism scores — calibrated from Apr 20 audit
 # DTRAIL10_ACT15_SL70: sim top vs live actual = 47x slip + 65% reconciler early-close
@@ -119,17 +129,80 @@ def main():
         axis=1
     )
 
+    # v14e.26 — Feature 4: Bootstrap rank stability via resampling days.
+    # Skipped silently if `daily_pnl_json` not in CSV (run pre-v14e.26).
+    if "daily_pnl_json" in df_eligible.columns:
+        print("\n[v14e.26 Feature 4] Bootstrap rank stability (300 resamples of days)...")
+        # Parse daily_pnl_json once per row
+        daily_dicts = df_eligible["daily_pnl_json"].apply(
+            lambda s: json.loads(s) if isinstance(s, str) and s else {}
+        ).tolist()
+        # Universe of all observed days
+        all_days = sorted({d for dd in daily_dicts for d in dd})
+        n_days = len(all_days)
+        if n_days >= 5 and len(daily_dicts) >= 10:
+            n_resamples = 300
+            rng = np.random.default_rng(42)
+            n_configs = len(daily_dicts)
+            # Pre-build matrix: rows = configs, cols = days, values = avg pnl_pct
+            M = np.full((n_configs, n_days), np.nan)
+            day_idx = {d: i for i, d in enumerate(all_days)}
+            for ci, dd in enumerate(daily_dicts):
+                for d, p in dd.items():
+                    j = day_idx.get(d)
+                    if j is not None:
+                        M[ci, j] = float(p)
+            # rank_pct accumulator
+            rank_sum = np.zeros(n_configs)
+            rank_sq = np.zeros(n_configs)
+            for _ in range(n_resamples):
+                sample_cols = rng.integers(0, n_days, n_days)  # bootstrap days w/ replacement
+                sub = M[:, sample_cols]
+                # Mean per config (ignoring NaN)
+                with np.errstate(invalid="ignore"):
+                    means = np.nanmean(sub, axis=1)
+                # Rank: higher mean = better. argsort gives ascending; pct = rank / N
+                order = np.argsort(np.nan_to_num(means, nan=-1e9))
+                ranks = np.empty(n_configs)
+                ranks[order] = np.arange(n_configs)
+                pct = ranks / max(1, n_configs - 1)
+                rank_sum += pct
+                rank_sq += pct ** 2
+            rank_mean = rank_sum / n_resamples
+            rank_var = rank_sq / n_resamples - rank_mean ** 2
+            rank_std = np.sqrt(np.clip(rank_var, 0, None))
+            df_eligible["bootstrap_rank_pct"] = np.round(rank_mean, 4)
+            df_eligible["rank_stability"] = np.round(1.0 - 2 * rank_std, 4)  # 1.0 = perfectly stable
+            print(f"  computed for {n_configs:,} configs across {n_days} days")
+        else:
+            print(f"  skipped: only {n_days} days, {len(daily_dicts)} configs (need >=5 days, >=10 configs)")
+
+    # v14e.26 — Feature 5: Cross-regime robust flag
+    if all(c in df_eligible.columns for c in ("pnl_active_pct", "pnl_quiet_pct", "wf_consistent")):
+        df_eligible["cross_regime_robust"] = (
+            (df_eligible["pnl_active_pct"].fillna(-99) > 0)
+            & (df_eligible["pnl_quiet_pct"].fillna(-99) > 0)
+            & (df_eligible["wf_consistent"].fillna(False))
+        )
+        n_cr = int(df_eligible["cross_regime_robust"].sum())
+        print(f"[v14e.26 Feature 5] cross_regime_robust = True: {n_cr:,} configs")
+
     # Save annotated CSV
     out_full = csv_path.parent / f"{csv_path.stem}_annotated.csv"
     df_eligible.to_csv(out_full, index=False)
     print(f"  -> {out_full} ({len(df_eligible):,} rows)")
 
-    # Top robust: positive avg, fdr<alpha, family_realism>=0.5
-    robust = df_eligible[
+    # Top robust: positive avg, fdr<alpha, family_realism>=0.5,
+    # AND cross_regime_robust if available (v14e.26)
+    base_filter = (
         (df_eligible["avg_pnl_pct"] > 0)
         & (df_eligible["fdr_q"] < args.alpha)
         & (df_eligible["family_realism"] >= 0.5)
-    ].sort_values("avg_pnl_pct", ascending=False).head(args.top)
+    )
+    if "cross_regime_robust" in df_eligible.columns:
+        base_filter = base_filter & df_eligible["cross_regime_robust"]
+        print(f"  applying cross_regime_robust filter to top robust selection")
+    robust = df_eligible[base_filter].sort_values("avg_pnl_pct", ascending=False).head(args.top)
     out_top = csv_path.parent / f"{csv_path.stem.replace('extended','top_robust')}.csv"
     robust.to_csv(out_top, index=False)
 
@@ -157,9 +230,13 @@ def main():
         print("  (none — try relaxing --alpha or check sweep data)")
     else:
         cols = ["strategy", "filter", "source", "smoothing", "polling_mode",
-                "n", "wr_pct", "avg_pnl_pct", "fdr_q", "family_realism", "dollars_per_day"]
+                "n", "wr_pct", "avg_pnl_pct", "fdr_q", "family_realism", "dollars_per_day",
+                # v14e.26 columns (shown if present)
+                "pnl_active_pct", "pnl_quiet_pct", "pnl_dead_pct",
+                "wf_train_pnl_pct", "wf_test_pnl_pct", "wf_consistent",
+                "rank_stability", "cross_regime_robust"]
         cols = [c for c in cols if c in robust.columns]
-        with pd.option_context("display.max_rows", None, "display.width", 200, "display.float_format", "{:,.4f}".format):
+        with pd.option_context("display.max_rows", None, "display.width", 240, "display.float_format", "{:,.4f}".format):
             print(robust[cols].to_string(index=False))
     print()
     print(f"Files written:")
@@ -173,6 +250,13 @@ def main():
     print("                    0.5=HYST nu (paired test confirmed loss vs base),")
     print("                    0.8=HYST + filter (real signal),")
     print("                    1.0=TP/SL/BE/FAST (clean, no smoothing trickery)")
+    print("  - pnl_{active,quiet,dead}_pct: per-regime avg PnL. Active days = pump_rate>=30%,")
+    print("                    quiet = 15-30%, dead = <15% (fraction of tokens hitting peak >= +50%)")
+    print("  - wf_{train,test}_pnl_pct: walk-forward split. Train = all days except last 3.")
+    print("                    Test = last 3 days. wf_consistent = same sign + within 60% magnitude.")
+    print("  - rank_stability: bootstrap stability of rank across day resampling. >0.7 = stable.")
+    print("  - cross_regime_robust: pnl_active>0 AND pnl_quiet>0 AND wf_consistent.")
+    print("                    Top robust list NOW REQUIRES this flag (v14e.26).")
 
 
 if __name__ == "__main__":
