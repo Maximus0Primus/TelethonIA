@@ -51,9 +51,10 @@ jobs:
           # analyze_mega_sweep.py par défaut).
           cd scraper
           # Workers: GH runner = 4 vCPU. sim.py default = min(12, cpu_count-2)
-          # → auto-clampe à 2. Explicite via --mega-sweep-workers pour éviter
-          # l'oversubscription.
-          python sim.py --mega-sweep-extended --mega-sweep-workers 2 2>&1 | tee sweep.out
+          # → auto-clampe à 2. Explicite via --mega-workers pour éviter
+          # l'oversubscription. v14e.19+v14e.20 filtres trail/hyst actifs par
+          # défaut (--include-trail-families / --include-hyst pour opt-in).
+          python sim.py --mega-sweep-extended --mega-workers 2 2>&1 | tee sweep.out
           # Move CSV to repo root for the next step
           if [ -f _mega_sweep_extended.csv ]; then
             mv _mega_sweep_extended.csv ../
