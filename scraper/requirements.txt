@@ -13,6 +13,9 @@ shap==0.50.0
 joblib==1.5.3
 jup-python-sdk==1.2.0
 pandas-ta==0.4.71b0
+# v14e.23: ETH live trader (Uniswap V3 + Flashbots Protect)
+web3==7.5.0
+eth-account==0.13.4
 # Optional: CryptoBERT sentiment (better accuracy, needs ~2GB VRAM/RAM)
 # transformers>=4.40.0
 # torch>=2.2.0
