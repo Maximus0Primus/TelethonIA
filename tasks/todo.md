@@ -1,3 +1,73 @@
+# Pipeline Status — Updated Apr 25, 2026 (v14e.22 — LOWSCORE shadow + routing audit)
+
+## v14e.22 — Apr 25 PM — LOWSCORE_TP50_SL15 shadow + 4 routing ideas tested
+
+### Audit routing (sur 22,475 trades closed depuis reset Apr 17)
+
+Script `_analyze_routing_ideas.py` + apples-to-apples `_quantify_routing_dollar_day.py`. Verdicts honnêtes après correction du biais d'échantillonnage :
+
+| Idée | Verdict | Δ apples-to-apples N=52 | Live $/d ($1.74/trade) | Annualisé |
+|---|---|---:|---:|---:|
+| BASELINE BE25_TP80_SL30 | (référence) | +9.41% | +$16.24/d | +$5,926/yr |
+| Per-KOL family routing | ❌ NEGATIVE | −0.88pp | −$1.51/d | −$551/yr |
+| **Score-gate (TP50 si score<30)** | ✅ POSITIVE | **+1.93pp** | **+$3.34/d** | **+$1,217/yr** |
+| Combined score+per-KOL | ≈ score-gate seul | +1.73pp | +$2.99/d | +$1,091/yr |
+| Cooccurrence multi-KOL | ❌ N/A | dataset trop petit | — | — |
+| Per-KOL custom timeout | ❌ NEGATIVE | +0.3pp | <$1/d | — |
+
+### Implémenté en v14e.22
+
+- **`LOWSCORE_TP50_SL15`** : nouvelle strat ajoutée à `strategies.py` (TP +50% / SL -15% / 120min / chain=solana / max_score=29). Mode **shadow uniquement** — pas dans `hybrid_strategy.allocations` ni `paper_trade_config.active_strategies` → s'ouvre en `is_shadow=True` automatiquement sur tout call SOL avec score<30. Aucune alerte Telegram, aucun impact bankroll. Track N≥150 events avant promotion main.
+- **Mega-sweep extended workflow GH** étendu (`mega-sweep-48h.yml`) : runner intégré pour `_analyze_routing_ideas.py` + `_quantify_routing_dollar_day.py` après chaque sweep 48h. Sortie dans artefacts. Trace l'évolution du signal à mesure que N grossit.
+- **Documentation `docs/known_issues.md §11`** mise à jour avec verdicts apples-to-apples (la version naïve a été corrigée — le per-KOL +13.7pp était un biais de sample, pas un signal réel).
+
+### Pourquoi le per-KOL routing n'a pas marché
+
+Intuition utilisateur : "chaque KOL a sa meilleure stratégie définie, donc le routing devrait gagner". **Réalité** : c'est de l'**overfitting / data mining bias**.
+- 30 KOLs × 8 familles = 240 cellules (KOL, famille). Avec N moyen 30-100/cellule, la **variance** sur l'avg pnl_pct est large (±10-20pp 95% CI).
+- Quand je sélectionne "le best fit" pour chaque KOL, je picke la famille qui s'est trouvée chanceuse sur ce sample précis.
+- Sur les MÊMES (KOL, token) events out-of-sample, le routing perd −0.88pp car la "préférence" était bruit, pas structure.
+- Avec N>150 events apples-to-apples (~3 semaines de plus), si signal réel >0pp persiste alors implémenter ; sinon idée définitivement abandonnée.
+
+### Reste à faire
+
+- **Surveiller LOWSCORE_TP50_SL15** : N≥30 attendu sous 5-7j (les calls score<30 représentent ~30-40% du flux). Décision de promotion main paper à ce moment.
+- **Re-runner `_quantify_routing_dollar_day.py` automatiquement** via mega-sweep workflow toutes les 48h → tracking N et Δ.
+
+---
+
+# Pipeline Status — Updated Apr 25, 2026 (v14e.17 — bat_gamble ETH-only purge)
+
+## v14e.17 — Apr 25 — bat_gamble Solana wipe + per-KOL chain whitelist
+
+Verdict bat_gamble v2 atteint après ~24h de paper post-v14e.14 (et l'historique pre-v108 toujours visible) :
+
+| Chain | N main closed | sum_pnl | strats | Verdict |
+|---|---:|---:|---:|---|
+| 🟣 Solana | 727 | **−$11,386.30** | 9 | Tous saignent — 0/290 shadows profitables @ N≥15 (les 2 borderline winners sont HYST/score-filter artefacts). Késako : late/post-pump sur low-liq, chaque exit type puni. |
+| 🔷 Ethereum | 23 | **+$1,627.84** | 6 | Tous gagnent (let-it-run profile, BE+TP100/150). N=3-5 par strat, verdict préliminaire mais cohérent. |
+
+**Action exécutée (commit cc61c5c → c6b60b2 push, déployé VPS 12:52 UTC)** :
+- 32,359 paper_trades rows SOL deleted (727 main + 31,632 shadows). 18 ETH rows kept.
+- Round 1 refund (+$11,386) sur 9 SOL strats — TROP GROS (incluait l'historique pre-v108 déjà wiped par le reset Apr 17 v138.3).
+- Round 2 (-$557.43) : leak post-deploy avant restart VPS, retiré.
+- **Round 3 (canonical) — full rebuild** : `_batgamble_rebuild_bankroll.py`. Cutoff = v138.3 reset (2026-04-17 14:36 UTC). Pour chaque strat SOL : `target_balance = starting_balance + sum(pnl_usd closed main rt SOL since cutoff WHERE kol_group != 'bat_gamble')`. Strats sans trades préservées telles quelles. starting_balance healed (cur_bal-cur_pnl) quand le bookkeeping le mettait à 0.
+- **Détection annexe** : top-level `strategy_bankrolls` inflaté **+$10,000 par strat** (phantom historique), maintenant mirrored depuis per_chain.solana (single source of truth).
+- État final : `current_balance` $24,937.68 → **$19,347.22** ; `total_pnl` $3,933.42 → **+$1,347.22** ; `total_trades` 1,162 → 1,006. SOL active strats dans la fourchette **$861-$1,247** (correspond au "$1000-$1300 avant bat_gamble" attendu par l'user). ETH/BSC/BASE inchangés.
+- Backups : `data/rt_bankroll_pre_batgamble_purge.json` (R1), `_round2.json` (R2), `_pre_rebuild_*.json` (R3).
+
+**Filtre per-KOL chain whitelist** (réutilisable) :
+- `GROUPS_DATA[kol]["chains"]` optionnel (default = toutes chains).
+- Gate dans `safe_scraper._rt_open_trades` après résolution `token_chain` — return 0 avant live ET paper paths.
+- Log : `RT SKIP (kol chain filter v14e.17): %s on %s — KOL allowed only on %s`.
+- bat_gamble = `["ethereum"]`. Pattern réutilisable pour future restriction par-KOL.
+
+**Reste blacklist live (`live_trading.kol_blacklist`)** : inchangée — bat_gamble toujours blacklist live (paper ETH only).
+
+**Slippage drift audit (en parallèle)** : suspicion utilisateur d'outliers en hausse post-v14e.6 → **infirmée**. Mean |Δ| paper_sim vs live 9.57pp (PRE) → **3.16pp (POST, −67%)**, max 215pp → 17.7pp, 0 outliers >50pp post (vs 8 pre). Le modèle continu écrase la dispersion sur 5-20k. À revérifier dans 5-7j (POST N=28 trop petit).
+
+---
+
 # Pipeline Status — Updated Apr 24, 2026 (v14e.16 — age-window A/B shadows)
 
 ## v14e.16 — Apr 24 — A/B test fenêtre d'âge (paper-only, zero-regression)
@@ -164,10 +234,10 @@ KOLs listés exécutent **paper + shadow normalement** mais bypass la branche
    quand ils overlapent** avec un autre caller (confirmation multi-sources).
    Script `scripts/kol_combo_analysis.py` à créer — analyser les trades où
    ≥2 KOLs de la liste + ≥1 existant = confirmation.
-4. **Verdict bat_gamble v2** : en v108 il était −11.18% avg PnL / −248K% cumul
-   sur 22K shadows. Mais scoring engine a bcp évolué (v108→v144). Si N≥50
-   confirme le pattern perdant, re-noter dans la memory comme *définitivement*
-   bloqué (doc `docs/known_issues.md`).
+4. ~~**Verdict bat_gamble v2**~~ ✅ **Tranché Apr 25 (v14e.17)** : SOL = perdant
+   définitif (−$11,386 / 727 main / 0/290 shadows profitables) → wipe SOL +
+   chain whitelist ETH-only. ETH = positif préliminaire (+$1,628 / 23 main /
+   6 strats N=3-5) → keep observation, paper-only.
 5. **Anti-spam detection** : certains (batman_gem, bat_gamble, reapergames)
    sont connus pour spammer. Mesurer si leurs 20e-30e calls/jour dilue le
    signal (WR tombe avec le volume) — indicateur anti-KOL vs bon signal.
@@ -179,7 +249,7 @@ KOLs listés exécutent **paper + shadow normalement** mais bypass la branche
 | `pnl > 0` et `WR ≥ 50%` sur N≥30 | Retirer de kol_blacklist → live activé |
 | `pnl > 0` mais `WR < 50%` (asymétrique) | Laisser paper, surveillance N=60 |
 | `pnl < 0` avec `N ≥ 30` | Garder blacklist, considerer blacklist scraping aussi |
-| `pnl < -$50` avec `N ≥ 30` | Retirer de `GROUPS_DATA` (comme v108 bat_gamble) |
+| `pnl < -$50` avec `N ≥ 30` (chain-specific) | Per-KOL chain whitelist (pattern v14e.17 bat_gamble : `chains=["ethereum"]`) ou retirer entièrement de `GROUPS_DATA` si saigne sur toutes les chains |
 | Spam signal (>30 calls/jour) avec `WR < 40%` | Downweight conviction 7→3 ou exclure totalement |
 
 ### Monitoring
@@ -690,8 +760,9 @@ Sweet-spot SCORE35 sur BE25 (extrapolation FAST_TP100_S35). LAZY_STRATEGIES nett
 
 ### ⏳ Data wait (laisser tourner)
 - **ETH Phase 1 N≥50 / 14j** (ETA Mai 07) — verdict go/no-go live ETH. Monitor via : `SELECT strategy, COUNT(*), AVG(pnl_pct)*100 FROM paper_trades WHERE chain='ethereum' AND status != 'open' GROUP BY 1;`
+- **bat_gamble ETH-only** (v14e.17, Apr 25) — re-vérifier dans 5-7j que le filtre tient (logs `RT SKIP (kol chain filter v14e.17)`) et que les 6 ETH strats restent positifs sur N≥10/strat
+- **Slip drift POST v14e.6** — recheck Apr 30 avec N≥80 trades post-Apr-23. PRE 9.57pp → POST (N=28) 3.16pp ; si converge stable <3pp on garde, si signed bias persiste >−1pp sur 5-20k tighten +5-10%
 - Verdicts paired shadows v144.x (Apr 23-30)
-- Slip per-cell N≥15 sur pump×tp_hit + non-pump×* (Apr 25)
 - Validation FAST_TP100_SL20_S35 paper paired vs base (sim dit +28%/trade)
 - Validation BE25_TP80_SL30_S35 paper paired vs base
 - LIVE post-swap projection vs réel (Apr 27)
@@ -763,8 +834,8 @@ Sweet-spot SCORE35 sur BE25 (extrapolation FAST_TP100_S35). LAZY_STRATEGIES nett
 - **sim per-trade ↔ paper** : ρ ≈ +0.9
 - **sim per-strategy ↔ paper** : ρ ≈ +0.7 (excluant shadow v144 polluants : ρ +0.71)
 
-### Slip calibration v144
-`_dynamic_sell_slip_factor` : offset global −100 bps. Splits per-cell pas faits faute de N. Revisit Apr 25-28.
+### Slip calibration v144 + v14e.6
+`_dynamic_sell_slip_factor` : offset global −100 bps + courbe log-continue v14e.6 sur liq mult (1.0 + 0.5·log10(50k/liq), clamped [1.0, 2.5]). Audit Apr 25 N=28 POST : mean |Δ| 3.16pp (vs 9.57pp PRE), max 17.7pp (vs 215pp), 0 outliers >50pp. Recheck Apr 30 avec N≥80 ; tighten +5-10% sur 5-20k si signed bias persiste <−1pp.
 
 ### CI Monitoring
 - `sim-align-gate.yml` (04:00 UTC) — alert si drift > 5pp
@@ -818,6 +889,7 @@ Sweet-spot SCORE35 sur BE25 (extrapolation FAST_TP100_S35). LAZY_STRATEGIES nett
 
 ## Historique récent
 
+- **v14e.17** (Apr 25) bat_gamble Solana wipe (32,359 rows deleted, 727 main = −$11,386 + 31K shadows) + ETH kept (23 main = +$1,628 / 6 strats). SOL bankrolls refunded +$11,386 (current 13.56k → 24.95k, total_pnl flipped +$3,943). Per-KOL chain whitelist `GROUPS_DATA[kol]["chains"]` enforced in safe_scraper RT gate (réutilisable). Slippage drift audit en parallèle : modèle continu v14e.6 a divisé outliers par 3 (mean |Δ| 9.57pp → 3.16pp), pas de régression — perception utilisateur infirmée.
 - **v14b** (Apr 23 PM) ETH strats promues de shadow à main paper + alertes Telegram chain-aware (🔷ETH tag, `dexscreener.com/{chain}/`, Uniswap + Etherscan links). `position_usd=$200` forcé sur main path ETH aussi. 3 strats ajoutées aux `hybrid_strategy.allocations` en DB (15 total).
 - **v14** (Apr 23 PM) **Sprint #ETH-1 Phase 1 deployed** : migration `chain` column sur 5 tables, `chain_detect.py` module + 25 tests, `ETH_CA_REGEX` scan dans `extract_tokens`, DexScreener chain-parameterized, guards 0x sur RugCheck/Helius/Jupiter/Bubblemaps/outcome, fee model ETH ($15 gas + 200bps MEV), `_passes_strategy_filter` chain gate strict. 3 strats ETH initiales. 38 tests pass. Sprint #ETH-1 Phase 1 live.
 - **v144.19b** (Apr 23 AM) Nightly shadow audit CI (`verify_shadow_main_parity.py` + `paired_all_v144_shadows.py`). Crash fix + tolerance sur parity script. Backfill `paper_sim_pnl_pct` historique (49,746 rows) completed.

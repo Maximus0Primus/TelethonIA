@@ -333,6 +333,22 @@ STRATEGIES["HIGHSCORE_TP200_SL40"] = [
 ]
 SHADOW_STRATEGIES.append("HIGHSCORE_TP200_SL40")
 
+# v14e.22 — LOWSCORE gate test (Apr 25). Apples-to-apples on N=52 events
+# showed TP50_SL15 on score<30 calls beats BE25_TP80_SL30 by +1.93pp avg.
+# Live extrapolation at $1.74/trade = +$3.34/d (+$1,217/yr). Modest signal,
+# N too small for tight CI — running as SHADOW to grow N before deciding to
+# promote to main paper. NOT in hybrid_strategy.allocations / not in
+# paper_trade_config.active_strategies — gated to shadow auto-open.
+# Mécanisme : SL serré (-15%) évite drawdown long sur low-conviction calls,
+# TP +50% suffit (pumps score<30 rarement >+50%).
+STRATEGIES["LOWSCORE_TP50_SL15"] = [
+    {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.85, "horizon_min": 120, "label": "main"},
+]
+# horizon_min=120 mirrors base TP50_SL15 — the apples-to-apples test used the
+# base strat directly, so the shadow must match for valid paired comparison.
+STRATEGY_FILTERS["LOWSCORE_TP50_SL15"] = {"chain": "solana", "max_score": 29}
+SHADOW_STRATEGIES.append("LOWSCORE_TP50_SL15")
+
 # ============================================================
 # v140 — full mega sweep winners (hysteresis + lazy dominates)
 # A/B test variants vs existing strats, each gets $1000 bankroll
