@@ -731,7 +731,7 @@ def open_live_trade(client_sb, token_entry: dict, strategy: str,
         logger.warning("live_trader: buy failed for %s: %s", symbol, result.get("error"))
         try:
             from alerter import alert_live_trade_failed
-            alert_live_trade_failed(symbol, "BUY", result.get("error", "unknown"))
+            alert_live_trade_failed(symbol, "BUY", result.get("error", "unknown"), strategy=strategy)
         except Exception:
             pass
         return _FAIL
@@ -1401,7 +1401,8 @@ def check_live_trades(client_sb) -> dict:
             )
             try:
                 from alerter import alert_live_trade_failed
-                alert_live_trade_failed(trade["symbol"], "SELL", sell_result.get("error", "unknown"))
+                alert_live_trade_failed(trade["symbol"], "SELL", sell_result.get("error", "unknown"),
+                                          strategy=trade.get("strategy", ""))
             except Exception:
                 pass
             continue

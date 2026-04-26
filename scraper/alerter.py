@@ -560,10 +560,16 @@ def alert_gh_actions_failure(workflow: str, step: str, error: str):
     _send(text, "gh_actions_failure")
 
 
-def alert_live_trade_failed(symbol: str, action: str, error: str):
-    """v105: Alert when a live buy/sell transaction fails."""
+def alert_live_trade_failed(symbol: str, action: str, error: str, strategy: str = ""):
+    """v105: Alert when a live buy/sell transaction fails.
+    v14e.28: include strategy name so multi-strat hybrid (BE25+BOND_FAST on
+    the same call) doesn't produce confusing 'BUY OK + BUY FAILED' pairs
+    where the reader can't tell which strat failed."""
+    head = f"LIVE {action} FAILED: ${symbol}"
+    if strategy:
+        head += f" [{strategy}]"
     text = (
-        f"<b>LIVE {action} FAILED: ${symbol}</b>\n"
+        f"<b>{head}</b>\n"
         f"<code>{_truncate(error, 300)}</code>"
     )
     _send(text, "live_trade_failed")
