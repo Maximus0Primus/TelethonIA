@@ -24,11 +24,14 @@ NEW_KOLS = [
     "ryoshigamble",
     "ryoshikushama",
     "mad_apes_gambles",
-    "MaestrosDegen",  # v14e.14e: was maestrodegen (wrong handle, silent channel)
+    # v14e.28 (Apr 26): MaestrosDegen REMOVED from scraping entirely
+    # (safe_scraper.GROUPS_DATA). Apr 1-26 paper stats: SOL N=1000 avg -49.8%
+    # sum -$23,985. Live blacklist is redundant — he can't reach the live
+    # path if not scraped.
     "bat_gamble",
     # v14e.14b: TheReaperGems + thereapergems removed per user — already in
     # GROUPS_DATA before v14e.14, should remain live-eligible. Only the truly
-    # new KOLs (9 entries below) are blacklisted from live.
+    # new KOLs (8 entries) are blacklisted from live.
     "reapergamble",
     "bagcalls",
 ]

@@ -229,9 +229,13 @@ GROUPS_DATA = {
     # ryoshikdegen / ryoshi_degen both resolve to this same channel title.
     "ryoshikdegen": {"conviction": 7, "tier": "A"},
     "mad_apes_gambles": {"conviction": 7, "tier": "A"},
-    # v14e.14e: maestrodegen was wrong handle (fetched 0 msgs every cycle).
-    # Correct channel = MaestrosDegen.
-    "MaestrosDegen": {"conviction": 7, "tier": "A"},
+    # v14e.28 (Apr 26): MaestrosDegen REMOVED from scraping. Apr 1-26 stats:
+    # SOL N=1000 paper trades, avg -49.8%, sum -$23,985 (paper). ETH N=12,
+    # avg -21.5%. Pump-and-dump pattern: he calls AT the top, every strategy
+    # ends WR ~0%. No strategy variant rescues his calls. Zero signal value
+    # — strictly noise that distorts paper ranking.
+    # v14e.14e (kept for git blame): maestrodegen was wrong handle (fetched
+    # 0 msgs every cycle); MaestrosDegen is the correct title that resolved.
     # v14e.17: bat_gamble restricted to ETH paper trades only. Solana paper
     # trades bled -$11,386 across 9 strats (727 closes); ETH paper trades
     # earned +$1,627 across 6 strats (23 closes). Solana history wiped, refund
