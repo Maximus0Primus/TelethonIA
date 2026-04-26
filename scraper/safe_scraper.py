@@ -224,10 +224,11 @@ GROUPS_DATA = {
     "venom_gambles": {"conviction": 7, "tier": "A"},
     "ryoshigamble": {"conviction": 7, "tier": "A"},
     # v14e.14c: ryoshikushama dropped (Telegram user, not a channel).
-    # v14e.14d: ryoshikdegen added — Channel "Ryoshi Degen" (broadcast=1),
-    # the correct user-intended target. ryoshidegen doesn't exist, but
-    # ryoshikdegen / ryoshi_degen both resolve to this same channel title.
-    "ryoshikdegen": {"conviction": 7, "tier": "A"},
+    # v14e.14d: ryoshikdegen added — Channel "Ryoshi Degen" (broadcast=1).
+    # v14e.29 (Apr 26): ryoshikdegen REMOVED from scraping. Apr 25-26 paper
+    # stats: N=350 paper trades, avg -12.7%, WR 9.1%, sum -$2,419 (paper).
+    # Confirmed loser pattern — pumps already exhausted before he calls.
+    # Stays in live blacklist as defense-in-depth in case he's ever re-added.
     "mad_apes_gambles": {"conviction": 7, "tier": "A"},
     # v14e.28 (Apr 26): MaestrosDegen REMOVED from scraping. Apr 1-26 stats:
     # SOL N=1000 paper trades, avg -49.8%, sum -$23,985 (paper). ETH N=12,

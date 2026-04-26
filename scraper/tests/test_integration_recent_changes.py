@@ -161,14 +161,14 @@ class TestKolLiveBlacklistGate(unittest.TestCase):
         self.assertEqual(bl, set())
 
     def test_live_cfg_structure_matches_seed_script(self):
-        """The KOLs the seed script adds — sanity. v14e.28: dropped to 8 after
-        MaestrosDegen removed from scraping (-$23,985 SOL paper bleed)."""
+        """The KOLs the seed script adds — sanity. v14e.29: dropped to 5 after
+        mad_apes_gambles / reapergamble / bat_gamble graduated to live (paper
+        validation passed). ryoshikdegen + MaestrosDegen removed from scraping."""
         expected = {
-            "bagcalls", "bat_gamble", "batman_gem",
-            "mad_apes_gambles", "reapergamble",
-            "ryoshigamble", "ryoshikushama", "venom_gambles",
+            "bagcalls", "batman_gem", "ryoshigamble",
+            "ryoshikushama", "venom_gambles",
         }
-        self.assertEqual(len(expected), 8)
+        self.assertEqual(len(expected), 5)
 
 
 class TestRtPipelineSkipReasons(unittest.TestCase):

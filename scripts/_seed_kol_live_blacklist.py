@@ -23,16 +23,15 @@ NEW_KOLS = [
     "venom_gambles",
     "ryoshigamble",
     "ryoshikushama",
-    "mad_apes_gambles",
-    # v14e.28 (Apr 26): MaestrosDegen REMOVED from scraping entirely
-    # (safe_scraper.GROUPS_DATA). Apr 1-26 paper stats: SOL N=1000 avg -49.8%
-    # sum -$23,985. Live blacklist is redundant — he can't reach the live
-    # path if not scraped.
-    "bat_gamble",
-    # v14e.14b: TheReaperGems + thereapergems removed per user — already in
-    # GROUPS_DATA before v14e.14, should remain live-eligible. Only the truly
-    # new KOLs (8 entries) are blacklisted from live.
-    "reapergamble",
+    # v14e.29 (Apr 26): mad_apes_gambles, reapergamble, bat_gamble GRADUATED
+    # from live blacklist after paper-test (mad_apes +$22,774/N=1991/WR 60.9%
+    # since Apr 24; reapergamble +$676/N=15; bat_gamble +$170/N=34/ETH-only).
+    # bat_gamble keeps its chains=["ethereum"] guard in GROUPS_DATA so SOL
+    # tokens still skip via the kol_chain_whitelist gate at safe_scraper:1505.
+    # ryoshikdegen REMOVED from scraping entirely (Apr 25-26 paper -$2,419
+    # / WR 9.1% / N=350 — confirmed loser, can't reach live path if unscraped).
+    # MaestrosDegen REMOVED from scraping in v14e.28 (-$23,985 SOL bleed).
+    # Live blacklist is redundant for unscraped KOLs but kept defense-in-depth.
     "bagcalls",
 ]
 
