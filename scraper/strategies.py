@@ -1312,6 +1312,50 @@ SHADOW_STRATEGIES.append("AGE48_SCALP_TP15_NOSL_S35")
 
 
 # ============================================================
+# v14e.28 (Apr 26) — ETH AGE clones across the 2 active ETH paper mains.
+# Apr 26 rerank surfaced ETH AGE24-48 = -23.5% / WR 15% on N=94 — INVERSE
+# of Solana where AGE24/48 outperforms. Default ETH max_age now 12h. These
+# 4 clones disable that default by declaring an explicit age band: keep
+# collecting data in case the regime shifts (or a specific strat profile
+# proves the inverse signal wrong). Shadow-only by construction.
+# ============================================================
+
+# ETH_TP80_SL40_T2H — top by N (26 trades) + paper main candidate.
+STRATEGIES["AGE24_ETH_TP80_SL40_T2H"] = [
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.60, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["AGE24_ETH_TP80_SL40_T2H"] = {
+    "chain": "ethereum", "min_age_hours": 12, "max_age_hours": 24,
+}
+SHADOW_STRATEGIES.append("AGE24_ETH_TP80_SL40_T2H")
+
+STRATEGIES["AGE48_ETH_TP80_SL40_T2H"] = [
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.60, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["AGE48_ETH_TP80_SL40_T2H"] = {
+    "chain": "ethereum", "min_age_hours": 24, "max_age_hours": 48,
+}
+SHADOW_STRATEGIES.append("AGE48_ETH_TP80_SL40_T2H")
+
+# ETH_FAST_TP100_SL20 — second active ETH main, top rerank avg pnl.
+STRATEGIES["AGE24_ETH_FAST_TP100_SL20"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.80, "horizon_min": 30, "label": "main"},
+]
+STRATEGY_FILTERS["AGE24_ETH_FAST_TP100_SL20"] = {
+    "chain": "ethereum", "min_age_hours": 12, "max_age_hours": 24,
+}
+SHADOW_STRATEGIES.append("AGE24_ETH_FAST_TP100_SL20")
+
+STRATEGIES["AGE48_ETH_FAST_TP100_SL20"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.80, "horizon_min": 30, "label": "main"},
+]
+STRATEGY_FILTERS["AGE48_ETH_FAST_TP100_SL20"] = {
+    "chain": "ethereum", "min_age_hours": 24, "max_age_hours": 48,
+}
+SHADOW_STRATEGIES.append("AGE48_ETH_FAST_TP100_SL20")
+
+
+# ============================================================
 # v14 (Sprint #ETH-1) — Ethereum L1 shadow strategies.
 # Shadow-only, zero capital. Entry filters require chain='ethereum'.
 # TP/SL widened vs Solana because ETH fees ($15 round-trip gas + 2% MEV

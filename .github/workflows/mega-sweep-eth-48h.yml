@@ -1,0 +1,99 @@
+name: Mega Sweep Extended ETH (48h)
+
+# v14e.28 — ETH-only mirror of mega-sweep-48h. Filters universe + price_ticks
+# by chain='ethereum' via sim.py --chain ethereum, applies the v14e.28 ETH
+# slip/gas calibration ($1.50 gas + 100 bps base) so ETH strats are ranked
+# under the right cost model. Runs at 22:00 UTC every 2 days — different
+# slot from SOL (02:00) so the same GH runner doesn't double-load.
+#
+# Output: _mega_sweep_eth_extended.csv. analyze_mega_sweep.py is re-run with
+# the ETH CSV so we get a separate _mega_sweep_eth_extended_annotated.csv +
+# _mega_sweep_eth_top_robust.csv. No clash with the SOL artifacts.
+#
+# Routing ideas step skipped (Solana-specific — KOL specialization, family
+# realism keys are SOL trail/dip artifacts).
+
+on:
+  schedule:
+    # "0 22 */2 * *" = every 2 days at 22:00 UTC (overnight EU/US). Offsets
+    # the SOL sweep at 02:00 UTC by 20h so CPU/Supabase load doesn't stack.
+    - cron: '0 22 */2 * *'
+  workflow_dispatch: {}
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    # ETH universe is ~10x smaller than SOL → expected runtime <1h. Keep 4h
+    # buffer in case Supabase is slow or universe explodes.
+    timeout-minutes: 240
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install deps
+        run: |
+          pip install --upgrade pip
+          pip install supabase requests python-dotenv pandas numpy
+
+      - name: Run mega sweep extended (ETH)
+        id: sweep
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          # --chain ethereum filters trade universe + price_ticks to ETH only.
+          # --mega-csv-out distinguishes from the SOL output so artifacts
+          # don't collide.
+          cd scraper
+          python sim.py \
+            --mega-sweep-extended \
+            --chain ethereum \
+            --mega-workers 2 \
+            --mega-csv-out _mega_sweep_eth_extended.csv \
+            2>&1 | tee sweep_eth.out
+          if [ -f _mega_sweep_eth_extended.csv ]; then
+            mv _mega_sweep_eth_extended.csv ../
+            echo "ETH mega-sweep CSV produced"
+          else
+            echo "sim.py did not produce _mega_sweep_eth_extended.csv"
+            exit 1
+          fi
+
+      - name: Annotate with FDR + family realism
+        run: |
+          # analyze_mega_sweep.py reads --csv path and writes annotated +
+          # top-robust files alongside. Pass the ETH CSV explicitly.
+          python scripts/analyze_mega_sweep.py \
+            --csv _mega_sweep_eth_extended.csv \
+            --alpha 0.05 \
+            --top 30 \
+            2>&1 | tee analyze_eth.out
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mega-sweep-eth-${{ github.run_id }}
+          path: |
+            _mega_sweep_eth_extended.csv
+            _mega_sweep_eth_extended_annotated.csv
+            _mega_sweep_eth_top_robust.csv
+            scraper/sweep_eth.out
+            analyze_eth.out
+          retention-days: 30
+
+      - name: Summary comment
+        if: success()
+        run: |
+          if [ -f _mega_sweep_eth_top_robust.csv ]; then
+            echo "## Top 10 robust ETH configs (v14e.28 calibration)" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            head -11 _mega_sweep_eth_top_robust.csv >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
