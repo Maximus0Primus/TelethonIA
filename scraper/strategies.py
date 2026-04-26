@@ -1262,6 +1262,284 @@ STRATEGY_FILTERS["AGE24_ETH_BE25_LOCK10_TP100_SL20"] = {
 }
 SHADOW_STRATEGIES.append("AGE24_ETH_BE25_LOCK10_TP100_SL20")
 
+# ==========================================================================
+# v14e.32 (Apr 26 PM, Run 2 verdict) — winner cluster expansion.
+# Run 24959544627 finished: top 30 robust ETH dominated by 3 LOCK strats:
+#   #1  BE25_LOCK10_TP100_SL30  18 cfg  +37.40% avg  WR 76.67%  $264/d
+#   #2  BE25_LOCK15_TP100_SL30   8 cfg  +36.78% avg  WR 76.67%  $249/d
+#   #3  BE15_LOCK10_TP80_SL30    4 cfg  +36.68% avg  WR 80.00%  $247/d
+# All on AGE12 band (12-24h) × median_5 × lazy_med polling. NONE/NOZEROLIQ
+# both work. Run 2 used position=$10 (lowballed), real +12pp expected at $50.
+#
+# 35 new shadows:
+#  - ETH versions of the 3 winners (Bloc U) — exact strat name parity SOL/ETH
+#  - AGE24/AGE48 explicit clones SOL+ETH (Bloc V)
+#  - Filter variants on the top winner BE25_LOCK10_TP100_SL30 (Bloc W)
+#  - BE-range variants BE15/BE20/BE30 × LOCK10 (Bloc X)
+#  - SL variants BE25_LOCK10_TP100 × SL20/40 (Bloc Y)
+#  - Wider TP variants (TP120/TP150 + LOCK10/15) (Bloc Z)
+# ==========================================================================
+
+# ---- Bloc U: ETH versions of the 3 Run 2 winners (3) ----
+STRATEGIES["ETH_BE25_LOCK10_TP100_SL30"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.25, "be_lock_pct": 0.10, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_BE25_LOCK10_TP100_SL30"] = {"chain": "ethereum"}
+SHADOW_STRATEGIES.append("ETH_BE25_LOCK10_TP100_SL30")
+
+STRATEGIES["ETH_BE25_LOCK15_TP100_SL30"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.25, "be_lock_pct": 0.15, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_BE25_LOCK15_TP100_SL30"] = {"chain": "ethereum"}
+SHADOW_STRATEGIES.append("ETH_BE25_LOCK15_TP100_SL30")
+
+STRATEGIES["ETH_BE15_LOCK10_TP80_SL30"] = [
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.15, "be_lock_pct": 0.10, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_BE15_LOCK10_TP80_SL30"] = {"chain": "ethereum"}
+SHADOW_STRATEGIES.append("ETH_BE15_LOCK10_TP80_SL30")
+
+# ---- Bloc V: AGE24 explicit clones of winners SOL+ETH (6) ----
+STRATEGIES["AGE24_BE25_LOCK10_TP100_SL30"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.25, "be_lock_pct": 0.10, "label": "main"},
+]
+STRATEGY_FILTERS["AGE24_BE25_LOCK10_TP100_SL30"] = {
+    "chain": "solana", "min_age_hours": 12, "max_age_hours": 24,
+}
+SHADOW_STRATEGIES.append("AGE24_BE25_LOCK10_TP100_SL30")
+
+STRATEGIES["AGE24_BE25_LOCK15_TP100_SL30"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.25, "be_lock_pct": 0.15, "label": "main"},
+]
+STRATEGY_FILTERS["AGE24_BE25_LOCK15_TP100_SL30"] = {
+    "chain": "solana", "min_age_hours": 12, "max_age_hours": 24,
+}
+SHADOW_STRATEGIES.append("AGE24_BE25_LOCK15_TP100_SL30")
+
+STRATEGIES["AGE24_BE15_LOCK10_TP80_SL30"] = [
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.15, "be_lock_pct": 0.10, "label": "main"},
+]
+STRATEGY_FILTERS["AGE24_BE15_LOCK10_TP80_SL30"] = {
+    "chain": "solana", "min_age_hours": 12, "max_age_hours": 24,
+}
+SHADOW_STRATEGIES.append("AGE24_BE15_LOCK10_TP80_SL30")
+
+STRATEGIES["AGE24_ETH_BE25_LOCK10_TP100_SL30"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.25, "be_lock_pct": 0.10, "label": "main"},
+]
+STRATEGY_FILTERS["AGE24_ETH_BE25_LOCK10_TP100_SL30"] = {
+    "chain": "ethereum", "min_age_hours": 12, "max_age_hours": 24,
+}
+SHADOW_STRATEGIES.append("AGE24_ETH_BE25_LOCK10_TP100_SL30")
+
+STRATEGIES["AGE24_ETH_BE25_LOCK15_TP100_SL30"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.25, "be_lock_pct": 0.15, "label": "main"},
+]
+STRATEGY_FILTERS["AGE24_ETH_BE25_LOCK15_TP100_SL30"] = {
+    "chain": "ethereum", "min_age_hours": 12, "max_age_hours": 24,
+}
+SHADOW_STRATEGIES.append("AGE24_ETH_BE25_LOCK15_TP100_SL30")
+
+STRATEGIES["AGE24_ETH_BE15_LOCK10_TP80_SL30"] = [
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.15, "be_lock_pct": 0.10, "label": "main"},
+]
+STRATEGY_FILTERS["AGE24_ETH_BE15_LOCK10_TP80_SL30"] = {
+    "chain": "ethereum", "min_age_hours": 12, "max_age_hours": 24,
+}
+SHADOW_STRATEGIES.append("AGE24_ETH_BE15_LOCK10_TP80_SL30")
+
+# ---- Bloc W: filter variants on top winner BE25_LOCK10_TP100_SL30 (8) ----
+STRATEGIES["BE25_LOCK10_TP100_SL30_S30"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.25, "be_lock_pct": 0.10, "label": "main"},
+]
+STRATEGY_FILTERS["BE25_LOCK10_TP100_SL30_S30"] = {"chain": "solana", "min_rt_score": 30}
+SHADOW_STRATEGIES.append("BE25_LOCK10_TP100_SL30_S30")
+
+STRATEGIES["BE25_LOCK10_TP100_SL30_S35"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.25, "be_lock_pct": 0.10, "label": "main"},
+]
+STRATEGY_FILTERS["BE25_LOCK10_TP100_SL30_S35"] = {"chain": "solana", "min_rt_score": 35}
+SHADOW_STRATEGIES.append("BE25_LOCK10_TP100_SL30_S35")
+
+STRATEGIES["BE25_LOCK10_TP100_SL30_S40"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.25, "be_lock_pct": 0.10, "label": "main"},
+]
+STRATEGY_FILTERS["BE25_LOCK10_TP100_SL30_S40"] = {"chain": "solana", "min_rt_score": 40}
+SHADOW_STRATEGIES.append("BE25_LOCK10_TP100_SL30_S40")
+
+STRATEGIES["BE25_LOCK10_TP100_SL30_NZ_S40"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.25, "be_lock_pct": 0.10, "label": "main"},
+]
+STRATEGY_FILTERS["BE25_LOCK10_TP100_SL30_NZ_S40"] = {
+    "chain": "solana", "min_liquidity_usd": 1, "min_rt_score": 40,
+}
+SHADOW_STRATEGIES.append("BE25_LOCK10_TP100_SL30_NZ_S40")
+
+STRATEGIES["ETH_BE25_LOCK10_TP100_SL30_S35"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.25, "be_lock_pct": 0.10, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_BE25_LOCK10_TP100_SL30_S35"] = {"chain": "ethereum", "min_rt_score": 35}
+SHADOW_STRATEGIES.append("ETH_BE25_LOCK10_TP100_SL30_S35")
+
+STRATEGIES["ETH_BE25_LOCK10_TP100_SL30_S40"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.25, "be_lock_pct": 0.10, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_BE25_LOCK10_TP100_SL30_S40"] = {"chain": "ethereum", "min_rt_score": 40}
+SHADOW_STRATEGIES.append("ETH_BE25_LOCK10_TP100_SL30_S40")
+
+STRATEGIES["ETH_BE25_LOCK10_TP100_SL30_NZ_S40"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.25, "be_lock_pct": 0.10, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_BE25_LOCK10_TP100_SL30_NZ_S40"] = {
+    "chain": "ethereum", "min_liquidity_usd": 1, "min_rt_score": 40,
+}
+SHADOW_STRATEGIES.append("ETH_BE25_LOCK10_TP100_SL30_NZ_S40")
+
+STRATEGIES["ETH_BE25_LOCK10_TP100_SL30_MCAP_S40"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.25, "be_lock_pct": 0.10, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_BE25_LOCK10_TP100_SL30_MCAP_S40"] = {
+    "chain": "ethereum", "min_mcap": 30_000, "max_mcap": 500_000, "min_rt_score": 40,
+}
+SHADOW_STRATEGIES.append("ETH_BE25_LOCK10_TP100_SL30_MCAP_S40")
+
+# ---- Bloc X: BE-range variants around the winner (8) ----
+STRATEGIES["BE20_LOCK10_TP100_SL30"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.20, "be_lock_pct": 0.10, "label": "main"},
+]
+SHADOW_STRATEGIES.append("BE20_LOCK10_TP100_SL30")
+
+STRATEGIES["BE30_LOCK10_TP100_SL30"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.30, "be_lock_pct": 0.10, "label": "main"},
+]
+SHADOW_STRATEGIES.append("BE30_LOCK10_TP100_SL30")
+
+STRATEGIES["BE25_LOCK20_TP100_SL30"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.25, "be_lock_pct": 0.20, "label": "main"},
+]
+SHADOW_STRATEGIES.append("BE25_LOCK20_TP100_SL30")
+
+STRATEGIES["BE15_LOCK15_TP80_SL30"] = [
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.15, "be_lock_pct": 0.15, "label": "main"},
+]
+SHADOW_STRATEGIES.append("BE15_LOCK15_TP80_SL30")
+
+STRATEGIES["ETH_BE20_LOCK10_TP100_SL30"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.20, "be_lock_pct": 0.10, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_BE20_LOCK10_TP100_SL30"] = {"chain": "ethereum"}
+SHADOW_STRATEGIES.append("ETH_BE20_LOCK10_TP100_SL30")
+
+STRATEGIES["ETH_BE30_LOCK10_TP100_SL30"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.30, "be_lock_pct": 0.10, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_BE30_LOCK10_TP100_SL30"] = {"chain": "ethereum"}
+SHADOW_STRATEGIES.append("ETH_BE30_LOCK10_TP100_SL30")
+
+STRATEGIES["ETH_BE25_LOCK20_TP100_SL30"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.25, "be_lock_pct": 0.20, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_BE25_LOCK20_TP100_SL30"] = {"chain": "ethereum"}
+SHADOW_STRATEGIES.append("ETH_BE25_LOCK20_TP100_SL30")
+
+STRATEGIES["ETH_BE15_LOCK15_TP80_SL30"] = [
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.15, "be_lock_pct": 0.15, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_BE15_LOCK15_TP80_SL30"] = {"chain": "ethereum"}
+SHADOW_STRATEGIES.append("ETH_BE15_LOCK15_TP80_SL30")
+
+# ---- Bloc Y: SL variants around BE25_LOCK10_TP100 (4) ----
+STRATEGIES["BE25_LOCK10_TP100_SL20"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.80, "horizon_min": 30,
+     "be_activation": 0.25, "be_lock_pct": 0.10, "label": "main"},
+]
+SHADOW_STRATEGIES.append("BE25_LOCK10_TP100_SL20")
+
+STRATEGIES["BE25_LOCK10_TP100_SL40"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.60, "horizon_min": 30,
+     "be_activation": 0.25, "be_lock_pct": 0.10, "label": "main"},
+]
+SHADOW_STRATEGIES.append("BE25_LOCK10_TP100_SL40")
+
+STRATEGIES["ETH_BE25_LOCK10_TP100_SL20"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.80, "horizon_min": 30,
+     "be_activation": 0.25, "be_lock_pct": 0.10, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_BE25_LOCK10_TP100_SL20"] = {"chain": "ethereum"}
+SHADOW_STRATEGIES.append("ETH_BE25_LOCK10_TP100_SL20")
+
+STRATEGIES["ETH_BE25_LOCK10_TP100_SL40"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.60, "horizon_min": 30,
+     "be_activation": 0.25, "be_lock_pct": 0.10, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_BE25_LOCK10_TP100_SL40"] = {"chain": "ethereum"}
+SHADOW_STRATEGIES.append("ETH_BE25_LOCK10_TP100_SL40")
+
+# ---- Bloc Z: wider TP variants with LOCK (6) ----
+STRATEGIES["BE25_LOCK10_TP120_SL30"] = [
+    {"pct": 1.0, "tp_mult": 2.20, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.25, "be_lock_pct": 0.10, "label": "main"},
+]
+SHADOW_STRATEGIES.append("BE25_LOCK10_TP120_SL30")
+
+STRATEGIES["BE25_LOCK15_TP120_SL30"] = [
+    {"pct": 1.0, "tp_mult": 2.20, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.25, "be_lock_pct": 0.15, "label": "main"},
+]
+SHADOW_STRATEGIES.append("BE25_LOCK15_TP120_SL30")
+
+STRATEGIES["BE25_LOCK15_TP150_SL30"] = [
+    {"pct": 1.0, "tp_mult": 2.50, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.25, "be_lock_pct": 0.15, "label": "main"},
+]
+SHADOW_STRATEGIES.append("BE25_LOCK15_TP150_SL30")
+
+STRATEGIES["ETH_BE25_LOCK10_TP120_SL30"] = [
+    {"pct": 1.0, "tp_mult": 2.20, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.25, "be_lock_pct": 0.10, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_BE25_LOCK10_TP120_SL30"] = {"chain": "ethereum"}
+SHADOW_STRATEGIES.append("ETH_BE25_LOCK10_TP120_SL30")
+
+STRATEGIES["ETH_BE25_LOCK15_TP120_SL30"] = [
+    {"pct": 1.0, "tp_mult": 2.20, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.25, "be_lock_pct": 0.15, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_BE25_LOCK15_TP120_SL30"] = {"chain": "ethereum"}
+SHADOW_STRATEGIES.append("ETH_BE25_LOCK15_TP120_SL30")
+
+STRATEGIES["ETH_BE25_LOCK15_TP150_SL30"] = [
+    {"pct": 1.0, "tp_mult": 2.50, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.25, "be_lock_pct": 0.15, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_BE25_LOCK15_TP150_SL30"] = {"chain": "ethereum"}
+SHADOW_STRATEGIES.append("ETH_BE25_LOCK15_TP150_SL30")
+
 
 # v139: Asymmetric payoff bets — TP200 (3x) with 4h horizon, gated by quality filters.
 # Tested on 71 post-v132 tokens: NOZEROLIQ +14.91%/48% WR, HIGHSCORE +14.42%/50% WR
