@@ -1030,6 +1030,238 @@ STRATEGY_FILTERS["TP300_SL40_6H_MCAP_S40"] = {
 }
 SHADOW_STRATEGIES.append("TP300_SL40_6H_MCAP_S40")
 
+# ==========================================================================
+# v14e.31 (Apr 26 PM, suite) — expansion around mega-sweep ETH winner.
+# Run 24958587941 finished: top 30 robust ALL = FAST_TP100_SL20 × AGE12 band
+# (12-24h tokens). +34.35% avg / WR 60% / $232/day / cross-regime robust.
+# Independent of smoothing/source = signal très propre.
+#
+# ~25 variants clustered around this winning combo to find the exact sweet
+# spot (TP variants, SL variants, score gates, NZ filter, horizons, LOCK
+# combo, ETH parallels). All shadow-only.
+# ==========================================================================
+
+# ---- Bloc P: AGE24/AGE48 FAST_TP100_SL20 + score gates SOL (6) ----
+STRATEGIES["AGE24_FAST_TP100_SL20_S30"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.80, "horizon_min": 30, "label": "main"},
+]
+STRATEGY_FILTERS["AGE24_FAST_TP100_SL20_S30"] = {
+    "chain": "solana", "min_age_hours": 12, "max_age_hours": 24, "min_rt_score": 30,
+}
+SHADOW_STRATEGIES.append("AGE24_FAST_TP100_SL20_S30")
+
+STRATEGIES["AGE24_FAST_TP100_SL20_S35"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.80, "horizon_min": 30, "label": "main"},
+]
+STRATEGY_FILTERS["AGE24_FAST_TP100_SL20_S35"] = {
+    "chain": "solana", "min_age_hours": 12, "max_age_hours": 24, "min_rt_score": 35,
+}
+SHADOW_STRATEGIES.append("AGE24_FAST_TP100_SL20_S35")
+
+STRATEGIES["AGE24_FAST_TP100_SL20_S40"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.80, "horizon_min": 30, "label": "main"},
+]
+STRATEGY_FILTERS["AGE24_FAST_TP100_SL20_S40"] = {
+    "chain": "solana", "min_age_hours": 12, "max_age_hours": 24, "min_rt_score": 40,
+}
+SHADOW_STRATEGIES.append("AGE24_FAST_TP100_SL20_S40")
+
+STRATEGIES["AGE24_FAST_TP100_SL20_NZ"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.80, "horizon_min": 30, "label": "main"},
+]
+STRATEGY_FILTERS["AGE24_FAST_TP100_SL20_NZ"] = {
+    "chain": "solana", "min_age_hours": 12, "max_age_hours": 24, "min_liquidity_usd": 1,
+}
+SHADOW_STRATEGIES.append("AGE24_FAST_TP100_SL20_NZ")
+
+STRATEGIES["AGE24_FAST_TP100_SL20_NZ_S40"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.80, "horizon_min": 30, "label": "main"},
+]
+STRATEGY_FILTERS["AGE24_FAST_TP100_SL20_NZ_S40"] = {
+    "chain": "solana", "min_age_hours": 12, "max_age_hours": 24,
+    "min_liquidity_usd": 1, "min_rt_score": 40,
+}
+SHADOW_STRATEGIES.append("AGE24_FAST_TP100_SL20_NZ_S40")
+
+STRATEGIES["AGE48_FAST_TP100_SL20_NZ_S40"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.80, "horizon_min": 30, "label": "main"},
+]
+STRATEGY_FILTERS["AGE48_FAST_TP100_SL20_NZ_S40"] = {
+    "chain": "solana", "min_age_hours": 24, "max_age_hours": 48,
+    "min_liquidity_usd": 1, "min_rt_score": 40,
+}
+SHADOW_STRATEGIES.append("AGE48_FAST_TP100_SL20_NZ_S40")
+
+# ---- Bloc Q: TP/SL variants of the winner SOL (6) ----
+STRATEGIES["AGE24_FAST_TP80_SL20"] = [
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.80, "horizon_min": 30, "label": "main"},
+]
+STRATEGY_FILTERS["AGE24_FAST_TP80_SL20"] = {
+    "chain": "solana", "min_age_hours": 12, "max_age_hours": 24,
+}
+SHADOW_STRATEGIES.append("AGE24_FAST_TP80_SL20")
+
+STRATEGIES["AGE24_FAST_TP120_SL20"] = [
+    {"pct": 1.0, "tp_mult": 2.20, "sl_mult": 0.80, "horizon_min": 30, "label": "main"},
+]
+STRATEGY_FILTERS["AGE24_FAST_TP120_SL20"] = {
+    "chain": "solana", "min_age_hours": 12, "max_age_hours": 24,
+}
+SHADOW_STRATEGIES.append("AGE24_FAST_TP120_SL20")
+
+STRATEGIES["AGE24_FAST_TP150_SL20"] = [
+    {"pct": 1.0, "tp_mult": 2.50, "sl_mult": 0.80, "horizon_min": 30, "label": "main"},
+]
+STRATEGY_FILTERS["AGE24_FAST_TP150_SL20"] = {
+    "chain": "solana", "min_age_hours": 12, "max_age_hours": 24,
+}
+SHADOW_STRATEGIES.append("AGE24_FAST_TP150_SL20")
+
+STRATEGIES["AGE24_FAST_TP100_SL10"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.90, "horizon_min": 30, "label": "main"},
+]
+STRATEGY_FILTERS["AGE24_FAST_TP100_SL10"] = {
+    "chain": "solana", "min_age_hours": 12, "max_age_hours": 24,
+}
+SHADOW_STRATEGIES.append("AGE24_FAST_TP100_SL10")
+
+STRATEGIES["AGE24_FAST_TP100_SL30"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.70, "horizon_min": 30, "label": "main"},
+]
+STRATEGY_FILTERS["AGE24_FAST_TP100_SL30"] = {
+    "chain": "solana", "min_age_hours": 12, "max_age_hours": 24,
+}
+SHADOW_STRATEGIES.append("AGE24_FAST_TP100_SL30")
+
+STRATEGIES["AGE24_FAST_TP100_NOSL"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.20, "horizon_min": 30, "label": "main"},
+]
+STRATEGY_FILTERS["AGE24_FAST_TP100_NOSL"] = {
+    "chain": "solana", "min_age_hours": 12, "max_age_hours": 24,
+}
+SHADOW_STRATEGIES.append("AGE24_FAST_TP100_NOSL")
+
+# ---- Bloc R: Horizon variants on the winner SOL (3) ----
+STRATEGIES["AGE24_FAST60_TP100_SL20"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.80, "horizon_min": 60, "label": "main"},
+]
+STRATEGY_FILTERS["AGE24_FAST60_TP100_SL20"] = {
+    "chain": "solana", "min_age_hours": 12, "max_age_hours": 24,
+}
+SHADOW_STRATEGIES.append("AGE24_FAST60_TP100_SL20")
+
+STRATEGIES["AGE24_TP100_SL20_T2H"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.80, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["AGE24_TP100_SL20_T2H"] = {
+    "chain": "solana", "min_age_hours": 12, "max_age_hours": 24,
+}
+SHADOW_STRATEGIES.append("AGE24_TP100_SL20_T2H")
+
+STRATEGIES["AGE24_FAST15_TP100_SL20"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.80, "horizon_min": 15, "label": "main"},
+]
+STRATEGY_FILTERS["AGE24_FAST15_TP100_SL20"] = {
+    "chain": "solana", "min_age_hours": 12, "max_age_hours": 24,
+}
+SHADOW_STRATEGIES.append("AGE24_FAST15_TP100_SL20")
+
+# ---- Bloc S: AGE × LOCK on the FAST_TP100_SL20 base SOL (3) ----
+STRATEGIES["AGE24_BE25_LOCK10_TP100_SL20"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.80, "horizon_min": 30,
+     "be_activation": 0.25, "be_lock_pct": 0.10, "label": "main"},
+]
+STRATEGY_FILTERS["AGE24_BE25_LOCK10_TP100_SL20"] = {
+    "chain": "solana", "min_age_hours": 12, "max_age_hours": 24,
+}
+SHADOW_STRATEGIES.append("AGE24_BE25_LOCK10_TP100_SL20")
+
+STRATEGIES["AGE24_BE25_LOCK15_TP100_SL20"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.80, "horizon_min": 30,
+     "be_activation": 0.25, "be_lock_pct": 0.15, "label": "main"},
+]
+STRATEGY_FILTERS["AGE24_BE25_LOCK15_TP100_SL20"] = {
+    "chain": "solana", "min_age_hours": 12, "max_age_hours": 24,
+}
+SHADOW_STRATEGIES.append("AGE24_BE25_LOCK15_TP100_SL20")
+
+STRATEGIES["AGE24_BE50_LOCK20_TP100_SL20"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.80, "horizon_min": 30,
+     "be_activation": 0.50, "be_lock_pct": 0.20, "label": "main"},
+]
+STRATEGY_FILTERS["AGE24_BE50_LOCK20_TP100_SL20"] = {
+    "chain": "solana", "min_age_hours": 12, "max_age_hours": 24,
+}
+SHADOW_STRATEGIES.append("AGE24_BE50_LOCK20_TP100_SL20")
+
+# ---- Bloc T: ETH parallels of the winning combo (8) ----
+STRATEGIES["AGE24_ETH_FAST_TP100_SL20_S35"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.80, "horizon_min": 30, "label": "main"},
+]
+STRATEGY_FILTERS["AGE24_ETH_FAST_TP100_SL20_S35"] = {
+    "chain": "ethereum", "min_age_hours": 12, "max_age_hours": 24, "min_rt_score": 35,
+}
+SHADOW_STRATEGIES.append("AGE24_ETH_FAST_TP100_SL20_S35")
+
+STRATEGIES["AGE24_ETH_FAST_TP100_SL20_NZ_S40"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.80, "horizon_min": 30, "label": "main"},
+]
+STRATEGY_FILTERS["AGE24_ETH_FAST_TP100_SL20_NZ_S40"] = {
+    "chain": "ethereum", "min_age_hours": 12, "max_age_hours": 24,
+    "min_liquidity_usd": 1, "min_rt_score": 40,
+}
+SHADOW_STRATEGIES.append("AGE24_ETH_FAST_TP100_SL20_NZ_S40")
+
+STRATEGIES["AGE48_ETH_FAST_TP100_SL20_NZ_S40"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.80, "horizon_min": 30, "label": "main"},
+]
+STRATEGY_FILTERS["AGE48_ETH_FAST_TP100_SL20_NZ_S40"] = {
+    "chain": "ethereum", "min_age_hours": 24, "max_age_hours": 48,
+    "min_liquidity_usd": 1, "min_rt_score": 40,
+}
+SHADOW_STRATEGIES.append("AGE48_ETH_FAST_TP100_SL20_NZ_S40")
+
+STRATEGIES["AGE24_ETH_FAST_TP120_SL20"] = [
+    {"pct": 1.0, "tp_mult": 2.20, "sl_mult": 0.80, "horizon_min": 30, "label": "main"},
+]
+STRATEGY_FILTERS["AGE24_ETH_FAST_TP120_SL20"] = {
+    "chain": "ethereum", "min_age_hours": 12, "max_age_hours": 24,
+}
+SHADOW_STRATEGIES.append("AGE24_ETH_FAST_TP120_SL20")
+
+STRATEGIES["AGE24_ETH_FAST_TP150_SL20"] = [
+    {"pct": 1.0, "tp_mult": 2.50, "sl_mult": 0.80, "horizon_min": 30, "label": "main"},
+]
+STRATEGY_FILTERS["AGE24_ETH_FAST_TP150_SL20"] = {
+    "chain": "ethereum", "min_age_hours": 12, "max_age_hours": 24,
+}
+SHADOW_STRATEGIES.append("AGE24_ETH_FAST_TP150_SL20")
+
+STRATEGIES["AGE24_ETH_FAST_TP100_SL30"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.70, "horizon_min": 30, "label": "main"},
+]
+STRATEGY_FILTERS["AGE24_ETH_FAST_TP100_SL30"] = {
+    "chain": "ethereum", "min_age_hours": 12, "max_age_hours": 24,
+}
+SHADOW_STRATEGIES.append("AGE24_ETH_FAST_TP100_SL30")
+
+STRATEGIES["AGE24_ETH_FAST60_TP100_SL20"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.80, "horizon_min": 60, "label": "main"},
+]
+STRATEGY_FILTERS["AGE24_ETH_FAST60_TP100_SL20"] = {
+    "chain": "ethereum", "min_age_hours": 12, "max_age_hours": 24,
+}
+SHADOW_STRATEGIES.append("AGE24_ETH_FAST60_TP100_SL20")
+
+STRATEGIES["AGE24_ETH_BE25_LOCK10_TP100_SL20"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.80, "horizon_min": 30,
+     "be_activation": 0.25, "be_lock_pct": 0.10, "label": "main"},
+]
+STRATEGY_FILTERS["AGE24_ETH_BE25_LOCK10_TP100_SL20"] = {
+    "chain": "ethereum", "min_age_hours": 12, "max_age_hours": 24,
+}
+SHADOW_STRATEGIES.append("AGE24_ETH_BE25_LOCK10_TP100_SL20")
+
 
 # v139: Asymmetric payoff bets — TP200 (3x) with 4h horizon, gated by quality filters.
 # Tested on 71 post-v132 tokens: NOZEROLIQ +14.91%/48% WR, HIGHSCORE +14.42%/50% WR
