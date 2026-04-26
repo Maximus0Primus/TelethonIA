@@ -35,18 +35,26 @@ BUY_FEE_BPS = 0          # 0% — folded into slippage
 SELL_FEE_BPS = 0          # 0% — folded into slippage
 
 # ---------------------------------------------------------------------------
-# Fee constants — Ethereum L1 (v14: shadow-only cost model)
+# Fee constants — Ethereum L1 (v14e.28: empirical recalibration Apr 26)
 #
-# Budget assumes mainnet ETH at ~20 gwei baseline. Single Uniswap V3 swap
-# = ~150k gas = ~$7-8 at $2500/ETH. Round-trip (buy + sell) = $15.
-# MEV sandwich attacks commonly take 100-300 bps on memecoin swaps; we
-# budget 200 bps per side to reflect realistic post-Flashbots conditions.
-# If we move to private relay for live (Phase 3), drop MEV to ~50 bps.
+# Calibrated against 2 real round-trips on PEPE (Apr 26, base_fee 0.5-1.5 gwei,
+# ETH @ $2330). Measured: $0.85-1.15 gas/side, ~0 bps slip on PEPE 0.3% pool.
+# Defensive buffers above measured to account for shallower memecoin pools.
+# Empirical run captured in data/eth_smoke_20260426T132313Z.json.
+#
+# Gas regime assumption: post-Pectra mainnet sub-2 gwei. ETH base_fee tracked
+# 0.12-0.83 gwei across 7d window (Apr 19-26). If base_fee returns >5 gwei
+# (rare since mid-2025), ETH_GAS_COST_USD_PER_SIDE will need ~3x bump.
+# Re-run scripts/_eth_round_trip_smoke.py to recalibrate.
+#
+# Slip 100 bps = defensive vs PEPE-measured 0 bps. Real memecoins on Uniswap
+# V3 ($50-500K liq) typically take 50-200 bps. Drop to ~30 bps once we have
+# N≥20 ETH live trades to fit empirically (mirror SOL v14e.24 methodology).
 # ---------------------------------------------------------------------------
-ETH_GAS_COST_USD_PER_SIDE = 7.50   # $7.50 each side, $15 round-trip
-ETH_BUY_SLIPPAGE_BPS = 200         # 2% slippage on entry (MEV + pool impact)
-ETH_SELL_SLIPPAGE_BPS = 200        # 2% slippage on exit
-ETH_MIN_POSITION_USD = 200         # below $200, fees eat >7.5% of trade
+ETH_GAS_COST_USD_PER_SIDE = 1.50   # $1.50 each side, $3 round-trip (Apr 26 empirical + 25% buffer)
+ETH_BUY_SLIPPAGE_BPS = 100         # 1% slippage on entry — defensive for shallow memecoin pools
+ETH_SELL_SLIPPAGE_BPS = 100        # 1% slippage on exit
+ETH_MIN_POSITION_USD = 50          # gas = 6% of $50 — viable; below $30 gas dominates >10%
 
 # ---------------------------------------------------------------------------
 # Fee constants — BSC (v14e: paper-only cost model)

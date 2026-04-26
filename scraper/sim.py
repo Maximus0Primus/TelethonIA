@@ -1068,13 +1068,15 @@ def simulate_dual_wallet(sim_candles: list[dict], raw_candles: list[dict],
     raw_candles: original 15min OHLCV candles (used for price lookup at delta)
     """
     liq = (context or {}).get("liq", 0)
+    # v14e.28: chain dispatch — EVM trades get gas-folded slip via sim_engines
+    chain = (context or {}).get("chain") or "solana"
     base_ts = raw_candles[0]["timestamp"] if raw_candles else 0
 
     simultaneous = (delta_min == 0)
     n_sim = 2 if simultaneous else 1
 
     # Wallet A: always buys at signal time
-    wa_slip = compute_buy_slippage(position_usd, liq, n_sim)
+    wa_slip = compute_buy_slippage(position_usd, liq, n_sim, chain=chain)
     wa_entry = entry_price * (1 + wa_slip)
     wa_result = simulate(sim_candles, wa_entry, cfg, context)
 
@@ -1087,7 +1089,7 @@ def simulate_dual_wallet(sim_candles: list[dict], raw_candles: list[dict],
         wb_raw_price = get_price_at_delta(raw_candles, base_ts, delta_min)
         if wb_raw_price is None:
             return None
-        wb_slip = compute_buy_slippage(position_usd, liq, 1)
+        wb_slip = compute_buy_slippage(position_usd, liq, 1, chain=chain)
         wb_entry = wb_raw_price * (1 + wb_slip)
         # Trim sim candles from Wallet B's entry time
         target_ts = base_ts + delta_min * 60
@@ -1108,7 +1110,7 @@ def simulate_dual_wallet(sim_candles: list[dict], raw_candles: list[dict],
         "combined_total_pnl_pct": wa_result["pnl_pct"] + wb_result["pnl_pct"],
         "delta_min": delta_min,
         "wa_slip": wa_slip,
-        "wb_slip": compute_buy_slippage(position_usd, liq, 1) if not simultaneous else wa_slip,
+        "wb_slip": compute_buy_slippage(position_usd, liq, 1, chain=chain) if not simultaneous else wa_slip,
     }
 
 
@@ -5688,6 +5690,10 @@ def main():
                 "age_h": float(t.get("rt_token_age_hours") or 0),
                 "is_pump": int(t.get("rt_is_pump_fun") or 0),
                 "n_kols": int(t.get("n_kol_confirmations") or 1),
+                # v14e.28: chain + position propagate to sim_engines for chain-aware
+                # buy/sell slip (EVM gets gas-folded slip, SOL keeps Jupiter Ultra median).
+                "chain": t.get("chain") or "solana",
+                "position_usd": float(t.get("position_usd") or 0),
             },
         })
 

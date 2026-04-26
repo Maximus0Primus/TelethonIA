@@ -132,6 +132,20 @@ def _eth_slip_bps_with_gas(pos_usd: float, base_slip_bps: int) -> int:
     side = "buy" if base_slip_bps == ETH_BUY_SLIPPAGE_BPS else "sell"
     return _evm_slip_bps_with_gas(pos_usd, "ethereum", side)
 
+
+def _resolve_buy_slip_bps(trade: dict, default_bps: int) -> int:
+    """v14e.28: per-trade buy slip for DB persistence on close. SOL keeps the
+    global empirical median (default_bps, typically BUY_SLIPPAGE_BPS=225 from
+    Jupiter Ultra calibration). EVM trades use position-aware gas+slip via
+    _evm_slip_bps_with_gas — same formula used at entry, so the persisted
+    column reflects the slip that was ACTUALLY applied to the fill (not a
+    Solana-default lie that breaks downstream divergence analysis on ETH)."""
+    chain = (trade.get("chain") or "solana") if isinstance(trade, dict) else "solana"
+    if chain in ("ethereum", "bsc", "base"):
+        pos = float(trade.get("position_usd") or 0)
+        return _evm_slip_bps_with_gas(pos, chain, "buy")
+    return int(default_bps)
+
 # v115: DIP_BUY in-memory watchlist — tracks tokens waiting for dip+bounce to open P2
 # Key: (token_address, strategy_name) → tracking state
 _dip_watchlist: dict[tuple, dict] = {}
@@ -2474,7 +2488,8 @@ def check_paper_trades(client) -> dict:
             update["high_price_seen"] = ev["high_price_seen"]
         # v142: persist slip bps assumed by the close so divergence vs live's real
         # fill is measurable. Previously NULL on every paper row — blocking audit.
-        update["buy_slippage_bps"] = _buy_slip_bps
+        # v14e.28: chain-aware buy slip (EVM gets position-folded gas+slip).
+        update["buy_slippage_bps"] = _resolve_buy_slip_bps(trade, _buy_slip_bps)
         update["sell_slippage_bps"] = _sell_slip_bps
         # v138: persist accumulated poll history alongside close fields
         hist = _flush_eval_history(trade["id"])
@@ -2571,7 +2586,8 @@ def check_paper_trades(client) -> dict:
         if ev.get("high_price_seen") is not None:
             update["high_price_seen"] = ev["high_price_seen"]
         # v142: persist slip bps on cascade close too (see main pass above)
-        update["buy_slippage_bps"] = _buy_slip_bps
+        # v14e.28: chain-aware buy slip
+        update["buy_slippage_bps"] = _resolve_buy_slip_bps(trade, _buy_slip_bps)
         update["sell_slippage_bps"] = _sell_slip_bps
 
         try:
@@ -2834,7 +2850,8 @@ def check_paper_trades_fast(client) -> dict:
         if ev.get("high_price_seen") is not None:
             update["high_price_seen"] = ev["high_price_seen"]
         # v142: persist slip bps (see check_paper_trades for rationale)
-        update["buy_slippage_bps"] = _buy_slip_bps
+        # v14e.28: chain-aware buy slip
+        update["buy_slippage_bps"] = _resolve_buy_slip_bps(trade, _buy_slip_bps)
         update["sell_slippage_bps"] = _sell_slip_bps
         # v138: persist accumulated poll history alongside close fields
         hist = _flush_eval_history(trade["id"])

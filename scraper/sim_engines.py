@@ -20,20 +20,48 @@ from strategies import BUY_SLIPPAGE_BPS as _PT_BUY_SLIPPAGE_BPS
 # across paper / sim / shadow. AMM impact term dropped: empirical R²=5%, the
 # liquidity feature does not predict slip, so the previous theoretical
 # `BASE_FEE + position/(liq+position)` was over-engineering.
-SLIPPAGE_TRAIL = 0.025   # legacy fallback — 2.5% for trail/timeout/TP
-SLIPPAGE_SL = 0.025      # legacy fallback — 2.5% for SL
-BUY_SLIPPAGE = _PT_BUY_SLIPPAGE_BPS / 10_000  # mirrors strategies.BUY_SLIPPAGE_BPS
+# v14e.28 (Apr 26): added chain dispatch — Solana keeps the 225 bps median,
+# EVM chains delegate to paper_trader._evm_slip_bps_with_gas which folds gas
+# (flat USD → bps via position size) on top of per-chain base slip.
+SLIPPAGE_TRAIL = 0.025   # legacy fallback — 2.5% for trail/timeout/TP (Solana)
+SLIPPAGE_SL = 0.025      # legacy fallback — 2.5% for SL (Solana)
+BUY_SLIPPAGE = _PT_BUY_SLIPPAGE_BPS / 10_000  # Solana — mirrors strategies.BUY_SLIPPAGE_BPS
 
 
 def compute_buy_slippage(position_usd: float, liquidity_usd: float,
-                         n_simultaneous: int = 1) -> float:
-    """v14e.24: returns the production constant (mirrors paper_trader).
+                         n_simultaneous: int = 1, chain: str = "solana") -> float:
+    """v14e.28: chain-aware buy slip used by sim and paper. Returns slip as a
+    fraction (e.g. 0.0225 = 225 bps).
 
-    Previously a theoretical AMM impact model (BASE_FEE + pos/(liq+pos)).
-    Empirical fit on 229 live trades showed R²=5%, so the liq-aware term
-    didn't predict slip. Now returns the same constant as paper to keep
-    sim ↔ paper ↔ shadow ↔ live aligned on a single source of truth.
+    - Solana: returns the empirical median (paper_trader matches, single source
+      of truth from strategies.BUY_SLIPPAGE_BPS).
+    - EVM (ethereum/bsc/base): delegates to paper_trader._evm_slip_bps_with_gas
+      which adds gas-as-bps on top of the per-chain base slip. Position-size-
+      sensitive (gas dominates at small positions).
+
+    Backward compat: chain defaults to 'solana' so existing callers (Solana sim
+    paths) get bit-for-bit identical behavior.
     """
+    if chain in ("ethereum", "bsc", "base"):
+        try:
+            from paper_trader import _evm_slip_bps_with_gas
+            return _evm_slip_bps_with_gas(position_usd, chain, "buy") / 10_000
+        except Exception:
+            # Import cycle / test isolation — fall back to ETH constants directly
+            from strategies import (
+                ETH_GAS_COST_USD_PER_SIDE, ETH_BUY_SLIPPAGE_BPS,
+                BSC_GAS_COST_USD_PER_SIDE, BSC_BUY_SLIPPAGE_BPS,
+                BASE_GAS_COST_USD_PER_SIDE, BASE_BUY_SLIPPAGE_BPS,
+            )
+            params = {
+                "ethereum": (ETH_GAS_COST_USD_PER_SIDE, ETH_BUY_SLIPPAGE_BPS),
+                "bsc":      (BSC_GAS_COST_USD_PER_SIDE, BSC_BUY_SLIPPAGE_BPS),
+                "base":     (BASE_GAS_COST_USD_PER_SIDE, BASE_BUY_SLIPPAGE_BPS),
+            }[chain]
+            gas_usd, base_slip = params
+            pos = max(float(position_usd or 0), 1.0)
+            gas_bps = int((gas_usd / pos) * 10_000)
+            return max(50, min(2000, base_slip + gas_bps)) / 10_000
     return BUY_SLIPPAGE
 
 
@@ -41,10 +69,22 @@ def compute_buy_slippage(position_usd: float, liquidity_usd: float,
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _dynamic_sell_slippage(liquidity_usd: float, is_sl: bool = False) -> float:
-    """Match paper_trader.py _dynamic_sell_slip_factor() logic.
-    Base: 200 bps (2%) + 50 bps fee. Scaled by liquidity and exit type.
-    When liq=0 (unknown), assume median ~$13K (from real trade data)."""
+def _dynamic_sell_slippage(liquidity_usd: float, is_sl: bool = False,
+                            chain: str = "solana", position_usd: float = 0) -> float:
+    """Sim-side legacy fallback for sell slippage. Production code goes through
+    paper_trader._dynamic_sell_slip_factor (called via _exit below). This is
+    used only when production fn unavailable (import cycles / standalone tests).
+
+    v14e.28: chain dispatch added. SOL keeps liq-aware Solana model. EVM uses
+    flat per-chain base + gas. Backward compat: chain defaults to solana so all
+    existing callers behave identically.
+    """
+    if chain in ("ethereum", "bsc", "base"):
+        try:
+            from paper_trader import _evm_slip_bps_with_gas
+            return _evm_slip_bps_with_gas(position_usd, chain, "sell") / 10_000
+        except Exception:
+            return 0.015  # 1.5% safe fallback for EVM (memecoin shallow pool)
     base_bps = 200
     fee_bps = 50
     liq = liquidity_usd if liquidity_usd > 0 else 13_000  # median from real trades
@@ -55,16 +95,29 @@ def _dynamic_sell_slippage(liquidity_usd: float, is_sl: bool = False) -> float:
 
 
 _sim_liquidity_usd = 0  # Set per-simulation by simulate() from context
+_sim_chain = "solana"   # Set per-simulation by simulate() from context (v14e.28)
+_sim_position_usd = 0   # Set per-simulation; needed for EVM gas-as-bps math
 
 
 def _exit(reason: str, exit_price: float, entry_price: float,
           elapsed_min: float, is_sl: bool = False) -> dict:
     """v126: Use production _dynamic_sell_slip_factor (paper_trader) for legacy engines.
-    Matches live slippage exactly: 10bps base + liquidity mult + exit_type mult.
-    Falls back to flat 2.5% if production fn unavailable (import cycles/tests)."""
+    Matches live slippage exactly: SOL = 10bps base + liq/exit multipliers,
+    EVM = per-chain base + gas-as-bps via _evm_slip_bps_with_gas.
+
+    v14e.28: pass chain + position into the production fn so EVM trades get
+    the right (gas-dominated) slip. Falls back to flat 2.5% if prod fn fails."""
     try:
         from paper_trader import _dynamic_sell_slip_factor
-        fake_trade = {"rt_liquidity_usd": _sim_liquidity_usd or 50_000}
+        # v14e.28: include chain + position so paper_trader._dynamic_sell_slip_factor
+        # routes EVM trades through _evm_slip_bps_with_gas (its own internal dispatch
+        # at paper_trader.py:1632-1636). For SOL, position_usd is read from trade dict
+        # by the production fn, so passing 0 is safe (matches default).
+        fake_trade = {
+            "rt_liquidity_usd": _sim_liquidity_usd or 50_000,
+            "chain": _sim_chain,
+            "position_usd": _sim_position_usd or 0,
+        }
         exit_type = reason if reason in ("sl_hit", "tp_hit", "trail_stop", "trail_crash", "timeout") else "timeout"
         slip_factor = _dynamic_sell_slip_factor(fake_trade, exit_type)
         net_price = exit_price * slip_factor
@@ -1321,8 +1374,13 @@ def simulate(candles: list[dict], entry_price: float, cfg: dict,
     unified=True (default): use production _evaluate_trade_exit() for types
     deployed in paper/live trading. unified=False: use legacy engines (for comparison).
     """
-    global _sim_liquidity_usd
-    _sim_liquidity_usd = (context or {}).get("liq", 0)
+    global _sim_liquidity_usd, _sim_chain, _sim_position_usd
+    ctx = context or {}
+    _sim_liquidity_usd = ctx.get("liq", 0)
+    # v14e.28: chain + position propagate from sim caller → _exit → paper_trader
+    # _dynamic_sell_slip_factor so EVM trades get gas-dominated slip in sim too.
+    _sim_chain = ctx.get("chain") or "solana"
+    _sim_position_usd = float(ctx.get("position_usd") or 0)
     t = cfg["type"]
 
     # Unified path for production strategy types
