@@ -1592,6 +1592,45 @@ def _rt_open_trades(ca: str, symbol: str, price: float, mcap: float,
                             live_fill_prices[strat_name] = float(exe_p)
             except Exception as e:
                 logger.error("Live trading (open) failed: %s", e)
+        # v14e.28: ETH live dispatch via Uniswap V3 + Flashbots Protect.
+        # Gated behind a SEPARATE flag (eth_live_enabled) so flipping
+        # live_trading.enabled for SOL doesn't accidentally open ETH positions
+        # before infra is validated.
+        #
+        # ⚠️ DANGER: the close-side (check_live_trades in live_trader.py:1113) is
+        # Solana-only — execute_sell rejects non-Solana mints (live_trader.py:339).
+        # Flipping eth_live_enabled=True today opens ETH positions that the bot
+        # CANNOT auto-close. Manual close via execute_sell in live_trader_eth.py
+        # only. Do NOT flip until check_live_trades_eth is wired.
+        elif (live_cfg.get("enabled", False)
+              and token_chain == "ethereum"
+              and live_cfg.get("eth_live_enabled", False)):
+            try:
+                from live_trader_eth import open_live_trade as open_live_trade_eth
+                from paper_trader import _passes_strategy_filter
+                eth_live_allocs = live_cfg.get("eth_allocations", live_cfg.get("allocations", allocations))
+                for strat_name, alloc_pct in eth_live_allocs.items():
+                    if not _passes_strategy_filter(token_entry, strat_name):
+                        logger.info("RT ETH LIVE SKIP (filter): %s/%s liq=$%.0f rt_score=%.1f",
+                                    symbol, strat_name,
+                                    float(token_entry.get("_rt_liquidity_usd") or 0),
+                                    float(token_entry.get("_rt_score") or 0))
+                        continue
+                    live_pos = round(pos_size * float(alloc_pct), 2)
+                    live_res = open_live_trade_eth(sb, token_entry, strat_name, live_pos, live_cfg)
+                    if isinstance(live_res, dict) and live_res.get("success"):
+                        exe_p = live_res.get("execution_price")
+                        if exe_p and float(exe_p) > 0:
+                            live_fill_prices[strat_name] = float(exe_p)
+                        logger.info("RT ETH LIVE OPENED: %s/%s pos=$%.2f tx=%s gas=$%.2f",
+                                    symbol, strat_name, live_pos,
+                                    live_res.get("tx_hash", "?")[:14],
+                                    float(live_res.get("gas_usd") or 0))
+                    elif isinstance(live_res, dict):
+                        logger.warning("RT ETH LIVE FAIL: %s/%s err=%s",
+                                       symbol, strat_name, live_res.get("error"))
+            except Exception as e:
+                logger.error("ETH live trading (open) failed: %s", e)
 
         # v142 E — Phase 2: open PAPER per-strat, injecting live's execution_price
         # when available so entry_price matches bit-for-bit.

@@ -37,15 +37,27 @@ Pas de code à écrire, juste observer la data grossir.
 
 ---
 
-## 🚧 PHASE A ETH live — SUSPENDU
+## 🚧 PHASE A ETH live — REPRISE Apr 26 (suspension levée par décision utilisateur)
 
-Mis en pause après le crash ETH paper du Apr 25 PM (148 trades / −$5,628 en 17h, 6 strats demoted).
+Décision : on avance malgré le crash ETH paper du 25 avril, en gating l'ouverture derrière `live_trading.eth_live_enabled` (default False) jusqu'à validation empirique.
 
-Reprend quand :
-- Les 3 ETH paper mains restantes (`ETH_TP80_SL40_T2H`, `ETH_FAST_TP100_SL20`, `ETH_FAST_TP40_SL30`) atteignent N≥30 chacune avec cum_pnl positif sur 7j glissants
-- ET le ranking ETH-only des 17 ETH clones produit ≥1 strat positive cross-régime à N≥20
+### État actuel
+- ✅ Wallet ETH dédié `0xC5c92E3AC207f686D09686Fe1dE79a302D9410E9` configuré dans `scraper/.env` VPS (`ETH_PRIVATE_KEY` + `ETH_RPC_URL=rpc.flashbots.net`)
+- ✅ `web3` + `eth-account` installés sur le venv VPS
+- ✅ Smoke test dry-run validé sur PEPE — gas $0.77 one-way / $1.54 round-trip à base_fee 0.19 gwei (calme). Gas $5-15 round-trip attendu en conditions normales.
+- ✅ `safe_scraper._rt_open_trades` câblé pour `chain=='ethereum'` → `live_trader_eth.open_live_trade`, gated derrière `live_trading.eth_live_enabled`
+- ❌ **Close-side NON câblée** — `check_live_trades` (live_trader.py:1113) reste Solana-only. Flipper `eth_live_enabled=True` aujourd'hui = positions qui ne peuvent PAS s'auto-clôturer.
 
-À ce moment-là, reprendre Phase A (calibration empirique gas + dry-run + swap réel test) — détails en commit history `880f0ea` ou redemander.
+### Étapes restantes
+- [ ] **A1.** User envoie ~0.01 ETH sur `0xC5c9…10E9` (wallet dédié, brûlé pour ce session — voir note sécu).
+- [ ] **A2.** `python scripts/_eth_live_smoke_test.py --token 0x... --eth-amount 0.005 --execute` sur un token ETH liquide (PEPE par défaut) pour mesurer gas + slip empirique réels.
+- [ ] **A3.** Câbler `check_live_trades_eth` dans `live_trader_eth.py` (mirror de `live_trader.check_live_trades` ligne 1113-1378, mais Uniswap V3 exit + dispatch chain dans la boucle).
+- [ ] **A4.** Pre-deploy check + deploy.
+- [ ] **A5.** Configurer `live_trading.eth_allocations` en DB (ETH paper mains restantes : `ETH_TP80_SL40_T2H`, `ETH_FAST_TP100_SL20`, `ETH_FAST_TP40_SL30`).
+- [ ] **A6.** Flipper `eth_live_enabled=True` à très petite taille (1 strat × $5) pour 24h de prod check.
+
+### Sécurité (rappel critique)
+- La clé privée `0xd270…da69` du wallet `0xC5c9…10E9` a été collée en clair dans le chat de cette session (transcript persistant). À considérer compromise. Déploie une rotation dès que ETH live est validé en infra.
 
 ---
 

@@ -89,13 +89,17 @@ def main():
     if not pk:
         print("ERROR: ETH_PRIVATE_KEY missing from scraper/.env")
         sys.exit(1)
-    rpc_url = os.environ.get("ETH_RPC_URL", "https://rpc.flashbots.net")
+    # Flashbots Protect (rpc.flashbots.net) is for tx submission only — reads return 403.
+    # Use ETH_READ_RPC_URL for quotes/balance, ETH_RPC_URL for signed tx submission.
+    read_rpc = os.environ.get("ETH_READ_RPC_URL", "https://ethereum-rpc.publicnode.com")
+    write_rpc = os.environ.get("ETH_RPC_URL", "https://rpc.flashbots.net")
 
-    w3 = Web3(Web3.HTTPProvider(rpc_url))
+    w3 = Web3(Web3.HTTPProvider(read_rpc))
     if not w3.is_connected():
-        print(f"ERROR: cannot connect to {rpc_url}")
+        print(f"ERROR: cannot connect to read RPC {read_rpc}")
         sys.exit(1)
-    print(f"Connected: {rpc_url}")
+    print(f"Read RPC:  {read_rpc}")
+    print(f"Write RPC: {write_rpc}")
     print(f"Block: {w3.eth.block_number} | Chain ID: {w3.eth.chain_id}")
 
     acct = Account.from_key(pk)
@@ -103,7 +107,7 @@ def main():
 
     eth_balance = w3.from_wei(w3.eth.get_balance(acct.address), "ether")
     print(f"ETH balance: {eth_balance:.6f}")
-    if eth_balance < args.eth_amount + 0.005:
+    if args.execute and eth_balance < args.eth_amount + 0.005:
         print(f"ERROR: insufficient ETH. Need at least {args.eth_amount + 0.005:.4f} ETH (swap + gas buffer)")
         sys.exit(1)
 
@@ -190,9 +194,11 @@ def main():
     })
 
     pre_token_bal_raw = erc20.functions.balanceOf(acct.address).call()
+    # Submit signed tx via Flashbots Protect (write RPC) for MEV protection.
+    w3_write = Web3(Web3.HTTPProvider(write_rpc))
     t0 = time.time()
     signed = acct.sign_transaction(tx)
-    tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+    tx_hash = w3_write.eth.send_raw_transaction(signed.raw_transaction)
     print(f"  tx sent: 0x{tx_hash.hex()}")
     print(f"  etherscan: https://etherscan.io/tx/0x{tx_hash.hex()}")
     print(f"  waiting for receipt (timeout 180s)...")
