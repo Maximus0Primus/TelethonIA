@@ -406,6 +406,127 @@ STRATEGIES["ETH_BE50_LOCK20_TP150_SL40"] = [
 STRATEGY_FILTERS["ETH_BE50_LOCK20_TP150_SL40"] = {"chain": "ethereum"}
 SHADOW_STRATEGIES.append("ETH_BE50_LOCK20_TP150_SL40")
 
+# ============================================================
+# v14e.29 (Apr 26 PM) — extended LOCK grid for mega-sweep coverage.
+# First 9 LOCK clones validated the mechanic. These extend the parameter
+# space (be_activation × lock_pct × tp × horizon) so the mega-sweep can
+# rank them against ALL strats, not just classic-BE base. If LOCK is
+# competitive globally, the top robust will surface multiple LOCK configs;
+# if not, mega-sweep ranking will tell us LOCK is just a BE optim and not
+# a top-tier family. Either way, more shadows = more signal.
+# ============================================================
+
+# SOL — early-activation variants (BE15) for fast scalp profile
+STRATEGIES["BE15_LOCK5_TP50_SL30"] = [
+    {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.15, "be_lock_pct": 0.05, "label": "main"},
+]
+SHADOW_STRATEGIES.append("BE15_LOCK5_TP50_SL30")
+
+STRATEGIES["BE15_LOCK10_TP80_SL30"] = [
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.15, "be_lock_pct": 0.10, "label": "main"},
+]
+SHADOW_STRATEGIES.append("BE15_LOCK10_TP80_SL30")
+
+# SOL — BE25 LOCK grid covering more TP/SL combinations
+STRATEGIES["BE25_LOCK10_TP100_SL30"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.25, "be_lock_pct": 0.10, "label": "main"},
+]
+SHADOW_STRATEGIES.append("BE25_LOCK10_TP100_SL30")
+
+STRATEGIES["BE25_LOCK10_TP60_SL30"] = [
+    {"pct": 1.0, "tp_mult": 1.60, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.25, "be_lock_pct": 0.10, "label": "main"},
+]
+SHADOW_STRATEGIES.append("BE25_LOCK10_TP60_SL30")
+
+# Same with SL20 (tighter — locks profit harder + smaller initial loss bound)
+STRATEGIES["BE25_LOCK10_TP80_SL20"] = [
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.80, "horizon_min": 30,
+     "be_activation": 0.25, "be_lock_pct": 0.10, "label": "main"},
+]
+SHADOW_STRATEGIES.append("BE25_LOCK10_TP80_SL20")
+
+# SOL — longer horizon variants (T2H) capturing slow-pumps
+STRATEGIES["BE25_LOCK10_TP100_SL40_T2H"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.60, "horizon_min": 120,
+     "be_activation": 0.25, "be_lock_pct": 0.10, "label": "main"},
+]
+SHADOW_STRATEGIES.append("BE25_LOCK10_TP100_SL40_T2H")
+
+STRATEGIES["BE25_LOCK15_TP150_SL40_T2H"] = [
+    {"pct": 1.0, "tp_mult": 2.50, "sl_mult": 0.60, "horizon_min": 120,
+     "be_activation": 0.25, "be_lock_pct": 0.15, "label": "main"},
+]
+SHADOW_STRATEGIES.append("BE25_LOCK15_TP150_SL40_T2H")
+
+# SOL — late activation (BE35) — only locks after a real pump
+STRATEGIES["BE35_LOCK15_TP100_SL30"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.35, "be_lock_pct": 0.15, "label": "main"},
+]
+SHADOW_STRATEGIES.append("BE35_LOCK15_TP100_SL30")
+
+STRATEGIES["BE35_LOCK20_TP150_SL40_T2H"] = [
+    {"pct": 1.0, "tp_mult": 2.50, "sl_mult": 0.60, "horizon_min": 120,
+     "be_activation": 0.35, "be_lock_pct": 0.20, "label": "main"},
+]
+SHADOW_STRATEGIES.append("BE35_LOCK20_TP150_SL40_T2H")
+
+# SOL — SCALP-style LOCK (small TP, small lock — very tight)
+STRATEGIES["BE15_LOCK5_TP30_SL20"] = [
+    {"pct": 1.0, "tp_mult": 1.30, "sl_mult": 0.80, "horizon_min": 30,
+     "be_activation": 0.15, "be_lock_pct": 0.05, "label": "main"},
+]
+SHADOW_STRATEGIES.append("BE15_LOCK5_TP30_SL20")
+
+# ETH — extended grid covering shorter/longer horizons + LOCK5
+STRATEGIES["ETH_BE25_LOCK5_TP80_SL40_T2H"] = [
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.60, "horizon_min": 120,
+     "be_activation": 0.25, "be_lock_pct": 0.05, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_BE25_LOCK5_TP80_SL40_T2H"] = {"chain": "ethereum"}
+SHADOW_STRATEGIES.append("ETH_BE25_LOCK5_TP80_SL40_T2H")
+
+STRATEGIES["ETH_BE25_LOCK15_TP100_SL40_T2H"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.60, "horizon_min": 120,
+     "be_activation": 0.25, "be_lock_pct": 0.15, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_BE25_LOCK15_TP100_SL40_T2H"] = {"chain": "ethereum"}
+SHADOW_STRATEGIES.append("ETH_BE25_LOCK15_TP100_SL40_T2H")
+
+# ETH — fast horizon FAST family LOCK clones
+STRATEGIES["ETH_BE25_LOCK10_TP100_SL20"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.80, "horizon_min": 30,
+     "be_activation": 0.25, "be_lock_pct": 0.10, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_BE25_LOCK10_TP100_SL20"] = {"chain": "ethereum"}
+SHADOW_STRATEGIES.append("ETH_BE25_LOCK10_TP100_SL20")
+
+STRATEGIES["ETH_BE15_LOCK5_TP80_SL30"] = [
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.15, "be_lock_pct": 0.05, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_BE15_LOCK5_TP80_SL30"] = {"chain": "ethereum"}
+SHADOW_STRATEGIES.append("ETH_BE15_LOCK5_TP80_SL30")
+
+# ETH — late activation (BE35/BE50) for slow-pump regime
+STRATEGIES["ETH_BE35_LOCK15_TP150_SL40_T2H"] = [
+    {"pct": 1.0, "tp_mult": 2.50, "sl_mult": 0.60, "horizon_min": 120,
+     "be_activation": 0.35, "be_lock_pct": 0.15, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_BE35_LOCK15_TP150_SL40_T2H"] = {"chain": "ethereum"}
+SHADOW_STRATEGIES.append("ETH_BE35_LOCK15_TP150_SL40_T2H")
+
+STRATEGIES["ETH_BE50_LOCK25_TP200_SL40"] = [
+    {"pct": 1.0, "tp_mult": 3.00, "sl_mult": 0.60, "horizon_min": 240,
+     "be_activation": 0.50, "be_lock_pct": 0.25, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_BE50_LOCK25_TP200_SL40"] = {"chain": "ethereum"}
+SHADOW_STRATEGIES.append("ETH_BE50_LOCK25_TP200_SL40")
+
 # v139: Asymmetric payoff bets — TP200 (3x) with 4h horizon, gated by quality filters.
 # Tested on 71 post-v132 tokens: NOZEROLIQ +14.91%/48% WR, HIGHSCORE +14.42%/50% WR
 # vs BASELINE +5.88%/41% WR. Skip toxic flow (liq=0) + use score signal = clear edge.
