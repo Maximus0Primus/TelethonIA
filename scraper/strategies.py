@@ -527,6 +527,341 @@ STRATEGIES["ETH_BE50_LOCK25_TP200_SL40"] = [
 STRATEGY_FILTERS["ETH_BE50_LOCK25_TP200_SL40"] = {"chain": "ethereum"}
 SHADOW_STRATEGIES.append("ETH_BE50_LOCK25_TP200_SL40")
 
+# ==========================================================================
+# v14e.30 (Apr 26 PM) — combinatorial gap-fill: LOCK × filters, AGE × LOCK,
+# ETH SLOW family, ETH × SCALP filters, ETH × HYST/LAZY/AGE×SCALP combos.
+#
+# Audit identified holes in the strategy lattice:
+#   ETH × LAZY = 0   ETH × HYST = 0   ETH × SLOW = 0
+#   LOCK × score-filter = 0 anywhere   LOCK × AGE = 0 anywhere
+#   AGE × SCALP × ETH = 0   AGE × BE × ETH = 0
+# These ~40 shadows cover the most impactful missing combos. All paper-only.
+# ==========================================================================
+
+# ---- Bloc A: SOL LOCK × score/liq filters (6) ----
+STRATEGIES["BE25_LOCK10_TP80_SL30_S35"] = [
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.25, "be_lock_pct": 0.10, "label": "main"},
+]
+STRATEGY_FILTERS["BE25_LOCK10_TP80_SL30_S35"] = {"chain": "solana", "min_rt_score": 35}
+SHADOW_STRATEGIES.append("BE25_LOCK10_TP80_SL30_S35")
+
+STRATEGIES["BE25_LOCK10_TP80_SL30_S40"] = [
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.25, "be_lock_pct": 0.10, "label": "main"},
+]
+STRATEGY_FILTERS["BE25_LOCK10_TP80_SL30_S40"] = {"chain": "solana", "min_rt_score": 40}
+SHADOW_STRATEGIES.append("BE25_LOCK10_TP80_SL30_S40")
+
+STRATEGIES["BE25_LOCK10_TP100_SL30_NZ_S40"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.25, "be_lock_pct": 0.10, "label": "main"},
+]
+STRATEGY_FILTERS["BE25_LOCK10_TP100_SL30_NZ_S40"] = {
+    "chain": "solana", "min_liquidity_usd": 1, "min_rt_score": 40,
+}
+SHADOW_STRATEGIES.append("BE25_LOCK10_TP100_SL30_NZ_S40")
+
+STRATEGIES["BE50_LOCK20_TP150_SL30_S40"] = [
+    {"pct": 1.0, "tp_mult": 2.50, "sl_mult": 0.70, "horizon_min": 60,
+     "be_activation": 0.50, "be_lock_pct": 0.20, "label": "main"},
+]
+STRATEGY_FILTERS["BE50_LOCK20_TP150_SL30_S40"] = {"chain": "solana", "min_rt_score": 40}
+SHADOW_STRATEGIES.append("BE50_LOCK20_TP150_SL30_S40")
+
+STRATEGIES["BE50_LOCK25_TP200_SL40_4H_NZ_S40"] = [
+    {"pct": 1.0, "tp_mult": 3.00, "sl_mult": 0.60, "horizon_min": 240,
+     "be_activation": 0.50, "be_lock_pct": 0.25, "label": "main"},
+]
+STRATEGY_FILTERS["BE50_LOCK25_TP200_SL40_4H_NZ_S40"] = {
+    "chain": "solana", "min_liquidity_usd": 1, "min_rt_score": 40,
+}
+SHADOW_STRATEGIES.append("BE50_LOCK25_TP200_SL40_4H_NZ_S40")
+
+STRATEGIES["BE50_LOCK25_TP200_SL40_4H_MCAP"] = [
+    {"pct": 1.0, "tp_mult": 3.00, "sl_mult": 0.60, "horizon_min": 240,
+     "be_activation": 0.50, "be_lock_pct": 0.25, "label": "main"},
+]
+STRATEGY_FILTERS["BE50_LOCK25_TP200_SL40_4H_MCAP"] = {
+    "chain": "solana", "min_mcap": 30_000, "max_mcap": 500_000,
+}
+SHADOW_STRATEGIES.append("BE50_LOCK25_TP200_SL40_4H_MCAP")
+
+# ---- Bloc B: ETH LOCK × score/liq filters (6) ----
+STRATEGIES["ETH_BE25_LOCK10_TP80_SL40_T2H_S35"] = [
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.60, "horizon_min": 120,
+     "be_activation": 0.25, "be_lock_pct": 0.10, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_BE25_LOCK10_TP80_SL40_T2H_S35"] = {"chain": "ethereum", "min_rt_score": 35}
+SHADOW_STRATEGIES.append("ETH_BE25_LOCK10_TP80_SL40_T2H_S35")
+
+STRATEGIES["ETH_BE30_LOCK10_TP100_SL40_S40"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.60, "horizon_min": 240,
+     "be_activation": 0.30, "be_lock_pct": 0.10, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_BE30_LOCK10_TP100_SL40_S40"] = {"chain": "ethereum", "min_rt_score": 40}
+SHADOW_STRATEGIES.append("ETH_BE30_LOCK10_TP100_SL40_S40")
+
+STRATEGIES["ETH_BE30_LOCK10_TP100_SL40_NZ_S40"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.60, "horizon_min": 240,
+     "be_activation": 0.30, "be_lock_pct": 0.10, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_BE30_LOCK10_TP100_SL40_NZ_S40"] = {
+    "chain": "ethereum", "min_liquidity_usd": 1, "min_rt_score": 40,
+}
+SHADOW_STRATEGIES.append("ETH_BE30_LOCK10_TP100_SL40_NZ_S40")
+
+STRATEGIES["ETH_BE50_LOCK20_TP150_SL40_S40"] = [
+    {"pct": 1.0, "tp_mult": 2.50, "sl_mult": 0.60, "horizon_min": 240,
+     "be_activation": 0.50, "be_lock_pct": 0.20, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_BE50_LOCK20_TP150_SL40_S40"] = {"chain": "ethereum", "min_rt_score": 40}
+SHADOW_STRATEGIES.append("ETH_BE50_LOCK20_TP150_SL40_S40")
+
+STRATEGIES["ETH_BE50_LOCK20_TP150_SL40_NZ_S40"] = [
+    {"pct": 1.0, "tp_mult": 2.50, "sl_mult": 0.60, "horizon_min": 240,
+     "be_activation": 0.50, "be_lock_pct": 0.20, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_BE50_LOCK20_TP150_SL40_NZ_S40"] = {
+    "chain": "ethereum", "min_liquidity_usd": 1, "min_rt_score": 40,
+}
+SHADOW_STRATEGIES.append("ETH_BE50_LOCK20_TP150_SL40_NZ_S40")
+
+STRATEGIES["ETH_BE50_LOCK25_TP200_SL40_MCAP_S40"] = [
+    {"pct": 1.0, "tp_mult": 3.00, "sl_mult": 0.60, "horizon_min": 240,
+     "be_activation": 0.50, "be_lock_pct": 0.25, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_BE50_LOCK25_TP200_SL40_MCAP_S40"] = {
+    "chain": "ethereum", "min_mcap": 30_000, "max_mcap": 500_000, "min_rt_score": 40,
+}
+SHADOW_STRATEGIES.append("ETH_BE50_LOCK25_TP200_SL40_MCAP_S40")
+
+# ---- Bloc C: AGE × LOCK SOL (4) ----
+STRATEGIES["AGE24_BE25_LOCK10_TP80_SL30"] = [
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.25, "be_lock_pct": 0.10, "label": "main"},
+]
+STRATEGY_FILTERS["AGE24_BE25_LOCK10_TP80_SL30"] = {
+    "chain": "solana", "min_age_hours": 12, "max_age_hours": 24,
+}
+SHADOW_STRATEGIES.append("AGE24_BE25_LOCK10_TP80_SL30")
+
+STRATEGIES["AGE48_BE25_LOCK10_TP80_SL30"] = [
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.25, "be_lock_pct": 0.10, "label": "main"},
+]
+STRATEGY_FILTERS["AGE48_BE25_LOCK10_TP80_SL30"] = {
+    "chain": "solana", "min_age_hours": 24, "max_age_hours": 48,
+}
+SHADOW_STRATEGIES.append("AGE48_BE25_LOCK10_TP80_SL30")
+
+STRATEGIES["AGE24_BE50_LOCK20_TP150_SL30"] = [
+    {"pct": 1.0, "tp_mult": 2.50, "sl_mult": 0.70, "horizon_min": 60,
+     "be_activation": 0.50, "be_lock_pct": 0.20, "label": "main"},
+]
+STRATEGY_FILTERS["AGE24_BE50_LOCK20_TP150_SL30"] = {
+    "chain": "solana", "min_age_hours": 12, "max_age_hours": 24,
+}
+SHADOW_STRATEGIES.append("AGE24_BE50_LOCK20_TP150_SL30")
+
+STRATEGIES["AGE48_BE50_LOCK20_TP150_SL30"] = [
+    {"pct": 1.0, "tp_mult": 2.50, "sl_mult": 0.70, "horizon_min": 60,
+     "be_activation": 0.50, "be_lock_pct": 0.20, "label": "main"},
+]
+STRATEGY_FILTERS["AGE48_BE50_LOCK20_TP150_SL30"] = {
+    "chain": "solana", "min_age_hours": 24, "max_age_hours": 48,
+}
+SHADOW_STRATEGIES.append("AGE48_BE50_LOCK20_TP150_SL30")
+
+# ---- Bloc D: AGE × LOCK ETH (4) ----
+STRATEGIES["AGE24_ETH_BE25_LOCK10_TP80_SL40_T2H"] = [
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.60, "horizon_min": 120,
+     "be_activation": 0.25, "be_lock_pct": 0.10, "label": "main"},
+]
+STRATEGY_FILTERS["AGE24_ETH_BE25_LOCK10_TP80_SL40_T2H"] = {
+    "chain": "ethereum", "min_age_hours": 12, "max_age_hours": 24,
+}
+SHADOW_STRATEGIES.append("AGE24_ETH_BE25_LOCK10_TP80_SL40_T2H")
+
+STRATEGIES["AGE48_ETH_BE25_LOCK10_TP80_SL40_T2H"] = [
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.60, "horizon_min": 120,
+     "be_activation": 0.25, "be_lock_pct": 0.10, "label": "main"},
+]
+STRATEGY_FILTERS["AGE48_ETH_BE25_LOCK10_TP80_SL40_T2H"] = {
+    "chain": "ethereum", "min_age_hours": 24, "max_age_hours": 48,
+}
+SHADOW_STRATEGIES.append("AGE48_ETH_BE25_LOCK10_TP80_SL40_T2H")
+
+STRATEGIES["AGE24_ETH_BE50_LOCK20_TP150_SL40"] = [
+    {"pct": 1.0, "tp_mult": 2.50, "sl_mult": 0.60, "horizon_min": 240,
+     "be_activation": 0.50, "be_lock_pct": 0.20, "label": "main"},
+]
+STRATEGY_FILTERS["AGE24_ETH_BE50_LOCK20_TP150_SL40"] = {
+    "chain": "ethereum", "min_age_hours": 12, "max_age_hours": 24,
+}
+SHADOW_STRATEGIES.append("AGE24_ETH_BE50_LOCK20_TP150_SL40")
+
+STRATEGIES["AGE48_ETH_BE50_LOCK20_TP150_SL40"] = [
+    {"pct": 1.0, "tp_mult": 2.50, "sl_mult": 0.60, "horizon_min": 240,
+     "be_activation": 0.50, "be_lock_pct": 0.20, "label": "main"},
+]
+STRATEGY_FILTERS["AGE48_ETH_BE50_LOCK20_TP150_SL40"] = {
+    "chain": "ethereum", "min_age_hours": 24, "max_age_hours": 48,
+}
+SHADOW_STRATEGIES.append("AGE48_ETH_BE50_LOCK20_TP150_SL40")
+
+# ---- Bloc E: AGE × SCALP × ETH (4) ----
+STRATEGIES["AGE24_ETH_SCALP_TP15_SL20_S35"] = [
+    {"pct": 1.0, "tp_mult": 1.15, "sl_mult": 0.80, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["AGE24_ETH_SCALP_TP15_SL20_S35"] = {
+    "chain": "ethereum", "min_age_hours": 12, "max_age_hours": 24, "min_rt_score": 35,
+}
+SHADOW_STRATEGIES.append("AGE24_ETH_SCALP_TP15_SL20_S35")
+
+STRATEGIES["AGE48_ETH_SCALP_TP15_SL20_S35"] = [
+    {"pct": 1.0, "tp_mult": 1.15, "sl_mult": 0.80, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["AGE48_ETH_SCALP_TP15_SL20_S35"] = {
+    "chain": "ethereum", "min_age_hours": 24, "max_age_hours": 48, "min_rt_score": 35,
+}
+SHADOW_STRATEGIES.append("AGE48_ETH_SCALP_TP15_SL20_S35")
+
+STRATEGIES["AGE24_ETH_SCALP_TP20_SL10_S30"] = [
+    {"pct": 1.0, "tp_mult": 1.20, "sl_mult": 0.90, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["AGE24_ETH_SCALP_TP20_SL10_S30"] = {
+    "chain": "ethereum", "min_age_hours": 12, "max_age_hours": 24, "min_rt_score": 30,
+}
+SHADOW_STRATEGIES.append("AGE24_ETH_SCALP_TP20_SL10_S30")
+
+STRATEGIES["AGE48_ETH_SCALP_TP20_SL10_S30"] = [
+    {"pct": 1.0, "tp_mult": 1.20, "sl_mult": 0.90, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["AGE48_ETH_SCALP_TP20_SL10_S30"] = {
+    "chain": "ethereum", "min_age_hours": 24, "max_age_hours": 48, "min_rt_score": 30,
+}
+SHADOW_STRATEGIES.append("AGE48_ETH_SCALP_TP20_SL10_S30")
+
+# ---- Bloc F: AGE × BE × ETH (4) ----
+STRATEGIES["AGE24_ETH_BE25_TP80_SL40_T2H"] = [
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.60, "horizon_min": 120,
+     "be_activation": 0.25, "label": "main"},
+]
+STRATEGY_FILTERS["AGE24_ETH_BE25_TP80_SL40_T2H"] = {
+    "chain": "ethereum", "min_age_hours": 12, "max_age_hours": 24,
+}
+SHADOW_STRATEGIES.append("AGE24_ETH_BE25_TP80_SL40_T2H")
+
+STRATEGIES["AGE48_ETH_BE25_TP80_SL40_T2H"] = [
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.60, "horizon_min": 120,
+     "be_activation": 0.25, "label": "main"},
+]
+STRATEGY_FILTERS["AGE48_ETH_BE25_TP80_SL40_T2H"] = {
+    "chain": "ethereum", "min_age_hours": 24, "max_age_hours": 48,
+}
+SHADOW_STRATEGIES.append("AGE48_ETH_BE25_TP80_SL40_T2H")
+
+STRATEGIES["AGE24_ETH_BE30_TP100_SL40"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.60, "horizon_min": 240,
+     "be_activation": 0.30, "label": "main"},
+]
+STRATEGY_FILTERS["AGE24_ETH_BE30_TP100_SL40"] = {
+    "chain": "ethereum", "min_age_hours": 12, "max_age_hours": 24,
+}
+SHADOW_STRATEGIES.append("AGE24_ETH_BE30_TP100_SL40")
+
+STRATEGIES["AGE48_ETH_BE30_TP100_SL40"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.60, "horizon_min": 240,
+     "be_activation": 0.30, "label": "main"},
+]
+STRATEGY_FILTERS["AGE48_ETH_BE30_TP100_SL40"] = {
+    "chain": "ethereum", "min_age_hours": 24, "max_age_hours": 48,
+}
+SHADOW_STRATEGIES.append("AGE48_ETH_BE30_TP100_SL40")
+
+# ---- Bloc G: ETH SLOW family (5) — long horizon, no BE ----
+STRATEGIES["ETH_SLOW4H_TP100_SL50"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.50, "horizon_min": 240, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_SLOW4H_TP100_SL50"] = {"chain": "ethereum"}
+SHADOW_STRATEGIES.append("ETH_SLOW4H_TP100_SL50")
+
+STRATEGIES["ETH_SLOW4H_TP150_SL40"] = [
+    {"pct": 1.0, "tp_mult": 2.50, "sl_mult": 0.60, "horizon_min": 240, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_SLOW4H_TP150_SL40"] = {"chain": "ethereum"}
+SHADOW_STRATEGIES.append("ETH_SLOW4H_TP150_SL40")
+
+STRATEGIES["ETH_SLOW6H_TP150_SL50"] = [
+    {"pct": 1.0, "tp_mult": 2.50, "sl_mult": 0.50, "horizon_min": 360, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_SLOW6H_TP150_SL50"] = {"chain": "ethereum"}
+SHADOW_STRATEGIES.append("ETH_SLOW6H_TP150_SL50")
+
+STRATEGIES["ETH_SLOW6H_TP200_SL40"] = [
+    {"pct": 1.0, "tp_mult": 3.00, "sl_mult": 0.60, "horizon_min": 360, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_SLOW6H_TP200_SL40"] = {"chain": "ethereum"}
+SHADOW_STRATEGIES.append("ETH_SLOW6H_TP200_SL40")
+
+STRATEGIES["ETH_SLOW6H_TP200_SL40_NZ_S40"] = [
+    {"pct": 1.0, "tp_mult": 3.00, "sl_mult": 0.60, "horizon_min": 360, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_SLOW6H_TP200_SL40_NZ_S40"] = {
+    "chain": "ethereum", "min_liquidity_usd": 1, "min_rt_score": 40,
+}
+SHADOW_STRATEGIES.append("ETH_SLOW6H_TP200_SL40_NZ_S40")
+
+# ---- Bloc H: ETH × SCALP additional filter combos (4) ----
+STRATEGIES["ETH_SCALP_TP10_SL10_S30"] = [
+    {"pct": 1.0, "tp_mult": 1.10, "sl_mult": 0.90, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_SCALP_TP10_SL10_S30"] = {"chain": "ethereum", "min_rt_score": 30}
+SHADOW_STRATEGIES.append("ETH_SCALP_TP10_SL10_S30")
+
+STRATEGIES["ETH_SCALP_TP15_NOSL_S40"] = [
+    {"pct": 1.0, "tp_mult": 1.15, "sl_mult": 0.20, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_SCALP_TP15_NOSL_S40"] = {"chain": "ethereum", "min_rt_score": 40}
+SHADOW_STRATEGIES.append("ETH_SCALP_TP15_NOSL_S40")
+
+STRATEGIES["ETH_SCALP_TP20_NOSL_S40"] = [
+    {"pct": 1.0, "tp_mult": 1.20, "sl_mult": 0.20, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_SCALP_TP20_NOSL_S40"] = {"chain": "ethereum", "min_rt_score": 40}
+SHADOW_STRATEGIES.append("ETH_SCALP_TP20_NOSL_S40")
+
+STRATEGIES["ETH_SCALP_TP25_SL15_S35"] = [
+    {"pct": 1.0, "tp_mult": 1.25, "sl_mult": 0.85, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_SCALP_TP25_SL15_S35"] = {"chain": "ethereum", "min_rt_score": 35}
+SHADOW_STRATEGIES.append("ETH_SCALP_TP25_SL15_S35")
+
+# ---- Bloc I: ETH let-it-run TP200/TP300 with filters (3) ----
+STRATEGIES["ETH_TP200_SL40_4H_NZ_S40"] = [
+    {"pct": 1.0, "tp_mult": 3.00, "sl_mult": 0.60, "horizon_min": 240, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_TP200_SL40_4H_NZ_S40"] = {
+    "chain": "ethereum", "min_liquidity_usd": 1, "min_rt_score": 40,
+}
+SHADOW_STRATEGIES.append("ETH_TP200_SL40_4H_NZ_S40")
+
+STRATEGIES["ETH_TP300_SL50_4H"] = [
+    {"pct": 1.0, "tp_mult": 4.00, "sl_mult": 0.50, "horizon_min": 240, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_TP300_SL50_4H"] = {"chain": "ethereum"}
+SHADOW_STRATEGIES.append("ETH_TP300_SL50_4H")
+
+STRATEGIES["ETH_TP300_SL40_4H_MCAP_S40"] = [
+    {"pct": 1.0, "tp_mult": 4.00, "sl_mult": 0.60, "horizon_min": 240, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_TP300_SL40_4H_MCAP_S40"] = {
+    "chain": "ethereum", "min_mcap": 30_000, "max_mcap": 500_000, "min_rt_score": 40,
+}
+SHADOW_STRATEGIES.append("ETH_TP300_SL40_4H_MCAP_S40")
+
+
 # v139: Asymmetric payoff bets — TP200 (3x) with 4h horizon, gated by quality filters.
 # Tested on 71 post-v132 tokens: NOZEROLIQ +14.91%/48% WR, HIGHSCORE +14.42%/50% WR
 # vs BASELINE +5.88%/41% WR. Skip toxic flow (liq=0) + use score signal = clear edge.
