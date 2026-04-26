@@ -1043,11 +1043,17 @@ def _rt_update_bankroll(pnl_usd: float, n_trades: int, strategy: str = "",
 
             # Legacy mirror — keep the flat dict in sync so pre-v14e readers
             # still see fresh numbers during rollout. Remove next release.
+            # v14e.32: defensive .get() with defaults — Apr 26 PM bug: a manual
+            # bankroll reset put 'pnl_usd'/'total_trades' field names instead
+            # of the expected 'pnl'/'trades'. This branch was raising KeyError
+            # on every ETH trade close ("RT bankroll update failed: 'pnl'")
+            # which silently swallowed all bankroll updates for ~3h. 110 trades
+            # had to be credited manually after the fact.
             strat_bankrolls = row.get("strategy_bankrolls") or {}
-            legacy_entry = strat_bankrolls.get(strategy, {"balance": 500, "trades": 0, "pnl": 0})
-            legacy_entry["balance"] = round(float(legacy_entry["balance"]) + pnl_usd, 2)
-            legacy_entry["pnl"] = round(float(legacy_entry["pnl"]) + pnl_usd, 2)
-            legacy_entry["trades"] = int(legacy_entry["trades"]) + n_trades
+            legacy_entry = dict(strat_bankrolls.get(strategy) or {"balance": 500, "trades": 0, "pnl": 0})
+            legacy_entry["balance"] = round(float(legacy_entry.get("balance", 500)) + pnl_usd, 2)
+            legacy_entry["pnl"] = round(float(legacy_entry.get("pnl", 0)) + pnl_usd, 2)
+            legacy_entry["trades"] = int(legacy_entry.get("trades", 0)) + n_trades
             strat_bankrolls[strategy] = legacy_entry
             update_data["strategy_bankrolls"] = strat_bankrolls
 
@@ -1059,7 +1065,12 @@ def _rt_update_bankroll(pnl_usd: float, n_trades: int, strategy: str = "",
         logger.info("RT bankroll: $%.2f → $%.2f (pnl=$%+.2f, %d trades, peak=$%.2f, dd=%.1f%%)%s",
                      old_balance, new_balance, pnl_usd, n_trades, new_peak, new_dd, strat_str)
     except Exception as e:
-        logger.error("RT bankroll update failed: %s", e)
+        # v14e.32: include strategy + chain context so the next silent failure
+        # is debuggable without grepping. Apr 26 PM bug went undetected for 3h
+        # because logs only said "RT bankroll update failed: 'pnl'" with no
+        # hint which strat/chain was failing.
+        logger.error("RT bankroll update failed for [%s/%s] pnl=$%+.2f: %r",
+                     chain, strategy, pnl_usd, e)
 
 
 def _rt_load_kol_scores() -> dict:
