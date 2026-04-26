@@ -42,15 +42,24 @@ def compute_buy_slippage(position_usd: float, liquidity_usd: float,
 # ---------------------------------------------------------------------------
 
 def _dynamic_sell_slippage(liquidity_usd: float, is_sl: bool = False) -> float:
-    """Match paper_trader.py _dynamic_sell_slip_factor() logic.
-    Base: 200 bps (2%) + 50 bps fee. Scaled by liquidity and exit type.
-    When liq=0 (unknown), assume median ~$13K (from real trade data)."""
-    base_bps = 200
-    fee_bps = 50
+    """v14e.27 — legacy helper, recalibrated to match paper_trader's empirical
+    type_bps. Original v14e.6 hardcoded base 200 bps + 50 bps fee + multipliers
+    that produced 200-400 bps total — wildly above the empirical median (0 bps).
+    Now mirrors the current paper_trader._dynamic_sell_slip_factor: ~85 bps for
+    SL, ~80 bps default, with the same liq_mult and -100 bps GLOBAL_OFFSET.
+
+    Production code path goes through _exit() below which calls the production
+    function directly — this fallback only fires on import cycles / tests.
+    """
+    type_bps = 85 if is_sl else 80
     liq = liquidity_usd if liquidity_usd > 0 else 13_000  # median from real trades
-    liq_mult = max(1.0, min(4.0, 50_000 / max(liq, 1_000)))
-    exit_mult = 1.5 if is_sl else 1.0
-    adjusted_bps = int(base_bps * liq_mult * exit_mult) + fee_bps
+    # Mirror paper_trader._liq_slip_multiplier (log-linear, clamped 1.0-2.5)
+    import math as _m
+    liq_clamped = max(500, min(50_000, liq))
+    liq_mult = max(1.0, min(2.5, 1.0 + 0.5 * max(0, _m.log10(50_000 / liq_clamped))))
+    GLOBAL_OFFSET_BPS = -100
+    adjusted_bps = int(type_bps * liq_mult) + GLOBAL_OFFSET_BPS
+    adjusted_bps = max(-1000, min(1500, adjusted_bps))
     return adjusted_bps / 10_000
 
 

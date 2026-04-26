@@ -1613,15 +1613,33 @@ def _liq_slip_multiplier(liq_usd: float) -> float:
 
 def _dynamic_sell_slip_factor(trade: dict, exit_type: str, base_bps: int = 10,
                               fee_bps: int = SELL_FEE_BPS) -> float:
-    """v14e.6: continuous liq model. Previous v144 used 3 buckets (5k/20k/50k),
-    now log-linear via `_liq_slip_multiplier`.
+    """v14e.27 (Apr 26) — empirical recalibration. 223 live rt_live trades
+    since v121 yielded median sell_slippage_bps = 0 across all exit types
+    (Jupiter Ultra RFQ delivers near-zero slip 95% of the time). The previous
+    v14e.6 type_bps lookup (sl_hit=435, tp_hit=-300, timeout=120, etc.) was
+    overfit to a 77-trade window and made the dynamic model PERFORM WORSE
+    than a flat constant: MAE 799 bps (dynamic) vs 142 bps (constant median),
+    R² = -0.061. OLS with all features only beat the constant by 0.5%, so
+    features explain essentially nothing — the slip is dominated by 5%
+    rug/MEV outliers (>5000 bps) that are not predictable ex-ante.
 
-    Base per-pair delta (pnl_live − pnl_paper) on 77 live/paper twins (Apr
-    13-19, DTRAIL excl.): median +115 bps pump (N=71), −328 non-pump (N=6).
-    Pump/liq/mcap splits all yield pooled std ~2920 bps — a single global
-    offset captures the mean, and the liq curve captures the dispersion.
+    Per-exit-type observed medians (calibration script
+    `scripts/_calibrate_sell_slip.py`, output `data/sell_slip_calibration.json`):
+        be_stop     -58 bps  N=7   (was 200, 5x over)
+        sl_hit       -1 bps  N=52  (was 435, 435x over)
+        timeout     -47 bps  N=103 (was 120, 2.5x over)
+        tp_hit       +0 bps  N=19  (was -300, sign-flipped)
+        trail_stop   +0 bps  N=42  (was 250, 250x over)
 
-    Offset −100 bps applied post-type to shift the overall mean toward zero.
+    `recommended` column (median + 100 / avg_liq_mult) backs out the type_bps
+    that, after the -100 GLOBAL_OFFSET and per-trade liq_mult, lands the
+    median prediction at the observed median. Values below.
+
+    Liq multiplier kept (v14e.6 log-linear, _liq_slip_multiplier) because
+    while it doesn't lift R², it captures the small dispersion across pool
+    depths. GLOBAL_OFFSET_BPS kept at -100. Outliers (rugs) remain unmodeled
+    Monte-Carlo noise — paper will look slightly better than live on the 5%
+    rug days.
 
     v14: Ethereum branch uses a separate model (200 bps base MEV slip + gas
     cost amortized over position size). Exit-type nuance doesn't apply — EVM
@@ -1638,24 +1656,28 @@ def _dynamic_sell_slip_factor(trade: dict, exit_type: str, base_bps: int = 10,
     liq_usd = float(trade.get("rt_liquidity_usd") or 50_000)
     liq_mult = _liq_slip_multiplier(liq_usd)
 
+    # v14e.27 — empirical type_bps from sell_slip_calibration.json.
+    # trail_crash kept at legacy 1000 (only 0-1 sample observed, no calibration
+    # data). tp_late kept at 80 (not observed in N=223, scheduled-exit edge case).
     if exit_type == "trail_crash":
         type_bps = 1000
     elif exit_type == "sl_hit":
-        type_bps = 435
+        type_bps = 85    # was 435
     elif exit_type == "trail_stop":
-        type_bps = 250
+        type_bps = 82    # was 250
     elif exit_type == "tp_hit":
-        type_bps = -300
+        type_bps = 87    # was -300 (sign was wrong)
     elif exit_type == "timeout":
-        type_bps = 120
+        type_bps = 47    # was 120
     elif exit_type == "be_stop":
-        type_bps = 200
+        type_bps = 35    # was 200
     elif exit_type == "tp_late":
         type_bps = 80
     else:
-        type_bps = 100
+        type_bps = 80    # default ~ recommended for unknown types
 
-    # v144: shift global by −100 bps (live is consistently 100 bps better than paper)
+    # GLOBAL_OFFSET kept at -100 (still empirically valid — live consistently
+    # 100 bps better than paper at the per-trade level after type_bps fits).
     GLOBAL_OFFSET_BPS = -100
 
     adjusted_bps = int(type_bps * liq_mult) + fee_bps + GLOBAL_OFFSET_BPS
