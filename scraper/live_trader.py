@@ -1196,6 +1196,15 @@ def check_live_trades(client_sb) -> dict:
         trade_id = trade.get("id")
         current_price = prices.get(addr)
 
+        # v14e.28: skip non-Solana trades — ETH live trades are handled by
+        # live_trader_eth.check_live_trades_eth. Without this gate, a flipped
+        # eth_live_enabled would create ETH rows that this Solana-only loop
+        # would try to sell via Jupiter (rejected at execute_sell:339 but
+        # leaving rows stuck in 'closing' status).
+        trade_chain = trade.get("chain") or "solana"
+        if trade_chain != "solana":
+            continue
+
         # v121: Trade stuck in 'closing' from a previous failed sell — force sell immediately
         _paper_sim_ev = None  # v141: default (closing_retry path has no paper simulation)
         if trade.get("status") == "closing":

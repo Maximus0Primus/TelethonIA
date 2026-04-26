@@ -2569,6 +2569,30 @@ async def main():
                                 live_pnl = live_result.get("rt_pnl_usd", 0)
                                 if live_pnl != 0 or closed > 0:
                                     _rt_update_bankroll(live_pnl, closed)
+
+                        # v14e.28: ETH close-side. Runs in same iteration so ETH and
+                        # SOL prices are checked at the same wall-clock — keeps cross-
+                        # chain divergence measurement consistent. Gated separately so
+                        # SOL live can run without loading web3/RPC if ETH disabled.
+                        if live_cfg.get("eth_live_enabled", False):
+                            try:
+                                from live_trader_eth import check_live_trades_eth
+                                eth_result = await asyncio.get_event_loop().run_in_executor(
+                                    None, check_live_trades_eth, sb_lt
+                                )
+                                eth_closed = eth_result.get("closed", 0)
+                                if eth_closed > 0:
+                                    logger.info(
+                                        "ETH LIVE MONITOR: closed %d/%d trades (TP=%d SL=%d TO=%d) pnl=$%+.2f",
+                                        eth_closed, eth_result.get("checked", 0),
+                                        eth_result.get("tp", 0), eth_result.get("sl", 0),
+                                        eth_result.get("timeout", 0), eth_result.get("pnl_usd", 0),
+                                    )
+                                    eth_pnl = eth_result.get("rt_pnl_usd", 0)
+                                    if eth_pnl != 0 or eth_closed > 0:
+                                        _rt_update_bankroll(eth_pnl, eth_closed)
+                            except Exception as e:
+                                logger.error("ETH live close error: %s", e)
             except Exception as e:
                 logger.error("live_trade_monitor error: %s", e)
 
