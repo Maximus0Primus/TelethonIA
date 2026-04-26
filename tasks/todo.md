@@ -48,13 +48,26 @@ Décision : on avance malgré le crash ETH paper du 25 avril, en gating l'ouvert
 - ✅ `safe_scraper._rt_open_trades` câblé pour `chain=='ethereum'` → `live_trader_eth.open_live_trade`, gated derrière `live_trading.eth_live_enabled`
 - ❌ **Close-side NON câblée** — `check_live_trades` (live_trader.py:1113) reste Solana-only. Flipper `eth_live_enabled=True` aujourd'hui = positions qui ne peuvent PAS s'auto-clôturer.
 
+### Étapes complétées (Apr 26)
+- [x] **A1.** User a envoyé 0.0207 ETH ($48) sur `0xC5c9…10E9` (Apr 26, ~13h00 UTC).
+- [x] **A2.** Round-trip empirique sur PEPE ($7 swap) : data permanente dans `data/eth_smoke_*.json`. Gas réel BUY $0.89-1.12 / SELL $0.87-1.11. Slip pur ~0bps. Round-trip cost dominé par gas, swap slip négligeable.
+- [x] **A3.** `check_live_trades_eth` câblé dans `live_trader_eth.py` (commit `754cd86`). Open path insert DB + close path full mirror.
+- [x] **A4.** Deploy `b9c03eb` + `754cd86` + `1d2f5af` sur VPS. 117 tests passent.
+- [x] **A5 bonus.** 2 bugs critiques `live_trader_eth` trouvés et fixés via le smoke test (commit `1d2f5af`) :
+  - SELL retournait WETH ERC20, pas ETH natif → fix multicall avec unwrapWETH9
+  - BUY reportait `tokens_received=0` (RPC read-after-write lag) → fix parsing du Swap event log
+- [x] **A6.** Helper `unwrap_weth_balance()` ajouté pour récupérer le WETH orphan créé pendant le 1er smoke (avant fix). Wallet propre.
+
 ### Étapes restantes
-- [ ] **A1.** User envoie ~0.01 ETH sur `0xC5c9…10E9` (wallet dédié, brûlé pour ce session — voir note sécu).
-- [ ] **A2.** `python scripts/_eth_live_smoke_test.py --token 0x... --eth-amount 0.005 --execute` sur un token ETH liquide (PEPE par défaut) pour mesurer gas + slip empirique réels.
-- [ ] **A3.** Câbler `check_live_trades_eth` dans `live_trader_eth.py` (mirror de `live_trader.check_live_trades` ligne 1113-1378, mais Uniswap V3 exit + dispatch chain dans la boucle).
-- [ ] **A4.** Pre-deploy check + deploy.
-- [ ] **A5.** Configurer `live_trading.eth_allocations` en DB (ETH paper mains restantes : `ETH_TP80_SL40_T2H`, `ETH_FAST_TP100_SL20`, `ETH_FAST_TP40_SL30`).
-- [ ] **A6.** Flipper `eth_live_enabled=True` à très petite taille (1 strat × $5) pour 24h de prod check.
+- [ ] **A7.** Configurer `live_trading.eth_allocations` en DB. Démarrer petit : `{"ETH_TP80_SL40_T2H": 1.0}` à 100% sur 1 seul strat (le moins risqué des 3 ETH paper mains restantes).
+- [ ] **A8.** Position size ETH initiale : $10/trade max (gas représente ~22% à cette taille — viable mais marge serrée). Bankroll ETH allouée du wallet : ~$40 (= 4 trades simultanés max).
+- [ ] **A9.** Flipper `live_trading.eth_live_enabled=True` en DB.
+- [ ] **A10.** Surveillance 24h-72h : cohérence paper↔live drift, gas réel par trade, slippage, Flashbots latency. Comparer aux numéros empiriques captured Apr 26.
+
+### Wallet état Apr 26 (post-tests)
+- Balance: 0.01867 ETH = $43.52
+- Coût total des smoke tests : $4.61 (= 2 round-trips + 1 unwrap manuel + slips)
+- Adresse publique : `0xC5c92E3AC207f686D09686Fe1dE79a302D9410E9`
 
 ### Sécurité (rappel critique)
 - La clé privée `0xd270…da69` du wallet `0xC5c9…10E9` a été collée en clair dans le chat de cette session (transcript persistant). À considérer compromise. Déploie une rotation dès que ETH live est validé en infra.
