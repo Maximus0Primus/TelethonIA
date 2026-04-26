@@ -861,6 +861,175 @@ STRATEGY_FILTERS["ETH_TP300_SL40_4H_MCAP_S40"] = {
 }
 SHADOW_STRATEGIES.append("ETH_TP300_SL40_4H_MCAP_S40")
 
+# ==========================================================================
+# v14e.30 (Apr 26 PM, suite) — SOL balance: 19 more shadows to match the
+# combinatorial depth applied to ETH. Fills the remaining SOL gaps:
+#   AGE × SCALP × S30/S40    (current AGE×SCALP only has S35)
+#   AGE × LOCK × score-gated (triple combo, never tested)
+#   SOL LOCK × let-it-run    (LOCK was only 30-60min horizon)
+#   SCALP × NZ filter        (SCALP had S30/35/40 but no NZ)
+#   SOL TP200/TP300 × MCAP/NZ (let-it-run with quality gates)
+# ==========================================================================
+
+# ---- Bloc J: AGE × SCALP × S30/S40 SOL (4) ----
+STRATEGIES["AGE24_SCALP_TP20_SL10_S30"] = [
+    {"pct": 1.0, "tp_mult": 1.20, "sl_mult": 0.90, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["AGE24_SCALP_TP20_SL10_S30"] = {
+    "chain": "solana", "min_age_hours": 12, "max_age_hours": 24, "min_rt_score": 30,
+}
+SHADOW_STRATEGIES.append("AGE24_SCALP_TP20_SL10_S30")
+
+STRATEGIES["AGE48_SCALP_TP20_SL10_S30"] = [
+    {"pct": 1.0, "tp_mult": 1.20, "sl_mult": 0.90, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["AGE48_SCALP_TP20_SL10_S30"] = {
+    "chain": "solana", "min_age_hours": 24, "max_age_hours": 48, "min_rt_score": 30,
+}
+SHADOW_STRATEGIES.append("AGE48_SCALP_TP20_SL10_S30")
+
+STRATEGIES["AGE24_SCALP_TP15_SL15_S40"] = [
+    {"pct": 1.0, "tp_mult": 1.15, "sl_mult": 0.85, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["AGE24_SCALP_TP15_SL15_S40"] = {
+    "chain": "solana", "min_age_hours": 12, "max_age_hours": 24, "min_rt_score": 40,
+}
+SHADOW_STRATEGIES.append("AGE24_SCALP_TP15_SL15_S40")
+
+STRATEGIES["AGE48_SCALP_TP15_SL15_S40"] = [
+    {"pct": 1.0, "tp_mult": 1.15, "sl_mult": 0.85, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["AGE48_SCALP_TP15_SL15_S40"] = {
+    "chain": "solana", "min_age_hours": 24, "max_age_hours": 48, "min_rt_score": 40,
+}
+SHADOW_STRATEGIES.append("AGE48_SCALP_TP15_SL15_S40")
+
+# ---- Bloc K: AGE × LOCK × score filter SOL (4) — triple combo ----
+STRATEGIES["AGE24_BE25_LOCK10_TP80_SL30_S35"] = [
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.25, "be_lock_pct": 0.10, "label": "main"},
+]
+STRATEGY_FILTERS["AGE24_BE25_LOCK10_TP80_SL30_S35"] = {
+    "chain": "solana", "min_age_hours": 12, "max_age_hours": 24, "min_rt_score": 35,
+}
+SHADOW_STRATEGIES.append("AGE24_BE25_LOCK10_TP80_SL30_S35")
+
+STRATEGIES["AGE48_BE25_LOCK10_TP80_SL30_S35"] = [
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.25, "be_lock_pct": 0.10, "label": "main"},
+]
+STRATEGY_FILTERS["AGE48_BE25_LOCK10_TP80_SL30_S35"] = {
+    "chain": "solana", "min_age_hours": 24, "max_age_hours": 48, "min_rt_score": 35,
+}
+SHADOW_STRATEGIES.append("AGE48_BE25_LOCK10_TP80_SL30_S35")
+
+STRATEGIES["AGE24_BE50_LOCK20_TP150_SL30_S40"] = [
+    {"pct": 1.0, "tp_mult": 2.50, "sl_mult": 0.70, "horizon_min": 60,
+     "be_activation": 0.50, "be_lock_pct": 0.20, "label": "main"},
+]
+STRATEGY_FILTERS["AGE24_BE50_LOCK20_TP150_SL30_S40"] = {
+    "chain": "solana", "min_age_hours": 12, "max_age_hours": 24, "min_rt_score": 40,
+}
+SHADOW_STRATEGIES.append("AGE24_BE50_LOCK20_TP150_SL30_S40")
+
+STRATEGIES["AGE48_BE50_LOCK20_TP150_SL30_S40"] = [
+    {"pct": 1.0, "tp_mult": 2.50, "sl_mult": 0.70, "horizon_min": 60,
+     "be_activation": 0.50, "be_lock_pct": 0.20, "label": "main"},
+]
+STRATEGY_FILTERS["AGE48_BE50_LOCK20_TP150_SL30_S40"] = {
+    "chain": "solana", "min_age_hours": 24, "max_age_hours": 48, "min_rt_score": 40,
+}
+SHADOW_STRATEGIES.append("AGE48_BE50_LOCK20_TP150_SL30_S40")
+
+# ---- Bloc L: SOL LOCK × let-it-run TP200/TP300 (4) ----
+STRATEGIES["BE25_LOCK10_TP200_SL40_4H"] = [
+    {"pct": 1.0, "tp_mult": 3.00, "sl_mult": 0.60, "horizon_min": 240,
+     "be_activation": 0.25, "be_lock_pct": 0.10, "label": "main"},
+]
+SHADOW_STRATEGIES.append("BE25_LOCK10_TP200_SL40_4H")
+
+STRATEGIES["BE25_LOCK15_TP200_SL40_4H_NZ_S40"] = [
+    {"pct": 1.0, "tp_mult": 3.00, "sl_mult": 0.60, "horizon_min": 240,
+     "be_activation": 0.25, "be_lock_pct": 0.15, "label": "main"},
+]
+STRATEGY_FILTERS["BE25_LOCK15_TP200_SL40_4H_NZ_S40"] = {
+    "chain": "solana", "min_liquidity_usd": 1, "min_rt_score": 40,
+}
+SHADOW_STRATEGIES.append("BE25_LOCK15_TP200_SL40_4H_NZ_S40")
+
+STRATEGIES["BE50_LOCK25_TP300_SL40_4H"] = [
+    {"pct": 1.0, "tp_mult": 4.00, "sl_mult": 0.60, "horizon_min": 240,
+     "be_activation": 0.50, "be_lock_pct": 0.25, "label": "main"},
+]
+SHADOW_STRATEGIES.append("BE50_LOCK25_TP300_SL40_4H")
+
+STRATEGIES["BE50_LOCK25_TP300_SL40_4H_MCAP_S40"] = [
+    {"pct": 1.0, "tp_mult": 4.00, "sl_mult": 0.60, "horizon_min": 240,
+     "be_activation": 0.50, "be_lock_pct": 0.25, "label": "main"},
+]
+STRATEGY_FILTERS["BE50_LOCK25_TP300_SL40_4H_MCAP_S40"] = {
+    "chain": "solana", "min_mcap": 30_000, "max_mcap": 500_000, "min_rt_score": 40,
+}
+SHADOW_STRATEGIES.append("BE50_LOCK25_TP300_SL40_4H_MCAP_S40")
+
+# ---- Bloc M: SCALP × NZ filter SOL (4) ----
+STRATEGIES["SCALP_TP15_SL20_S35_NZ"] = [
+    {"pct": 1.0, "tp_mult": 1.15, "sl_mult": 0.80, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["SCALP_TP15_SL20_S35_NZ"] = {
+    "chain": "solana", "min_liquidity_usd": 1, "min_rt_score": 35,
+}
+SHADOW_STRATEGIES.append("SCALP_TP15_SL20_S35_NZ")
+
+STRATEGIES["SCALP_TP20_SL10_S30_NZ"] = [
+    {"pct": 1.0, "tp_mult": 1.20, "sl_mult": 0.90, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["SCALP_TP20_SL10_S30_NZ"] = {
+    "chain": "solana", "min_liquidity_usd": 1, "min_rt_score": 30,
+}
+SHADOW_STRATEGIES.append("SCALP_TP20_SL10_S30_NZ")
+
+STRATEGIES["SCALP_TP15_NOSL_S35_NZ"] = [
+    {"pct": 1.0, "tp_mult": 1.15, "sl_mult": 0.20, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["SCALP_TP15_NOSL_S35_NZ"] = {
+    "chain": "solana", "min_liquidity_usd": 1, "min_rt_score": 35,
+}
+SHADOW_STRATEGIES.append("SCALP_TP15_NOSL_S35_NZ")
+
+STRATEGIES["SCALP_TP20_NOSL_S40_NZ"] = [
+    {"pct": 1.0, "tp_mult": 1.20, "sl_mult": 0.20, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["SCALP_TP20_NOSL_S40_NZ"] = {
+    "chain": "solana", "min_liquidity_usd": 1, "min_rt_score": 40,
+}
+SHADOW_STRATEGIES.append("SCALP_TP20_NOSL_S40_NZ")
+
+# ---- Bloc N: SOL TP200/TP300 × MCAP/NZ (3) ----
+STRATEGIES["TP200_SL40_4H_MCAP_S40"] = [
+    {"pct": 1.0, "tp_mult": 3.00, "sl_mult": 0.60, "horizon_min": 240, "label": "main"},
+]
+STRATEGY_FILTERS["TP200_SL40_4H_MCAP_S40"] = {
+    "chain": "solana", "min_mcap": 30_000, "max_mcap": 500_000, "min_rt_score": 40,
+}
+SHADOW_STRATEGIES.append("TP200_SL40_4H_MCAP_S40")
+
+STRATEGIES["TP300_SL50_4H_NZ_S40"] = [
+    {"pct": 1.0, "tp_mult": 4.00, "sl_mult": 0.50, "horizon_min": 240, "label": "main"},
+]
+STRATEGY_FILTERS["TP300_SL50_4H_NZ_S40"] = {
+    "chain": "solana", "min_liquidity_usd": 1, "min_rt_score": 40,
+}
+SHADOW_STRATEGIES.append("TP300_SL50_4H_NZ_S40")
+
+STRATEGIES["TP300_SL40_6H_MCAP_S40"] = [
+    {"pct": 1.0, "tp_mult": 4.00, "sl_mult": 0.60, "horizon_min": 360, "label": "main"},
+]
+STRATEGY_FILTERS["TP300_SL40_6H_MCAP_S40"] = {
+    "chain": "solana", "min_mcap": 30_000, "max_mcap": 500_000, "min_rt_score": 40,
+}
+SHADOW_STRATEGIES.append("TP300_SL40_6H_MCAP_S40")
+
 
 # v139: Asymmetric payoff bets — TP200 (3x) with 4h horizon, gated by quality filters.
 # Tested on 71 post-v132 tokens: NOZEROLIQ +14.91%/48% WR, HIGHSCORE +14.42%/50% WR
