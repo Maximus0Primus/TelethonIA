@@ -1448,6 +1448,17 @@ def _rt_open_trades(ca: str, symbol: str, price: float, mcap: float,
     if not sb:
         return 0
 
+    # v14e.28: normalize EVM addresses to lowercase BEFORE dedup queries.
+    # Bug surfaced Apr 26: $HENRY (0x1c798B...) opened twice by Luca_Apes 4min
+    # apart because the first row stored mixed-case (0x1c798BFDf4...) and the
+    # second came in lowercase. Postgres .eq() is case-sensitive on text, so
+    # the dedup didn't match → two positions on the same token.
+    try:
+        from chain_detect import normalize_address
+        ca = normalize_address(ca)
+    except Exception:
+        pass
+
     # v94: Max positions per token (concentration limit)
     max_per_token = int(config.get("max_positions_per_token", 2))
     try:

@@ -248,6 +248,15 @@ def _passes_strategy_filter(token: dict, strategy_name: str) -> bool:
     # `_rt_token_age_hours`; batch path sets `token_age_hours`.
     max_age = filt.get("max_age_hours")
     min_age = filt.get("min_age_hours")
+    # v14e.28: default max_age_hours=12 for ETH/EVM strats — empirical Apr 26
+    # rerank showed ETH AGE24-48h tokens saigne (-23.5% N=94, WR 15%). On SOL
+    # the relaxed 72h global gate is fine because AGE24/AGE48 SOL clones make
+    # money. ETH has no such evidence and the default is dangerously expensive.
+    # Strats opt out of this default by declaring `max_age_hours` (any value)
+    # in their filter — including the AGE24_/AGE48_ pattern if we ever clone
+    # for ETH. Applied only when not already set.
+    if max_age is None and strat_chain in ("ethereum", "bsc", "base"):
+        max_age = 12
     if max_age is not None or min_age is not None:
         token_age_h = float(
             token.get("_rt_token_age_hours")

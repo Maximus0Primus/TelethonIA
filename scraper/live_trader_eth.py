@@ -523,6 +523,11 @@ def open_live_trade(client_sb, token_entry: dict, strategy: str,
     _FAIL = {"success": False, "execution_price": None}
     ca = token_entry.get("token_address")
     symbol = token_entry.get("symbol", "???")
+    # v14e.28: normalize EVM address to lowercase (defensive: also done in
+    # safe_scraper._rt_open_trades). EVM is case-insensitive — Postgres .eq()
+    # is not — so dedup queries miss when stored case differs from query case.
+    if ca:
+        ca = ca.lower()
 
     if not ca:
         logger.warning("live_trader_eth: no CA for %s — skipping", symbol)
