@@ -333,6 +333,79 @@ STRATEGIES["BE25_TP80_SL30_DS"] = [
 ]
 SHADOW_STRATEGIES.append("BE25_TP80_SL30_DS")
 
+# ============================================================
+# v14e.29 (Apr 26) — BE+LOCK profit-lock variants.
+# Backtest on 100 SOL + 37 ETH BE25/BE30 closed trades (replay of price_ticks):
+#   LOCK10 SOL: +1.88pp avg vs BE25 (19 trades better, 0 worse)
+#   LOCK10 ETH: +2.85pp avg vs ETH_BE30 (10 better, 3 worse)
+#   LOCK15-20: increasingly hurt (TP exits sacrificed) — sweet spot LOCK10
+# Mechanic: when peak ≥ entry*(1+be_act), SL ratchets to entry*(1+lock_pct)
+# instead of plain entry. Single-event ratchet (not continuous trail) so it
+# escapes the 47x slip + reconciler-race pitfalls of TRAIL/DTRAIL.
+# All shadows. Will paired-test vs BE base when N≥30.
+# ============================================================
+
+# SOL — clones of BE25_TP80_SL30 with various lock pcts
+STRATEGIES["BE25_LOCK10_TP80_SL30"] = [
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.25, "be_lock_pct": 0.10, "label": "main"},
+]
+SHADOW_STRATEGIES.append("BE25_LOCK10_TP80_SL30")
+
+STRATEGIES["BE25_LOCK5_TP80_SL30"] = [
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.25, "be_lock_pct": 0.05, "label": "main"},
+]
+SHADOW_STRATEGIES.append("BE25_LOCK5_TP80_SL30")
+
+STRATEGIES["BE25_LOCK15_TP100_SL30"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.25, "be_lock_pct": 0.15, "label": "main"},
+]
+SHADOW_STRATEGIES.append("BE25_LOCK15_TP100_SL30")
+
+# Higher activation pre-lock — only locks once we have a real pump
+STRATEGIES["BE50_LOCK20_TP150_SL30"] = [
+    {"pct": 1.0, "tp_mult": 2.50, "sl_mult": 0.70, "horizon_min": 60,
+     "be_activation": 0.50, "be_lock_pct": 0.20, "label": "main"},
+]
+SHADOW_STRATEGIES.append("BE50_LOCK20_TP150_SL30")
+
+STRATEGIES["BE50_LOCK25_TP200_SL40_4H"] = [
+    {"pct": 1.0, "tp_mult": 3.00, "sl_mult": 0.60, "horizon_min": 240,
+     "be_activation": 0.50, "be_lock_pct": 0.25, "label": "main"},
+]
+SHADOW_STRATEGIES.append("BE50_LOCK25_TP200_SL40_4H")
+
+# ETH — clones of the 2 active ETH paper mains with LOCK10 (validated by backtest)
+STRATEGIES["ETH_BE25_LOCK10_TP80_SL40_T2H"] = [
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.60, "horizon_min": 120,
+     "be_activation": 0.25, "be_lock_pct": 0.10, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_BE25_LOCK10_TP80_SL40_T2H"] = {"chain": "ethereum"}
+SHADOW_STRATEGIES.append("ETH_BE25_LOCK10_TP80_SL40_T2H")
+
+STRATEGIES["ETH_BE30_LOCK10_TP100_SL40"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.60, "horizon_min": 240,
+     "be_activation": 0.30, "be_lock_pct": 0.10, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_BE30_LOCK10_TP100_SL40"] = {"chain": "ethereum"}
+SHADOW_STRATEGIES.append("ETH_BE30_LOCK10_TP100_SL40")
+
+STRATEGIES["ETH_BE30_LOCK15_TP100_SL40"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.60, "horizon_min": 240,
+     "be_activation": 0.30, "be_lock_pct": 0.15, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_BE30_LOCK15_TP100_SL40"] = {"chain": "ethereum"}
+SHADOW_STRATEGIES.append("ETH_BE30_LOCK15_TP100_SL40")
+
+STRATEGIES["ETH_BE50_LOCK20_TP150_SL40"] = [
+    {"pct": 1.0, "tp_mult": 2.50, "sl_mult": 0.60, "horizon_min": 240,
+     "be_activation": 0.50, "be_lock_pct": 0.20, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_BE50_LOCK20_TP150_SL40"] = {"chain": "ethereum"}
+SHADOW_STRATEGIES.append("ETH_BE50_LOCK20_TP150_SL40")
+
 # v139: Asymmetric payoff bets — TP200 (3x) with 4h horizon, gated by quality filters.
 # Tested on 71 post-v132 tokens: NOZEROLIQ +14.91%/48% WR, HIGHSCORE +14.42%/50% WR
 # vs BASELINE +5.88%/41% WR. Skip toxic flow (liq=0) + use score signal = clear edge.
@@ -687,6 +760,12 @@ _DIP_SPLIT_RE = re.compile(
     r"^DIP(\d+)_B(\d+)_P1T(\d+)A(\d+)S(\d+)_P2T(\d+)A(\d+)S(\d+)_(\d+)m$"
 )
 _BE_RE = re.compile(r"^BE(\d+)_TP\d+_SL\d+")  # v140: no end anchor → accepts any suffix (_HYST, _NZ, _S30, etc.)
+# v14e.29: BE+LOCK variants — when BE arms, SL ratchets to entry*(1+lock_pct)
+# instead of plain entry. Captures the case where the user wants to lock a
+# guaranteed profit at activation rather than just breakeven. Pattern matches
+# e.g. BE25_LOCK10_TP80_SL30 (group 1=25, group 2=10) or BE50_LOCK25_TP150_SL30.
+# Also matches the chain-prefixed variants ETH_BE25_LOCK10_TP80_SL30.
+_BE_LOCK_RE = re.compile(r"^(?:ETH_|BSC_|BASE_)?BE(\d+)_LOCK(\d+)_TP\d+_SL\d+")
 
 # Cache for _get_trail_config() to avoid regex per-tick in sim
 _trail_config_cache: dict[str, tuple] = {}

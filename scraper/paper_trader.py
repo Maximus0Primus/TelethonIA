@@ -86,7 +86,7 @@ from strategies import (
     BASE_GAS_COST_USD_PER_SIDE, BASE_BUY_SLIPPAGE_BPS, BASE_SELL_SLIPPAGE_BPS,
     BASE_MIN_POSITION_USD,
     STRATEGIES, STRATEGY_FILTERS,
-    _DECAY_RE, _TRAIL_RE, _DTRAIL_RE, _DIP_RE, _DIP_SPLIT_RE, _BE_RE,
+    _DECAY_RE, _TRAIL_RE, _DTRAIL_RE, _DIP_RE, _DIP_SPLIT_RE, _BE_RE, _BE_LOCK_RE,
     _get_decay_end, _get_trail_config,
     LAZY_STRATEGIES, LAZY_FAST_SEC, LAZY_FAST_WINDOW, LAZY_SLOW_SEC,
 )
@@ -1868,14 +1868,26 @@ def _evaluate_trade_exit(trade: dict, current_price: float | None,
         ) or {}
 
         # 2) SL check — with breakeven stop override
-        #    BE strategies: once peak exceeded entry*(1+be_act), SL moves to entry price
+        #    BE strategies: once peak exceeded entry*(1+be_act), SL moves to entry price.
+        #    v14e.29: BE+LOCK variants ratchet SL to entry*(1+lock_pct) instead of
+        #    just entry — locks a guaranteed profit at activation rather than
+        #    breaking even. Pattern: BE25_LOCK10_TP80_SL30 (lock=10% above entry).
         effective_sl = sl_price
-        be_match = _BE_RE.match(trade.get("strategy", ""))
-        if be_match and market_ref_price > 0 and high_seen > 0:
-            be_act = int(be_match.group(1)) / 100  # e.g., BE20 → 0.20
+        _strat_name = trade.get("strategy", "")
+        be_lock_match = _BE_LOCK_RE.match(_strat_name)
+        if be_lock_match and market_ref_price > 0 and high_seen > 0:
+            be_act = int(be_lock_match.group(1)) / 100
+            lock_pct = int(be_lock_match.group(2)) / 100
             if high_seen >= market_ref_price * (1 + be_act):
-                # Breakeven activated — SL is now entry price
-                effective_sl = entry_price
+                # BE+LOCK activated — SL ratchets to entry * (1 + lock_pct)
+                effective_sl = entry_price * (1 + lock_pct)
+        else:
+            be_match = _BE_RE.match(_strat_name)
+            if be_match and market_ref_price > 0 and high_seen > 0:
+                be_act = int(be_match.group(1)) / 100  # e.g., BE20 → 0.20
+                if high_seen >= market_ref_price * (1 + be_act):
+                    # Breakeven activated — SL is now entry price
+                    effective_sl = entry_price
 
         # v142: TIME-based BE — after N minutes elapsed, SL moves to entry
         # regardless of peak reached. Distinct from peak-based BE_RE logic above.
