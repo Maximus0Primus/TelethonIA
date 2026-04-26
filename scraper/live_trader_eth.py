@@ -79,7 +79,26 @@ ROUTER_ABI = [
     "name": "exactInputSingle",
     "outputs": [{"internalType": "uint256", "name": "amountOut", "type": "uint256"}],
     "stateMutability": "payable", "type": "function"},
+    # multicall for bundling swap + unwrap in one tx
+    {"inputs": [{"internalType": "bytes[]", "name": "data", "type": "bytes[]"}],
+     "name": "multicall",
+     "outputs": [{"internalType": "bytes[]", "name": "results", "type": "bytes[]"}],
+     "stateMutability": "payable", "type": "function"},
+    # unwrapWETH9: converts router-held WETH to native ETH and forwards to recipient.
+    # Needed after a swap where outputToken=WETH so the user receives ETH not WETH.
+    {"inputs": [
+        {"internalType": "uint256", "name": "amountMinimum", "type": "uint256"},
+        {"internalType": "address", "name": "recipient", "type": "address"},
+     ],
+     "name": "unwrapWETH9",
+     "outputs": [],
+     "stateMutability": "payable", "type": "function"},
 ]
+
+# Uniswap V3 Pool Swap event signature for receipt log parsing.
+# event Swap(address sender, address recipient, int256 amount0, int256 amount1,
+#            uint160 sqrtPriceX96, uint128 liquidity, int24 tick)
+SWAP_EVENT_TOPIC = "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67"
 
 ERC20_ABI = [
     {"inputs":[{"name":"who","type":"address"}],"name":"balanceOf","outputs":[{"type":"uint256"}],"stateMutability":"view","type":"function"},
@@ -163,6 +182,52 @@ def _eth_usd_price(w3) -> float:
     return c.functions.latestRoundData().call()[1] / 1e8
 
 
+def _parse_swap_output_from_logs(receipt, target_token_addr: str) -> int | None:
+    """Parse Uniswap V3 Swap event from receipt logs to recover the exact output
+    amount, independent of RPC state propagation. Returns raw token amount
+    received by the recipient (positive int), or None if no Swap event found.
+
+    Why: balanceOf via publicnode RPC has read-after-write lag — calling it
+    immediately after wait_for_transaction_receipt sometimes returns the
+    pre-tx state, making (post_bal - pre_bal) = 0 even on successful swaps.
+    Receipt logs are authoritative since they're embedded in the block.
+
+    For exactInputSingle WETH→TOKEN: amount0 or amount1 (depending on token
+    ordering) is negative for the side the pool sends to recipient. We pick
+    the negative side as the output (taking absolute value).
+    """
+    target = target_token_addr.lower()
+    for log in receipt.get("logs", []):
+        topics = log.get("topics", [])
+        if not topics:
+            continue
+        topic0 = topics[0]
+        topic_hex = topic0.hex() if hasattr(topic0, "hex") else str(topic0)
+        if not topic_hex.startswith("0x"):
+            topic_hex = "0x" + topic_hex
+        if topic_hex.lower() != SWAP_EVENT_TOPIC.lower():
+            continue
+        # We have a Swap event. Pool address = log["address"].
+        # Decode data: amount0 (int256), amount1 (int256), then 3 more fields.
+        data = log["data"]
+        data_hex = data.hex() if hasattr(data, "hex") else str(data)
+        if data_hex.startswith("0x"):
+            data_hex = data_hex[2:]
+        amount0 = int(data_hex[0:64], 16)
+        if amount0 >= 2**255:
+            amount0 -= 2**256
+        amount1 = int(data_hex[64:128], 16)
+        if amount1 >= 2**255:
+            amount1 -= 2**256
+        # The negative amount is what the pool SENT (= what recipient received).
+        # We take absolute value of the negative side.
+        if amount0 < 0:
+            return -amount0
+        if amount1 < 0:
+            return -amount1
+    return None
+
+
 def execute_buy(ca: str, amount_usd: float, slippage_bps: int = 300) -> dict:
     """ETH → memecoin swap via Uniswap V3.
 
@@ -197,7 +262,6 @@ def execute_buy(ca: str, amount_usd: float, slippage_bps: int = 300) -> dict:
     })
 
     erc20 = w3r.eth.contract(address=_to_checksum(ca), abi=ERC20_ABI)
-    pre_bal = erc20.functions.balanceOf(acct.address).call()
     try:
         decimals = erc20.functions.decimals().call()
     except Exception:
@@ -205,7 +269,6 @@ def execute_buy(ca: str, amount_usd: float, slippage_bps: int = 300) -> dict:
 
     t0 = time.time()
     signed = acct.sign_transaction(tx)
-    # Submit via Flashbots Protect for MEV protection. Receipt fetched via read RPC.
     tx_hash = w3w.eth.send_raw_transaction(signed.raw_transaction)
     receipt = w3r.eth.wait_for_transaction_receipt(tx_hash, timeout=180)
     elapsed_ms = int((time.time() - t0) * 1000)
@@ -216,8 +279,23 @@ def execute_buy(ca: str, amount_usd: float, slippage_bps: int = 300) -> dict:
                 "tx_hash": tx_hash.hex(), "gas_usd": float(gas_paid_eth) * eth_usd,
                 "exec_ms": elapsed_ms}
 
-    post_bal = erc20.functions.balanceOf(acct.address).call()
-    received = post_bal - pre_bal
+    # Parse output amount from Swap event logs (authoritative, RPC-lag-immune).
+    # Falls back to balanceOf delta if log parsing fails for any reason.
+    received = _parse_swap_output_from_logs(receipt, ca)
+    if received is None or received <= 0:
+        try:
+            # Sleep briefly to give read RPC time to catch up before fallback.
+            time.sleep(2)
+            post_bal = erc20.functions.balanceOf(acct.address).call()
+            received = max(post_bal, 0)
+            logger.warning(
+                "live_trader_eth.execute_buy: Swap event parse failed for %s, "
+                "using balanceOf fallback (received=%d). RPC lag suspected.",
+                ca[:10], received,
+            )
+        except Exception:
+            received = 0
+
     received_human = received / (10 ** decimals)
     slippage_real_bps = int((1 - received / amount_out) * 10000) if amount_out else 0
 
@@ -272,11 +350,16 @@ def _ensure_approval(w3r, w3w, acct, token_address: str, amount_min: int):
 
 def execute_sell(ca: str, amount_tokens: Optional[int] = None,
                  slippage_bps: int = 500) -> dict:
-    """Memecoin → ETH swap via Uniswap V3.
+    """Memecoin → ETH swap via Uniswap V3 + automatic WETH unwrap.
 
     amount_tokens=None → sell entire balance. Default slippage 500 bps (5%) on
     sells because dumping shallow-pool tokens moves price more than the entry
     quote suggests.
+
+    Architecture: SwapRouter02.exactInputSingle(token→WETH) outputs WETH ERC20,
+    not native ETH. We bundle (1) swap with recipient=router and (2) unwrapWETH9
+    in a single multicall, so the user receives native ETH on completion. Saves
+    one tx (gas) vs. swap + separate WETH.withdraw.
 
     Returns: {success, tx_hash, eth_received (wei), eth_received_human (eth),
               eth_received_usd, gas_usd, fee_tier_used, exec_ms, block_number, eth_usd}
@@ -304,16 +387,25 @@ def execute_sell(ca: str, amount_tokens: Optional[int] = None,
     priority = w3r.to_wei(2, "gwei")
     max_fee = base_fee * 2 + priority
     router = w3r.eth.contract(address=_to_checksum(SWAP_ROUTER_02), abi=ROUTER_ABI)
-    params = (_to_checksum(ca), _to_checksum(WETH), fee_tier_used,
-              acct.address, amount_tokens, min_out, 0)
+
+    # Step 1: swap with recipient = router itself (so router holds WETH).
+    # Step 2: unwrapWETH9 sweeps router's WETH → ETH and forwards to acct.
+    # Both bundled via multicall — atomic, single gas overhead.
+    swap_params = (_to_checksum(ca), _to_checksum(WETH), fee_tier_used,
+                   _to_checksum(SWAP_ROUTER_02),  # recipient = router (NOT acct)
+                   amount_tokens, min_out, 0)
+    swap_calldata = router.encode_abi("exactInputSingle", args=[swap_params])
+    unwrap_calldata = router.encode_abi(
+        "unwrapWETH9", args=[min_out, acct.address]
+    )
     nonce = w3r.eth.get_transaction_count(acct.address)
-    tx = router.functions.exactInputSingle(params).build_transaction({
+    tx = router.functions.multicall([swap_calldata, unwrap_calldata]).build_transaction({
         "from": acct.address, "value": 0, "nonce": nonce,
-        "gas": gas_est + 80_000, "maxFeePerGas": max_fee,
+        # Multicall adds ~30k gas for the second call (unwrapWETH9 ~50k itself).
+        "gas": gas_est + 130_000, "maxFeePerGas": max_fee,
         "maxPriorityFeePerGas": priority, "chainId": 1,
     })
 
-    pre_eth = w3r.eth.get_balance(acct.address)
     t0 = time.time()
     signed = acct.sign_transaction(tx)
     tx_hash = w3w.eth.send_raw_transaction(signed.raw_transaction)
@@ -324,11 +416,26 @@ def execute_sell(ca: str, amount_tokens: Optional[int] = None,
         return {"success": False, "error": "sell tx reverted",
                 "tx_hash": tx_hash.hex(), "exec_ms": elapsed_ms}
 
-    post_eth = w3r.eth.get_balance(acct.address)
-    gas_paid = receipt["gasUsed"] * receipt["effectiveGasPrice"]
-    eth_received_wei = post_eth - pre_eth + gas_paid  # net of gas
+    # Authoritative output amount from Swap event log (RPC-lag-immune).
+    # The Swap event records pool's amount0/amount1 — the WETH side is what
+    # the router received before unwrapping. Both unwrap and forward preserve
+    # the same amount, modulo the 0-value rounding.
+    eth_received_wei = _parse_swap_output_from_logs(receipt, WETH)
+    if eth_received_wei is None or eth_received_wei <= 0:
+        # Fallback: derive from get_balance delta after a brief sleep for RPC sync.
+        time.sleep(2)
+        post_eth = w3r.eth.get_balance(acct.address)
+        gas_paid = receipt["gasUsed"] * receipt["effectiveGasPrice"]
+        eth_received_wei = max(post_eth + gas_paid - w3r.eth.get_balance(acct.address, receipt["blockNumber"] - 1), 0)
+        logger.warning(
+            "live_trader_eth.execute_sell: Swap log parse failed for %s, "
+            "using balance delta fallback (received=%d wei).",
+            ca[:10], eth_received_wei,
+        )
+
     eth_received_human = eth_received_wei / 1e18 if eth_received_wei else 0.0
     eth_received_usd = eth_received_human * eth_usd
+    gas_paid_wei = receipt["gasUsed"] * receipt["effectiveGasPrice"]
 
     return {
         "success": True,
@@ -336,11 +443,56 @@ def execute_sell(ca: str, amount_tokens: Optional[int] = None,
         "eth_received": eth_received_wei,
         "eth_received_human": eth_received_human,
         "eth_received_usd": eth_received_usd,
-        "gas_usd": float(w3r.from_wei(gas_paid, "ether")) * eth_usd,
+        "gas_usd": float(w3r.from_wei(gas_paid_wei, "ether")) * eth_usd,
         "fee_tier_used": fee_tier_used,
         "exec_ms": elapsed_ms,
         "block_number": receipt["blockNumber"],
         "eth_usd": eth_usd,
+    }
+
+
+def unwrap_weth_balance() -> dict:
+    """Manually unwrap any WETH sitting in the wallet to native ETH.
+
+    Used to recover from pre-multicall versions of execute_sell that left
+    WETH on the wallet. Calls WETH.withdraw(amount) directly.
+    """
+    w3r, w3w, acct = _client()
+    eth_usd = _eth_usd_price(w3r)
+    weth = w3r.eth.contract(
+        address=_to_checksum(WETH),
+        abi=ERC20_ABI + [
+            {"inputs": [{"name": "amount", "type": "uint256"}],
+             "name": "withdraw", "outputs": [],
+             "stateMutability": "nonpayable", "type": "function"},
+        ],
+    )
+    bal = weth.functions.balanceOf(acct.address).call()
+    if bal == 0:
+        return {"success": True, "message": "no WETH to unwrap", "amount_wei": 0}
+
+    base_fee = w3r.eth.get_block("latest")["baseFeePerGas"]
+    priority = w3r.to_wei(2, "gwei")
+    max_fee = base_fee * 2 + priority
+    nonce = w3r.eth.get_transaction_count(acct.address)
+    tx = weth.functions.withdraw(bal).build_transaction({
+        "from": acct.address, "nonce": nonce, "gas": 80_000,
+        "maxFeePerGas": max_fee, "maxPriorityFeePerGas": priority, "chainId": 1,
+    })
+    signed = acct.sign_transaction(tx)
+    tx_hash = w3w.eth.send_raw_transaction(signed.raw_transaction)
+    receipt = w3r.eth.wait_for_transaction_receipt(tx_hash, timeout=180)
+    if receipt["status"] != 1:
+        return {"success": False, "error": "withdraw reverted",
+                "tx_hash": tx_hash.hex()}
+    gas_paid_eth = w3r.from_wei(receipt["gasUsed"] * receipt["effectiveGasPrice"], "ether")
+    return {
+        "success": True,
+        "tx_hash": tx_hash.hex(),
+        "amount_wei": bal,
+        "amount_eth": bal / 1e18,
+        "amount_usd": (bal / 1e18) * eth_usd,
+        "gas_usd": float(gas_paid_eth) * eth_usd,
     }
 
 
