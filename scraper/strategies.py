@@ -1203,6 +1203,12 @@ STRATEGY_FILTERS["AGE72_FAST_TP50_SL30"] = {
 # paper_trades.is_shadow=False so the flow is identical to a Solana main.
 # Must be added to scoring_config.rt_trade_config.hybrid_strategy.allocations
 # for RT path to actually open them.
+# v14e.27 (Apr 26) — ETH BE20 variants confirmed BE never armed (peak <+20%
+# on ETH memecoins): paper PnL was identical row-pour-row vs the non-BE
+# parents (ETH_TP100_SL50 vs ETH_BE20_TP100_SL50, ETH_TP80_SL40_T2H vs
+# ETH_BE20_TP80_SL40_T2H). Removing the BE20 duplicates and adding a single
+# higher-trigger BE shadow (BE50_TP150_SL40_T2H) below — testing whether a
+# BE that can plausibly arm on the +50%+ runners adds value vs the pure TP.
 STRATEGIES["ETH_TP100_SL50"] = [
     {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.50, "horizon_min": 240, "label": "main"},
 ]
@@ -1210,44 +1216,54 @@ STRATEGIES["ETH_TP100_SL50"] = [
 # slippage) encode the real cost on shallow pools instead of pre-filtering.
 # Same rationale for BSC/Base below. The chain gate is the only hard filter.
 STRATEGY_FILTERS["ETH_TP100_SL50"] = {"chain": "ethereum"}
+# v14e.27: bleeding −$872 last 12h — demote to shadow, keep N growing.
+SHADOW_STRATEGIES.append("ETH_TP100_SL50")
 
 STRATEGIES["ETH_TP80_SL40_T2H"] = [
     {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.60, "horizon_min": 120, "label": "main"},
 ]
 STRATEGY_FILTERS["ETH_TP80_SL40_T2H"] = {"chain": "ethereum"}
 
+# Higher-trigger BE shadow — tests whether BE@+50% (plausibly reached on
+# real ETH runners) plus tight SL40 outperforms the pure TP100/TP80 parents.
+STRATEGIES["ETH_BE50_TP150_SL40_T2H"] = [
+    {"pct": 1.0, "tp_mult": 2.50, "sl_mult": 0.60, "horizon_min": 120,
+     "be_activation": 0.50, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_BE50_TP150_SL40_T2H"] = {"chain": "ethereum"}
+SHADOW_STRATEGIES.append("ETH_BE50_TP150_SL40_T2H")
+
+# Kept in code for in-flight close (legacy), removed from SHADOW_STRATEGIES so
+# no NEW shadows open. v14e.27: BE20 never armed on ETH (peak <+20% in regime),
+# so these were dead duplicates of the TP-pure parents.
 STRATEGIES["ETH_BE50_TP150_SL50"] = [
     {"pct": 1.0, "tp_mult": 2.50, "sl_mult": 0.50, "horizon_min": 240,
      "be_activation": 0.50, "label": "main"},
 ]
 STRATEGY_FILTERS["ETH_BE50_TP150_SL50"] = {"chain": "ethereum"}
+# Not in SHADOW_STRATEGIES — replaced by ETH_BE50_TP150_SL40_T2H.
 
-# v14e.13 (Apr 24) — 3 BE20/BE30 variants added after grid sim on the first
-# 4 ETH tokens (ASTEROID/GENZ/CHINESEASTEROID/EIB). Discovery: BE20-BE30
-# transforms full -53% dumps into a BE stop at ~-$19 (gas + slip only)
-# because 3/4 tokens peaked >+20% before dumping. Grid total: +$129 over
-# 4 tokens vs -$75 for ETH_TP100_SL50 and -$269 for ETH_BE50_TP150_SL50
-# (which never activated BE because no token peaked >+50%). BE50 is
-# structurally dead on this early ETH memecoin universe, hence the lower
-# activation thresholds here. N=4 is statistically nothing, so these stay
-# paper until the Phase 2 gate (N>=50, WR>=65%, EV>=+10% net, Mai 07).
 STRATEGIES["ETH_BE20_TP100_SL50"] = [
     {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.50, "horizon_min": 240,
      "be_activation": 0.20, "label": "main"},
 ]
 STRATEGY_FILTERS["ETH_BE20_TP100_SL50"] = {"chain": "ethereum"}
+# Not in SHADOW_STRATEGIES — duplicate of ETH_TP100_SL50, BE20 never arms.
 
 STRATEGIES["ETH_BE30_TP100_SL40"] = [
     {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.60, "horizon_min": 240,
      "be_activation": 0.30, "label": "main"},
 ]
 STRATEGY_FILTERS["ETH_BE30_TP100_SL40"] = {"chain": "ethereum"}
+# v14e.27: bleeding −$525 last 12h, BE30 rarely armed — demote to shadow.
+SHADOW_STRATEGIES.append("ETH_BE30_TP100_SL40")
 
 STRATEGIES["ETH_BE20_TP80_SL40_T2H"] = [
     {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.60, "horizon_min": 120,
      "be_activation": 0.20, "label": "main"},
 ]
 STRATEGY_FILTERS["ETH_BE20_TP80_SL40_T2H"] = {"chain": "ethereum"}
+# Not in SHADOW_STRATEGIES — duplicate of ETH_TP80_SL40_T2H, BE20 never arms.
 
 # ============================================================
 # v14e.21 — ETH FAST family (sim mega-sweep top picks Apr 25, post v14e.20
@@ -1265,10 +1281,22 @@ STRATEGY_FILTERS["ETH_BE20_TP80_SL40_T2H"] = {"chain": "ethereum"}
 # expected ~Mai 02-09. NOT in live_trading.allocations — paper only.
 # ============================================================
 
+# v14e.27 (Apr 26) — ETH_FAST family triage after 17h post-seed:
+#   ETH_FAST_TP100_SL20 +$81 / +6.8% N=6 (last 6h)  → KEEP main
+#   ETH_FAST_TP40_SL30  +$6  / +0.5% N=7            → KEEP main
+#   ETH_FAST_TP100_SL50 −$497 / −14.6% N=17         → DEMOTE shadow
+#   ETH_FAST60_TP100_SL50 −$671 / −19.8% N=17       → DEMOTE shadow
+#   ETH_FAST_TP500_SL40_60M −$785 / −23.1% N=17     → DEMOTE shadow
+# The 3 demoted variants stay in SHADOW_STRATEGIES so we keep collecting
+# paper data, but are dropped from rt_trade_config.hybrid_strategy.allocations
+# (DB-side update). Shadow keeps N growing; if regime flips we have data to
+# reverse the call.
+
 STRATEGIES["ETH_FAST_TP100_SL50"] = [
     {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.50, "horizon_min": 30, "label": "main"},
 ]
 STRATEGY_FILTERS["ETH_FAST_TP100_SL50"] = {"chain": "ethereum"}
+SHADOW_STRATEGIES.append("ETH_FAST_TP100_SL50")
 
 STRATEGIES["ETH_FAST_TP100_SL20"] = [
     {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.80, "horizon_min": 30, "label": "main"},
@@ -1279,11 +1307,13 @@ STRATEGIES["ETH_FAST60_TP100_SL50"] = [
     {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.50, "horizon_min": 60, "label": "main"},
 ]
 STRATEGY_FILTERS["ETH_FAST60_TP100_SL50"] = {"chain": "ethereum"}
+SHADOW_STRATEGIES.append("ETH_FAST60_TP100_SL50")
 
 STRATEGIES["ETH_FAST_TP500_SL40_60M"] = [
     {"pct": 1.0, "tp_mult": 6.00, "sl_mult": 0.60, "horizon_min": 60, "label": "main"},
 ]
 STRATEGY_FILTERS["ETH_FAST_TP500_SL40_60M"] = {"chain": "ethereum"}
+SHADOW_STRATEGIES.append("ETH_FAST_TP500_SL40_60M")
 
 STRATEGIES["ETH_FAST_TP40_SL30"] = [
     {"pct": 1.0, "tp_mult": 1.40, "sl_mult": 0.70, "horizon_min": 30, "label": "main"},
@@ -1340,6 +1370,246 @@ STRATEGIES["BASE_BE50_TP150_SL50"] = [
      "be_activation": 0.50, "label": "main"},
 ]
 STRATEGY_FILTERS["BASE_BE50_TP150_SL50"] = {"chain": "base"}
+
+
+# ============================================================
+# v14e.27 (Apr 26) — Mega-sweep regime-aware top picks shadow rollout.
+#
+# Run 24941515693 (521,640 configs simulated, 9d window 4 active / 3 quiet
+# / 1 dead) surfaced 24 strategy_ids that pass cross_regime_robust + family
+# realism gate. Highlight: SCALP family dominates (10/20 top robust), with
+# SCALP_TP15_SL20 SCORE35 the only strat positive on dead-days (+7.74%) and
+# rank_stability 0.88. FAST60 niche secondary; classic TP/SL with score gate
+# rounds out.
+#
+# All added below as SHADOW (paper-only, no live alloc, no bankroll alloc).
+# Filter is embedded in the strategy name (`_S30`, `_S35`, `_S40`,
+# `_NZ_S40`, `_MCAP_S40`) so the mega-sweep result reproduces 1:1.
+#
+# Expected verdict at N≥50 / 14d (~Mai 09): paired-test vs base SCALP/FAST60
+# without filter → if score gate adds >+2pp avg/trade, promote 1-2 to main.
+# ============================================================
+
+# --- SOL shadow rollout (17 strats) ---
+
+# SCALP family — robust dead-day winner per v14e.26 sweep.
+STRATEGIES["SCALP_TP15_SL20_S35"] = [
+    {"pct": 1.0, "tp_mult": 1.15, "sl_mult": 0.80, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["SCALP_TP15_SL20_S35"] = {"min_rt_score": 35}
+SHADOW_STRATEGIES.append("SCALP_TP15_SL20_S35")
+
+STRATEGIES["SCALP_TP15_SL15_S40"] = [
+    {"pct": 1.0, "tp_mult": 1.15, "sl_mult": 0.85, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["SCALP_TP15_SL15_S40"] = {"min_rt_score": 40}
+SHADOW_STRATEGIES.append("SCALP_TP15_SL15_S40")
+
+STRATEGIES["SCALP_TP15_NOSL_S35"] = [
+    {"pct": 1.0, "tp_mult": 1.15, "sl_mult": 0.20, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["SCALP_TP15_NOSL_S35"] = {"min_rt_score": 35}
+SHADOW_STRATEGIES.append("SCALP_TP15_NOSL_S35")
+
+STRATEGIES["SCALP_TP15_SL10_S30"] = [
+    {"pct": 1.0, "tp_mult": 1.15, "sl_mult": 0.90, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["SCALP_TP15_SL10_S30"] = {"min_rt_score": 30}
+SHADOW_STRATEGIES.append("SCALP_TP15_SL10_S30")
+
+STRATEGIES["SCALP_TP10_SL10_S35"] = [
+    {"pct": 1.0, "tp_mult": 1.10, "sl_mult": 0.90, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["SCALP_TP10_SL10_S35"] = {"min_rt_score": 35}
+SHADOW_STRATEGIES.append("SCALP_TP10_SL10_S35")
+
+STRATEGIES["SCALP_TP10_SL15_S40"] = [
+    {"pct": 1.0, "tp_mult": 1.10, "sl_mult": 0.85, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["SCALP_TP10_SL15_S40"] = {"min_rt_score": 40}
+SHADOW_STRATEGIES.append("SCALP_TP10_SL15_S40")
+
+STRATEGIES["SCALP_TP20_SL10_S30"] = [
+    {"pct": 1.0, "tp_mult": 1.20, "sl_mult": 0.90, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["SCALP_TP20_SL10_S30"] = {"min_rt_score": 30}
+SHADOW_STRATEGIES.append("SCALP_TP20_SL10_S30")
+
+STRATEGIES["SCALP_TP20_NOSL_S35"] = [
+    {"pct": 1.0, "tp_mult": 1.20, "sl_mult": 0.20, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["SCALP_TP20_NOSL_S35"] = {"min_rt_score": 35}
+SHADOW_STRATEGIES.append("SCALP_TP20_NOSL_S35")
+
+STRATEGIES["SCALP_TP20_SL15_S35"] = [
+    {"pct": 1.0, "tp_mult": 1.20, "sl_mult": 0.85, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["SCALP_TP20_SL15_S35"] = {"min_rt_score": 35}
+SHADOW_STRATEGIES.append("SCALP_TP20_SL15_S35")
+
+# FAST60 family — rapid-timeout robust picks.
+STRATEGIES["FAST60_TP50_SL50_S30"] = [
+    {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.50, "horizon_min": 60, "label": "main"},
+]
+STRATEGY_FILTERS["FAST60_TP50_SL50_S30"] = {"min_rt_score": 30}
+SHADOW_STRATEGIES.append("FAST60_TP50_SL50_S30")
+
+STRATEGIES["FAST60_TP100_SL50_NZ_S40"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.50, "horizon_min": 60, "label": "main"},
+]
+STRATEGY_FILTERS["FAST60_TP100_SL50_NZ_S40"] = {"min_liquidity_usd": 1.0, "min_rt_score": 40}
+SHADOW_STRATEGIES.append("FAST60_TP100_SL50_NZ_S40")
+
+STRATEGIES["FAST60_TP70_SL50_NZ_S40"] = [
+    {"pct": 1.0, "tp_mult": 1.70, "sl_mult": 0.50, "horizon_min": 60, "label": "main"},
+]
+STRATEGY_FILTERS["FAST60_TP70_SL50_NZ_S40"] = {"min_liquidity_usd": 1.0, "min_rt_score": 40}
+SHADOW_STRATEGIES.append("FAST60_TP70_SL50_NZ_S40")
+
+STRATEGIES["FAST45_TP40_SL30_S30"] = [
+    {"pct": 1.0, "tp_mult": 1.40, "sl_mult": 0.70, "horizon_min": 45, "label": "main"},
+]
+STRATEGY_FILTERS["FAST45_TP40_SL30_S30"] = {"min_rt_score": 30}
+SHADOW_STRATEGIES.append("FAST45_TP40_SL30_S30")
+
+# Classic TP/SL with score gate.
+STRATEGIES["TP30_SL10_S35"] = [
+    {"pct": 1.0, "tp_mult": 1.30, "sl_mult": 0.90, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["TP30_SL10_S35"] = {"min_rt_score": 35}
+SHADOW_STRATEGIES.append("TP30_SL10_S35")
+
+STRATEGIES["TP50_SL40_S35"] = [
+    {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.60, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["TP50_SL40_S35"] = {"min_rt_score": 35}
+SHADOW_STRATEGIES.append("TP50_SL40_S35")
+
+STRATEGIES["TP200_SL40_2H_NZ_S40"] = [
+    {"pct": 1.0, "tp_mult": 3.00, "sl_mult": 0.60, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["TP200_SL40_2H_NZ_S40"] = {"min_liquidity_usd": 1.0, "min_rt_score": 40}
+SHADOW_STRATEGIES.append("TP200_SL40_2H_NZ_S40")
+
+STRATEGIES["FAST_TP200_SL40_60M_MCAP_S40"] = [
+    {"pct": 1.0, "tp_mult": 3.00, "sl_mult": 0.60, "horizon_min": 60, "label": "main"},
+]
+STRATEGY_FILTERS["FAST_TP200_SL40_60M_MCAP_S40"] = {
+    "min_mcap": 30_000, "max_mcap": 500_000, "min_rt_score": 40,
+}
+SHADOW_STRATEGIES.append("FAST_TP200_SL40_60M_MCAP_S40")
+
+# --- ETH clones of the SOL shadow rollout (17 strats, chain-gated) ---
+
+STRATEGIES["ETH_SCALP_TP15_SL20_S35"] = [
+    {"pct": 1.0, "tp_mult": 1.15, "sl_mult": 0.80, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_SCALP_TP15_SL20_S35"] = {"chain": "ethereum", "min_rt_score": 35}
+SHADOW_STRATEGIES.append("ETH_SCALP_TP15_SL20_S35")
+
+STRATEGIES["ETH_SCALP_TP15_SL15_S40"] = [
+    {"pct": 1.0, "tp_mult": 1.15, "sl_mult": 0.85, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_SCALP_TP15_SL15_S40"] = {"chain": "ethereum", "min_rt_score": 40}
+SHADOW_STRATEGIES.append("ETH_SCALP_TP15_SL15_S40")
+
+STRATEGIES["ETH_SCALP_TP15_NOSL_S35"] = [
+    {"pct": 1.0, "tp_mult": 1.15, "sl_mult": 0.20, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_SCALP_TP15_NOSL_S35"] = {"chain": "ethereum", "min_rt_score": 35}
+SHADOW_STRATEGIES.append("ETH_SCALP_TP15_NOSL_S35")
+
+STRATEGIES["ETH_SCALP_TP15_SL10_S30"] = [
+    {"pct": 1.0, "tp_mult": 1.15, "sl_mult": 0.90, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_SCALP_TP15_SL10_S30"] = {"chain": "ethereum", "min_rt_score": 30}
+SHADOW_STRATEGIES.append("ETH_SCALP_TP15_SL10_S30")
+
+STRATEGIES["ETH_SCALP_TP10_SL10_S35"] = [
+    {"pct": 1.0, "tp_mult": 1.10, "sl_mult": 0.90, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_SCALP_TP10_SL10_S35"] = {"chain": "ethereum", "min_rt_score": 35}
+SHADOW_STRATEGIES.append("ETH_SCALP_TP10_SL10_S35")
+
+STRATEGIES["ETH_SCALP_TP10_SL15_S40"] = [
+    {"pct": 1.0, "tp_mult": 1.10, "sl_mult": 0.85, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_SCALP_TP10_SL15_S40"] = {"chain": "ethereum", "min_rt_score": 40}
+SHADOW_STRATEGIES.append("ETH_SCALP_TP10_SL15_S40")
+
+STRATEGIES["ETH_SCALP_TP20_SL10_S30"] = [
+    {"pct": 1.0, "tp_mult": 1.20, "sl_mult": 0.90, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_SCALP_TP20_SL10_S30"] = {"chain": "ethereum", "min_rt_score": 30}
+SHADOW_STRATEGIES.append("ETH_SCALP_TP20_SL10_S30")
+
+STRATEGIES["ETH_SCALP_TP20_NOSL_S35"] = [
+    {"pct": 1.0, "tp_mult": 1.20, "sl_mult": 0.20, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_SCALP_TP20_NOSL_S35"] = {"chain": "ethereum", "min_rt_score": 35}
+SHADOW_STRATEGIES.append("ETH_SCALP_TP20_NOSL_S35")
+
+STRATEGIES["ETH_SCALP_TP20_SL15_S35"] = [
+    {"pct": 1.0, "tp_mult": 1.20, "sl_mult": 0.85, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_SCALP_TP20_SL15_S35"] = {"chain": "ethereum", "min_rt_score": 35}
+SHADOW_STRATEGIES.append("ETH_SCALP_TP20_SL15_S35")
+
+STRATEGIES["ETH_FAST60_TP50_SL50_S30"] = [
+    {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.50, "horizon_min": 60, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_FAST60_TP50_SL50_S30"] = {"chain": "ethereum", "min_rt_score": 30}
+SHADOW_STRATEGIES.append("ETH_FAST60_TP50_SL50_S30")
+
+STRATEGIES["ETH_FAST60_TP100_SL50_NZ_S40"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.50, "horizon_min": 60, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_FAST60_TP100_SL50_NZ_S40"] = {
+    "chain": "ethereum", "min_liquidity_usd": 1.0, "min_rt_score": 40,
+}
+SHADOW_STRATEGIES.append("ETH_FAST60_TP100_SL50_NZ_S40")
+
+STRATEGIES["ETH_FAST60_TP70_SL50_NZ_S40"] = [
+    {"pct": 1.0, "tp_mult": 1.70, "sl_mult": 0.50, "horizon_min": 60, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_FAST60_TP70_SL50_NZ_S40"] = {
+    "chain": "ethereum", "min_liquidity_usd": 1.0, "min_rt_score": 40,
+}
+SHADOW_STRATEGIES.append("ETH_FAST60_TP70_SL50_NZ_S40")
+
+STRATEGIES["ETH_FAST45_TP40_SL30_S30"] = [
+    {"pct": 1.0, "tp_mult": 1.40, "sl_mult": 0.70, "horizon_min": 45, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_FAST45_TP40_SL30_S30"] = {"chain": "ethereum", "min_rt_score": 30}
+SHADOW_STRATEGIES.append("ETH_FAST45_TP40_SL30_S30")
+
+STRATEGIES["ETH_TP30_SL10_S35"] = [
+    {"pct": 1.0, "tp_mult": 1.30, "sl_mult": 0.90, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_TP30_SL10_S35"] = {"chain": "ethereum", "min_rt_score": 35}
+SHADOW_STRATEGIES.append("ETH_TP30_SL10_S35")
+
+STRATEGIES["ETH_TP50_SL40_S35"] = [
+    {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.60, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_TP50_SL40_S35"] = {"chain": "ethereum", "min_rt_score": 35}
+SHADOW_STRATEGIES.append("ETH_TP50_SL40_S35")
+
+STRATEGIES["ETH_TP200_SL40_2H_NZ_S40"] = [
+    {"pct": 1.0, "tp_mult": 3.00, "sl_mult": 0.60, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_TP200_SL40_2H_NZ_S40"] = {
+    "chain": "ethereum", "min_liquidity_usd": 1.0, "min_rt_score": 40,
+}
+SHADOW_STRATEGIES.append("ETH_TP200_SL40_2H_NZ_S40")
+
+STRATEGIES["ETH_FAST_TP200_SL40_60M_MCAP_S40"] = [
+    {"pct": 1.0, "tp_mult": 3.00, "sl_mult": 0.60, "horizon_min": 60, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_FAST_TP200_SL40_60M_MCAP_S40"] = {
+    "chain": "ethereum", "min_mcap": 30_000, "max_mcap": 500_000, "min_rt_score": 40,
+}
+SHADOW_STRATEGIES.append("ETH_FAST_TP200_SL40_60M_MCAP_S40")
 
 
 # ---------------------------------------------------------------------------

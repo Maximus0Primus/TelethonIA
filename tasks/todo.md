@@ -1,4 +1,62 @@
-# Pipeline Status — Updated Apr 25, 2026 (v14e.26 — REGIME-AWARE MEGA SWEEP)
+# Pipeline Status — Updated Apr 26, 2026 (v14e.27 — POST-MEGA-SWEEP TRIAGE)
+
+## 🎯 v14e.27 (Apr 26, ~10:30 UTC) — Mega-sweep verdict + ETH triage + 34 new shadows
+
+**Context** : ETH paper bleeds since Apr 25 14:00 UTC seed (148 trades, ~−$5,628 cumul).
+Root cause = ETH market regime flipped Apr 25 (Apr 24 same code +16-29% / Apr 25 same code −17 to −18%).
+SOL live retraced $24 → $20 overnight (Apr 25 18:00 → Apr 26 07:43 UTC, −$4.11 / 12 trades, 7 timeouts).
+Mega sweep run 24941515693 published; SCALP family dominates cross-regime.
+
+### Changes shipped
+
+1. **ETH cleanup** (`scraper/strategies.py`):
+   - Demoted to shadow (kept in STRATEGIES + added to SHADOW_STRATEGIES, removed from
+     `rt_trade_config.hybrid_strategy.allocations` JSONB):
+     `ETH_TP100_SL50`, `ETH_BE30_TP100_SL40`, `ETH_FAST_TP100_SL50`,
+     `ETH_FAST60_TP100_SL50`, `ETH_FAST_TP500_SL40_60M`.
+   - Removed from allocations BUT NOT in SHADOW_STRATEGIES (legacy duplicates whose BE
+     never armed on ETH regime — exact PnL clones of TP-pure parents):
+     `ETH_BE20_TP100_SL50`, `ETH_BE20_TP80_SL40_T2H`, `ETH_BE50_TP150_SL50`.
+   - New shadow with higher BE trigger that can plausibly arm on ETH runners:
+     `ETH_BE50_TP150_SL40_T2H` (BE@+50%, SL @-40%, 2h horizon).
+   - Kept main: `ETH_TP80_SL40_T2H`, `ETH_FAST_TP100_SL20`, `ETH_FAST_TP40_SL30` (last-6h positives).
+
+2. **34 new shadow strats from mega-sweep robust top** (17 SOL + 17 ETH clones):
+   - SCALP family (TP10-20 / SL10-20, 2h horizon) with `_S30/_S35/_S40` score gates.
+   - FAST60 family (60min timeout) with `_S30/_NZ_S40` filters.
+   - Classic `TP30_SL10_S35`, `TP50_SL40_S35`, `TP200_SL40_2H_NZ_S40`, `FAST_TP200_SL40_60M_MCAP_S40`.
+   - All chain-gated. ETH variants prefixed `ETH_`. Filters embedded in name.
+
+3. **Mega-sweep gate relaxed** (`scripts/analyze_mega_sweep.py`):
+   - FDR<alpha is now opt-in via `--require-fdr` flag (was always-on, was nuking
+     top_robust to zero rows on 371k Bonferroni-corrected tests).
+   - Default behaviour: `cross_regime_robust + family_realism>=0.5 + avg>0`.
+   - Re-ran on Apr 26 artifacts → top_robust.csv now publishes 30 SCALP_TP15_SL20 variants.
+
+### Verdict actionnable
+
+- **SCALP_TP15_SL20 SCORE35** = top robust : avg +6.91%, WR 69%, dead-day **+7.74%**,
+  rank_stability 0.88, $/d projeté +$26.48. **Le seul strat positif sur dead-day robuste.**
+- BE25 live : −$4 nuit due à régime dead (7/11 timeouts, 0 TP), pas un blow-up.
+  14j cum reste +$4.27. Garder. Si encore dead-day demain → réévaluer.
+- BOND_FAST live N=4, rester observer N≥10.
+
+### À faire — décision N≥50 / 14d (~Mai 09)
+
+- [ ] **0.1** À N≥30 par strat shadow nouveau, paired-test SCALP_TP15_SL20_S35 vs base SCALP_TP15_SL20.
+  Si score gate ajoute >+2pp avg/trade → promouvoir 1-2 SCALP en main (paper alloc + Telegram).
+- [ ] **0.2** À 7j de paper ETH avec les 17 ETH clones, sortir un ranking ETH-only.
+- [ ] **0.3** Mesurer l'effet du dead-day filter v14e.26 en RT : si on flagge `regime=dead` côté pipeline
+  et qu'on coupe les ouvertures sur ces jours-là, est-ce que BE25 redevient profitable ?
+- [ ] **0.4** Re-runner mega-sweep dans 48h (cron `mega-sweep-48h.yml`) avec --require-fdr off pour
+  voir l'évolution du ranking SCALP à mesure que N grossit.
+- [ ] **0.5** Calibrer SELL_SLIPPAGE_BPS empirique (mirror de v14e.24 pour SELL) : créer
+  `scripts/_calibrate_sell_slip.py` sur N=229 live trades. Sell slip dynamique sous-calibré
+  expliquerait les outliers paper-live (status=match mais exit_price diverge).
+
+---
+
+
 
 ## 🎯 TÂCHE 0 — Post-mortem mega sweep regime-aware (en cours, 21:51 UTC)
 

@@ -88,6 +88,12 @@ def benjamini_hochberg(pvals: list[float]) -> list[float]:
 
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--require-fdr", action="store_true",
+                    help="Apply FDR<alpha gate to top_robust (v14e.27 default OFF — "
+                         "Bonferroni-corrected FDR on 371k tests was nuking the entire "
+                         "top robust list to zero rows. Regime-aware gate alone is the "
+                         "actual signal; FDR is a strict statistical bar that re-enables "
+                         "with this flag when N is large enough).")
     ap.add_argument("--csv", default="scraper/_mega_sweep_extended.csv",
                     help="Path to mega_sweep CSV (default: scraper/_mega_sweep_extended.csv)")
     ap.add_argument("--alpha", type=float, default=0.05,
@@ -192,13 +198,19 @@ def main():
     df_eligible.to_csv(out_full, index=False)
     print(f"  -> {out_full} ({len(df_eligible):,} rows)")
 
-    # Top robust: positive avg, fdr<alpha, family_realism>=0.5,
-    # AND cross_regime_robust if available (v14e.26)
+    # Top robust: positive avg, family_realism>=0.5, cross_regime_robust if
+    # available (v14e.26). FDR<alpha is OPT-IN via --require-fdr (v14e.27):
+    # the Bonferroni-corrected FDR on 371k tests nuked the entire top_robust
+    # list to zero on the Apr 26 run, so the regime-aware filter is now the
+    # primary gate. Re-enable FDR once N grows large enough that q-values
+    # actually discriminate.
     base_filter = (
         (df_eligible["avg_pnl_pct"] > 0)
-        & (df_eligible["fdr_q"] < args.alpha)
         & (df_eligible["family_realism"] >= 0.5)
     )
+    if args.require_fdr:
+        base_filter = base_filter & (df_eligible["fdr_q"] < args.alpha)
+        print(f"  applying FDR<{args.alpha} gate (--require-fdr)")
     if "cross_regime_robust" in df_eligible.columns:
         base_filter = base_filter & df_eligible["cross_regime_robust"]
         print(f"  applying cross_regime_robust filter to top robust selection")
@@ -224,7 +236,8 @@ def main():
     print(f"  family clean (realism=1.0):   {n_clean_family:>10,}")
     print(f"  family artifact (realism=0.1):{n_artifact:>10,}  (DTRAIL/TRAIL/DIP/SPLIT/BOND/TD2)")
     print()
-    print(f"TOP {min(args.top, len(robust))} ROBUST CONFIGS (positive, FDR<{args.alpha}, family>=0.5):")
+    _gate_desc = f"FDR<{args.alpha}, " if args.require_fdr else ""
+    print(f"TOP {min(args.top, len(robust))} ROBUST CONFIGS (positive, {_gate_desc}family>=0.5):")
     print("-" * 100)
     if len(robust) == 0:
         print("  (none — try relaxing --alpha or check sweep data)")
