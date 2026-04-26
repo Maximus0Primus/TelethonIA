@@ -1187,6 +1187,123 @@ STRATEGY_FILTERS["AGE72_FAST_TP50_SL30"] = {
 
 
 # ============================================================
+# v14e.27 (Apr 26) — AGE clones across other top strats.
+# AGE24_FAST_TP50_SL30 surfaced +20% avg / WR 62.5% on N=8 (Apr 24-26 dead
+# regime), hinting the 12-24h age band beats the default 0-12h universe when
+# the macro pump-rate is low. Cloning the top-earning + new SCALP picks across
+# the same 2 bands (12-24h, 24-48h) to test whether the age signal is a
+# strat-specific quirk or a general edge. AGE72 (48-72h) deliberately skipped
+# — it bled −$7.55/N=2 on the existing FAST clone, signal points the wrong
+# way on tokens that old. All shadow-only, paper data only.
+# ============================================================
+
+# BE25_TP80_SL30 — live earner, +$166 post-reset / N=75. Test if age gate
+# improves dead-day resilience.
+STRATEGIES["AGE24_BE25_TP80_SL30"] = [
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.25, "label": "main"},
+]
+STRATEGY_FILTERS["AGE24_BE25_TP80_SL30"] = {
+    "chain": "solana", "min_age_hours": 12, "max_age_hours": 24,
+}
+SHADOW_STRATEGIES.append("AGE24_BE25_TP80_SL30")
+
+STRATEGIES["AGE48_BE25_TP80_SL30"] = [
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.25, "label": "main"},
+]
+STRATEGY_FILTERS["AGE48_BE25_TP80_SL30"] = {
+    "chain": "solana", "min_age_hours": 24, "max_age_hours": 48,
+}
+SHADOW_STRATEGIES.append("AGE48_BE25_TP80_SL30")
+
+# TP50_SL15 — fast scalp +$60 post-reset / N=100.
+STRATEGIES["AGE24_TP50_SL15"] = [
+    {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.85, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["AGE24_TP50_SL15"] = {
+    "chain": "solana", "min_age_hours": 12, "max_age_hours": 24,
+}
+SHADOW_STRATEGIES.append("AGE24_TP50_SL15")
+
+STRATEGIES["AGE48_TP50_SL15"] = [
+    {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.85, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["AGE48_TP50_SL15"] = {
+    "chain": "solana", "min_age_hours": 24, "max_age_hours": 48,
+}
+SHADOW_STRATEGIES.append("AGE48_TP50_SL15")
+
+# FAST_TP100_SL20 — high-TP fast +$49 post-reset / N=100.
+STRATEGIES["AGE24_FAST_TP100_SL20"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.80, "horizon_min": 30, "label": "main"},
+]
+STRATEGY_FILTERS["AGE24_FAST_TP100_SL20"] = {
+    "chain": "solana", "min_age_hours": 12, "max_age_hours": 24,
+}
+SHADOW_STRATEGIES.append("AGE24_FAST_TP100_SL20")
+
+STRATEGIES["AGE48_FAST_TP100_SL20"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.80, "horizon_min": 30, "label": "main"},
+]
+STRATEGY_FILTERS["AGE48_FAST_TP100_SL20"] = {
+    "chain": "solana", "min_age_hours": 24, "max_age_hours": 48,
+}
+SHADOW_STRATEGIES.append("AGE48_FAST_TP100_SL20")
+
+# FAST_TP80_SL25 — fast TP80 +$25 post-reset / N=100.
+STRATEGIES["AGE24_FAST_TP80_SL25"] = [
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.75, "horizon_min": 30, "label": "main"},
+]
+STRATEGY_FILTERS["AGE24_FAST_TP80_SL25"] = {
+    "chain": "solana", "min_age_hours": 12, "max_age_hours": 24,
+}
+SHADOW_STRATEGIES.append("AGE24_FAST_TP80_SL25")
+
+STRATEGIES["AGE48_FAST_TP80_SL25"] = [
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.75, "horizon_min": 30, "label": "main"},
+]
+STRATEGY_FILTERS["AGE48_FAST_TP80_SL25"] = {
+    "chain": "solana", "min_age_hours": 24, "max_age_hours": 48,
+}
+SHADOW_STRATEGIES.append("AGE48_FAST_TP80_SL25")
+
+# SCALP_TP15_SL20 SCORE35 — mega-sweep top robust (dead-day +7.74%, rs 0.88).
+STRATEGIES["AGE24_SCALP_TP15_SL20_S35"] = [
+    {"pct": 1.0, "tp_mult": 1.15, "sl_mult": 0.80, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["AGE24_SCALP_TP15_SL20_S35"] = {
+    "chain": "solana", "min_age_hours": 12, "max_age_hours": 24, "min_rt_score": 35,
+}
+SHADOW_STRATEGIES.append("AGE24_SCALP_TP15_SL20_S35")
+
+STRATEGIES["AGE48_SCALP_TP15_SL20_S35"] = [
+    {"pct": 1.0, "tp_mult": 1.15, "sl_mult": 0.80, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["AGE48_SCALP_TP15_SL20_S35"] = {
+    "chain": "solana", "min_age_hours": 24, "max_age_hours": 48, "min_rt_score": 35,
+}
+SHADOW_STRATEGIES.append("AGE48_SCALP_TP15_SL20_S35")
+
+# SCALP_TP15_NOSL SCORE35 — mega-sweep robust (dead-day +7.99%, WR 76%).
+STRATEGIES["AGE24_SCALP_TP15_NOSL_S35"] = [
+    {"pct": 1.0, "tp_mult": 1.15, "sl_mult": 0.20, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["AGE24_SCALP_TP15_NOSL_S35"] = {
+    "chain": "solana", "min_age_hours": 12, "max_age_hours": 24, "min_rt_score": 35,
+}
+SHADOW_STRATEGIES.append("AGE24_SCALP_TP15_NOSL_S35")
+
+STRATEGIES["AGE48_SCALP_TP15_NOSL_S35"] = [
+    {"pct": 1.0, "tp_mult": 1.15, "sl_mult": 0.20, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["AGE48_SCALP_TP15_NOSL_S35"] = {
+    "chain": "solana", "min_age_hours": 24, "max_age_hours": 48, "min_rt_score": 35,
+}
+SHADOW_STRATEGIES.append("AGE48_SCALP_TP15_NOSL_S35")
+
+
+# ============================================================
 # v14 (Sprint #ETH-1) — Ethereum L1 shadow strategies.
 # Shadow-only, zero capital. Entry filters require chain='ethereum'.
 # TP/SL widened vs Solana because ETH fees ($15 round-trip gas + 2% MEV

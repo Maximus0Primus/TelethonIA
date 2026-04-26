@@ -4225,6 +4225,20 @@ _MEGA_EXT_FILTERS = ["NONE", "NOZEROLIQ", "SCORE30", "SCORE35", "SCORE40",
                      "SCORE45", "SCORE50", "MCAP_MID", "TOPKOL",
                      "NOZEROLIQ_SCORE30", "NOZEROLIQ_SCORE40", "MCAP_MID_SCORE40"]
 
+# v14e.27 — token-age dimension. Default scrape gate is 12h (safe_scraper +
+# pipeline). The age sweep tests whether relaxing to 24h or 48h opens an edge:
+#   "ALL"   — no age cap (use whatever rt_token_age_hours the trade carried)
+#   "AGE12" — token <= 12h at entry (current default — equivalent to no filter
+#             for the historical universe, since the global gate already capped
+#             at 12h on most days; included for forward compat when the global
+#             gate is relaxed).
+#   "AGE24" — disjoint band 12-24h
+#   "AGE48" — disjoint band 24-48h
+# Disjoint bands match strategies.py AGE24_/AGE48_ filter convention so the
+# sweep result maps 1:1 onto the deployed shadows.
+_MEGA_EXT_AGE_BANDS = ["ALL", "AGE12", "AGE24", "AGE48"]
+_MEGA_AGE_BANDS = ["ALL"]   # base sweep stays 1-band for backwards compat
+
 _MEGA_LOOP_SEC = 30
 _MEGA_LAZY_FAST_SEC = 180
 _MEGA_LAZY_FAST_WINDOW = 300
@@ -4426,6 +4440,26 @@ def _mega_apply_filter(u, fname):
     if fname == "SCORE50": return (u.get("rt_score") or 0) >= 50
     if fname == "MCAP_MID": return 30_000 <= (u.get("entry_mcap") or 0) <= 500_000
     if fname == "TOPKOL": return (u.get("kol_group") or "") in _MEGA_TOP_KOLS
+
+
+def _mega_apply_age_band(u, age_band):
+    """v14e.27: token-age band filter, mirrors STRATEGY_FILTERS min/max_age_hours.
+    Bands are disjoint to match strategies.py AGE24/AGE48 convention."""
+    if age_band == "ALL":
+        return True
+    age_h = u.get("rt_token_age_hours")
+    if age_h is None:
+        # No age data persisted on this trade — exclude from age-banded runs
+        # rather than silently bucketing into "ALL".
+        return False
+    age_h = float(age_h)
+    if age_band == "AGE12":
+        return age_h <= 12.0
+    if age_band == "AGE24":
+        return 12.0 < age_h <= 24.0
+    if age_band == "AGE48":
+        return 24.0 < age_h <= 48.0
+    return True
     if fname == "NOZEROLIQ_SCORE30":
         return (u.get("rt_liquidity_usd") or 0) > 0 and (u.get("rt_score") or 0) >= 30
     if fname == "NOZEROLIQ_SCORE40":
@@ -4615,12 +4649,21 @@ def _mega_process_config(args):
     import numpy as np
     import json as _json
     from collections import defaultdict
-    (strat_name, tp_mult, sl_mult, horizon_min, be_act,
-     fname, source, smoothing, polling_mode, universe) = args
+    # v14e.27: tuple grew to include age_band. Backwards-compat — older callers
+    # passing the 10-arg form get age_band="ALL" so existing entrypoints
+    # (eval_history mode + tests) keep their behaviour.
+    if len(args) == 10:
+        (strat_name, tp_mult, sl_mult, horizon_min, be_act,
+         fname, source, smoothing, polling_mode, universe) = args
+        age_band = "ALL"
+    else:
+        (strat_name, tp_mult, sl_mult, horizon_min, be_act,
+         fname, age_band, source, smoothing, polling_mode, universe) = args
     pnls = []
     pnls_by_day = defaultdict(list)  # v14e.26: track per-day pnls
     for u in universe:
         if not _mega_apply_filter(u, fname): continue
+        if not _mega_apply_age_band(u, age_band): continue
         addr = u["token_address"]
         td = _MEGA_TICKS.get(addr)
         if not td: continue
@@ -4648,7 +4691,8 @@ def _mega_process_config(args):
     eq = np.cumprod(1 + arr)
     peaks = np.maximum.accumulate(eq)
     dd = float(((eq - peaks) / peaks).min()) * 100
-    n_pass = sum(1 for u in universe if _mega_apply_filter(u, fname))
+    n_pass = sum(1 for u in universe
+                 if _mega_apply_filter(u, fname) and _mega_apply_age_band(u, age_band))
     trade_rate = n_pass / max(1, len(universe)) * 18
     dollars_day = 50 * (avg / 100) * trade_rate
 
@@ -4684,8 +4728,8 @@ def _mega_process_config(args):
     daily_pnl = {day: round(float(np.mean(p) * 100), 3) for day, p in pnls_by_day.items()}
 
     return {
-        "strategy": strat_name, "filter": fname, "source": source,
-        "smoothing": smoothing, "polling_mode": polling_mode,
+        "strategy": strat_name, "filter": fname, "age_band": age_band,
+        "source": source, "smoothing": smoothing, "polling_mode": polling_mode,
         "n_pass": n_pass, "n": n, "wr_pct": round(wr, 2),
         "avg_pnl_pct": round(avg, 3), "median_pnl_pct": round(med, 3),
         "sharpe": round(sharpe, 4), "max_dd_pct": round(dd, 2),
@@ -4891,15 +4935,18 @@ def _mega_sweep_run(args):
         smoothings = _MEGA_EXT_SMOOTHINGS
         polling_modes = _MEGA_EXT_POLLING_MODES
         filters = _MEGA_EXT_FILTERS
+        age_bands = _MEGA_EXT_AGE_BANDS
         print(f"\n*** EXTENDED MEGA SWEEP — FULL MATRIX ***")
     else:
         sources = _MEGA_SOURCES
         smoothings = _MEGA_SMOOTHINGS
         polling_modes = _MEGA_POLLING_MODES
         filters = _MEGA_FILTERS
+        age_bands = _MEGA_AGE_BANDS
     smoothings = _filter_smoothings_default(smoothings, getattr(args, "include_smoothing_artefacts", False))
-    print(f"  sources={len(sources)} smoothings={len(smoothings)} polling={len(polling_modes)} filters={len(filters)}")
-    print(f"  per-strat configs: {len(sources)*len(smoothings)*len(polling_modes)*len(filters)}")
+    print(f"  sources={len(sources)} smoothings={len(smoothings)} polling={len(polling_modes)} "
+          f"filters={len(filters)} age_bands={len(age_bands)} ({age_bands})")
+    print(f"  per-strat configs: {len(sources)*len(smoothings)*len(polling_modes)*len(filters)*len(age_bands)}")
 
     print(f"\n{'#'*90}\n# v140 MEGA SWEEP {datetime.now().isoformat()[:19]}\n{'#'*90}\n")
     t0 = _time.time()
@@ -4921,9 +4968,10 @@ def _mega_sweep_run(args):
 
     # v142: sb_get() paginates internally via offset+limit; the previous manual
     # range_lo/range_hi loop called it with kwargs that don't exist -> TypeError.
+    # v14e.27: rt_token_age_hours included for age-band sweep dimension.
     params = [
         ("select", "id,token_address,created_at,entry_price,rt_liquidity_usd,"
-                   "rt_score,kol_group,entry_mcap,chain"),
+                   "rt_score,kol_group,entry_mcap,rt_token_age_hours,chain"),
         ("source", "eq.rt"),
         ("created_at", f"gte.{since}"),
         ("order", "created_at"),
@@ -5015,10 +5063,12 @@ def _mega_sweep_run(args):
     jobs = []
     for strat_name, (tp, sl, h, be) in full_pool.items():
         for fname in filters:
-            for src in sources:
-                for smooth in smoothings:
-                    for poll in polling_modes:
-                        jobs.append((strat_name, tp, sl, h, be, fname, src, smooth, poll, universe))
+            for age_band in age_bands:
+                for src in sources:
+                    for smooth in smoothings:
+                        for poll in polling_modes:
+                            jobs.append((strat_name, tp, sl, h, be, fname, age_band,
+                                         src, smooth, poll, universe))
     total = len(jobs)
     print(f"\nTotal configs: {total}")
     print(f"Launching {n_workers} workers...\n")
