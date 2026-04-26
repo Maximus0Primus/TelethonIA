@@ -414,13 +414,13 @@ def alert_live_sell(symbol: str, strategy: str, exit_reason: str,
         reason_text = "TRAIL STOP"
     elif exit_reason == "tp_hit":
         emoji, reason_text = "🎯", "TP HIT"
-        # v14e.18: tag TP fired but execution slipped (peak hit target, fill
-        # came back near/below entry due to Solana sell latency on dumping
-        # tokens). Heuristic: peak ≥ +30% AND realized < peak − 20pp →
-        # surface the slip in the title so the alert isn't misleading.
-        slip_pp = max_gain - (pnl_pct * 100)
-        if max_gain >= 30 and slip_pp >= 20:
-            reason_text = f"TP HIT (slip −{slip_pp:.0f}pp)"
+        # v14e.18 / v14e.31 renamed: "slip" was misleading. The metric is
+        # peak − realized — a missed-gain indicator (price kept going AFTER
+        # the TP fired), NOT execution slip (= 4% on EVM, ~2.25% on Sol).
+        # Surface it as "missed +Xpp" instead.
+        gap_pp = max_gain - (pnl_pct * 100)
+        if max_gain >= 30 and gap_pp >= 20:
+            reason_text = f"TP HIT (missed +{gap_pp:.0f}pp peak)"
             emoji = "⚠️🎯"
     elif exit_reason == "sl_hit":
         emoji, reason_text = "🔴", "SL HIT"
