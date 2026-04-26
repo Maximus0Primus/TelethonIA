@@ -3333,12 +3333,17 @@ def _synthetic_strategy_sweep(args):
                         entry_price = float(t["entry_price"])
                         tp_price = entry_price * (1 + spec["tp"] / 100)
                         sl_price = entry_price * (1 - spec["sl"] / 100)
+                        # v14e.31: position_usd chain-aware. Match shadow/paper/live
+                        # ($50 for EVM via _evm_min_position_usd) so sim slip kernel
+                        # (gas-as-bps formula) matches reality. SOL keeps $10 — Jupiter
+                        # Ultra is near-zero slip independent of position anyway.
+                        _pos_usd = 50.0 if _SIM_CHAIN in ("ethereum", "bsc", "base") else 10.0
                         fake = {
                             "id": f"{strat_name}_{t['id']}",
                             "entry_price": entry_price,
                             "sl_price": sl_price,
                             "tp_price": tp_price,
-                            "position_usd": 10.0,
+                            "position_usd": _pos_usd,
                             "strategy": strat_name,
                             "tranche_label": "main",
                             "horizon_minutes": spec["horizon"],
@@ -4252,10 +4257,15 @@ _MEGA_DAY_REGIME = {}  # v14e.26: {date_str: "active"/"quiet"/"dead"}
 _MEGA_TEST_DAYS = set()  # v14e.26: walk-forward test set (last 3 days)
 
 
-def _mega_init_worker(ticks_path, day_regime_path=None):
-    """multiprocessing initializer — loads ticks JSON once per worker process."""
+def _mega_init_worker(ticks_path, day_regime_path=None, sim_chain="solana"):
+    """multiprocessing initializer — loads ticks JSON once per worker process.
+
+    v14e.31: also propagates _SIM_CHAIN so workers spawned via 'spawn' method
+    (Windows) get the right chain. On 'fork' (Linux, GH Actions) state is
+    inherited from parent so this is redundant — but cheap to be explicit.
+    """
     import json
-    global _MEGA_TICKS, _MEGA_DAY_REGIME, _MEGA_TEST_DAYS
+    global _MEGA_TICKS, _MEGA_DAY_REGIME, _MEGA_TEST_DAYS, _SIM_CHAIN
     with open(ticks_path) as f:
         _MEGA_TICKS = json.load(f)
     if day_regime_path:
@@ -4263,6 +4273,7 @@ def _mega_init_worker(ticks_path, day_regime_path=None):
             _meta = json.load(f)
         _MEGA_DAY_REGIME = _meta.get("day_regime", {})
         _MEGA_TEST_DAYS = set(_meta.get("test_days", []))
+    _SIM_CHAIN = sim_chain
 
 
 def _compute_day_regime(universe, ticks, peak_window_min=120, pump_threshold_pct=50,
@@ -4604,10 +4615,16 @@ def _mega_replay_one(tp_mult, sl_mult, horizon_min, be_act,
     # trail/dtrail/dip/split/scalp get multiplier 4-10× to match live reality.
     _family_mult = _mega_family_slip_mult(strat_name)
     _sell_slip = 1 - (10 * _family_mult) / 10_000 if _family_mult != 1.0 else _MEGA_SELL_SLIP_BASE
+    # v14e.31: position_usd chain-aware so the EVM gas-as-bps slip in
+    # _evaluate_trade_exit (via _evm_slip_bps_with_gas) matches shadow/paper/live.
+    # ETH paper/live position cap = $50 (matches _evm_min_position_usd). At $10
+    # the sim was over-pessimistic (slip 1600 bps vs 400 bps real). SOL keeps
+    # $10 — Jupiter Ultra near-zero slip is position-independent anyway.
+    _pos_usd = 50.0 if _SIM_CHAIN in ("ethereum", "bsc", "base") else 10.0
     fake_trade = {
         "id": trade_id, "entry_price": entry_price,
         "sl_price": sl_price, "tp_price": tp_price,
-        "position_usd": 10.0,
+        "position_usd": _pos_usd,
         "strategy": strat_name or (f"BE{int(be_act*100)}_TP80_SL30" if be_act else "TP80_SL30"),
         "tranche_label": "main", "horizon_minutes": horizon_min,
         "created_at": entry_time_iso,
@@ -4871,7 +4888,8 @@ def _mega_sweep_run_eh(args):
     print(f"Launching {n_workers} workers...\n")
     results = []
     t_start = _time.time()
-    with mp.Pool(n_workers, initializer=_mega_init_worker, initargs=(ticks_path,)) as pool:
+    with mp.Pool(n_workers, initializer=_mega_init_worker,
+                 initargs=(ticks_path, None, _SIM_CHAIN)) as pool:
         for i, r in enumerate(pool.imap_unordered(_mega_process_config, jobs, chunksize=50)):
             if r is not None:
                 results.append(r)
@@ -5076,7 +5094,8 @@ def _mega_sweep_run(args):
     print(f"Launching {n_workers} workers...\n")
     results = []
     t_start = _time.time()
-    with mp.Pool(n_workers, initializer=_mega_init_worker, initargs=(ticks_path, regime_path)) as pool:
+    with mp.Pool(n_workers, initializer=_mega_init_worker,
+                 initargs=(ticks_path, regime_path, _SIM_CHAIN)) as pool:
         for i, r in enumerate(pool.imap_unordered(_mega_process_config, jobs, chunksize=50)):
             if r is not None: results.append(r)
             if (i+1) % 2000 == 0:
