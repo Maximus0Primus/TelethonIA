@@ -53,6 +53,16 @@ sb = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_ROLE
 random.seed(42)
 
 
+def _load_artifact_strats() -> set[str]:
+    """v14e.38: load _AUTO_DEPRECATED + _is_artifact_family check from strategies.py
+    so the audit can drop trail/dip/split rows whose pnl is sim-only fiction."""
+    try:
+        from strategies import _AUTO_DEPRECATED, _is_artifact_family  # noqa
+        return set(_AUTO_DEPRECATED), _is_artifact_family
+    except Exception:
+        return set(), lambda _name: False
+
+
 def fetch_all(query):
     out, step, off = [], 1000, 0
     while True:
@@ -117,13 +127,35 @@ def main():
     ap.add_argument("--reliable-min-n", type=int, default=30)
     ap.add_argument("--probable-min-n", type=int, default=15)
     ap.add_argument("--strat-min-n", type=int, default=3)
+    ap.add_argument("--exclude-artifact-strats", action="store_true",
+                    help="Drop rows whose strategy is in _AUTO_DEPRECATED (DTRAIL/PTRAIL/"
+                         "TRAIL/SPLIT_/DIP30_/BOND_/TD2_/MCAP_MID_DTRAIL). Removes shadow "
+                         "winnings that cannot translate to live (47x slip + reconciler 65% "
+                         "early close). Recommended for any KOL verdict post-v14e.36.")
+    ap.add_argument("--since-recalc", action="store_true",
+                    help="Only count trades after Apr 25 23:23 UTC (v14e.24 commit). Avoids "
+                         "the pre-recalc slip regime where pnl_pct was computed with BUY=10. "
+                         "Result is more conservative (fewer trades) but slip-uniform.")
     args = ap.parse_args()
 
     since = (datetime.now(timezone.utc) - timedelta(days=args.days)).isoformat()
-    print(f"Window: {args.days}d  |  bootstrap: {args.bootstrap:,}  |  reliable_min_n: {args.reliable_min_n}")
+    if args.since_recalc:
+        recalc_cutoff = "2026-04-25T23:23:00+00:00"
+        if recalc_cutoff > since:
+            since = recalc_cutoff
+    print(f"Window: {args.days}d (since {since[:19]}Z)  |  bootstrap: {args.bootstrap:,}  |  reliable_min_n: {args.reliable_min_n}")
+
+    artifact_set, is_artifact = _load_artifact_strats()
+    if args.exclude_artifact_strats:
+        print(f"Filtering out {len(artifact_set)} artifact strategies (DTRAIL/DIP/SPLIT/BOND/TD2)")
 
     rows = fetch_trades(since)
-    print(f"Trades fetched: {len(rows):,}\n")
+    if args.exclude_artifact_strats:
+        before = len(rows)
+        rows = [r for r in rows if r.get("strategy") and not is_artifact(r["strategy"])]
+        print(f"Trades fetched: {before:,} -> {len(rows):,} after artifact filter ({before-len(rows):,} dropped)\n")
+    else:
+        print(f"Trades fetched: {len(rows):,}\n")
 
     # buckets[(kol, chain, strat)] -> list of pnl tuples
     buckets = defaultdict(list)
