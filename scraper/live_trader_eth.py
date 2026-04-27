@@ -436,6 +436,9 @@ def execute_sell(ca: str, amount_tokens: Optional[int] = None,
     eth_received_human = eth_received_wei / 1e18 if eth_received_wei else 0.0
     eth_received_usd = eth_received_human * eth_usd
     gas_paid_wei = receipt["gasUsed"] * receipt["effectiveGasPrice"]
+    # Quote-vs-fill slippage on sell — different from DexScreener-vs-fill;
+    # measures router-side price impact specifically.
+    slippage_real_bps = int((1 - eth_received_wei / eth_out) * 10000) if eth_out else 0
 
     return {
         "success": True,
@@ -448,6 +451,7 @@ def execute_sell(ca: str, amount_tokens: Optional[int] = None,
         "exec_ms": elapsed_ms,
         "block_number": receipt["blockNumber"],
         "eth_usd": eth_usd,
+        "slippage_actual_bps": slippage_real_bps,
     }
 
 
@@ -544,8 +548,22 @@ def open_live_trade(client_sb, token_entry: dict, strategy: str,
         logger.error("live_trader_eth: entry_price=0 for %s — aborting", symbol)
         return _FAIL
 
-    # Max open positions check (shared budget across chains, gated by config)
-    max_open = int(config.get("max_open_positions", 5))
+    # v14e.32+: ETH-specific position cap (overrides Kelly-derived size).
+    # Without this, _rt_position_size returns Kelly × bankroll capped at the
+    # SOL-tuned max_position_usd, which is unsafe for ETH where slippage and
+    # gas profile is different. Phase 1 microtest sets eth_max_position_usd=50.
+    eth_cap = config.get("eth_max_position_usd")
+    if eth_cap is not None:
+        eth_cap = float(eth_cap)
+        if position_usd > eth_cap:
+            logger.info("live_trader_eth: capping position $%.2f -> $%.2f (eth_max_position_usd)",
+                        position_usd, eth_cap)
+            position_usd = eth_cap
+
+    # v14e.32+: ETH-specific max open. Falls back to shared max_open_positions
+    # if eth_max_open_positions is unset (preserves prior behavior).
+    max_open = int(config.get("eth_max_open_positions",
+                              config.get("max_open_positions", 5)))
     try:
         result = (
             client_sb.table("paper_trades")
@@ -648,6 +666,15 @@ def open_live_trade(client_sb, token_entry: dict, strategy: str,
         "message_to_buy_seconds": _calc_message_to_buy(token_entry.get("_rt_message_ts")),
         "buy_slippage_bps": actual_slippage_bps,
         "buy_fee_bps": slippage,
+        # v14e.32+: fine-grained instrumentation for paired-test calibration
+        # gas_usd_buy = real gas paid (different from buy_fee_bps which is the
+        # SLIPPAGE TOLERANCE asked, not gas). quote_slip_bps_buy = Uniswap quote
+        # vs actual fill (router-internal slippage from price impact); distinct
+        # from buy_slippage_bps which is DexScreener-mid vs fill (data quality).
+        # block_number_buy = chain block at receipt time (latency proxy).
+        "gas_usd_buy": float(result.get("gas_usd") or 0),
+        "quote_slip_bps_buy": int(result.get("slippage_actual_bps") or 0),
+        "block_number_buy": int(result.get("block_number") or 0),
         # Native chain price/amount columns repurposed for ETH (semantics by chain col)
         "sol_price_at_entry": eth_usd,                    # ETH price USD
         "position_sol": round(eth_spent, 6),              # ETH amount
@@ -660,6 +687,8 @@ def open_live_trade(client_sb, token_entry: dict, strategy: str,
         "pair_address": token_entry.get("_rt_pair_address"),
     }
 
+    # v14e.32+ instrumentation cols — drop if DB migration not yet applied.
+    _OPTIONAL_BUY = ("gas_usd_buy", "quote_slip_bps_buy", "block_number_buy")
     try:
         client_sb.table("paper_trades").insert(row).execute()
         logger.info(
@@ -668,12 +697,27 @@ def open_live_trade(client_sb, token_entry: dict, strategy: str,
             result["tx_hash"][:14], result.get("gas_usd") or 0,
         )
     except Exception as e:
-        logger.error(
-            "CRITICAL: ETH live trade %s bought (tx=%s) but DB insert failed: %s. "
-            "Position untracked, manual recovery needed.",
-            symbol, result.get("tx_hash"), e,
-        )
-        return _FAIL
+        err_str = str(e)
+        stripped = [c for c in _OPTIONAL_BUY if c in err_str and c in row]
+        if stripped:
+            for c in stripped:
+                row.pop(c, None)
+            try:
+                client_sb.table("paper_trades").insert(row).execute()
+                logger.warning("ETH LIVE OPENED (instrum cols dropped: %s): %s %s tx=%s",
+                               stripped, symbol, strategy, result["tx_hash"][:14])
+            except Exception as e2:
+                logger.error(
+                    "CRITICAL: ETH live trade %s bought (tx=%s) but DB insert failed even after strip: %s",
+                    symbol, result.get("tx_hash"), e2)
+                return _FAIL
+        else:
+            logger.error(
+                "CRITICAL: ETH live trade %s bought (tx=%s) but DB insert failed: %s. "
+                "Position untracked, manual recovery needed.",
+                symbol, result.get("tx_hash"), e,
+            )
+            return _FAIL
 
     return {
         "success": True,
@@ -911,11 +955,19 @@ def check_live_trades_eth(client_sb) -> dict:
                 round(float(_paper_sim_ev.get("pnl_pct")), 4)
                 if _paper_sim_ev and _paper_sim_ev.get("pnl_pct") is not None else None
             ),
+            # v14e.32+: fine-grained instrumentation (mirror of buy-side fields).
+            "gas_usd_sell": float(sell_result.get("gas_usd") or 0),
+            "quote_slip_bps_sell": int(sell_result.get("slippage_actual_bps") or 0),
+            "block_number_sell": int(sell_result.get("block_number") or 0),
         }
         hist = _flush_eval_history(trade["id"])
         if hist:
             update["eval_history"] = hist
 
+        # v14e.32+ instrumentation cols. Strip if migration not yet applied
+        # (defensive — keeps insert working even if DB schema is behind code).
+        _OPTIONAL_COLS = ("paper_sim_pnl_pct", "gas_usd_sell",
+                          "quote_slip_bps_sell", "block_number_sell")
         db_updated = False
         for attempt in range(3):
             try:
@@ -924,8 +976,12 @@ def check_live_trades_eth(client_sb) -> dict:
                 break
             except Exception as e:
                 err_str = str(e)
-                if "paper_sim_pnl_pct" in err_str and "paper_sim_pnl_pct" in update:
-                    update.pop("paper_sim_pnl_pct", None)
+                stripped = False
+                for col in _OPTIONAL_COLS:
+                    if col in err_str and col in update:
+                        update.pop(col, None)
+                        stripped = True
+                if stripped:
                     try:
                         client_sb.table("paper_trades").update(update).eq("id", trade["id"]).execute()
                         db_updated = True

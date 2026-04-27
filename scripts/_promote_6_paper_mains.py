@@ -69,12 +69,16 @@ for s in ALL_NEW:
         print(f"  ADDED            {s}  alloc=1")
 
 # 5. Seed bankrolls per_chain + flat top-level
+# IMPORTANT: schema must match what paper_trader.py / safe_scraper._rt_update_bankroll
+# reads-and-writes — keys are balance/pnl/trades/starting_balance. Earlier versions
+# used current_balance/total_pnl/total_trades which paper_trader IGNORES, causing
+# .get("balance", 500) to default to $500 on first close. See bug fix Apr 27.
 new_br = copy.deepcopy(br)
 seed_entry = lambda: {
     "starting_balance": SEED,
-    "current_balance": SEED,
-    "total_pnl": 0.0,
-    "total_trades": 0,
+    "balance": SEED,
+    "pnl": 0.0,
+    "trades": 0,
 }
 flat = new_br.setdefault("strategy_bankrolls", {})
 per_chain = new_br.setdefault("strategy_bankrolls_per_chain", {})
