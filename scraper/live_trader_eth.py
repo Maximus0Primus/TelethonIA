@@ -47,6 +47,12 @@ DEFAULT_READ_RPC = "https://ethereum-rpc.publicnode.com"
 # Fee tiers to try in order (most liquid first for memecoins)
 FEE_TIERS = [3000, 10000, 500, 100]
 
+# v14e.33: Uniswap V2 fallback. Most ETH memecoins launch on V2 only — without
+# this, _quote_with_best_fee returns None on every KOL call and the bot never
+# buys. V2 router is the canonical UniswapV2Router02; pools are 0.30% fee fixed.
+# Quote via router.getAmountsOut (reverts if no pair) — no factory call needed.
+UNISWAP_V2_ROUTER = "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D"
+
 # ABIs (minimal)
 QUOTER_ABI = [{
     "inputs": [{"components": [
@@ -95,6 +101,41 @@ ROUTER_ABI = [
      "stateMutability": "payable", "type": "function"},
 ]
 
+# v14e.33: Uniswap V2 Router02 ABI (quote + swap functions only).
+# - getAmountsOut: pure quote, reverts if no pair exists for path.
+# - swapExactETHForTokensSupportingFeeOnTransferTokens: BUY path (handles
+#   fee-on-transfer tokens — common in memecoins; the non-FoT variant reverts
+#   on tax tokens).
+# - swapExactTokensForETHSupportingFeeOnTransferTokens: SELL path (mirror).
+V2_ROUTER_ABI = [
+    {"inputs": [
+        {"name": "amountIn", "type": "uint256"},
+        {"name": "path", "type": "address[]"},
+     ], "name": "getAmountsOut",
+     "outputs": [{"name": "amounts", "type": "uint256[]"}],
+     "stateMutability": "view", "type": "function"},
+    {"inputs": [
+        {"name": "amountOutMin", "type": "uint256"},
+        {"name": "path", "type": "address[]"},
+        {"name": "to", "type": "address"},
+        {"name": "deadline", "type": "uint256"},
+     ], "name": "swapExactETHForTokensSupportingFeeOnTransferTokens",
+     "outputs": [], "stateMutability": "payable", "type": "function"},
+    {"inputs": [
+        {"name": "amountIn", "type": "uint256"},
+        {"name": "amountOutMin", "type": "uint256"},
+        {"name": "path", "type": "address[]"},
+        {"name": "to", "type": "address"},
+        {"name": "deadline", "type": "uint256"},
+     ], "name": "swapExactTokensForETHSupportingFeeOnTransferTokens",
+     "outputs": [], "stateMutability": "nonpayable", "type": "function"},
+]
+
+# Uniswap V2 Pair Swap event (different signature than V3):
+# event Swap(address indexed sender, uint amount0In, uint amount1In,
+#            uint amount0Out, uint amount1Out, address indexed to)
+V2_SWAP_EVENT_TOPIC = "0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822"
+
 # Uniswap V3 Pool Swap event signature for receipt log parsing.
 # event Swap(address sender, address recipient, int256 amount0, int256 amount1,
 #            uint160 sqrtPriceX96, uint128 liquidity, int24 tick)
@@ -112,7 +153,15 @@ ERC20_ABI = [
 _w3_read = None
 _w3_write = None
 _account = None
-_approval_cache: set[str] = set()
+# v14e.33: keyed by (token_address.lower(), router_address.lower()) so V3 and
+# V2 approvals are tracked separately — selling on a different DEX than we
+# bought on still triggers an approval if needed.
+_approval_cache: set[tuple[str, str]] = set()
+
+# ERC20 Transfer event topic — used to recover received amount from the
+# target token's Transfer-to-recipient log. Works for V2 (where Swap event
+# decoding requires knowing token0/token1 ordering) and as a backup for V3.
+ERC20_TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 
 
 def _client():
@@ -153,7 +202,7 @@ def _to_checksum(addr: str) -> str:
 
 
 def _quote_with_best_fee(w3, amount_in_wei: int, token_in: str, token_out: str):
-    """Try fee tiers in order, return (amount_out, fee_tier, gas_estimate) or (None, None, None)."""
+    """V3-only quote. Try fee tiers in order, return (amount_out, fee_tier, gas_estimate) or (None, None, None)."""
     quoter = w3.eth.contract(address=_to_checksum(QUOTER_V2), abi=QUOTER_ABI)
     for fee in FEE_TIERS:
         try:
@@ -168,6 +217,52 @@ def _quote_with_best_fee(w3, amount_in_wei: int, token_in: str, token_out: str):
         except Exception:
             continue
     return None, None, None
+
+
+def _quote_v2(w3, amount_in_wei: int, token_in: str, token_out: str):
+    """V2-only quote via UniswapV2Router02.getAmountsOut. Returns amount_out or None.
+
+    getAmountsOut reverts if no pair exists, so the try/except is the
+    pair-existence check (no separate factory.getPair call needed).
+    """
+    router = w3.eth.contract(address=_to_checksum(UNISWAP_V2_ROUTER), abi=V2_ROUTER_ABI)
+    try:
+        amounts = router.functions.getAmountsOut(
+            amount_in_wei,
+            [_to_checksum(token_in), _to_checksum(token_out)],
+        ).call()
+        return amounts[-1] if amounts else None
+    except Exception:
+        return None
+
+
+def _quote_best_route(w3, amount_in_wei: int, token_in: str, token_out: str):
+    """v14e.33: Unified quote across V3 + V2. Picks the route with the highest
+    output (best price for the user).
+
+    Returns (amount_out, route, fee_tier, gas_estimate) where:
+      route = "v3" | "v2"
+      fee_tier = V3 fee tier (3000/10000/500/100) or 3000 for V2 (constant fee)
+      gas_estimate = V3 quoter's gas est, or 200_000 default for V2
+
+    Returns (None, None, None, None) if no liquidity on either DEX.
+    """
+    v3_out, v3_fee, v3_gas = _quote_with_best_fee(w3, amount_in_wei, token_in, token_out)
+    v2_out = _quote_v2(w3, amount_in_wei, token_in, token_out)
+
+    # Both fail
+    if not v3_out and not v2_out:
+        return None, None, None, None
+    # V2 only
+    if not v3_out:
+        return v2_out, "v2", 3000, 200_000
+    # V3 only
+    if not v2_out:
+        return v3_out, "v3", v3_fee, v3_gas
+    # Both — pick higher output (better price). Ties go to V3 (cheaper gas via single-pool).
+    if v2_out > v3_out:
+        return v2_out, "v2", 3000, 200_000
+    return v3_out, "v3", v3_fee, v3_gas
 
 
 def _eth_usd_price(w3) -> float:
@@ -228,38 +323,112 @@ def _parse_swap_output_from_logs(receipt, target_token_addr: str) -> int | None:
     return None
 
 
-def execute_buy(ca: str, amount_usd: float, slippage_bps: int = 300) -> dict:
-    """ETH → memecoin swap via Uniswap V3.
+def _parse_transfer_to_recipient(receipt, token_addr: str, recipient: str) -> int | None:
+    """Sum ERC20 Transfer events of `token_addr` where `to == recipient`.
+
+    Used to recover the exact amount received in a swap regardless of route
+    (V2/V3) and resilient to fee-on-transfer tokens (we get the post-fee
+    amount that actually landed in the wallet). Returns None if no matching
+    Transfer found.
+    """
+    target_token = token_addr.lower()
+    target_to = recipient.lower()
+    total = 0
+    found = False
+    for log in receipt.get("logs", []):
+        addr = (log.get("address") or "").lower()
+        if addr != target_token:
+            continue
+        topics = log.get("topics", [])
+        if not topics or len(topics) < 3:
+            continue
+        topic0 = topics[0]
+        topic_hex = topic0.hex() if hasattr(topic0, "hex") else str(topic0)
+        if not topic_hex.startswith("0x"):
+            topic_hex = "0x" + topic_hex
+        if topic_hex.lower() != ERC20_TRANSFER_TOPIC.lower():
+            continue
+        # topics[2] = `to` (indexed). Last 20 bytes = recipient address.
+        to_topic = topics[2]
+        to_hex = to_topic.hex() if hasattr(to_topic, "hex") else str(to_topic)
+        if not to_hex.startswith("0x"):
+            to_hex = "0x" + to_hex
+        to_addr = "0x" + to_hex[-40:]
+        if to_addr.lower() != target_to:
+            continue
+        data = log.get("data")
+        data_hex = data.hex() if hasattr(data, "hex") else str(data)
+        if data_hex.startswith("0x"):
+            data_hex = data_hex[2:]
+        try:
+            total += int(data_hex, 16)
+            found = True
+        except ValueError:
+            continue
+    return total if found else None
+
+
+def execute_buy(ca: str, amount_usd: float, slippage_bps: int = 300,
+                force_route: str | None = None) -> dict:
+    """ETH → memecoin swap via Uniswap V3 or V2 (whichever quotes higher).
+
+    force_route: None (auto-pick best) | "v3" | "v2". Used by the smoke
+    test harness to force a specific path even when the other one quotes
+    higher; keeps prod auto-routing in execute_sell unchanged.
 
     Returns: {success, tx_hash, execution_price (USD), gas_usd,
               tokens_received (raw), tokens_received_human, slippage_actual_bps,
-              fee_tier_used, exec_ms, block_number, eth_spent_wei, eth_usd}
+              fee_tier_used, route ("v3"|"v2"), exec_ms, block_number,
+              eth_spent_wei, eth_usd}
     """
     w3r, w3w, acct = _client()
     eth_usd = _eth_usd_price(w3r)
     eth_amount = amount_usd / eth_usd
     amount_in_wei = w3r.to_wei(eth_amount, "ether")
 
-    # 1. Quote with auto fee-tier discovery
-    amount_out, fee_tier, gas_est = _quote_with_best_fee(w3r, amount_in_wei, WETH, ca)
+    # 1. Quote — forced or auto.
+    if force_route == "v3":
+        v3_out, v3_fee, v3_gas = _quote_with_best_fee(w3r, amount_in_wei, WETH, ca)
+        amount_out, route, fee_tier, gas_est = (v3_out, "v3", v3_fee, v3_gas) if v3_out else (None, None, None, None)
+    elif force_route == "v2":
+        v2_out = _quote_v2(w3r, amount_in_wei, WETH, ca)
+        amount_out, route, fee_tier, gas_est = (v2_out, "v2", 3000, 200_000) if v2_out else (None, None, None, None)
+    else:
+        amount_out, route, fee_tier, gas_est = _quote_best_route(w3r, amount_in_wei, WETH, ca)
     if amount_out is None:
-        return {"success": False, "error": "no Uniswap V3 pool found across fee tiers"}
+        return {"success": False, "error": f"no Uniswap pool found (route={force_route or 'auto'})"}
 
     min_out = (amount_out * (10000 - slippage_bps)) // 10000
 
-    # 2. Build + sign tx
+    # 2. Build + sign tx — branch by route.
     base_fee = w3r.eth.get_block("latest")["baseFeePerGas"]
     priority = w3r.to_wei(2, "gwei")
     max_fee = base_fee * 2 + priority
-    router = w3r.eth.contract(address=_to_checksum(SWAP_ROUTER_02), abi=ROUTER_ABI)
-    params = (_to_checksum(WETH), _to_checksum(ca), fee_tier, acct.address,
-              amount_in_wei, min_out, 0)
     nonce = w3r.eth.get_transaction_count(acct.address)
-    tx = router.functions.exactInputSingle(params).build_transaction({
-        "from": acct.address, "value": amount_in_wei, "nonce": nonce,
-        "gas": gas_est + 80_000, "maxFeePerGas": max_fee,
-        "maxPriorityFeePerGas": priority, "chainId": 1,
-    })
+    if route == "v3":
+        router = w3r.eth.contract(address=_to_checksum(SWAP_ROUTER_02), abi=ROUTER_ABI)
+        params = (_to_checksum(WETH), _to_checksum(ca), fee_tier, acct.address,
+                  amount_in_wei, min_out, 0)
+        tx = router.functions.exactInputSingle(params).build_transaction({
+            "from": acct.address, "value": amount_in_wei, "nonce": nonce,
+            "gas": gas_est + 80_000, "maxFeePerGas": max_fee,
+            "maxPriorityFeePerGas": priority, "chainId": 1,
+        })
+    else:  # v2
+        # FoT-tolerant variant — non-FoT tokens still work, FoT (tax) tokens
+        # don't revert. Deadline = now + 5 min (matches Uniswap UI default).
+        router = w3r.eth.contract(address=_to_checksum(UNISWAP_V2_ROUTER), abi=V2_ROUTER_ABI)
+        deadline = int(time.time()) + 300
+        tx = router.functions.swapExactETHForTokensSupportingFeeOnTransferTokens(
+            min_out,
+            [_to_checksum(WETH), _to_checksum(ca)],
+            acct.address,
+            deadline,
+        ).build_transaction({
+            "from": acct.address, "value": amount_in_wei, "nonce": nonce,
+            "gas": gas_est + 50_000, "maxFeePerGas": max_fee,
+            "maxPriorityFeePerGas": priority, "chainId": 1,
+        })
 
     erc20 = w3r.eth.contract(address=_to_checksum(ca), abi=ERC20_ABI)
     try:
@@ -279,19 +448,25 @@ def execute_buy(ca: str, amount_usd: float, slippage_bps: int = 300) -> dict:
                 "tx_hash": tx_hash.hex(), "gas_usd": float(gas_paid_eth) * eth_usd,
                 "exec_ms": elapsed_ms}
 
-    # Parse output amount from Swap event logs (authoritative, RPC-lag-immune).
-    # Falls back to balanceOf delta if log parsing fails for any reason.
-    received = _parse_swap_output_from_logs(receipt, ca)
+    # Parse output amount. V3 Swap event is route-deterministic and resolves
+    # output by sign of amount0/amount1; V2 Swap event needs token0/token1
+    # ordering to disambiguate. We use the target token's ERC20 Transfer-to-
+    # recipient log instead — works for BOTH routes and is FoT-aware (returns
+    # post-tax amount that actually landed in the wallet).
+    received = _parse_transfer_to_recipient(receipt, ca, acct.address)
+    if received is None or received <= 0:
+        # V3 fallback path (Swap event decode) — kept as a secondary parser
+        # in case Transfer parsing misses an edge case.
+        received = _parse_swap_output_from_logs(receipt, ca) if route == "v3" else None
     if received is None or received <= 0:
         try:
-            # Sleep briefly to give read RPC time to catch up before fallback.
             time.sleep(2)
             post_bal = erc20.functions.balanceOf(acct.address).call()
             received = max(post_bal, 0)
             logger.warning(
-                "live_trader_eth.execute_buy: Swap event parse failed for %s, "
+                "live_trader_eth.execute_buy: log parse failed for %s (route=%s), "
                 "using balanceOf fallback (received=%d). RPC lag suspected.",
-                ca[:10], received,
+                ca[:10], route, received,
             )
         except Exception:
             received = 0
@@ -313,6 +488,7 @@ def execute_buy(ca: str, amount_usd: float, slippage_bps: int = 300) -> dict:
         "decimals": decimals,
         "slippage_actual_bps": slippage_real_bps,
         "fee_tier_used": fee_tier,
+        "route": route,
         "exec_ms": elapsed_ms,
         "block_number": receipt["blockNumber"],
         "eth_spent_wei": amount_in_wei,
@@ -320,20 +496,27 @@ def execute_buy(ca: str, amount_usd: float, slippage_bps: int = 300) -> dict:
     }
 
 
-def _ensure_approval(w3r, w3w, acct, token_address: str, amount_min: int):
-    """Approve SwapRouter02 if not already done. Idempotent + cached."""
-    if token_address in _approval_cache:
+def _ensure_approval(w3r, w3w, acct, token_address: str, amount_min: int,
+                     router_address: str = SWAP_ROUTER_02):
+    """Approve `router_address` to spend `token_address`. Idempotent + cached.
+
+    v14e.33: router_address parameterized so V2 sells don't reuse the V3
+    approval (different routers, different allowance slots). Cache key is
+    (token, router) so each pairing is tracked independently.
+    """
+    cache_key = (token_address.lower(), router_address.lower())
+    if cache_key in _approval_cache:
         return
     erc20 = w3r.eth.contract(address=_to_checksum(token_address), abi=ERC20_ABI)
-    current = erc20.functions.allowance(acct.address, _to_checksum(SWAP_ROUTER_02)).call()
+    current = erc20.functions.allowance(acct.address, _to_checksum(router_address)).call()
     if current >= amount_min:
-        _approval_cache.add(token_address)
+        _approval_cache.add(cache_key)
         return
     base_fee = w3r.eth.get_block("latest")["baseFeePerGas"]
     priority = w3r.to_wei(2, "gwei")
     nonce = w3r.eth.get_transaction_count(acct.address)
     MAX_UINT = 2**256 - 1
-    tx = erc20.functions.approve(_to_checksum(SWAP_ROUTER_02), MAX_UINT).build_transaction({
+    tx = erc20.functions.approve(_to_checksum(router_address), MAX_UINT).build_transaction({
         "from": acct.address, "nonce": nonce, "gas": 80_000,
         "maxFeePerGas": base_fee * 2 + priority,
         "maxPriorityFeePerGas": priority, "chainId": 1,
@@ -342,27 +525,29 @@ def _ensure_approval(w3r, w3w, acct, token_address: str, amount_min: int):
     tx_hash = w3w.eth.send_raw_transaction(signed.raw_transaction)
     receipt = w3r.eth.wait_for_transaction_receipt(tx_hash, timeout=180)
     if receipt["status"] != 1:
-        raise RuntimeError(f"ERC20 approve failed for {token_address}: {tx_hash.hex()}")
-    _approval_cache.add(token_address)
-    logger.info("live_trader_eth: approved router for %s (tx %s)",
-                token_address, tx_hash.hex())
+        raise RuntimeError(f"ERC20 approve failed for {token_address} -> {router_address}: {tx_hash.hex()}")
+    _approval_cache.add(cache_key)
+    logger.info("live_trader_eth: approved %s for %s (tx %s)",
+                router_address, token_address, tx_hash.hex())
 
 
 def execute_sell(ca: str, amount_tokens: Optional[int] = None,
-                 slippage_bps: int = 500) -> dict:
-    """Memecoin → ETH swap via Uniswap V3 + automatic WETH unwrap.
+                 slippage_bps: int = 500,
+                 force_route: str | None = None) -> dict:
+    """Memecoin → ETH swap via Uniswap V3 or V2 (whichever quotes higher).
 
     amount_tokens=None → sell entire balance. Default slippage 500 bps (5%) on
     sells because dumping shallow-pool tokens moves price more than the entry
     quote suggests.
 
-    Architecture: SwapRouter02.exactInputSingle(token→WETH) outputs WETH ERC20,
-    not native ETH. We bundle (1) swap with recipient=router and (2) unwrapWETH9
-    in a single multicall, so the user receives native ETH on completion. Saves
-    one tx (gas) vs. swap + separate WETH.withdraw.
+    V3 path: SwapRouter02.exactInputSingle outputs WETH ERC20, then we bundle
+      unwrapWETH9 via multicall so the user receives native ETH atomically.
+    V2 path: UniswapV2Router02.swapExactTokensForETHSupportingFeeOnTransferTokens
+      outputs native ETH directly — no unwrap needed, FoT-tolerant.
 
     Returns: {success, tx_hash, eth_received (wei), eth_received_human (eth),
-              eth_received_usd, gas_usd, fee_tier_used, exec_ms, block_number, eth_usd}
+              eth_received_usd, gas_usd, fee_tier_used, route ("v3"|"v2"),
+              exec_ms, block_number, eth_usd, slippage_actual_bps}
     """
     w3r, w3w, acct = _client()
     eth_usd = _eth_usd_price(w3r)
@@ -376,35 +561,57 @@ def execute_sell(ca: str, amount_tokens: Optional[int] = None,
     if amount_tokens == 0:
         return {"success": False, "error": "zero balance to sell"}
 
-    _ensure_approval(w3r, w3w, acct, ca, amount_tokens)
-
-    eth_out, fee_tier_used, gas_est = _quote_with_best_fee(w3r, amount_tokens, ca, WETH)
+    if force_route == "v3":
+        v3_out, v3_fee, v3_gas = _quote_with_best_fee(w3r, amount_tokens, ca, WETH)
+        eth_out, route, fee_tier_used, gas_est = (v3_out, "v3", v3_fee, v3_gas) if v3_out else (None, None, None, None)
+    elif force_route == "v2":
+        v2_out = _quote_v2(w3r, amount_tokens, ca, WETH)
+        eth_out, route, fee_tier_used, gas_est = (v2_out, "v2", 3000, 200_000) if v2_out else (None, None, None, None)
+    else:
+        eth_out, route, fee_tier_used, gas_est = _quote_best_route(w3r, amount_tokens, ca, WETH)
     if eth_out is None:
-        return {"success": False, "error": "no liquidity for sell on any fee tier"}
+        return {"success": False, "error": f"no liquidity for sell (route={force_route or 'auto'})"}
+
+    # Approve only the router we'll actually use.
+    target_router = SWAP_ROUTER_02 if route == "v3" else UNISWAP_V2_ROUTER
+    _ensure_approval(w3r, w3w, acct, ca, amount_tokens, router_address=target_router)
 
     min_out = (eth_out * (10000 - slippage_bps)) // 10000
     base_fee = w3r.eth.get_block("latest")["baseFeePerGas"]
     priority = w3r.to_wei(2, "gwei")
     max_fee = base_fee * 2 + priority
-    router = w3r.eth.contract(address=_to_checksum(SWAP_ROUTER_02), abi=ROUTER_ABI)
-
-    # Step 1: swap with recipient = router itself (so router holds WETH).
-    # Step 2: unwrapWETH9 sweeps router's WETH → ETH and forwards to acct.
-    # Both bundled via multicall — atomic, single gas overhead.
-    swap_params = (_to_checksum(ca), _to_checksum(WETH), fee_tier_used,
-                   _to_checksum(SWAP_ROUTER_02),  # recipient = router (NOT acct)
-                   amount_tokens, min_out, 0)
-    swap_calldata = router.encode_abi("exactInputSingle", args=[swap_params])
-    unwrap_calldata = router.encode_abi(
-        "unwrapWETH9", args=[min_out, acct.address]
-    )
     nonce = w3r.eth.get_transaction_count(acct.address)
-    tx = router.functions.multicall([swap_calldata, unwrap_calldata]).build_transaction({
-        "from": acct.address, "value": 0, "nonce": nonce,
-        # Multicall adds ~30k gas for the second call (unwrapWETH9 ~50k itself).
-        "gas": gas_est + 130_000, "maxFeePerGas": max_fee,
-        "maxPriorityFeePerGas": priority, "chainId": 1,
-    })
+
+    if route == "v3":
+        router = w3r.eth.contract(address=_to_checksum(SWAP_ROUTER_02), abi=ROUTER_ABI)
+        # Step 1: swap with recipient = router (router holds WETH).
+        # Step 2: unwrapWETH9 sweeps WETH → native ETH to acct. Atomic via multicall.
+        swap_params = (_to_checksum(ca), _to_checksum(WETH), fee_tier_used,
+                       _to_checksum(SWAP_ROUTER_02),
+                       amount_tokens, min_out, 0)
+        swap_calldata = router.encode_abi("exactInputSingle", args=[swap_params])
+        unwrap_calldata = router.encode_abi(
+            "unwrapWETH9", args=[min_out, acct.address]
+        )
+        tx = router.functions.multicall([swap_calldata, unwrap_calldata]).build_transaction({
+            "from": acct.address, "value": 0, "nonce": nonce,
+            "gas": gas_est + 130_000, "maxFeePerGas": max_fee,
+            "maxPriorityFeePerGas": priority, "chainId": 1,
+        })
+    else:  # v2
+        router = w3r.eth.contract(address=_to_checksum(UNISWAP_V2_ROUTER), abi=V2_ROUTER_ABI)
+        deadline = int(time.time()) + 300
+        tx = router.functions.swapExactTokensForETHSupportingFeeOnTransferTokens(
+            amount_tokens,
+            min_out,
+            [_to_checksum(ca), _to_checksum(WETH)],
+            acct.address,
+            deadline,
+        ).build_transaction({
+            "from": acct.address, "value": 0, "nonce": nonce,
+            "gas": gas_est + 80_000, "maxFeePerGas": max_fee,
+            "maxPriorityFeePerGas": priority, "chainId": 1,
+        })
 
     t0 = time.time()
     signed = acct.sign_transaction(tx)
@@ -416,28 +623,43 @@ def execute_sell(ca: str, amount_tokens: Optional[int] = None,
         return {"success": False, "error": "sell tx reverted",
                 "tx_hash": tx_hash.hex(), "exec_ms": elapsed_ms}
 
-    # Authoritative output amount from Swap event log (RPC-lag-immune).
-    # The Swap event records pool's amount0/amount1 — the WETH side is what
-    # the router received before unwrapping. Both unwrap and forward preserve
-    # the same amount, modulo the 0-value rounding.
-    eth_received_wei = _parse_swap_output_from_logs(receipt, WETH)
+    # Authoritative output amount from receipt logs (RPC-lag-immune).
+    # V3: V3 Swap event records pool's amount0/amount1 — the WETH side is what
+    #     the router received before unwrapping. Multicall preserves the
+    #     amount through unwrapWETH9, so this also equals what acct received.
+    # V2: V2 Swap topic differs and amount0/amount1 mapping needs token0
+    #     ordering. Easier: sum WETH Transfer events from pair → router; that
+    #     amount equals what router unwraps and forwards to acct.
+    if route == "v3":
+        eth_received_wei = _parse_swap_output_from_logs(receipt, WETH)
+    else:
+        eth_received_wei = _parse_transfer_to_recipient(receipt, WETH, UNISWAP_V2_ROUTER)
     if eth_received_wei is None or eth_received_wei <= 0:
-        # Fallback: derive from get_balance delta after a brief sleep for RPC sync.
+        # Fallback: native ETH balance delta. Requires archive RPC for the
+        # historical balance read at block N-1; publicnode supports this.
         time.sleep(2)
-        post_eth = w3r.eth.get_balance(acct.address)
-        gas_paid = receipt["gasUsed"] * receipt["effectiveGasPrice"]
-        eth_received_wei = max(post_eth + gas_paid - w3r.eth.get_balance(acct.address, receipt["blockNumber"] - 1), 0)
-        logger.warning(
-            "live_trader_eth.execute_sell: Swap log parse failed for %s, "
-            "using balance delta fallback (received=%d wei).",
-            ca[:10], eth_received_wei,
-        )
+        try:
+            post_eth = w3r.eth.get_balance(acct.address)
+            gas_paid = receipt["gasUsed"] * receipt["effectiveGasPrice"]
+            eth_received_wei = max(
+                post_eth + gas_paid - w3r.eth.get_balance(acct.address, receipt["blockNumber"] - 1),
+                0,
+            )
+            logger.warning(
+                "live_trader_eth.execute_sell: log parse failed for %s (route=%s), "
+                "using balance delta fallback (received=%d wei).",
+                ca[:10], route, eth_received_wei,
+            )
+        except Exception as _e:
+            logger.error(
+                "live_trader_eth.execute_sell: balance fallback also failed for %s (route=%s): %s",
+                ca[:10], route, _e,
+            )
+            eth_received_wei = 0
 
     eth_received_human = eth_received_wei / 1e18 if eth_received_wei else 0.0
     eth_received_usd = eth_received_human * eth_usd
     gas_paid_wei = receipt["gasUsed"] * receipt["effectiveGasPrice"]
-    # Quote-vs-fill slippage on sell — different from DexScreener-vs-fill;
-    # measures router-side price impact specifically.
     slippage_real_bps = int((1 - eth_received_wei / eth_out) * 10000) if eth_out else 0
 
     return {
@@ -448,6 +670,7 @@ def execute_sell(ca: str, amount_tokens: Optional[int] = None,
         "eth_received_usd": eth_received_usd,
         "gas_usd": float(w3r.from_wei(gas_paid_wei, "ether")) * eth_usd,
         "fee_tier_used": fee_tier_used,
+        "route": route,
         "exec_ms": elapsed_ms,
         "block_number": receipt["blockNumber"],
         "eth_usd": eth_usd,
@@ -692,8 +915,9 @@ def open_live_trade(client_sb, token_entry: dict, strategy: str,
     try:
         client_sb.table("paper_trades").insert(row).execute()
         logger.info(
-            "ETH LIVE OPENED: %s %s @ $%.10f | %.6f ETH ($%.2f) | tx: %s | gas $%.2f",
+            "ETH LIVE OPENED: %s %s @ $%.10f | %.6f ETH ($%.2f) | route=%s | tx: %s | gas $%.2f",
             symbol, strategy, execution_price, eth_spent, position_usd,
+            result.get("route") or "?",
             result["tx_hash"][:14], result.get("gas_usd") or 0,
         )
     except Exception as e:
@@ -1045,9 +1269,10 @@ def check_live_trades_eth(client_sb) -> dict:
             result_counts[status_key] += 1
 
         logger.info(
-            "ETH LIVE CLOSED: %s %s @ $%.10f | %.6f ETH ($%.2f) | pnl=%+.2f%% (gas=$%.2f)",
+            "ETH LIVE CLOSED: %s %s @ $%.10f | %.6f ETH ($%.2f) | route=%s | pnl=%+.2f%% (gas=$%.2f)",
             trade["symbol"], new_status, actual_exit_price, eth_received,
-            usd_received, pnl_pct * 100, sell_result.get("gas_usd") or 0,
+            usd_received, sell_result.get("route") or "?",
+            pnl_pct * 100, sell_result.get("gas_usd") or 0,
         )
 
     return result_counts

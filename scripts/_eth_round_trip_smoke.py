@@ -102,6 +102,8 @@ def main():
                     help="Seconds to hold between BUY and SELL (default 15)")
     ap.add_argument("--buy-slip-bps", type=int, default=300)
     ap.add_argument("--sell-slip-bps", type=int, default=500)
+    ap.add_argument("--force-route", choices=("v3", "v2"), default=None,
+                    help="Force buy+sell route. Default: auto (whichever quotes higher).")
     args = ap.parse_args()
 
     # Import the prod modules (the whole point of this test)
@@ -135,6 +137,7 @@ def main():
     print(f"Token:     {args.token}")
     print(f"Amount:    {args.eth_amount} ETH = ${amount_usd:.2f} (ETH @ ${eth_usd_initial:.2f})")
     print(f"Hold:      {args.hold_seconds}s")
+    print(f"Route:     {args.force_route or 'auto (best quote)'}")
     print()
 
     # ─── PRE-BUY snapshot ──
@@ -154,7 +157,8 @@ def main():
     print()
     print(f"[BUY] submitting Uniswap V3 swap via Flashbots Protect...")
     t_buy_start = time.time()
-    buy_result = execute_buy(args.token, amount_usd, slippage_bps=args.buy_slip_bps)
+    buy_result = execute_buy(args.token, amount_usd, slippage_bps=args.buy_slip_bps,
+                              force_route=args.force_route)
     t_buy_end = time.time()
     record["buy_call_elapsed_seconds"] = t_buy_end - t_buy_start
     record["buy_result"] = dict(buy_result)
@@ -206,7 +210,8 @@ def main():
     print()
     print(f"[SELL] submitting Uniswap V3 sell via Flashbots Protect...")
     t_sell_start = time.time()
-    sell_result = execute_sell(args.token, amount_tokens=None, slippage_bps=args.sell_slip_bps)
+    sell_result = execute_sell(args.token, amount_tokens=None, slippage_bps=args.sell_slip_bps,
+                                force_route=args.force_route)
     t_sell_end = time.time()
     record["sell_call_elapsed_seconds"] = t_sell_end - t_sell_start
     record["sell_result"] = dict(sell_result)
