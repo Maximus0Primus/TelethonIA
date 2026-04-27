@@ -1,4 +1,4 @@
-# Pipeline Status — Updated Apr 27, 2026 PM (v14e.32 deployed)
+# Pipeline Status — Updated Apr 27, 2026 evening (v14e.34 deployed)
 
 État courant : **ETH live Phase 1 microtest ACTIF** depuis 13:18 UTC. Live SOL = BE25_TP80_SL30 + BOND_FAST_TP50_SL20_T20. Live ETH = `eth_live_enabled=True`, 1 strat (`ETH_TP80_SL40_T2H`), pos $20, max 1 open.
 
@@ -12,13 +12,14 @@ L'historique des décisions se lit dans le git log — ce TODO ne garde que ce q
 
 Goal : mesurer **slippage empirique sur tokens KOL ETH** (le smoke test Apr 26 sur PEPE n'est pas représentatif). Position $20 max, max 1 open. **Stop quand 10 trades fermés** ou si drift > -7pp.
 
-- [ ] **E1.** Surveiller premier trade live ETH : `journalctl -u kol-scraper -f | grep "ETH LIVE"`. Vérifier que les 6 nouvelles colonnes (`gas_usd_buy`, `quote_slip_bps_buy`, etc.) se peuplent bien.
+- [x] **E1.** Premier trade live ETH ouvert : **$ALIENPEPE** (Apr 27 20:12 UTC, route=v2, gas $1.35, quote_slip 0bps, ds_slip 98bps). Encore open, TP=$0.000339 / SL=$0.000113. v14e.33 = Uniswap V2 fallback validé en condition réelle.
 - [ ] **E2.** Après 5-10 trades fermés (ETA 1-3 jours selon volume KOL ETH) : `python scripts/_eth_microtest_recap.py`. Verdict :
   - drift médian > -3pp → Phase 2 ($50/trade, 2 strats)
   - drift -3 à -7pp → continuer collecte
   - drift < -7pp → abort + recalibrer `ETH_BUY_SLIPPAGE_BPS` empiriquement
 - [ ] **E3.** Top up wallet : actuel $43 → $80-100 (≈ 0.035 ETH supplémentaires) pour avoir buffer. Adresse : `0xC5c92E3AC207f686D09686Fe1dE79a302D9410E9`.
 - [ ] **E4.** **Rotation clé wallet ETH** — la clé est compromise (transcript persistant). À faire AVANT scaling Phase 2.
+- [ ] **E5.** **Race condition ETH dispatch** : 2 KOL calls simultanés à 20:12 ont submit 2 txs avec même nonce → 1 mined ($ALIENPEPE), 1 timeout 180s (orpheline, jamais minée, $0 perdu). Le check `open_count < eth_max_open_positions` est TOCTOU. Fix : `threading.Lock` autour de `live_trader_eth.open_live_trade` (~5 lignes) OU lire le nonce avec `pending=True`. Pas urgent, eth_max_open=1 borne le risque.
 
 ---
 
@@ -36,6 +37,23 @@ Pas de code à écrire, juste laisser la data grossir. ETA verdicts paired-test 
 ### Mega sweep auto (cron 48h)
 - [ ] **W6.** SOL : prochain run cron 02:00 UTC.
 - [ ] **W7.** ETH : prochain run 22:00 UTC avec chain-aware position $50.
+
+---
+
+## 🚨 À VALIDER — RT lag fix v14e.34
+
+Apr 27 20:12 UTC : burst de 5 KOL calls détectés avec `msg→detect` 700-1050s (14-17 min de retard). Cause : `run_one_cycle` exécutait `process_and_push`, `refresh_top_tokens`, `check_paper_trades`, etc. en **sync** sur l'event loop asyncio → telethon RT bloqué pendant 27 min, drain en burst à fin de cycle.
+
+Fix v14e.34 : tous les blocs lourds wrappés en `await asyncio.to_thread(...)` (mirror du pattern unified_check_loop).
+
+- [ ] **R1.** Vérifier sur le prochain cycle batch (ETA Apr 27 ~21:00 UTC) que `msg→detect` reste < 30s même pendant que le batch tourne. `journalctl -u kol-scraper --since '1h ago' | grep "msg.detect"`.
+- [ ] **R2.** Si lag persiste : profiler `process_and_push` ou `check_paper_trades` pour trouver le bloc qui mange 1000s+ (probablement enrichment loop ou close-loop sur 1000+ trades).
+
+---
+
+## ✅ FIXÉ Apr 27 evening (v14e.34)
+
+- ✅ **Reconcile chain bug** : `live_trader.reconcile_positions` interrogeait le wallet Solana sur TOUS les `rt_live` open trades, y compris ETH → ETH live position fermée à tort en `pnl=0` à chaque restart. Fix : filtre `chain=solana`. $ALIENPEPE restauré en `open` via `_eth_unreconcile_alienpepe.py`.
 
 ---
 
