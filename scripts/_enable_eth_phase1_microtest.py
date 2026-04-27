@@ -37,10 +37,11 @@ sb = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_ROLE
 DESIRED = {
     "eth_live_enabled": True,
     "eth_allocations": {"ETH_TP80_SL40_T2H": 1.0},
-    "eth_max_position_usd": 25,    # safer — paper sim assumes $50 min so paired-test
-                                    # has a constant cost-drag bias of ~+8pp on live;
-                                    # live slippage measurements are lower bound vs
-                                    # a scaled-up Phase 2.
+    "eth_max_position_usd": 20,    # ultra-safe microtest — wallet $43, gives
+                                    # 2 trades buffer + gas room. Paper sim min
+                                    # is $50 so cost-drag bias ~+12pp on live;
+                                    # slippage observed here is a LOWER BOUND
+                                    # (less price impact than $50 in same pool).
     "eth_max_open_positions": 1,
     "eth_buy_slippage_bps": 500,
     "eth_sell_slippage_bps": 600,

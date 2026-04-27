@@ -1,10 +1,24 @@
-# Pipeline Status — Updated Apr 26, 2026 PM (v14e.31 deployed)
+# Pipeline Status — Updated Apr 27, 2026 PM (v14e.32 deployed)
 
-État courant : ETH live infra complète + recalibrée + cohérence sim/paper/live à $50. **484 strats** dont 25 LOCK, 19 AGE clones, 26 winners-cluster. MaestrosDegen retiré (1142 paper trades + 481 ticks effacés). Live SOL = BE25_TP80_SL30 + BOND_FAST_TP50_SL20_T20. Live ETH = câblé mais `eth_live_enabled=False`.
+État courant : **ETH live Phase 1 microtest ACTIF** depuis 13:18 UTC. Live SOL = BE25_TP80_SL30 + BOND_FAST_TP50_SL20_T20. Live ETH = `eth_live_enabled=True`, 1 strat (`ETH_TP80_SL40_T2H`), pos $20, max 1 open.
 
-Dernière session ajouts : 85 nouveaux shadows en 4 vagues (LOCK base + LOCK extended + gap-fill + winner cluster). Mega-sweep position $10→$50 chain-aware. Alerter "slip" label corrigé en "missed peak".
+Bankroll global $53,409 / starting $29,000 (post Apr 27 paper-promote +6 strats à $1000 chacun, fix bankroll bug schema).
 
 L'historique des décisions se lit dans le git log — ce TODO ne garde que ce qui est encore à faire.
+
+---
+
+## 🎯 EN COURS — ETH Phase 1 microtest
+
+Goal : mesurer **slippage empirique sur tokens KOL ETH** (le smoke test Apr 26 sur PEPE n'est pas représentatif). Position $20 max, max 1 open. **Stop quand 10 trades fermés** ou si drift > -7pp.
+
+- [ ] **E1.** Surveiller premier trade live ETH : `journalctl -u kol-scraper -f | grep "ETH LIVE"`. Vérifier que les 6 nouvelles colonnes (`gas_usd_buy`, `quote_slip_bps_buy`, etc.) se peuplent bien.
+- [ ] **E2.** Après 5-10 trades fermés (ETA 1-3 jours selon volume KOL ETH) : `python scripts/_eth_microtest_recap.py`. Verdict :
+  - drift médian > -3pp → Phase 2 ($50/trade, 2 strats)
+  - drift -3 à -7pp → continuer collecte
+  - drift < -7pp → abort + recalibrer `ETH_BUY_SLIPPAGE_BPS` empiriquement
+- [ ] **E3.** Top up wallet : actuel $43 → $80-100 (≈ 0.035 ETH supplémentaires) pour avoir buffer. Adresse : `0xC5c92E3AC207f686D09686Fe1dE79a302D9410E9`.
+- [ ] **E4.** **Rotation clé wallet ETH** — la clé est compromise (transcript persistant). À faire AVANT scaling Phase 2.
 
 ---
 
@@ -13,39 +27,26 @@ L'historique des décisions se lit dans le git log — ce TODO ne garde que ce q
 Pas de code à écrire, juste laisser la data grossir. ETA verdicts paired-test : **Mai 03-10**.
 
 ### À N≥30 par strat
-- [ ] **W1.** Paired-test `SCALP_TP15_SL20_S35` vs base `SCALP_TP15_SL20`. Si score gate ajoute >+2pp → promouvoir 1-2 SCALP en paper main + Telegram.
+- [ ] **W1.** Paired-test `SCALP_TP15_SL20_S35` vs base `SCALP_TP15_SL20`.
 - [ ] **W2.** Paired-test des AGE clones SOL vs leur parent (AGE24/48_BE25 vs BE25, etc.).
-- [ ] **W3.** Paired-test des AGE clones ETH (4 existants + 8 nouveaux v14e.31). Confirmer si ETH AGE12-band winner (mega-sweep Run 1 = +34% avg N=30) tient sur N élargi.
+- [ ] **W3.** Paired-test des AGE clones ETH (4 existants + 8 nouveaux v14e.31).
 - [ ] **W4.** Paired-test **LOCK family** vs BE base : LOCK10 SOL = +1.88pp / LOCK10 ETH = +2.85pp en backtest tick-replay. Confirmer en paper N≥30.
-- [ ] **W5.** Validation **ETH winner cluster** (26 strats v14e.31) : quel SL/TP/score gate exact donne le meilleur ratio dans la zone du winner FAST_TP100_SL20 × AGE12.
+- [ ] **W5.** Validation **ETH winner cluster** (26 strats v14e.31).
 
 ### Mega sweep auto (cron 48h)
-- [ ] **W6.** **SOL** : prochain run cron 02:00 UTC. Position fixée à $10 SOL (Jupiter Ultra near-zero slip = position-indép, donc OK).
-- [ ] **W7.** **ETH** : prochain run 22:00 UTC avec **chain-aware position $50** (commit `29f1870`). Premier ranking propre avec slip kernel matching paper/live.
+- [ ] **W6.** SOL : prochain run cron 02:00 UTC.
+- [ ] **W7.** ETH : prochain run 22:00 UTC avec chain-aware position $50.
 
 ---
 
-## 🚧 PHASE A ETH live — INFRA COMPLÈTE, attente data paper
+## 🚨 INVESTIGATION DRIFT BE25 (à surveiller)
 
-État : tout câblé, gated `eth_live_enabled=False`. Paper actif depuis Apr 26 13:00 UTC sur 2 strats × $50/trade × $1000 bankroll.
+Apr 27 investigation : aggregate drift Apr 26-27 = -16.88pp paraissait alarmant mais le **paired-test correct** donne -7.46pp (vs -4.59pp Apr 22-25). Δ réel = -2.87pp, dans le bruit pour N=28.
 
-**Premières TP HITs Apr 26 17:56 UTC sur `$WIDE`** :
-- `ETH_FAST_TP100_SL20` : +92% net (TP gross +100% − 4% slip = +96% computed, peak max +121%) → **$+46/trade** — match v14e.28 calibration parfaitement
-- `ETH_TP80_SL40_T2H` : +72.8% net → **$+36.40/trade** — idem
-
-→ **La calibration v14e.28 est validée empiriquement par les premiers TP HITs paper ETH.**
-
-### Étapes restantes pour activer ETH live
-- [ ] **A1.** Refunder le wallet : actuel $43.52 → ~$300 (4-5 positions $50 simultanées + buffer gas). **Rotation clé en même temps** (la clé du wallet est compromise via le transcript de session Apr 26).
-- [ ] **A2.** Attendre que les 2 ETH paper mains atteignent N≥30 (~Mai 03-06) avec cum_pnl positif sur 7j.
-- [ ] **A3.** Configurer `live_trading.eth_allocations` en DB : `{"ETH_TP80_SL40_T2H": 0.5, "ETH_FAST_TP100_SL20": 0.5}`.
-- [ ] **A4.** Per-chain KOL blacklist : prérequis = T5 ci-dessous.
-- [ ] **A5.** Flipper `live_trading.eth_live_enabled=True`.
-- [ ] **A6.** Surveillance 24-72h : cohérence paper↔live drift, gas réel, slippage, Flashbots latency.
-
-### Wallet état
-- Balance : 0.01867 ETH = $43.52 | Adresse : `0xC5c92E3AC207f686D09686Fe1dE79a302D9410E9`
-- **Sécurité** : clé privée compromise (transcript persistant). À rotater AVANT activation live.
+- [x] Paired-test analysis fait (`_paired_drift.py`)
+- [x] Mad_apes blacklist appliquée puis annulée (paired drift -1.17pp sur N=4 = noise, pas un signal)
+- [ ] **D1.** Re-runner `_paired_drift.py` chaque 48h sur BE25 — surveiller si drift médian descend < -5pp avec N>50 (alors investigation cause exec).
+- [ ] **D2.** Si drift persistant : recalibrer `BUY_SLIPPAGE_BPS` SOL via `_calibrate_buy_slip.py` (pas touché depuis 225bps Apr 25).
 
 ---
 
@@ -56,63 +57,60 @@ Pas de code à écrire, juste laisser la data grossir. ETA verdicts paired-test 
 - [ ] **T1.** Câbler `_calibrate_sell_slip.py` dans `mega-sweep-48h.yml` post-sweep.
 - [ ] **T2.** Re-run sell slip drift quand N≥200 twin pairs (~Mai 03-05).
 - [ ] **T3.** Re-run `_eth_round_trip_smoke.py --execute` mensuellement OU si base_fee ETH > 5 gwei. Bumper `ETH_GAS_COST_USD_PER_SIDE` ~3× si gas/side > $4.
+- [ ] **T4.** Câbler `eth_daily_loss_limit_usd` dans le ETH dispatch (pas enforced actuellement, pour Phase 1 le `eth_max_open_positions=1` borne le risque).
 
 ### KOL blacklist multi-chain
-- [ ] **T5.** Convertir `live_trading.kol_blacklist` en struct chain-aware (actuellement liste plate vide). Permettre exclusion ETH-only (5 destroyers ETH) + SOL (5 destroyers SOL) sans cross-pollution. Prérequis pour A4.
+- [ ] **T5.** Convertir `live_trading.kol_blacklist` en struct chain-aware. Permettre exclusion ETH-only vs SOL-only sans cross-pollution. Note : les "destroyers" identifiés Apr 26 doivent être re-vérifiés en paired-test (l'aggregate de cette époque était biaisé).
 
 ### Dead-day filter (priorité basse, exploratoire)
-- [ ] **T6.** Brancher `_compute_day_regime` (sim.py) dans pipeline RT : flagger `regime=dead` côté safe_scraper.
+- [ ] **T6.** Brancher `_compute_day_regime` (sim.py) dans pipeline RT.
 - [ ] **T7.** Tester en shadow avec set `DEADGATE_*`.
 
 ### Idées de nouvelles mécaniques (à coder si bandwidth)
 - [ ] **T8.** **DELAY entry** (DELAY30/60) — attendre 30s après KOL call, vérifier prix tient avant d'acheter. Filtre les instant-rugs. ~30 lignes.
 - [ ] **T9.** **CIRCUIT BREAKER** (CRASH5_30S) — exit si -5% en 30s. Rug-pull early-exit. ~50 lignes.
-- [ ] **T10.** **VOLUME drop exit** — exit si rolling 1min volume < seuil. Data déjà capturée dans price_ticks. ~80 lignes.
-- [ ] **T11.** **LIQ-pull exit** — exit si liquidity_usd drop >15%. Dev-pull detection. Data dans price_ticks.
-- [ ] **T12.** **MULTI-KOL confirmation** — open seulement si 2+ KOLs callent dans X min. Conviction filter.
-- [ ] **T13.** **TIME-based BE** activement utilisé : déjà supporté via `time_be_minute` dans tranche config mais 0 strat l'utilise. Créer 5-10 shadows TIMEBE5_LOCK10/etc.
+- [ ] **T10.** **VOLUME drop exit** — exit si rolling 1min volume < seuil. ~80 lignes.
+- [ ] **T11.** **LIQ-pull exit** — exit si liquidity_usd drop >15%. Dev-pull detection.
+- [ ] **T12.** **MULTI-KOL confirmation** — open seulement si 2+ KOLs callent dans X min.
+- [ ] **T13.** **TIME-based BE** : déjà supporté via `time_be_minute` mais 0 strat l'utilise. Créer 5-10 shadows TIMEBE5_LOCK10/etc.
 
 ---
 
 ## 📌 RAPPELS PERSISTANTS
 
-### KOL routing
-- **KOL whitelist** : DISABLED. **Per-chain destroyers** identifiés (à blacklist quand T5 fait) :
-  - SOL : `jadendegens, CarnagecallsGambles, ChairmanDN1, bounty_journal, papicall` (papicall N=507 sum -$3984 sur 4j)
-  - ETH : `marcellsfightclub, maythousdegens, batmansafucalls, neocallss, animegems` (WR=0%)
-  - **Caveat** : `DegenSeals`, `explorer_gems` saignent SOL mais winners ETH → routing per-chain obligatoire.
-  - **MaestrosDegen** : entièrement retiré du scraping Apr 26 (1142 paper trades + 481 ticks wipés). 5 tokens uniques à lui seul.
+### Méthode statistique
+- **TOUJOURS paired-test** sur tokens intersection paper×live, JAMAIS aggregate avg quand sample sizes diffèrent. Cf. Apr 27 leçon : aggregate -16.88pp = artefact du selection bias, paired -7.46pp = vrai signal.
+- N≥30 par strat avant verdict, N≥10 par KOL avant blacklist.
 
-### KOL winners (paper/live profitables)
-- ETH : `mad_apes_gambles` (N=25, WR 92%, +67%), `luca_apes` (N=63, WR 75%, +25%), `bat_gamble` (N=26, WR 50%, +14% — chain-restricted ETH only)
-- SOL : `mad_apes_gambles` (N=1571, WR 72%, +11%)
+### KOL routing
+- KOL whitelist : DISABLED.
+- Per-chain destroyers : à re-verifier en paired-test (les listes Apr 24-26 sont basées sur aggregate biaisé). Prerequisite T5.
+- **MaestrosDegen** : retiré du scraping Apr 26 (1142 paper trades + 481 ticks wipés).
 
 ### Bankroll
-- Current : $48,125 / starting $23,000 (post-MaestrosDegen refund +$26,918). Peak $48,125. SOL live = $20.
+- Current : $53,409 / starting $29,000 (Apr 27 = +6 promoted strats à $1000).
+- SOL live position size : ~$1.70/trade (0.01 SOL × $170/SOL).
+- ETH live position size (Phase 1) : **$20/trade**, max 1 open simultanée.
 
-### Calibration ETH (v14e.28)
-- Gas $1.50/side | Slip 100 bps base | Min position $50
-- Empirique du 26 avril (base_fee ETH 0.5-1.5 gwei, calme post-Pectra). Rerun smoke si base_fee > 5 gwei.
+### Calibration ETH
+- v14e.28 : Gas $1.50/side, Slip 100 bps base, Min position paper $50. Empirique 26 avril (ETH base_fee 0.5-1.5 gwei). Rerun smoke si base_fee > 5 gwei.
+- Phase 1 microtest = collecte empirique slippage sur tokens KOL réels (≠ PEPE). Verdict E2 ci-dessus.
 
 ### Cohérence sim/paper/live ETH (v14e.31)
-- Tous layers ETH à **position $50** + slip kernel `_evm_slip_bps_with_gas` + logic `_evaluate_trade_exit`.
-- Mega-sweep ETH désormais chain-aware ($50, pas $10) → ranking valide ET valeurs absolues réalistes.
-
-### SELL slip model SOL
-- v144 calibration (`_dynamic_sell_slip_factor` avec type_bps + GLOBAL_OFFSET=−100) valide. Ne PAS toucher sans `_calibrate_sell_slip.py` empirique d'abord.
+- Tous layers à position $50 + slip kernel `_evm_slip_bps_with_gas`. Live Phase 1 à $20 = écart cost-drag connu (+12pp), à corriger lors de scale-up.
 
 ### Mega-sweep
-- Triple gate FDR<alpha opt-in via `--require-fdr` (default OFF).
 - ETH workflow `mega-sweep-eth-48h.yml` cron 22:00 UTC tous les 2 jours.
 - SOL workflow `mega-sweep-48h.yml` cron 02:00 UTC tous les 2 jours.
+- Triple gate FDR<alpha opt-in via `--require-fdr` (default OFF).
 
-### Strats deck (484 total — repartition)
+### Strats deck (484 total)
 | Family | SOL | ETH |
 |--------|-----|-----|
 | BE | 33 | 9 |
-| **LOCK** (v14e.29-31) | 33 | 20 |
+| LOCK | 33 | 20 |
 | FAST | 73 | 18 |
 | SLOW | 13 | 5 |
 | SCALP | 36 | 17 |
-| Other (TP_only/TRAIL/DIP/etc.) | 199 | 10 |
-| AGE clones (×N) | 38 | 18 |
+| Other | 199 | 10 |
+| AGE clones | 38 | 18 |
