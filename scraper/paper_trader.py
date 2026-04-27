@@ -1099,6 +1099,16 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
     sell_slip_bps = SELL_SLIPPAGE_BPS
     buy_fee_bps = BUY_FEE_BPS
 
+    # v14e.37: per-chain KOL blacklist gate. Format in JSONB:
+    #   paper_trade_config.kol_chain_blacklist = {"solana": [...], "ethereum": [...]}
+    # Skips MAIN row creation only — shadows + telemetry (snapshots, ticks,
+    # mentions, kol_call_outcomes) keep flowing so we can re-evaluate later.
+    _kcbl_raw = config.get("kol_chain_blacklist", {}) or {}
+    _kol_chain_bl = {
+        ch: set(map(str, names)) for ch, names in _kcbl_raw.items()
+        if isinstance(names, (list, tuple, set))
+    }
+
     # v130: Quote Ultra at live's actual position size so paper's entry_price
     # reflects the exact route/fill live will execute against. One quote per
     # token per cycle (caller loop iterates tokens once), shared across all
@@ -1337,6 +1347,18 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
             val = token.get(src_key)
             if val is not None:
                 base_row[db_col] = val
+
+        # v14e.37: skip MAIN row creation for blacklisted (kol, chain). Shadows
+        # still run (separate loop below). RT live is gated separately in
+        # safe_scraper using the same JSONB list.
+        _row_kol = base_row.get("kol_group")
+        _row_chain = base_row.get("chain") or "solana"
+        if _row_kol and _row_chain in _kol_chain_bl and _row_kol in _kol_chain_bl[_row_chain]:
+            logger.info(
+                "paper_trader: SKIP MAIN (kol blacklist v14e.37): %s/%s on %s",
+                _row_kol, token.get("symbol", "???"), _row_chain,
+            )
+            continue  # outer token loop — shadow loop below still runs
 
         for strat_name in active_strategies:
             if not _passes_strategy_filter(token, strat_name):

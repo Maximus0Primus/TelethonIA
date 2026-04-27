@@ -1591,11 +1591,22 @@ def _rt_open_trades(ca: str, symbol: str, price: float, mcap: float,
         # execute paper + shadow normally but never open live trades. Used
         # to test unproven KOLs (spammers, re-added blacklisted ones) without
         # putting capital at risk while N<30 paper sample builds.
+        # v14e.37: also honor paper_trade_config.kol_chain_blacklist per-chain
+        # (statistical reliable_blacklist, shared with paper main gate).
         live_kol_blacklist = set(live_cfg.get("kol_blacklist", []))
-        if kol_username in live_kol_blacklist:
+        try:
+            from paper_trader import _load_paper_trade_config
+            _ptc = _load_paper_trade_config(_get_supabase()) or {}
+            _chain_bl_raw = _ptc.get("kol_chain_blacklist", {}) or {}
+            _chain_bl = set(_chain_bl_raw.get(token_chain, []) or [])
+        except Exception:
+            _chain_bl = set()
+        _is_chain_banned = kol_username in _chain_bl
+        if kol_username in live_kol_blacklist or _is_chain_banned:
+            _reason = "v14e.37 chain blacklist" if _is_chain_banned else "v14e.14 flat blacklist"
             logger.info(
-                "RT LIVE SKIP (kol blacklist v14e.14): %s — paper/shadow only",
-                kol_username,
+                "RT LIVE SKIP (%s): %s on %s — paper/shadow telemetry only",
+                _reason, kol_username, token_chain,
             )
         elif live_cfg.get("enabled", False) and token_chain == "solana":
             try:

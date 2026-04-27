@@ -85,11 +85,35 @@ BASE_MIN_POSITION_USD = 50
 
 # ---------------------------------------------------------------------------
 # Default deprecated strategies — overridable via scoring_config JSONB
-# ---------------------------------------------------------------------------
+# v14e.36: trail/dip/split families dropped to deprecated set so they stop
+# polluting shadow analytics. Per dtrail_shadow_artifact_apr20 audit, sim
+# over-estimates these by 47x (paper models 200 bps sell slip; live actual
+# 9429 bps from multi-step sells), and the position_reconciler closes 50-65%
+# of these trades before the trail can fire. They cannot be promoted to
+# live, and their "winning" $/day in shadow polluted every sweep ranking
+# (top robust on Apr 27 10h: top 17 = all DTRAIL20_*).
+# Specific trail/dip/split names are appended below the family loops.
 _DEFAULT_DEPRECATED = {
     "MOONBAG", "WIDE_RUNNER", "SCALE_OUT", "TP100_SL30",
     "QUICK_SCALP", "TP30_SL10", "TP50_SL15", "TP30_SL30",
 }
+
+
+def _is_artifact_family(name: str) -> bool:
+    """Trail/dip/split prefixes whose shadow $/day cannot translate to live.
+    Matches the family_realism=0.1 filter in analyze_mega_sweep.py."""
+    s = name.upper()
+    return (
+        s.startswith("DTRAIL")
+        or s.startswith("PTRAIL")
+        or s.startswith("TRAIL")
+        or s.startswith("SPLIT_")
+        or s.startswith("DIP30_")
+        or s.startswith("DIP_")
+        or "MCAP_MID_DTRAIL" in s
+        or s.startswith("BOND_")
+        or s.startswith("TD2_")
+    )
 
 # ---------------------------------------------------------------------------
 # Shadow strategies list (single-tranche strategies eligible for $0 shadows)
@@ -3067,3 +3091,14 @@ def sim_cfg_to_fake_trade(cfg: dict, entry_price: float, created_at: str,
         "rt_liquidity_usd": liquidity_usd,
         "dex_spot_price_at_entry": entry_price,
     }
+
+
+# ---------------------------------------------------------------------------
+# v14e.36 — auto-deprecate every artifact-family strategy registered above.
+# Trail/dip/split/bond shadows pollute analytics (sim ranks them top via
+# 47x slip miscalibration) and cannot be promoted to live. This finalization
+# step ensures any name matching the artifact prefixes — present or future —
+# is dropped to deprecated without manual maintenance.
+# ---------------------------------------------------------------------------
+_AUTO_DEPRECATED = {name for name in STRATEGIES.keys() if _is_artifact_family(name)}
+_DEFAULT_DEPRECATED |= _AUTO_DEPRECATED
