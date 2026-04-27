@@ -951,6 +951,222 @@ def open_live_trade(client_sb, token_entry: dict, strategy: str,
     }
 
 
+def _finalize_orphan_eth_sell(client_sb, trade: dict) -> bool:
+    """Recover a stuck status='closing' trade whose sell already mined on-chain
+    but whose DB row never got patched (process crash between sell-mine and
+    .update()). Without this recovery, the retry path in process_open_trades
+    re-submits the sell every cycle; the wallet has 0 tokens so each tx reverts,
+    burning gas indefinitely (~$0.50-2/cycle until manual intervention).
+
+    Detection rule: status='closing' AND tx_signature_exit IS NULL AND wallet
+    on-chain balance == 0. We then scan ERC20 Transfer logs from the wallet
+    for this token in the recent block window, find the sell tx, parse the
+    ETH received, and finalize the row + bankroll.
+
+    Returns True on successful finalize (caller skips further work for the
+    trade), False if the wallet still holds tokens (real retry path applies)
+    or if recovery isn't possible (logs missing, decode failure → manual fix).
+
+    Concrete instance: $ALIENPEPE trade 251132, Apr 27 2026 — sell mined block
+    24974330 but DB stayed in 'closing' until manually resynced via
+    scripts/_eth_alienpepe_db_resync.py.
+    """
+    if trade.get("status") != "closing" or trade.get("tx_signature_exit"):
+        return False
+    addr = trade.get("token_address")
+    if not addr:
+        return False
+    try:
+        w3r, _, acct = _client()
+    except Exception as e:
+        logger.debug("orphan-finalize: _client failed for %s: %s",
+                     trade.get("symbol"), e)
+        return False
+    wallet = acct.address
+
+    try:
+        erc20 = w3r.eth.contract(address=_to_checksum(addr), abi=ERC20_ABI)
+        bal = erc20.functions.balanceOf(wallet).call()
+    except Exception as e:
+        logger.warning("orphan-finalize: balanceOf failed for %s: %s",
+                       trade.get("symbol"), e)
+        return False
+    if bal > 0:
+        return False  # tokens still held → genuine retry path
+
+    # Wallet drained — find the sell tx via Transfer logs from wallet→pool.
+    try:
+        from_block = max(int(trade.get("block_number_buy") or 0) - 5, 0)
+        if from_block == 0:
+            from_block = max(w3r.eth.block_number - 2400, 0)  # ~8h ETH window
+        addr_topic = "0x" + wallet.lower().replace("0x", "").rjust(64, "0")
+        logs = w3r.eth.get_logs({
+            "address": _to_checksum(addr),
+            "fromBlock": from_block,
+            "toBlock": "latest",
+            "topics": [ERC20_TRANSFER_TOPIC, addr_topic],
+        })
+    except Exception as e:
+        logger.warning("orphan-finalize: get_logs failed for %s: %s",
+                       trade.get("symbol"), e)
+        return False
+    if not logs:
+        logger.error(
+            "orphan-finalize: %s wallet 0 tokens but NO Transfer logs from wallet "
+            "in window — possible honeypot tax or manual move, manual fix needed.",
+            trade.get("symbol"),
+        )
+        return False
+
+    sell_log = max(logs, key=lambda l: int(l["blockNumber"]) if isinstance(
+        l["blockNumber"], int) else int(l["blockNumber"], 16))
+    tx_hash = sell_log["transactionHash"]
+    if hasattr(tx_hash, "hex"):
+        tx_hash = tx_hash.hex()
+    if not tx_hash.startswith("0x"):
+        tx_hash = "0x" + tx_hash
+
+    try:
+        receipt = w3r.eth.get_transaction_receipt(tx_hash)
+        block = w3r.eth.get_block(receipt["blockNumber"])
+    except Exception as e:
+        logger.warning("orphan-finalize: receipt fetch failed for %s tx %s: %s",
+                       trade.get("symbol"), tx_hash[:12], e)
+        return False
+
+    # Try V3 (multicall: WETH→ETH unwrap to wallet) then V2 (WETH transfer
+    # pair→router); fall back to trace_transaction for native ETH internal txs.
+    eth_received_wei = _parse_swap_output_from_logs(receipt, WETH)
+    if not eth_received_wei:
+        eth_received_wei = _parse_transfer_to_recipient(receipt, WETH, UNISWAP_V2_ROUTER)
+    if not eth_received_wei:
+        try:
+            tr = w3r.provider.make_request("trace_transaction", [tx_hash])
+            for t in (tr.get("result") or []):
+                a = t.get("action") or {}
+                if (a.get("to", "").lower() == wallet.lower()
+                        and a.get("callType") == "call"):
+                    v = a.get("value", "0x0")
+                    if isinstance(v, str):
+                        v = int(v, 16)
+                    eth_received_wei = (eth_received_wei or 0) + v
+        except Exception:
+            pass
+    if not eth_received_wei or eth_received_wei <= 0:
+        logger.error(
+            "orphan-finalize: %s found sell tx %s but cannot decode ETH received "
+            "via V3/V2/trace — manual fix needed.",
+            trade.get("symbol"), tx_hash[:12],
+        )
+        return False
+
+    # Chainlink ETH/USD at the actual sell block (matches what live_trader
+    # would have computed in real-time, not the current price).
+    eth_usd_at_sell = None
+    try:
+        AGG = "0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419"
+        ABI = [{"inputs": [], "name": "latestRoundData", "outputs": [
+            {"name": "r", "type": "uint80"}, {"name": "answer", "type": "int256"},
+            {"name": "s", "type": "uint256"}, {"name": "u", "type": "uint256"},
+            {"name": "a", "type": "uint80"},
+        ], "stateMutability": "view", "type": "function"}]
+        c = w3r.eth.contract(address=_to_checksum(AGG), abi=ABI)
+        eth_usd_at_sell = c.functions.latestRoundData().call(
+            block_identifier=int(receipt["blockNumber"]))[1] / 1e8
+    except Exception:
+        try:
+            eth_usd_at_sell = _eth_usd_price(w3r)
+        except Exception:
+            return False
+
+    eth_received = eth_received_wei / 1e18
+    usd_received = eth_received * eth_usd_at_sell
+    pos_usd = float(trade.get("position_usd") or 0)
+    entry_price = float(trade.get("entry_price") or 0)
+    if pos_usd <= 0 or entry_price <= 0:
+        return False
+    actual_exit_price = entry_price * (usd_received / pos_usd)
+    pnl_pct = round((usd_received / pos_usd) - 1, 4)
+    pnl_usd = round(pos_usd * pnl_pct, 2)
+    gas_paid_wei = int(receipt["gasUsed"]) * int(receipt["effectiveGasPrice"])
+    gas_usd = (gas_paid_wei / 1e18) * eth_usd_at_sell
+
+    exit_at_dt = datetime.fromtimestamp(int(block["timestamp"]), tz=timezone.utc)
+    elapsed_minutes = 0
+    ct = trade.get("created_at")
+    if ct:
+        try:
+            ctd = (datetime.fromisoformat(ct.replace("Z", "+00:00"))
+                   if isinstance(ct, str) else ct)
+            elapsed_minutes = int((exit_at_dt - ctd).total_seconds() / 60)
+        except Exception:
+            pass
+
+    # Best-effort exit-reason classification from price action we DO have.
+    high = float(trade.get("high_price_seen") or 0)
+    tp_price = float(trade.get("tp_price") or 0)
+    sl_price = float(trade.get("sl_price") or 0)
+    horizon = int(trade.get("horizon_minutes") or 0)
+    if tp_price and high >= tp_price:
+        new_status = "tp_hit"
+    elif sl_price and actual_exit_price <= sl_price:
+        new_status = "sl_hit"
+    elif horizon and elapsed_minutes >= horizon:
+        new_status = "timeout"
+    else:
+        new_status = "closing_recovered"
+
+    update = {
+        "status": new_status,
+        "exit_price": actual_exit_price,
+        "exit_at": exit_at_dt.isoformat(),
+        "pnl_pct": pnl_pct,
+        "pnl_usd": pnl_usd,
+        "exit_minutes": elapsed_minutes,
+        "tx_signature_exit": tx_hash,
+        "sell_slippage_bps": 0,
+        "slippage_actual_bps": int(trade.get("buy_slippage_bps") or 0),
+        "sol_price_at_exit": eth_usd_at_sell,
+        "sell_output_lamports": int(eth_received_wei),
+        "sell_sol_received": round(eth_received, 6),
+        "gas_usd_sell": gas_usd,
+        "block_number_sell": int(receipt["blockNumber"]),
+    }
+
+    _OPTIONAL = ("gas_usd_sell", "block_number_sell")
+    for _ in range(3):
+        try:
+            client_sb.table("paper_trades").update(update).eq("id", trade["id"]).execute()
+            break
+        except Exception as e:
+            s = str(e)
+            stripped = False
+            for col in _OPTIONAL:
+                if col in s and col in update:
+                    update.pop(col, None)
+                    stripped = True
+            if not stripped:
+                logger.error("orphan-finalize: DB update failed for %s: %s",
+                             trade.get("symbol"), e)
+                return False
+
+    try:
+        from safe_scraper import _rt_update_bankroll
+        _rt_update_bankroll(pnl_usd, 1, strategy=trade.get("strategy", ""),
+                            chain="ethereum")
+    except Exception as e:
+        logger.warning("orphan-finalize: bankroll update failed for %s: %s",
+                       trade.get("symbol"), e)
+
+    logger.info(
+        "ETH ORPHAN-RECOVERED: %s %s exit=%.10f eth=%.6f usd=$%.2f "
+        "pnl=%+.2f%% tx=%s block=%d",
+        trade.get("symbol"), new_status, actual_exit_price, eth_received,
+        usd_received, pnl_pct * 100, tx_hash[:12], int(receipt["blockNumber"]),
+    )
+    return True
+
+
 def check_live_trades_eth(client_sb) -> dict:
     """Close-side mirror of live_trader.check_live_trades for ETH chain.
 
@@ -1017,6 +1233,13 @@ def check_live_trades_eth(client_sb) -> dict:
         trade_id = trade.get("id")
         current_price = prices.get(addr)
         entry_price = float(trade.get("entry_price") or 0)
+
+        # Orphan-sell recovery: detect stuck 'closing' rows whose sell already
+        # mined on-chain (wallet drained) and finalize them from receipt logs
+        # instead of re-submitting a sell that would revert (no tokens to sell).
+        if _finalize_orphan_eth_sell(client_sb, trade):
+            result_counts["closed"] += 1
+            continue
 
         _paper_sim_ev = None
         if trade.get("status") == "closing":
