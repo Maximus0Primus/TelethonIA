@@ -2262,9 +2262,17 @@ async def run_one_cycle(client: TelegramClient, dump: bool = False,
     logger.info("=== Scrape cycle starting (cycle #%d) ===", _cycle_counter)
 
     # v74: Replay any buffered failed writes from previous cycles
+    # v14e.34: every sync block in this cycle is now off-loaded via
+    # asyncio.to_thread. Reason: prior to this commit, process_and_push,
+    # refresh_top_tokens, and check_paper_trades all ran on the main event
+    # loop, blocking it for 5–27 minutes per cycle. During that window the
+    # telethon RT listener could not drain incoming Telegram updates → KOL
+    # calls were buffered and processed in burst at end-of-cycle (15-min
+    # detect lag observed on $ALIENPEPE et al). Threading the heavy work
+    # frees the loop so the RT listener stays sub-second.
     try:
         from push_to_supabase import retry_failed_writes
-        replay = retry_failed_writes()
+        replay = await asyncio.to_thread(retry_failed_writes)
         if replay.get("replayed", 0) > 0:
             logger.info("Write buffer replay: %d/%d succeeded",
                         replay["succeeded"], replay["replayed"])
@@ -2277,31 +2285,35 @@ async def run_one_cycle(client: TelegramClient, dump: bool = False,
     logger.info("Scraped %d messages from %d groups", total_msgs, len(messages_data))
 
     if total_msgs > 0:
-        process_and_push(messages_data, dump=dump,
-                         cycle_num=_cycle_counter, once_mode=once_mode)
+        await asyncio.to_thread(
+            process_and_push, messages_data, dump,
+            _cycle_counter, once_mode,
+        )
 
         # C1 fix: Run price refresh at end of cycle so --once mode
         # (GH Action) also gets fresh DexScreener prices before exiting.
         try:
-            updated = refresh_top_tokens()
+            updated = await asyncio.to_thread(refresh_top_tokens)
             logger.info("Post-cycle price refresh: %d tokens updated", updated)
         except Exception as e:
             logger.error("Post-cycle price refresh failed: %s", e)
 
         # Paper trading: check open positions + log summary
         try:
-            from paper_trader import check_paper_trades, paper_trade_summary, correct_closed_prices
+            from paper_trader import (
+                check_paper_trades, paper_trade_summary,
+                correct_closed_prices, kol_attribution,
+            )
             sb_pt = _get_supabase()
-            pt_result = check_paper_trades(sb_pt)
+            await asyncio.to_thread(check_paper_trades, sb_pt)
             # v113: bankroll now updated per-trade inside paper_trader (before alerts)
-            summary = paper_trade_summary(sb_pt)
+            summary = await asyncio.to_thread(paper_trade_summary, sb_pt)
             if summary:
                 logger.info("paper_trader: %s", summary)
             # v107: Fix high_price_seen for recently closed trades (pool migration bug)
-            correct_closed_prices(sb_pt)
+            await asyncio.to_thread(correct_closed_prices, sb_pt)
             # v74: KOL attribution — aggregate paper trade PnL by KOL
-            from paper_trader import kol_attribution
-            kol_attribution(sb_pt, days=7)
+            await asyncio.to_thread(kol_attribution, sb_pt, 7)
         except Exception as e:
             logger.error("Paper trading (cycle-end) failed: %s", e)
 

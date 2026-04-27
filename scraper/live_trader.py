@@ -1762,12 +1762,18 @@ def reconcile_positions(client_sb) -> dict:
     try:
         # v121: Also check 'closing' trades (sell may have succeeded but DB update crashed)
         # v133-D: Include buy_output_tokens to detect sibling-sold case.
+        # v14e.34: SCOPE TO SOLANA. get_wallet_balance() reads the Solana wallet only;
+        # ETH live positions live in a separate EVM wallet (live_trader_eth). Without
+        # this filter, every ETH live position was flagged as "0 on-chain balance"
+        # because the Solana wallet of course doesn't hold ETH tokens, and
+        # auto-closed as neutral on every restart — destroying live ETH trades.
         resp = (
             client_sb.table("paper_trades")
             .select("id, symbol, token_address, entry_price, position_usd, "
                     "buy_output_tokens, created_at, status")
             .in_("status", ["open", "closing"])
             .eq("source", "rt_live")
+            .eq("chain", "solana")
             .execute()
         )
         open_trades = resp.data or []
