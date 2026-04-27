@@ -923,8 +923,9 @@ def _handle_config(sb, args: str) -> str:
     hybrid_alloc = hybrid.get("allocations", {})
     dedup = ptc.get("dedup_cooldown_hours", 24)
     ml_mode = ptc.get("ml_gate_mode", "disabled")
-    slippage_buy = ptc.get("buy_slippage_bps", 100)
-    slippage_sell = ptc.get("sell_slippage_bps", 200)
+    # v14e.34: slip displayed from strategies.py (single source of truth).
+    # JSONB override removed in paper_trader.py — display must follow.
+    from strategies import BUY_SLIPPAGE_BPS as slippage_buy, SELL_SLIPPAGE_BPS as slippage_sell
 
     # v116: Compute per-strategy position size
     from safe_scraper import _rt_load_bankroll

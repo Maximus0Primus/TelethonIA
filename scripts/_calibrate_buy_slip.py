@@ -363,3 +363,45 @@ os.makedirs(os.path.dirname(out_path), exist_ok=True)
 with open(out_path, "w", encoding="utf-8") as f:
     json.dump(results, f, indent=2)
 print(f"\nSaved -> {out_path}")
+
+
+# --- Propagate to all 4 layers atomically --------------------------------
+# v14e.34: close the boucle. strategies.py is the source of truth, but the
+# scoring_config.paper_trade_config JSONB OVERRIDES it at runtime
+# (paper_trader.py:1095, 2393, 2815). Forgetting to update the JSONB caused
+# v14e.24-25 to silently drift for 2 days (Apr 25-27): all batch SOL trades
+# kept using buy=100 from JSONB while strategies.py was at 225.
+#
+# Auto-update the JSONB to match the recommended median, then remind the
+# operator to manually edit strategies.py + sim_engines.py + sim.py too
+# (those are imports, not DB-driven, so they need a code commit).
+recommended = round(median_robust)
+print(f"\n{'='*70}")
+print("PROPAGATION CHECK - all 4 layers must match")
+print(f"{'='*70}")
+
+apply = "--apply" in sys.argv
+if apply:
+    try:
+        cur = sb.table("scoring_config").select("paper_trade_config").eq("id", 1).execute()
+        ptc = (cur.data or [{}])[0].get("paper_trade_config") or {}
+        if isinstance(ptc, str):
+            ptc = json.loads(ptc)
+        prev = ptc.get("buy_slippage_bps")
+        ptc["buy_slippage_bps"] = recommended
+        sb.table("scoring_config").update({
+            "paper_trade_config": ptc,
+            "updated_by": "_calibrate_buy_slip",
+            "change_reason": f"buy_slip recalibration: {prev} -> {recommended} bps",
+        }).eq("id", 1).execute()
+        print(f"  [OK] scoring_config.paper_trade_config.buy_slippage_bps {prev} -> {recommended}")
+    except Exception as e:
+        print(f"  [ERR] DB update failed: {e}")
+else:
+    print(f"  Run with --apply to update scoring_config.paper_trade_config.buy_slippage_bps -> {recommended}")
+
+print(f"\nMANUAL STEPS still required (code, not DB):")
+print(f"  - scraper/strategies.py:        BUY_SLIPPAGE_BPS = {recommended}")
+print(f"  - scraper/sim.py / sim_engines: imports from strategies (auto-aligned via import)")
+print(f"  - scraper/optimize_strategies.py: imports from strategies (auto-aligned)")
+print(f"  Commit these together to keep all 4 layers (paper / sim / shadow / live) coherent.")

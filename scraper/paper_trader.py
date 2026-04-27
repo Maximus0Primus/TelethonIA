@@ -1092,9 +1092,12 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
     active_strategies = [s for s in config["active_strategies"] if s in STRATEGIES and s not in deprecated]
     dedup_cooldown_h = config.get("dedup_cooldown_hours", DEDUP_COOLDOWN_HOURS)
     ca_filter = config.get("ca_filter", True)
-    buy_slip_bps_base = int(config.get("buy_slippage_bps", BUY_SLIPPAGE_BPS))
-    sell_slip_bps = int(config.get("sell_slippage_bps", SELL_SLIPPAGE_BPS))
-    buy_fee_bps = int(config.get("buy_fee_bps", BUY_FEE_BPS))
+    # v14e.34: slip constants are SOURCED from strategies.py only (single source of
+    # truth). Previously read from JSONB which silently overrode strategies.py and
+    # caused 2 days of drift (Apr 25-27, JSONB=100 while strategies=225).
+    buy_slip_bps_base = BUY_SLIPPAGE_BPS
+    sell_slip_bps = SELL_SLIPPAGE_BPS
+    buy_fee_bps = BUY_FEE_BPS
 
     # v130: Quote Ultra at live's actual position size so paper's entry_price
     # reflects the exact route/fill live will execute against. One quote per
@@ -2382,15 +2385,15 @@ def check_paper_trades(client) -> dict:
     # v142: also load buy slip so we can persist both bps on close (observability
     # gap: paper_trades rows had NULL buy/sell_slippage_bps, blocking divergence
     # analysis against live's real execution slippage).
+    # v14e.34: slip constants are sourced from strategies.py only (single source).
+    # JSONB only used for active_strategies list (and other non-slip config).
     _sell_slip_bps = SELL_SLIPPAGE_BPS
     _sell_fee_bps = SELL_FEE_BPS
     _buy_slip_bps = BUY_SLIPPAGE_BPS
     _active_strats = []
     try:
         _cfg = _load_paper_trade_config(client)
-        _sell_slip_bps = int(_cfg.get("sell_slippage_bps", SELL_SLIPPAGE_BPS))
         _sell_fee_bps = int(_cfg.get("sell_fee_bps", SELL_FEE_BPS))
-        _buy_slip_bps = int(_cfg.get("buy_slippage_bps", BUY_SLIPPAGE_BPS))
         _active_strats = _cfg.get("active_strategies", [])
     except Exception:
         pass
@@ -2804,15 +2807,14 @@ def check_paper_trades_fast(client) -> dict:
     if not recent_trades:
         return {"checked": 0, "closed": 0}
 
+    # v14e.34: slip constants from strategies.py only (single source of truth).
     _sell_slip_bps = SELL_SLIPPAGE_BPS
     _sell_fee_bps = SELL_FEE_BPS
     _buy_slip_bps = BUY_SLIPPAGE_BPS
     _active_strats = []
     try:
         _cfg = _load_paper_trade_config(client)
-        _sell_slip_bps = int(_cfg.get("sell_slippage_bps", SELL_SLIPPAGE_BPS))
         _sell_fee_bps = int(_cfg.get("sell_fee_bps", SELL_FEE_BPS))
-        _buy_slip_bps = int(_cfg.get("buy_slippage_bps", BUY_SLIPPAGE_BPS))
         _active_strats = _cfg.get("active_strategies", [])
     except Exception:
         pass

@@ -72,6 +72,24 @@ jobs:
             --top 30 \
             2>&1 | tee analyze.out
 
+      - name: Slippage robustness on top-robust winners
+        # v14e.34 — re-evaluates each top winning strategy at slip levels
+        # {50, 100, 225, 400, 600, 800} bps. Strats whose $/day flips sign or
+        # rank drops sharply at high slip are FRAGILE — flagged before any
+        # promotion. Direct response to the JSONB drift bug (Apr 27): we
+        # discovered $40K of recalc damage that was invisible because slip
+        # was assumed constant.
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          python scripts/_strat_slip_sensitivity.py \
+            --top-csv _mega_sweep_top_robust.csv \
+            --top 20 \
+            --days 14 \
+            --out data/slip_sensitivity_latest.csv \
+            2>&1 | tee slip_sensitivity.out || true
+
       - name: Routing ideas refresh (per-KOL specialization + score-band gate)
         # v14e.22: re-test the 4 routing hypotheses on the latest paper data
         # alongside the strat-pool sweep. Apples-to-apples comparison on the
@@ -99,7 +117,9 @@ jobs:
             analyze.out
             routing.out
             routing_dollar_day.out
+            slip_sensitivity.out
             data/routing_ideas_*.json
+            data/slip_sensitivity_*.csv
           retention-days: 30
 
       - name: Summary comment
