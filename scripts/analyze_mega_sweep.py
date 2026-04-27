@@ -100,6 +100,14 @@ def main():
                     help="Significance threshold for FDR + Bonferroni (default 0.05)")
     ap.add_argument("--top", type=int, default=30,
                     help="Number of robust top configs to extract (default 30)")
+    ap.add_argument("--persist", action="store_true",
+                    help="v14e.34: also INSERT top configs into mega_sweep_runs table "
+                         "(Supabase). Lets the calibration script later compare each "
+                         "predicted $/day against realized paper P&L in the post-run window.")
+    ap.add_argument("--persist-extra", type=int, default=50,
+                    help="When --persist set, insert top-N robust rows AS top_robust=true "
+                         "PLUS the next N rows by avg_pnl_pct as top_robust=false (default 50). "
+                         "Total per run = top + persist-extra. Keeps DB small but tracks runners-up.")
     args = ap.parse_args()
 
     csv_path = Path(args.csv)
@@ -252,6 +260,81 @@ def main():
         with pd.option_context("display.max_rows", None, "display.width", 240, "display.float_format", "{:,.4f}".format):
             print(robust[cols].to_string(index=False))
     print()
+    # v14e.34: persist top-N to Supabase mega_sweep_runs for sim/actual calibration.
+    # Writes one row per (strategy, filter) at the current run timestamp. Calibration
+    # script later joins with paper_trades over the post-run window to compute drift.
+    if args.persist:
+        try:
+            import os
+            from datetime import datetime, timezone
+            from supabase import create_client
+            url = os.environ.get("SUPABASE_URL")
+            key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+            if not (url and key):
+                print("[persist] SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY missing, skipping DB write")
+            else:
+                sb = create_client(url, key)
+                run_at = datetime.now(timezone.utc).isoformat()
+                run_id = os.environ.get("GITHUB_RUN_ID") or os.environ.get("RUN_ID")
+                run_source = "gh-actions" if os.environ.get("GITHUB_ACTIONS") else "local"
+
+                def _row_to_record(rr, rank, is_top):
+                    g = lambda k: rr[k] if k in rr.index and pd.notna(rr[k]) else None
+                    return {
+                        "run_at": run_at,
+                        "run_source": run_source,
+                        "run_id": run_id,
+                        "chain": "solana",
+                        "strategy": str(g("strategy") or ""),
+                        "filter_name": str(g("filter") or "") or None,
+                        "rank_at_run": int(rank),
+                        "n_sim_trades": int(g("n")) if g("n") is not None else None,
+                        "avg_pnl_pct": float(g("avg_pnl_pct")) if g("avg_pnl_pct") is not None else None,
+                        "median_pnl_pct": float(g("median_pnl_pct")) if g("median_pnl_pct") is not None else None,
+                        "win_rate": float(g("wr_pct")) / 100.0 if g("wr_pct") is not None else None,
+                        "pnl_per_day": float(g("dollars_per_day")) if g("dollars_per_day") is not None else None,
+                        "family_realism": float(g("family_realism")) if g("family_realism") is not None else None,
+                        "fdr_q": float(g("fdr_q")) if g("fdr_q") is not None else None,
+                        "p_corrected": float(g("p_corrected")) if g("p_corrected") is not None else None,
+                        "bootstrap_rank_pct": float(g("bootstrap_rank_pct")) if g("bootstrap_rank_pct") is not None else None,
+                        "rank_stability": float(g("rank_stability")) if g("rank_stability") is not None else None,
+                        "cross_regime_robust": bool(g("cross_regime_robust")) if g("cross_regime_robust") is not None else None,
+                        "is_top_robust": bool(is_top),
+                        "metadata": {
+                            "smoothing": str(g("smoothing") or "") or None,
+                            "polling_mode": str(g("polling_mode") or "") or None,
+                            "source": str(g("source") or "") or None,
+                            "wf_consistent": bool(g("wf_consistent")) if g("wf_consistent") is not None else None,
+                            "dollars_per_day_active": float(g("pnl_active_pct")) if g("pnl_active_pct") is not None else None,
+                            "dollars_per_day_quiet": float(g("pnl_quiet_pct")) if g("pnl_quiet_pct") is not None else None,
+                        },
+                    }
+
+                records = []
+                # top robust rows (is_top_robust=true)
+                for i, (_, rr) in enumerate(robust.iterrows(), start=1):
+                    records.append(_row_to_record(rr, i, True))
+                # runners-up (next N by avg_pnl_pct, family>=0.5, not in robust)
+                if args.persist_extra > 0:
+                    runners = (
+                        df_eligible[
+                            (df_eligible["family_realism"] >= 0.5)
+                            & (~df_eligible.index.isin(robust.index))
+                        ]
+                        .sort_values("avg_pnl_pct", ascending=False)
+                        .head(args.persist_extra)
+                    )
+                    for j, (_, rr) in enumerate(runners.iterrows(), start=len(records) + 1):
+                        records.append(_row_to_record(rr, j, False))
+
+                if records:
+                    # Batch insert (chunks of 100 to be polite)
+                    for k in range(0, len(records), 100):
+                        sb.table("mega_sweep_runs").insert(records[k:k + 100]).execute()
+                    print(f"[persist] inserted {len(records)} rows into mega_sweep_runs (run_at={run_at}, run_id={run_id})")
+        except Exception as e:
+            print(f"[persist] DB write FAILED: {e}")
+
     print(f"Files written:")
     print(f"  - {out_full}")
     print(f"  - {out_top}")

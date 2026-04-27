@@ -65,12 +65,33 @@ jobs:
           fi
 
       - name: Annotate with FDR + family realism
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
+          # v14e.34: --persist writes top-30 robust + 50 runners-up into the
+          # mega_sweep_runs Supabase table tagged with this run_id. The
+          # calibration script downstream joins these predictions against
+          # realized paper_trades to detect sim/actual drift over time.
           python scripts/analyze_mega_sweep.py \
             --csv _mega_sweep_extended.csv \
             --alpha 0.05 \
             --top 30 \
+            --persist \
+            --persist-extra 50 \
             2>&1 | tee analyze.out
+
+      - name: Sim/actual calibration report
+        # v14e.34: reads mega_sweep_runs (filled by --persist above and by
+        # past runs) and joins predictions vs realized paper $/day in the
+        # 7d post-run window. Detects chronic over-estimators (sim too
+        # optimistic) per strategy and per family. Output stays as artifact.
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          python scripts/_mega_sweep_calibration.py --window-days 7 \
+            2>&1 | tee sim_calibration.out || true
 
       - name: Slippage robustness on top-robust winners
         # v14e.34 — re-evaluates each top winning strategy at slip levels
@@ -118,8 +139,10 @@ jobs:
             routing.out
             routing_dollar_day.out
             slip_sensitivity.out
+            sim_calibration.out
             data/routing_ideas_*.json
             data/slip_sensitivity_*.csv
+            data/sim_calibration_*.csv
           retention-days: 30
 
       - name: Summary comment
