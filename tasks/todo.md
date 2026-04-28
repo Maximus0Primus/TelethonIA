@@ -45,7 +45,11 @@ Pas de code à écrire, juste laisser la data grossir. ETA verdicts paired-test 
 - [ ] **W3.** Paired-test des AGE clones ETH (4 existants + 8 v14e.31).
 - [ ] **W4.** Paired-test **LOCK family** vs BE base : LOCK10 SOL +1.88pp / ETH +2.85pp en backtest.
 - [ ] **W5.** Validation **ETH winner cluster** (26 strats v14e.31).
-- [ ] **W9.** **RECALL family v14e.40 + v14e.41** (60 strats shadow — 36 DIP + 24 PEAK, SOL+ETH). Wait N≥30 par bucket avant verdict. Découpage paired-test :
+- [x] **W9a.** **RECALL sweep extended v14e.41** (`scripts/_recall_sweep.py`) — backtest 14d sur 30 exit specs × 11 universes (first_call + 6 recall buckets + 4 unions). Wired dans mega-sweep-48h.yml. **Top findings 14d** :
+  - **Union beats first_call alone** : FAST60_TP40_SL30 cumul $sum +358 → +534 (+49%) en ajoutant recall_dip30 (N=295 vs 279).
+  - **Recall isolés sont massivement positifs** : SLOW6H_TP50_SL30 sur recall_dip30 = +33% EV WR 81% N=16, SLOW6H_TP100_SL50 sur recall_peak30 = +22% EV N=25, SLOW4H_TP50_SL30 sur recall_peak70 = +22% EV WR 73% N=15.
+  - Confirme : ajouter les recall events à n'importe quelle exit-spec déjà profitable booste son $sum cumulé sans dégrader le N.
+- [ ] **W9b.** **RECALL family v14e.40 + v14e.41** (60 strats shadow — 36 DIP + 24 PEAK, SOL+ETH). Wait N≥30 par bucket avant verdict. Découpage paired-test :
   - DIP vs first_call_price : DIP10/DIP30/DIP50 × {plain TP/SL, BE+LOCK, FAST/SLOW timeouts, SCALP, DECAY, NZ/S30/S40/MCAP gates, AGE2H/AGE6H/AGE24}
   - PEAK vs post-1st-call ATH : PEAK30/PEAK50/PEAK70 × {SL≥50% mandatory, BE+LOCK, SCALP, wide-TP TP100→TP500}
   - Validation $PARANOID confirmée : `RECALL_PEAK50_TP200_SL50_6H` capture +200% TP @ t+52min, les SL30/40 strats sortent à t+8min sur la mèche. Vérifier ce pattern se reproduit sur N≥30.

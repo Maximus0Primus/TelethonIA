@@ -111,6 +111,20 @@ jobs:
             --out data/slip_sensitivity_latest.csv \
             2>&1 | tee slip_sensitivity.out || true
 
+      - name: Recall sweep (v14e.41 — first_call vs recall vs union)
+        # v14e.41: tests each exit spec on first_call universe + recall buckets
+        # (DIP10/30/50, PEAK30/50/70) + union (first_call ∪ recall_dipXX).
+        # Confirms whether adding recall opens to a base strategy improves EV.
+        # 14d backtest established: FAST60_TP40_SL30 + recall_dip30 lifted
+        # cum $sum +49% vs first_call alone. Output: scraper/_recall_sweep.csv.
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          python scripts/_recall_sweep.py \
+            --output scraper/_recall_sweep.csv \
+            2>&1 | tee recall_sweep.out || true
+
       - name: Routing ideas refresh (per-KOL specialization + score-band gate)
         # v14e.22: re-test the 4 routing hypotheses on the latest paper data
         # alongside the strat-pool sweep. Apples-to-apples comparison on the
@@ -143,6 +157,8 @@ jobs:
             data/routing_ideas_*.json
             data/slip_sensitivity_*.csv
             data/sim_calibration_*.csv
+            scraper/_recall_sweep.csv
+            recall_sweep.out
           retention-days: 30
 
       - name: Summary comment
