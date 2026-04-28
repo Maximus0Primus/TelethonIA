@@ -20,12 +20,12 @@ on:
 jobs:
   sweep:
     runs-on: ubuntu-latest
-    # v14e.41: --mega-sweep-extended sur SOL = 4M configs = ne finit pas dans
-    # 5h sur GH runner 2-worker. Run Apr 27 cancelled @ 5h. Switché à
-    # --mega-sweep (1/5 des configs ~800K) + workers=4 (full vCPU) →
-    # finit en ~1h. Timeout 540min en safety pour absorber Supabase tick fetch
-    # + post-processing (analyze + recall_sweep + slip_sensitivity + routing).
-    timeout-minutes: 540
+    # v14e.41: --mega-sweep-extended (4M configs) gardé — l'utilisateur préfère
+    # l'exhaustivité au runtime. Workers bumped 2→4 (full GH vCPU) divise
+    # par ~2 le temps. Timeout porté à 720min (12h) — limite max plausible
+    # GitHub-hosted runner = 6h par job mais on peut chaîner. Si timeout
+    # encore atteint, prochain step = self-hosted runner ou réduire universe.
+    timeout-minutes: 720
 
     steps:
       - uses: actions/checkout@v4
@@ -41,24 +41,19 @@ jobs:
           pip install --upgrade pip
           pip install supabase requests python-dotenv pandas numpy
 
-      - name: Run mega sweep
+      - name: Run mega sweep extended
         id: sweep
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
-          # v14e.41: --mega-sweep (NOT extended) — 1/5 des configs (~800K vs 4M).
-          # Le run extended SOL Apr 27 a timeout @ 5h car 188 tokens × 4M configs
-          # × 2 workers > 5h. Le mode standard est largement suffisant pour le
-          # ranking robust + persist en DB. ETH garde --extended (universe 3×
-          # plus petit, finit en 2h39m).
-          # Workers: 4 = full vCPU du GH runner. Output forcé sur le nom standard
-          # `_mega_sweep_extended.csv` pour que analyze_mega_sweep.py (default
-          # path) le lise sans modif.
+          # v14e.41: --mega-sweep-extended (full matrix, ~4M configs) gardé.
+          # Workers bumped 2→4 (full GH runner vCPU). Apr 27 timeout @ 5h →
+          # passé à 12h (timeout-minutes: 720). Output: _mega_sweep_extended.csv
+          # (analyze_mega_sweep.py default path).
           cd scraper
-          python sim.py --mega-sweep \
+          python sim.py --mega-sweep-extended \
             --mega-workers 4 \
-            --mega-csv-out _mega_sweep_extended.csv \
             2>&1 | tee sweep.out
           if [ -f _mega_sweep_extended.csv ]; then
             mv _mega_sweep_extended.csv ../
