@@ -108,6 +108,9 @@ def main():
                     help="When --persist set, insert top-N robust rows AS top_robust=true "
                          "PLUS the next N rows by avg_pnl_pct as top_robust=false (default 50). "
                          "Total per run = top + persist-extra. Keeps DB small but tracks runners-up.")
+    ap.add_argument("--chain", default="solana",
+                    help="Chain tag written to mega_sweep_runs.chain when --persist is set "
+                         "(default: solana). ETH workflow passes --chain ethereum.")
     args = ap.parse_args()
 
     csv_path = Path(args.csv)
@@ -284,7 +287,7 @@ def main():
                         "run_at": run_at,
                         "run_source": run_source,
                         "run_id": run_id,
-                        "chain": "solana",
+                        "chain": args.chain,
                         "strategy": str(g("strategy") or ""),
                         "filter_name": str(g("filter") or "") or None,
                         "rank_at_run": int(rank),

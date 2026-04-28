@@ -20,9 +20,12 @@ on:
 jobs:
   sweep:
     runs-on: ubuntu-latest
-    # sim.py --mega-sweep-extended est documenté ~3h. Buffer à 5h pour
-    # absorber les pics de Supabase lag + le post-processing.
-    timeout-minutes: 300
+    # v14e.41: --mega-sweep-extended sur SOL = 4M configs = ne finit pas dans
+    # 5h sur GH runner 2-worker. Run Apr 27 cancelled @ 5h. Switché à
+    # --mega-sweep (1/5 des configs ~800K) + workers=4 (full vCPU) →
+    # finit en ~1h. Timeout 540min en safety pour absorber Supabase tick fetch
+    # + post-processing (analyze + recall_sweep + slip_sensitivity + routing).
+    timeout-minutes: 540
 
     steps:
       - uses: actions/checkout@v4
@@ -38,29 +41,30 @@ jobs:
           pip install --upgrade pip
           pip install supabase requests python-dotenv pandas numpy
 
-      - name: Run mega sweep extended
+      - name: Run mega sweep
         id: sweep
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
-          # --mega-sweep-extended : full matrix (smoothings × polling × filters),
-          # ~5× les configs de --mega-sweep. Output: _mega_sweep_extended.csv.
-          # Note: le flag cumule avec l'auto-détection eval_history si dispo,
-          # mais le CSV produit reste _mega_sweep_extended.csv (attendu par
-          # analyze_mega_sweep.py par défaut).
+          # v14e.41: --mega-sweep (NOT extended) — 1/5 des configs (~800K vs 4M).
+          # Le run extended SOL Apr 27 a timeout @ 5h car 188 tokens × 4M configs
+          # × 2 workers > 5h. Le mode standard est largement suffisant pour le
+          # ranking robust + persist en DB. ETH garde --extended (universe 3×
+          # plus petit, finit en 2h39m).
+          # Workers: 4 = full vCPU du GH runner. Output forcé sur le nom standard
+          # `_mega_sweep_extended.csv` pour que analyze_mega_sweep.py (default
+          # path) le lise sans modif.
           cd scraper
-          # Workers: GH runner = 4 vCPU. sim.py default = min(12, cpu_count-2)
-          # → auto-clampe à 2. Explicite via --mega-workers pour éviter
-          # l'oversubscription. v14e.19+v14e.20 filtres trail/hyst actifs par
-          # défaut (--include-trail-families / --include-hyst pour opt-in).
-          python sim.py --mega-sweep-extended --mega-workers 2 2>&1 | tee sweep.out
-          # Move CSV to repo root for the next step
+          python sim.py --mega-sweep \
+            --mega-workers 4 \
+            --mega-csv-out _mega_sweep_extended.csv \
+            2>&1 | tee sweep.out
           if [ -f _mega_sweep_extended.csv ]; then
             mv _mega_sweep_extended.csv ../
-            echo "✅ _mega_sweep_extended.csv produced"
+            echo "_mega_sweep_extended.csv produced"
           else
-            echo "❌ sim.py did not produce _mega_sweep_extended.csv"
+            echo "sim.py did not produce _mega_sweep_extended.csv"
             exit 1
           fi
 

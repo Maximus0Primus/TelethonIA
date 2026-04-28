@@ -54,7 +54,7 @@ jobs:
           python sim.py \
             --mega-sweep-extended \
             --chain ethereum \
-            --mega-workers 2 \
+            --mega-workers 4 \
             --mega-csv-out _mega_sweep_eth_extended.csv \
             2>&1 | tee sweep_eth.out
           if [ -f _mega_sweep_eth_extended.csv ]; then
@@ -65,14 +65,21 @@ jobs:
             exit 1
           fi
 
-      - name: Annotate with FDR + family realism
+      - name: Annotate with FDR + family realism + persist to DB
+        # v14e.41: SUPABASE env vars + --persist added so ETH top robust rows
+        # land in mega_sweep_runs (was missing — Apr 27 ETH success run wrote
+        # 0 rows). Mirrors the SOL workflow analyze step.
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
-          # analyze_mega_sweep.py reads --csv path and writes annotated +
-          # top-robust files alongside. Pass the ETH CSV explicitly.
           python scripts/analyze_mega_sweep.py \
             --csv _mega_sweep_eth_extended.csv \
             --alpha 0.05 \
             --top 30 \
+            --persist \
+            --persist-extra 50 \
+            --chain ethereum \
             2>&1 | tee analyze_eth.out
 
       - name: Upload artifacts
