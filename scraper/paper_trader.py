@@ -268,21 +268,36 @@ def _passes_strategy_filter(token: dict, strategy_name: str) -> bool:
         if min_age is not None and token_age_h < float(min_age):
             return False
 
-    # v14e.40: RECALL filters. Strategies opt in by setting `require_recall=True`
-    # in their filter. drift = (recall_price / first_call_price) - 1, so a
-    # negative number means the recall is BELOW the first call (the dipped-
-    # recall hypothesis). hours_since_first_call gates the lookback window.
+    # v14e.40 / v14e.41: RECALL filters. Strategies opt in via require_recall=True.
+    # Two drift modes — each strat picks ONE via filter key:
+    #   min_recall_drift / max_recall_drift           — vs 1st-call entry price
+    #   min_drift_vs_peak / max_drift_vs_peak         — vs post-1st-call ATH
+    # The peak mode catches "pump-then-dump" patterns where the recall price is
+    # below the prior pic but above the 1st-call entry (e.g. $PARANOID 27 Apr:
+    # drift_vs_first=-21%, drift_vs_peak=-54%, post-recall ran +220%).
     if filt.get("require_recall"):
         if not token.get("_rt_is_recall"):
             return False
-        drift = token.get("_rt_recall_drift_pct")
-        if drift is None:
-            return False
-        drift = float(drift)
-        if "max_recall_drift" in filt and drift > float(filt["max_recall_drift"]):
-            return False
-        if "min_recall_drift" in filt and drift < float(filt["min_recall_drift"]):
-            return False
+        # drift vs first-call entry
+        if "max_recall_drift" in filt or "min_recall_drift" in filt:
+            d = token.get("_rt_recall_drift_pct")
+            if d is None:
+                return False
+            d = float(d)
+            if "max_recall_drift" in filt and d > float(filt["max_recall_drift"]):
+                return False
+            if "min_recall_drift" in filt and d < float(filt["min_recall_drift"]):
+                return False
+        # drift vs post-1st-call ATH (catches pump-then-dump)
+        if "max_drift_vs_peak" in filt or "min_drift_vs_peak" in filt:
+            dp = token.get("_rt_recall_drift_vs_peak")
+            if dp is None:
+                return False
+            dp = float(dp)
+            if "max_drift_vs_peak" in filt and dp > float(filt["max_drift_vs_peak"]):
+                return False
+            if "min_drift_vs_peak" in filt and dp < float(filt["min_drift_vs_peak"]):
+                return False
         hsfc = token.get("_rt_hours_since_first_call")
         if hsfc is None:
             return False

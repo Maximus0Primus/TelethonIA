@@ -1,9 +1,9 @@
-# Pipeline Status — Updated Apr 28, 2026 14:30 UTC (v14e.40 deployed)
+# Pipeline Status — Updated Apr 28, 2026 15:50 UTC (v14e.41 deployed)
 
 État courant :
 - **ETH live Phase 1 microtest ACTIF** depuis 20:12 UTC. Live SOL = BE25_TP80_SL30 + BOND_FAST_TP50_SL20_T20 (la deuxième est artifact-deprecated v14e.36 — à retirer du live config). Live ETH = `eth_live_enabled=True`, 1 strat (`ETH_TP80_SL40_T2H`), pos $20, max 1 open.
 - **KOL chain-blacklist v14e.40 RÉPARÉ** : v14e.37/38 avait shipping-bug — `_load_paper_trade_config` filtrait `kol_chain_blacklist` hors du dict retourné car la clé n'était pas dans `defaults`. Fix v14e.40 : ajout dans `defaults`. Du 26 au 28 Apr, mad_apes + 12 autres KOLs blacklistés ont quand même ouvert ~343 paper mains SOL (-$2 752 paper). Live indemne (gate `live_trading.kol_blacklist` séparé). Post-fix le gate paper main + safe_scraper RT live re-fonctionnent.
-- **RECALL_DIP shadow family v14e.40** : 14 nouvelles strats shadow (9 SOL + 4 ETH + 1 combo), filtre `require_recall=True` + bornes drift_vs_first × hours_since_first × score. RT detection via query `kol_call_outcomes` au message_handler. Backtest 21j (price_ticks) : EV TP50/SL30 6h sur dip ≥30% = +11.8% (N=15, trop fin pour live). Laisser tourner 4 semaines pour N≥80.
+- **RECALL family v14e.40 + v14e.41** : 60 strats shadow couvrant les 2 modes drift (DIP vs 1st-call entry × PEAK vs post-1st ATH) × les mécaniques validées (BE15/25/30, LOCK5/10/15, FAST45/60, SLOW4H/6H, SCALP, DECAY, NZ, S30/S40, MCAP_MID, AGE2H/6H/24H, wide-TP TP100→TP500). v14e.41 ajoute le mode `drift_vs_peak` après replay $PARANOID 27 Apr (drift_vs_1st=-21% → bloqué par DIP30, mais drift_vs_peak=-54% capture pump-then-dump → +220% post-recall). Gate temporel resserré 1800s→600s. SL≥-50% obligatoire sur PEAK strats car le dump-mèche tape SL30/SL40 avant la recovery (replay $PARANOID : SL30 fired @ t+8min, TP200 @ t+52min → seul `RECALL_PEAK50_TP200_SL50_6H` aurait gagné). 5 strats opened sur scenario PARANOID, 30 sur deep-dip scenario, 0 sur non-recall — filtres validés.
 - **Trail/dip/split shadows DEPRECATED v14e.36** : 119 strats artefact retirées. Aucun nouveau shadow DTRAIL/PTRAIL/SPLIT/DIP/BOND/TD2/MCAP_DTRAIL.
 
 L'historique des décisions se lit dans le git log — ce TODO ne garde que ce qui est encore à faire.
@@ -45,7 +45,11 @@ Pas de code à écrire, juste laisser la data grossir. ETA verdicts paired-test 
 - [ ] **W3.** Paired-test des AGE clones ETH (4 existants + 8 v14e.31).
 - [ ] **W4.** Paired-test **LOCK family** vs BE base : LOCK10 SOL +1.88pp / ETH +2.85pp en backtest.
 - [ ] **W5.** Validation **ETH winner cluster** (26 strats v14e.31).
-- [ ] **W9.** **RECALL_DIP family v14e.40** (14 strats shadow). Wait N≥30 par bucket avant verdict. Comparer recall dip 30/50/age6/age24 vs first-call baseline. ETA Mai 26 si volume similaire au baseline. Strats clés à watch : `RECALL_DIP30_TP50_SL30_6H` (best EV historique), `RECALL_DIP30_AGE6_TP50_SL30` (sweet-spot age 0-6h), `RECALL_DIP30_BE25_TP80_SL30` (locking variant).
+- [ ] **W9.** **RECALL family v14e.40 + v14e.41** (60 strats shadow — 36 DIP + 24 PEAK, SOL+ETH). Wait N≥30 par bucket avant verdict. Découpage paired-test :
+  - DIP vs first_call_price : DIP10/DIP30/DIP50 × {plain TP/SL, BE+LOCK, FAST/SLOW timeouts, SCALP, DECAY, NZ/S30/S40/MCAP gates, AGE2H/AGE6H/AGE24}
+  - PEAK vs post-1st-call ATH : PEAK30/PEAK50/PEAK70 × {SL≥50% mandatory, BE+LOCK, SCALP, wide-TP TP100→TP500}
+  - Validation $PARANOID confirmée : `RECALL_PEAK50_TP200_SL50_6H` capture +200% TP @ t+52min, les SL30/40 strats sortent à t+8min sur la mèche. Vérifier ce pattern se reproduit sur N≥30.
+  - ETA verdict : Mai 26-Juin 5 selon volume recalls.
 
 ### Mega sweep auto (cron 48h)
 - [x] **W6.** SOL : prochain run cron 02:00 UTC avec `--persist` → DB `mega_sweep_runs`.
@@ -128,7 +132,7 @@ Apr 27 20:12 UTC : burst de 5 KOL calls détectés avec `msg→detect` 700-1050s
 - v14e.34 : robustness analyzer `_strat_slip_sensitivity.py` post-sweep — flag fragile strats whose $/d sign-flips at slip 100→600 bps.
 - Triple gate FDR<alpha opt-in via `--require-fdr` (default OFF).
 
-### Strats deck (531 dont 119 artefact-deprecated)
+### Strats deck (577 dont 119 artefact-deprecated)
 | Family | SOL | ETH |
 |--------|-----|-----|
 | BE | 33 | 9 |
@@ -138,4 +142,5 @@ Apr 27 20:12 UTC : burst de 5 KOL calls détectés avec `msg→detect` 700-1050s
 | SCALP | 36 | 17 |
 | Other | 80 | 10 |  *# was 199, -119 artefacts retirés*
 | AGE clones | 38 | 18 |
-| **RECALL** | **9** | **5** |  *# v14e.40 INVA-pattern shadows (require_recall=True)*
+| **RECALL DIP** (v14e.40+41) | **27** | **9** |  *# drift_vs_first_call_price*
+| **RECALL PEAK** (v14e.41) | **18** | **6** |  *# drift_vs_post-1st-call ATH ($PARANOID pattern)*

@@ -1511,40 +1511,59 @@ def _rt_open_trades(ca: str, symbol: str, price: float, mcap: float,
         )
         return 0
 
-    # v14e.40: RECALL detection. Query kol_call_outcomes for the FIRST mention
-    # of this CA (any KOL, any time) and compute drift_vs_first. Used by RECALL_*
-    # shadow strategies to test the "INVA pattern" — re-entering on a dipped
-    # recall after another KOL already called the token. Backfilled at RT time
-    # only (cheap single-row indexed query); paper_trader filters consume it.
+    # v14e.40 / v14e.41: RECALL detection. Query kol_call_outcomes for the FIRST
+    # mention of this CA + the post-1st-call ATH (peak before this call).
+    # Used by RECALL_* shadow strategies to test the "INVA pattern" — re-entering
+    # on a dipped recall after another KOL already called the token.
+    #
+    # Two drift fields:
+    #   recall_drift_pct      = (now / first_call_price) - 1   (vs entry of 1st)
+    #   recall_drift_vs_peak  = (now / peak_after_first) - 1   (vs ATH between)
+    # The peak-based drift catches pump-then-dump patterns where price > 1st-call
+    # price for a while, then dumps below pic but above 1st-call entry.
+    # Example $PARANOID 27 Apr: 1st @ $0.000112, pic $0.000193, recall @ $0.0000884.
+    # drift_vs_first = -21% (passes DIP10 filter) but drift_vs_peak = -54% (passes
+    # DIP30/DIP50). Both exposed; strats decide which to gate on.
+    #
+    # v14e.41: lower gate to 600s (10 min). Pump-then-dump cycles often resolve
+    # within 15-30min — the prior 1800s threshold missed real INVA-style recalls.
     is_recall = False
-    recall_drift_pct = None       # (current_price / first_price) - 1
+    recall_drift_pct = None
+    recall_drift_vs_peak = None
     hours_since_first_call = None
     first_call_price = None
+    peak_after_first = None
     try:
         _first = (
             sb.table("kol_call_outcomes")
-            .select("entry_price, call_timestamp")
+            .select("entry_price, call_timestamp, ath_after_call")
             .eq("token_address", ca)
             .order("call_timestamp", desc=False)
             .limit(1)
             .execute()
         )
         if _first.data and _first.data[0].get("entry_price"):
-            _fp = float(_first.data[0]["entry_price"])
-            _ft = _first.data[0].get("call_timestamp")
-            # Only flag as recall if first call is OLDER than 30 min — same-cycle
-            # multi-KOL hits should not be treated as recalls.
+            _row = _first.data[0]
+            _fp = float(_row["entry_price"])
+            _ft = _row.get("call_timestamp")
+            _ath = _row.get("ath_after_call")
             from datetime import datetime as _dt
             _ft_dt = _dt.fromisoformat(str(_ft).replace("Z", "+00:00")) if _ft else None
             now_utc = datetime.now(timezone.utc)
-            if _fp > 0 and _ft_dt and (now_utc - _ft_dt).total_seconds() > 1800:
+            if _fp > 0 and _ft_dt and (now_utc - _ft_dt).total_seconds() > 600:
                 first_call_price = _fp
                 recall_drift_pct = (price / _fp) - 1.0 if price > 0 else None
                 hours_since_first_call = (now_utc - _ft_dt).total_seconds() / 3600.0
+                if _ath and float(_ath) > 0 and price > 0:
+                    peak_after_first = float(_ath)
+                    recall_drift_vs_peak = (price / peak_after_first) - 1.0
                 is_recall = True
                 logger.info(
-                    "RT RECALL detected: %s — drift=%.1f%% vs first call @ $%.6g (%.1fh ago)",
-                    symbol, (recall_drift_pct or 0) * 100, _fp, hours_since_first_call,
+                    "RT RECALL: %s — drift_vs_1st=%.1f%% drift_vs_peak=%s @ $%.6g (1st %.1fh ago, peak $%.6g)",
+                    symbol,
+                    (recall_drift_pct or 0) * 100,
+                    f"{recall_drift_vs_peak*100:.1f}%" if recall_drift_vs_peak is not None else "n/a",
+                    _fp, hours_since_first_call, peak_after_first or 0,
                 )
     except Exception as e:
         logger.debug("recall detection failed for %s: %s", ca, e)
@@ -1583,11 +1602,14 @@ def _rt_open_trades(ca: str, symbol: str, price: float, mcap: float,
         # Latency profiling — propagated to live_trader for final timing breakdown
         "_rt_t_msg": token_info.get("_rt_t_msg"),
         "_rt_t_ds_done": token_info.get("_rt_t_ds_done"),
-        # v14e.40: recall fields (consumed by RECALL_* shadow strategy filters)
+        # v14e.40 / v14e.41: recall fields consumed by RECALL_* filters.
+        # drift_pct = vs 1st-call entry, drift_vs_peak = vs post-1st-call ATH.
         "_rt_is_recall": is_recall,
         "_rt_recall_drift_pct": recall_drift_pct,
+        "_rt_recall_drift_vs_peak": recall_drift_vs_peak,
         "_rt_hours_since_first_call": hours_since_first_call,
         "_rt_first_call_price": first_call_price,
+        "_rt_peak_after_first": peak_after_first,
     }
 
     now = datetime.now(timezone.utc)

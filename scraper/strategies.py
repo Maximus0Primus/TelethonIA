@@ -3180,6 +3180,256 @@ STRATEGY_FILTERS["ETH_RECALL_DIP30_S30_TP50_SL30"] = {
 }
 SHADOW_STRATEGIES.append("ETH_RECALL_DIP30_S30_TP50_SL30")
 
+# ============================================================
+# v14e.41 — PEAK-based recall family (pump-then-dump pattern).
+# Catches the $PARANOID 27 Apr scenario: 1st KOL calls, pump +72%,
+# then dumps -54% from peak before next KOL recalls. Drift_vs_1st
+# only -21% (filtered out by DIP30) but drift_vs_peak = -54%
+# (passes DIP30/DIP50 peak filters). Post-recall ran +220% (3x).
+#
+# Uses kol_call_outcomes.ath_after_call as the peak reference. If
+# null (peak not yet computed), strats requiring peak drift skip.
+# ============================================================
+
+# SOL — recall after deep dip from peak (-50 to -30%)
+STRATEGIES["RECALL_PEAK30_TP50_SL30"] = [
+    {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.70, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["RECALL_PEAK30_TP50_SL30"] = {
+    "require_recall": True,
+    "min_drift_vs_peak": -0.50, "max_drift_vs_peak": -0.30,
+    "max_hours_since_first": 6,
+}
+SHADOW_STRATEGIES.append("RECALL_PEAK30_TP50_SL30")
+
+# Deeper peak dump (-70 to -50%) — the $PARANOID sweet spot
+STRATEGIES["RECALL_PEAK50_TP100_SL40_6H"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.60, "horizon_min": 360, "label": "main"},
+]
+STRATEGY_FILTERS["RECALL_PEAK50_TP100_SL40_6H"] = {
+    "require_recall": True,
+    "min_drift_vs_peak": -0.70, "max_drift_vs_peak": -0.50,
+    "max_hours_since_first": 6,
+}
+SHADOW_STRATEGIES.append("RECALL_PEAK50_TP100_SL40_6H")
+
+# Wide TP for the moonshot end of pump-dump-rebuy
+STRATEGIES["RECALL_PEAK50_TP200_SL50_6H"] = [
+    {"pct": 1.0, "tp_mult": 3.00, "sl_mult": 0.50, "horizon_min": 360, "label": "main"},
+]
+STRATEGY_FILTERS["RECALL_PEAK50_TP200_SL50_6H"] = {
+    "require_recall": True,
+    "min_drift_vs_peak": -0.85, "max_drift_vs_peak": -0.50,
+    "max_hours_since_first": 12,
+}
+SHADOW_STRATEGIES.append("RECALL_PEAK50_TP200_SL50_6H")
+
+# Quick recovery scalp (15-30 min after 1st, dip from peak ≥30%)
+STRATEGIES["RECALL_PEAK30_FAST_TP50_SL30"] = [
+    {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.70, "horizon_min": 30, "label": "main"},
+]
+STRATEGY_FILTERS["RECALL_PEAK30_FAST_TP50_SL30"] = {
+    "require_recall": True,
+    "min_drift_vs_peak": -0.70, "max_drift_vs_peak": -0.30,
+    "min_hours_since_first": 0.15, "max_hours_since_first": 2,
+}
+SHADOW_STRATEGIES.append("RECALL_PEAK30_FAST_TP50_SL30")
+
+# Same with BE25 lock for the ones that pop then dump again
+STRATEGIES["RECALL_PEAK30_BE25_TP80_SL30"] = [
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.70, "horizon_min": 120,
+     "be_activation": 0.25, "label": "main"},
+]
+STRATEGY_FILTERS["RECALL_PEAK30_BE25_TP80_SL30"] = {
+    "require_recall": True,
+    "min_drift_vs_peak": -0.85, "max_drift_vs_peak": -0.30,
+    "max_hours_since_first": 6,
+}
+SHADOW_STRATEGIES.append("RECALL_PEAK30_BE25_TP80_SL30")
+
+# ETH peak variant
+STRATEGIES["ETH_RECALL_PEAK30_TP50_SL30"] = [
+    {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.70, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_RECALL_PEAK30_TP50_SL30"] = {
+    "chain": "ethereum",
+    "require_recall": True,
+    "min_drift_vs_peak": -0.70, "max_drift_vs_peak": -0.30,
+    "max_hours_since_first": 6,
+}
+SHADOW_STRATEGIES.append("ETH_RECALL_PEAK30_TP50_SL30")
+
+# ============================================================
+# v14e.41 — RECALL × proven mechanics matrix.
+# Combines the 2 recall modes (DIP_vs_1st / PEAK_vs_ATH) with the
+# strategy mechanics that paper-tested positive on 14d (BE25/30,
+# LOCK10/15, FAST45/60, SLOW4H/6H, SCALP, DECAY, NZ, S30/S40,
+# MCAP_MID, AGE windows, wide-TP moonshots).
+# Insight from $PARANOID 27 Apr replay: SL≥-50% is mandatory on
+# pump-then-dump recalls because the dump mèche fires SL30/SL40
+# BEFORE the recovery pump arrives. All PEAK variants below use
+# SL40-SL60 to survive the dip-trough.
+# ============================================================
+
+# Helper to register a shadow strat with filter in 1 line
+def _add_recall(name, tp_mult, sl_mult, horizon, filt_extra, be_act=None, be_lock=None):
+    spec = {"pct": 1.0, "tp_mult": tp_mult, "sl_mult": sl_mult,
+            "horizon_min": horizon, "label": "main"}
+    if be_act is not None:
+        spec["be_activation"] = be_act
+    if be_lock is not None:
+        spec["be_lock_pct"] = be_lock
+    STRATEGIES[name] = [spec]
+    base = {"require_recall": True}
+    base.update(filt_extra)
+    STRATEGY_FILTERS[name] = base
+    SHADOW_STRATEGIES.append(name)
+
+
+# --- DIP family (drift_vs_first_call_price) — broaden mechanic coverage ---
+# BE + LOCK on dip recalls
+_add_recall("RECALL_DIP30_BE15_LOCK5_TP50_SL30", 1.50, 0.70, 120,
+    {"min_recall_drift": -0.70, "max_recall_drift": -0.30, "max_hours_since_first": 24},
+    be_act=0.15, be_lock=0.05)
+_add_recall("RECALL_DIP30_BE25_LOCK10_TP80_SL30", 1.80, 0.70, 120,
+    {"min_recall_drift": -0.70, "max_recall_drift": -0.30, "max_hours_since_first": 24},
+    be_act=0.25, be_lock=0.10)
+_add_recall("RECALL_DIP30_BE25_LOCK10_TP100_SL40", 2.00, 0.60, 240,
+    {"min_recall_drift": -0.70, "max_recall_drift": -0.30, "max_hours_since_first": 24},
+    be_act=0.25, be_lock=0.10)
+_add_recall("RECALL_DIP30_BE30_LOCK15_TP100_SL40", 2.00, 0.60, 240,
+    {"min_recall_drift": -0.70, "max_recall_drift": -0.30, "max_hours_since_first": 24},
+    be_act=0.30, be_lock=0.15)
+
+# FAST timeouts on dip recalls
+_add_recall("RECALL_DIP30_FAST45_TP50_SL30", 1.50, 0.70, 45,
+    {"min_recall_drift": -0.70, "max_recall_drift": -0.30, "max_hours_since_first": 24})
+_add_recall("RECALL_DIP30_FAST60_TP40_SL30", 1.40, 0.70, 60,
+    {"min_recall_drift": -0.70, "max_recall_drift": -0.30, "max_hours_since_first": 24})
+
+# SLOW timeouts (let the moonshot run)
+_add_recall("RECALL_DIP30_SLOW4H_TP100_SL50", 2.00, 0.50, 240,
+    {"min_recall_drift": -0.70, "max_recall_drift": -0.30, "max_hours_since_first": 24})
+_add_recall("RECALL_DIP30_SLOW6H_TP150_SL50", 2.50, 0.50, 360,
+    {"min_recall_drift": -0.70, "max_recall_drift": -0.30, "max_hours_since_first": 48})
+_add_recall("RECALL_DIP30_SLOW6H_TP200_SL50", 3.00, 0.50, 360,
+    {"min_recall_drift": -0.70, "max_recall_drift": -0.30, "max_hours_since_first": 48})
+
+# SCALP on dip — tight TP, capture the bounce
+_add_recall("RECALL_DIP30_SCALP_TP15_SL15", 1.15, 0.85, 120,
+    {"min_recall_drift": -0.70, "max_recall_drift": -0.30, "max_hours_since_first": 24})
+_add_recall("RECALL_DIP30_SCALP_TP20_SL15", 1.20, 0.85, 120,
+    {"min_recall_drift": -0.70, "max_recall_drift": -0.30, "max_hours_since_first": 24})
+
+# DECAY — TP decays from 50% to 15% over the horizon
+STRATEGIES["RECALL_DIP30_DECAY_TP50_E15"] = [
+    {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.70, "horizon_min": 120,
+     "tp_decay_end": 1.15, "label": "main"},
+]
+STRATEGY_FILTERS["RECALL_DIP30_DECAY_TP50_E15"] = {
+    "require_recall": True,
+    "min_recall_drift": -0.70, "max_recall_drift": -0.30, "max_hours_since_first": 24,
+}
+SHADOW_STRATEGIES.append("RECALL_DIP30_DECAY_TP50_E15")
+
+# Quality gates on dip
+_add_recall("RECALL_DIP30_NZ_TP50_SL30", 1.50, 0.70, 120,
+    {"min_recall_drift": -0.70, "max_recall_drift": -0.30, "max_hours_since_first": 24,
+     "min_liquidity_usd": 1.0})
+_add_recall("RECALL_DIP30_S40_TP100_SL40", 2.00, 0.60, 240,
+    {"min_recall_drift": -0.70, "max_recall_drift": -0.30, "max_hours_since_first": 24,
+     "min_rt_score": 40})
+_add_recall("RECALL_DIP30_MCAP_TP100_SL40", 2.00, 0.60, 240,
+    {"min_recall_drift": -0.70, "max_recall_drift": -0.30, "max_hours_since_first": 24,
+     "min_mcap": 30_000, "max_mcap": 500_000})
+
+# Wide-TP moonshots on dip
+_add_recall("RECALL_DIP30_TP100_SL50", 2.00, 0.50, 240,
+    {"min_recall_drift": -0.70, "max_recall_drift": -0.30, "max_hours_since_first": 24})
+_add_recall("RECALL_DIP30_TP150_SL50", 2.50, 0.50, 240,
+    {"min_recall_drift": -0.70, "max_recall_drift": -0.30, "max_hours_since_first": 24})
+_add_recall("RECALL_DIP30_TP200_SL50_6H", 3.00, 0.50, 360,
+    {"min_recall_drift": -0.70, "max_recall_drift": -0.30, "max_hours_since_first": 48})
+_add_recall("RECALL_DIP50_TP200_SL50_6H_OVERRIDE", 3.00, 0.50, 360,
+    {"min_recall_drift": -0.85, "max_recall_drift": -0.50, "max_hours_since_first": 72})
+
+# AGE-windowed dip recalls
+_add_recall("RECALL_DIP30_AGE2H_BE25_TP80_SL30", 1.80, 0.70, 120,
+    {"min_recall_drift": -0.70, "max_recall_drift": -0.30,
+     "min_hours_since_first": 0.15, "max_hours_since_first": 2},
+    be_act=0.25)
+_add_recall("RECALL_DIP30_AGE6H_LOCK10_TP100_SL40", 2.00, 0.60, 240,
+    {"min_recall_drift": -0.70, "max_recall_drift": -0.30,
+     "min_hours_since_first": 0.15, "max_hours_since_first": 6},
+    be_act=0.25, be_lock=0.10)
+
+
+# --- PEAK family (drift_vs_post-1st-call ATH) — SL≥50% mandatory ---
+# Wider SL variants of the existing peak strats (mèche-survivable)
+_add_recall("RECALL_PEAK30_TP50_SL50", 1.50, 0.50, 120,
+    {"min_drift_vs_peak": -0.70, "max_drift_vs_peak": -0.30, "max_hours_since_first": 6})
+_add_recall("RECALL_PEAK30_TP80_SL50", 1.80, 0.50, 240,
+    {"min_drift_vs_peak": -0.70, "max_drift_vs_peak": -0.30, "max_hours_since_first": 6})
+
+# BE/LOCK on peak dump
+_add_recall("RECALL_PEAK30_BE25_LOCK10_TP100_SL50", 2.00, 0.50, 240,
+    {"min_drift_vs_peak": -0.70, "max_drift_vs_peak": -0.30, "max_hours_since_first": 6},
+    be_act=0.25, be_lock=0.10)
+_add_recall("RECALL_PEAK50_BE25_LOCK15_TP150_SL50_6H", 2.50, 0.50, 360,
+    {"min_drift_vs_peak": -0.85, "max_drift_vs_peak": -0.50, "max_hours_since_first": 12},
+    be_act=0.25, be_lock=0.15)
+
+# FAST/SLOW timeouts on peak
+_add_recall("RECALL_PEAK30_FAST45_TP50_SL50", 1.50, 0.50, 45,
+    {"min_drift_vs_peak": -0.70, "max_drift_vs_peak": -0.30,
+     "min_hours_since_first": 0.15, "max_hours_since_first": 2})
+_add_recall("RECALL_PEAK50_SLOW4H_TP100_SL50", 2.00, 0.50, 240,
+    {"min_drift_vs_peak": -0.85, "max_drift_vs_peak": -0.50, "max_hours_since_first": 6})
+
+# SCALP on peak (capture quick bounce off the dip)
+_add_recall("RECALL_PEAK30_SCALP_TP15_SL20", 1.15, 0.80, 120,
+    {"min_drift_vs_peak": -0.70, "max_drift_vs_peak": -0.30, "max_hours_since_first": 6})
+_add_recall("RECALL_PEAK50_SCALP_TP20_SL30", 1.20, 0.70, 120,
+    {"min_drift_vs_peak": -0.85, "max_drift_vs_peak": -0.50, "max_hours_since_first": 6})
+
+# Wide-TP / extreme moonshots on deep peak dumps (the $PARANOID +220% pattern)
+_add_recall("RECALL_PEAK50_TP100_SL50_6H", 2.00, 0.50, 360,
+    {"min_drift_vs_peak": -0.85, "max_drift_vs_peak": -0.50, "max_hours_since_first": 12})
+_add_recall("RECALL_PEAK50_TP200_SL60_6H", 3.00, 0.40, 360,
+    {"min_drift_vs_peak": -0.85, "max_drift_vs_peak": -0.50, "max_hours_since_first": 12})
+_add_recall("RECALL_PEAK70_TP200_SL50_6H", 3.00, 0.50, 360,
+    {"min_drift_vs_peak": -0.95, "max_drift_vs_peak": -0.70, "max_hours_since_first": 24})
+_add_recall("RECALL_PEAK70_TP500_SL60_6H", 6.00, 0.40, 360,
+    {"min_drift_vs_peak": -0.95, "max_drift_vs_peak": -0.70, "max_hours_since_first": 24})
+
+# Score-gated peak
+_add_recall("RECALL_PEAK30_S30_TP80_SL50", 1.80, 0.50, 240,
+    {"min_drift_vs_peak": -0.70, "max_drift_vs_peak": -0.30,
+     "max_hours_since_first": 6, "min_rt_score": 30})
+
+
+# --- ETH variants of the proven mechanics ---
+_add_recall("ETH_RECALL_DIP30_BE25_LOCK10_TP80_SL40_T2H", 1.80, 0.60, 120,
+    {"chain": "ethereum",
+     "min_recall_drift": -0.70, "max_recall_drift": -0.30, "max_hours_since_first": 24},
+    be_act=0.25, be_lock=0.10)
+_add_recall("ETH_RECALL_DIP30_TP150_SL50_4H", 2.50, 0.50, 240,
+    {"chain": "ethereum",
+     "min_recall_drift": -0.70, "max_recall_drift": -0.30, "max_hours_since_first": 24})
+_add_recall("ETH_RECALL_DIP30_SLOW4H_TP100_SL50", 2.00, 0.50, 240,
+    {"chain": "ethereum",
+     "min_recall_drift": -0.70, "max_recall_drift": -0.30, "max_hours_since_first": 48})
+_add_recall("ETH_RECALL_PEAK30_TP100_SL50", 2.00, 0.50, 240,
+    {"chain": "ethereum",
+     "min_drift_vs_peak": -0.70, "max_drift_vs_peak": -0.30, "max_hours_since_first": 6})
+_add_recall("ETH_RECALL_PEAK50_TP200_SL50_6H", 3.00, 0.50, 360,
+    {"chain": "ethereum",
+     "min_drift_vs_peak": -0.85, "max_drift_vs_peak": -0.50, "max_hours_since_first": 12})
+_add_recall("ETH_RECALL_PEAK50_BE25_LOCK10_TP150_SL40_T4H", 2.50, 0.60, 240,
+    {"chain": "ethereum",
+     "min_drift_vs_peak": -0.85, "max_drift_vs_peak": -0.50, "max_hours_since_first": 12},
+    be_act=0.25, be_lock=0.10)
+
 
 # ---------------------------------------------------------------------------
 # v14e — Chain-indexed strategy registry.
