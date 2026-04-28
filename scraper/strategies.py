@@ -3019,6 +3019,168 @@ STRATEGY_FILTERS["ETH_FAST_TP200_SL40_60M_MCAP_S40"] = {
 SHADOW_STRATEGIES.append("ETH_FAST_TP200_SL40_60M_MCAP_S40")
 
 
+# ============================================================
+# v14e.40 — RECALL_DIP shadow family (INVA pattern A/B test).
+# Hypothesis: when a token already called by a KOL gets recalled
+# AFTER a meaningful dip vs the first call price, smart money may
+# be re-entering. Historical 21d sample (N=15-20 per bucket) showed
+# +8-12% EV on TP50/SL30 for dip≥30%, but evidence is too thin to
+# ship live — these run as shadows to gather labeled data.
+#
+# Filter contract (paper_trader._passes_strategy_filter v14e.40):
+#   require_recall=True       — must be a 2nd+ call
+#   min_recall_drift / max_recall_drift  — bounds on (price/first - 1)
+#   max_hours_since_first     — lookback window
+# RT detection: safe_scraper._rt_open_trades queries kol_call_outcomes
+# for the FIRST call ≥30 min ago, populates _rt_is_recall + drift fields.
+#
+# Variants (14): dip × age × TP/SL/timeout × chain.
+# All shadows, no live exposure.
+# ============================================================
+
+# --- SOL recall — TP50/SL30 (positive EV bucket from 21d backtest) ---
+STRATEGIES["RECALL_DIP30_TP50_SL30_2H"] = [
+    {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.70, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["RECALL_DIP30_TP50_SL30_2H"] = {
+    "require_recall": True, "min_recall_drift": -0.50, "max_recall_drift": -0.30,
+    "max_hours_since_first": 24,
+}
+SHADOW_STRATEGIES.append("RECALL_DIP30_TP50_SL30_2H")
+
+STRATEGIES["RECALL_DIP30_TP50_SL30_6H"] = [
+    {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.70, "horizon_min": 360, "label": "main"},
+]
+STRATEGY_FILTERS["RECALL_DIP30_TP50_SL30_6H"] = {
+    "require_recall": True, "min_recall_drift": -0.50, "max_recall_drift": -0.30,
+    "max_hours_since_first": 24,
+}
+SHADOW_STRATEGIES.append("RECALL_DIP30_TP50_SL30_6H")
+
+# Deeper dip (-50 to -70%) — N=5 historic, 40% TP50 hit but tiny sample
+STRATEGIES["RECALL_DIP50_TP50_SL30_2H"] = [
+    {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.70, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["RECALL_DIP50_TP50_SL30_2H"] = {
+    "require_recall": True, "min_recall_drift": -0.70, "max_recall_drift": -0.50,
+    "max_hours_since_first": 48,
+}
+SHADOW_STRATEGIES.append("RECALL_DIP50_TP50_SL30_2H")
+
+STRATEGIES["RECALL_DIP50_TP100_SL40_6H"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.60, "horizon_min": 360, "label": "main"},
+]
+STRATEGY_FILTERS["RECALL_DIP50_TP100_SL40_6H"] = {
+    "require_recall": True, "min_recall_drift": -0.70, "max_recall_drift": -0.50,
+    "max_hours_since_first": 48,
+}
+SHADOW_STRATEGIES.append("RECALL_DIP50_TP100_SL40_6H")
+
+# Wide dip range -30 to -70 with BE (lock the bounce, no full SL)
+STRATEGIES["RECALL_DIP30_BE25_TP80_SL30"] = [
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.70, "horizon_min": 120,
+     "be_activation": 0.25, "label": "main"},
+]
+STRATEGY_FILTERS["RECALL_DIP30_BE25_TP80_SL30"] = {
+    "require_recall": True, "min_recall_drift": -0.70, "max_recall_drift": -0.30,
+    "max_hours_since_first": 24,
+}
+SHADOW_STRATEGIES.append("RECALL_DIP30_BE25_TP80_SL30")
+
+# Age-segmented (6h after first call = freshest dip recovery, 44% TP50 in N=18)
+STRATEGIES["RECALL_DIP30_AGE6_TP50_SL30"] = [
+    {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.70, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["RECALL_DIP30_AGE6_TP50_SL30"] = {
+    "require_recall": True, "min_recall_drift": -0.70, "max_recall_drift": -0.30,
+    "max_hours_since_first": 6,
+}
+SHADOW_STRATEGIES.append("RECALL_DIP30_AGE6_TP50_SL30")
+
+# Older recalls (6-24h) — stale bag bounce hypothesis
+STRATEGIES["RECALL_DIP30_AGE24_TP50_SL30"] = [
+    {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.70, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["RECALL_DIP30_AGE24_TP50_SL30"] = {
+    "require_recall": True, "min_recall_drift": -0.70, "max_recall_drift": -0.30,
+    "min_hours_since_first": 6, "max_hours_since_first": 24,
+}
+SHADOW_STRATEGIES.append("RECALL_DIP30_AGE24_TP50_SL30")
+
+# Shallow dip (-10 to -30%) — control / negative-control bucket
+STRATEGIES["RECALL_DIP10_TP50_SL30"] = [
+    {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.70, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["RECALL_DIP10_TP50_SL30"] = {
+    "require_recall": True, "min_recall_drift": -0.30, "max_recall_drift": -0.10,
+    "max_hours_since_first": 24,
+}
+SHADOW_STRATEGIES.append("RECALL_DIP10_TP50_SL30")
+
+# Wider TP for the deep-dip recoveries that historically went 5x-10x
+STRATEGIES["RECALL_DIP50_TP200_SL50_6H"] = [
+    {"pct": 1.0, "tp_mult": 3.00, "sl_mult": 0.50, "horizon_min": 360, "label": "main"},
+]
+STRATEGY_FILTERS["RECALL_DIP50_TP200_SL50_6H"] = {
+    "require_recall": True, "min_recall_drift": -0.85, "max_recall_drift": -0.50,
+    "max_hours_since_first": 72,
+}
+SHADOW_STRATEGIES.append("RECALL_DIP50_TP200_SL50_6H")
+
+# --- ETH recall variants ---
+STRATEGIES["ETH_RECALL_DIP30_TP50_SL30_2H"] = [
+    {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.70, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_RECALL_DIP30_TP50_SL30_2H"] = {
+    "chain": "ethereum",
+    "require_recall": True, "min_recall_drift": -0.50, "max_recall_drift": -0.30,
+    "max_hours_since_first": 24,
+}
+SHADOW_STRATEGIES.append("ETH_RECALL_DIP30_TP50_SL30_2H")
+
+STRATEGIES["ETH_RECALL_DIP30_BE25_TP80_SL40_T2H"] = [
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.60, "horizon_min": 120,
+     "be_activation": 0.25, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_RECALL_DIP30_BE25_TP80_SL40_T2H"] = {
+    "chain": "ethereum",
+    "require_recall": True, "min_recall_drift": -0.70, "max_recall_drift": -0.30,
+    "max_hours_since_first": 24,
+}
+SHADOW_STRATEGIES.append("ETH_RECALL_DIP30_BE25_TP80_SL40_T2H")
+
+STRATEGIES["ETH_RECALL_DIP50_TP100_SL40_6H"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.60, "horizon_min": 360, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_RECALL_DIP50_TP100_SL40_6H"] = {
+    "chain": "ethereum",
+    "require_recall": True, "min_recall_drift": -0.70, "max_recall_drift": -0.50,
+    "max_hours_since_first": 48,
+}
+SHADOW_STRATEGIES.append("ETH_RECALL_DIP50_TP100_SL40_6H")
+
+# Combo: recall dip + score gate (only if rt_score >= 30 — quality filter)
+STRATEGIES["RECALL_DIP30_S30_TP50_SL30"] = [
+    {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.70, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["RECALL_DIP30_S30_TP50_SL30"] = {
+    "require_recall": True, "min_recall_drift": -0.70, "max_recall_drift": -0.30,
+    "max_hours_since_first": 24, "min_rt_score": 30,
+}
+SHADOW_STRATEGIES.append("RECALL_DIP30_S30_TP50_SL30")
+
+# Same but ETH
+STRATEGIES["ETH_RECALL_DIP30_S30_TP50_SL30"] = [
+    {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.70, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["ETH_RECALL_DIP30_S30_TP50_SL30"] = {
+    "chain": "ethereum",
+    "require_recall": True, "min_recall_drift": -0.70, "max_recall_drift": -0.30,
+    "max_hours_since_first": 24, "min_rt_score": 30,
+}
+SHADOW_STRATEGIES.append("ETH_RECALL_DIP30_S30_TP50_SL30")
+
+
 # ---------------------------------------------------------------------------
 # v14e — Chain-indexed strategy registry.
 # ---------------------------------------------------------------------------

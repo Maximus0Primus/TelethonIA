@@ -1511,6 +1511,44 @@ def _rt_open_trades(ca: str, symbol: str, price: float, mcap: float,
         )
         return 0
 
+    # v14e.40: RECALL detection. Query kol_call_outcomes for the FIRST mention
+    # of this CA (any KOL, any time) and compute drift_vs_first. Used by RECALL_*
+    # shadow strategies to test the "INVA pattern" — re-entering on a dipped
+    # recall after another KOL already called the token. Backfilled at RT time
+    # only (cheap single-row indexed query); paper_trader filters consume it.
+    is_recall = False
+    recall_drift_pct = None       # (current_price / first_price) - 1
+    hours_since_first_call = None
+    first_call_price = None
+    try:
+        _first = (
+            sb.table("kol_call_outcomes")
+            .select("entry_price, call_timestamp")
+            .eq("token_address", ca)
+            .order("call_timestamp", desc=False)
+            .limit(1)
+            .execute()
+        )
+        if _first.data and _first.data[0].get("entry_price"):
+            _fp = float(_first.data[0]["entry_price"])
+            _ft = _first.data[0].get("call_timestamp")
+            # Only flag as recall if first call is OLDER than 30 min — same-cycle
+            # multi-KOL hits should not be treated as recalls.
+            from datetime import datetime as _dt
+            _ft_dt = _dt.fromisoformat(str(_ft).replace("Z", "+00:00")) if _ft else None
+            now_utc = datetime.now(timezone.utc)
+            if _fp > 0 and _ft_dt and (now_utc - _ft_dt).total_seconds() > 1800:
+                first_call_price = _fp
+                recall_drift_pct = (price / _fp) - 1.0 if price > 0 else None
+                hours_since_first_call = (now_utc - _ft_dt).total_seconds() / 3600.0
+                is_recall = True
+                logger.info(
+                    "RT RECALL detected: %s — drift=%.1f%% vs first call @ $%.6g (%.1fh ago)",
+                    symbol, (recall_drift_pct or 0) * 100, _fp, hours_since_first_call,
+                )
+    except Exception as e:
+        logger.debug("recall detection failed for %s: %s", ca, e)
+
     # Build base token entry with RT metadata
     token_entry = {
         "symbol": symbol,
@@ -1545,6 +1583,11 @@ def _rt_open_trades(ca: str, symbol: str, price: float, mcap: float,
         # Latency profiling — propagated to live_trader for final timing breakdown
         "_rt_t_msg": token_info.get("_rt_t_msg"),
         "_rt_t_ds_done": token_info.get("_rt_t_ds_done"),
+        # v14e.40: recall fields (consumed by RECALL_* shadow strategy filters)
+        "_rt_is_recall": is_recall,
+        "_rt_recall_drift_pct": recall_drift_pct,
+        "_rt_hours_since_first_call": hours_since_first_call,
+        "_rt_first_call_price": first_call_price,
     }
 
     now = datetime.now(timezone.utc)

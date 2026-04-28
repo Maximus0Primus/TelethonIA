@@ -267,6 +267,30 @@ def _passes_strategy_filter(token: dict, strategy_name: str) -> bool:
             return False
         if min_age is not None and token_age_h < float(min_age):
             return False
+
+    # v14e.40: RECALL filters. Strategies opt in by setting `require_recall=True`
+    # in their filter. drift = (recall_price / first_call_price) - 1, so a
+    # negative number means the recall is BELOW the first call (the dipped-
+    # recall hypothesis). hours_since_first_call gates the lookback window.
+    if filt.get("require_recall"):
+        if not token.get("_rt_is_recall"):
+            return False
+        drift = token.get("_rt_recall_drift_pct")
+        if drift is None:
+            return False
+        drift = float(drift)
+        if "max_recall_drift" in filt and drift > float(filt["max_recall_drift"]):
+            return False
+        if "min_recall_drift" in filt and drift < float(filt["min_recall_drift"]):
+            return False
+        hsfc = token.get("_rt_hours_since_first_call")
+        if hsfc is None:
+            return False
+        hsfc = float(hsfc)
+        if "max_hours_since_first" in filt and hsfc > float(filt["max_hours_since_first"]):
+            return False
+        if "min_hours_since_first" in filt and hsfc < float(filt["min_hours_since_first"]):
+            return False
     return True
 
 
@@ -994,6 +1018,10 @@ def _load_paper_trade_config(client) -> dict:
         "experiment_id": None,       # v92: A/B testing
         "variant_id": None,          # v92: A/B testing
         "deprecated_strategies": list(_DEFAULT_DEPRECATED),  # v92: dynamic deprecated
+        # v14e.40: kol_chain_blacklist must be in defaults — _load_paper_trade_config
+        # filters JSONB to keys present here. Missing entry caused v14e.37 gate to
+        # always read {} → blacklist never fired. Empty default = allow all.
+        "kol_chain_blacklist": {},
     }
     try:
         result = client.table("scoring_config").select("paper_trade_config").eq("id", 1).execute()
