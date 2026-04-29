@@ -136,6 +136,10 @@ def main():
                          "Uses relaxed gates (no cross_regime_robust, n_recent>=15).")
     ap.add_argument("--min-n-recent", type=int, default=15,
                     help="v14e.45: minimum trades in the recent window to be eligible (default 15).")
+    ap.add_argument("--min-wr-recent", type=float, default=0.25,
+                    help="v14e.45: minimum win rate (fraction) on the full sweep window for "
+                         "top_recent eligibility — guards against pure fat-tail strats with "
+                         "1-2 moonshots boosting recent_avg. Default 0.25 (25%%).")
     args = ap.parse_args()
 
     csv_path = Path(args.csv)
@@ -322,6 +326,13 @@ def main():
         # Eligibilité par n_sim_trades >= min_n_recent — abaisse la barre vs robust
         if "n" in df_eligible.columns:
             recent_filter = recent_filter & (df_eligible["n"] >= args.min_n_recent)
+        # v14e.45: WR gate sur la fenêtre full sweep — garde-fou anti fat-tail.
+        # Une strat qui ranke +30% recent_avg avec WR 5% (= 1-2 moonshots) est
+        # un mirage qui va revenir à la moyenne. Le gate WR>=25% sur la fenêtre
+        # complete sweep (14d) écarte ces cas avant promotion.
+        if "wr_pct" in df_eligible.columns:
+            recent_filter = recent_filter & (df_eligible["wr_pct"] >= args.min_wr_recent * 100)
+            print(f"[v14e.45 recent ranking] WR gate >= {args.min_wr_recent*100:.0f}% applied")
         recent = (
             df_eligible[recent_filter]
             .sort_values("recent_avg_pnl_pct", ascending=False)
