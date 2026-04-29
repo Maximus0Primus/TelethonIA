@@ -1433,8 +1433,14 @@ def check_live_trades_eth(client_sb) -> dict:
                 continue
 
         # Execute Uniswap V3 sell
+        # v14e.43: read sell tolerance from live_trading.eth_sell_slippage_bps
+        # (was hardcoded 500 — ignored JSONB). Default raised to 600 to match
+        # the empirical p75 with margin; legit dumping memecoins routinely
+        # exceed 500 bps router-internal slip.
         sell_amount = int(trade.get("buy_output_tokens") or 0) or None
-        sell_result = execute_sell(addr, amount_tokens=sell_amount, slippage_bps=500)
+        _lt_cfg = _rt_cfg_orch.get("live_trading", {}) if isinstance(_rt_cfg_orch, dict) else {}
+        _sell_slip = int(_lt_cfg.get("eth_sell_slippage_bps", 600))
+        sell_result = execute_sell(addr, amount_tokens=sell_amount, slippage_bps=_sell_slip)
 
         if not sell_result.get("success"):
             try:

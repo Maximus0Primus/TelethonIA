@@ -38,6 +38,35 @@
 
 **Cost-drag insight (informatif)** — sur les 8 trades : sum cost = $50, sum PnL = +$9.30, sum gross (avant cost) = +$59.30. **Le cost mange 84% du gross edge**. Pour Phase 2 ($100/trade), le cost drag % devrait baisser proportionnellement (gas devient ~3% de la position vs 9% à $20), mais le slip% reste identique → drag global ~22-25%. Toujours énorme mais viable si le KOL signal continue de produire +30%/trade gross sur les winners.
 
+**Réalité wallet (on-chain) Apr 27→29 :** wallet `0xc5c92e3...` initial 0.018670 ETH (~$43), final 0.003182 ETH (~$7.3). **Net réel −0.01378 ETH ≈ −$31.7**. Le DB sum pnl_usd = +$9.27 ne comptait PAS le gas ($16.82 cumul) NI le sell INCOME manuel raté (-0.001709 ETH = −$3.93 perdu en gas net). Net DB-aware = +9.27 − 16.82 ≈ −$7.5. Reste ~−$24 = INCOME orphan + gas approval/wrap + petits + WETH residuals. Plus dur que les "−$15" estimés à œil.
+
+**LIVE TX TOLERANCE FIX v14e.43** — `live_trader_eth.py:1437` hardcodait `slippage_bps=500` pour les sells, ignorant `live_trading.eth_sell_slippage_bps` JSONB (= 600). Wired now : `_lt_cfg.get('eth_sell_slippage_bps', 600)`. Empirical p75 sell adverse = 2500 bps → JSONB devrait monter à ~2000 (à valider après prochains trades, sinon trades légitimes vont revert).
+
+**Top ETH strats — sim Apr 27 (OLD slip 100/100, à re-run avec slip 500/800) :**
+| Rank | Strategy | Filter | sim N | sim WR | sim avg | sim $/d |
+|---|---|---|---|---|---|---|
+| 1 | TP300_SL40_6H_MCAP_S40 | SCORE35 AGE12 | 30 | 43.3% | +62.6% | $264 |
+| 2 | BE50_LOCK25_TP300_SL40_4H | NONE/NOZEROLIQ AGE12 | 52 | 57.7% | +36.0% | $260 |
+| 9-14 | ETH_SLOW6H_TP200_SL40 | various | 30-52 | 33-43% | +35-59% | $250 |
+| 17-20 | ETH_TP300_SL40_4H_MCAP_S40 | NONE/NOZEROLIQ | 52 | 36.5% | +34.3% | $247 |
+| 8044 | **ETH_TP80_SL40_T2H** (live) | NOZEROLIQ AGE12 | 52 | 50% | +23.2% | $167 |
+
+**Reality check sur les 8 tokens KOL (paper shadows, OLD slip — donc encore optimistes) :**
+| Strategy | shadow N | shadow WR | shadow avg | shadow sum |
+|---|---|---|---|---|
+| **ETH_SLOW6H_TP200_SL40** | 8 | 25% | **+15.2%** | **+121%** |
+| ETH_BE50_TP150_SL40_T2H | 8 | 25% | -6.7% | -54% |
+| ETH_TP80_SL40_T2H (live shadow) | 8 | 25% | -15.1% | -121% |
+| ETH_FAST_TP100_SL20 | 8 | 12.5% | -16.1% | -128% |
+| ETH_TP300_SL40_4H_MCAP_S40 | 5 | 0% | -42.4% | -212% |
+| TP300/BE50_LOCK25 (top sim) | 0 | — | — | (filter excluded) |
+
+Live ETH_TP80_SL40_T2H réalité Jupiter Ultra : sum +46% N=8 WR=50% avg+5.8% — **Jupiter Ultra positive slip a sauvé ce qui aurait été −121% en paper**. Drift live-paper ~+30pp net.
+
+**Verdict :** sur ces 8 tokens, **ETH_SLOW6H_TP200_SL40 aurait fait mieux que la strat live** (+15% paper vs −15% paper, mais live Jupiter Ultra peut faire flip). Le top sim winner (TP300_SL40_6H_MCAP_S40 +62.6% avg) n'a aucune shadow ETH — son filtre MCAP_MID exclut probablement les KOL memecoins. À valider au prochain sweep ETH avec slip 500/800.
+
+**Action pending :** re-trigger workflow_dispatch `mega-sweep-eth-48h` après commit slip recalib pour avoir un ranking propre avec les bons slip 500/800.
+
 ---
 
 # Pipeline Status — Updated Apr 28, 2026 15:50 UTC (v14e.41 deployed)
@@ -61,7 +90,6 @@ L'historique des décisions se lit dans le git log — ce TODO ne garde que ce q
   - drift -3 à -7pp → continuer collecte
   - drift < -7pp → abort + recalibrer `ETH_BUY_SLIPPAGE_BPS` empiriquement
 - [ ] **E3.** Top up wallet ETH : actuel $43 → $80-100. Adresse : `0xC5c92E3AC207f686D09686Fe1dE79a302D9410E9`.
-- [ ] **E4.** **Rotation clé wallet ETH** — la clé est compromise (transcript persistant). À faire AVANT scaling Phase 2.
 - [x] **E5.** v14e.43 — `_eth_open_lock = threading.Lock()` enrobe `open_live_trade` dans `_open_live_trade_locked`. ✅
 
 ---
