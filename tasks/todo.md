@@ -1,210 +1,120 @@
-# Pipeline Status — Updated Apr 29, 2026 (v14e.42 deployed)
+# Pipeline Status — Updated 2026-04-29 (v14e.43 deployed)
 
-## v14e.42 (Apr 29) — closing_retry sentinel-leak + ETH bigint overflow
+## État courant
 
-**Bug 1 (DB cosmétique) — `closing_retry` trap.** Quand un sell ETH reverted/timeout, status passait `open→closing`. Le retry path à `live_trader_eth.py:1248` settait `ev["status"]="closing_retry"` (sentinelle) ; après retry sell réussi, `closing_retry` était écrit comme status terminal. Le filtre de scan `in_("status",["open","closing"])` n'incluait pas `closing_retry` → row jamais retouchée. **6 ETH live (CYB, APHEX, MOMMYS, ARMA, SCAM, PARANOID)** ont été silencieusement bloqués alors que les sells avaient bien minée on-chain (vérifié via `eth_getTransactionReceipt`). Fix : (a) inclure `closing_retry` dans le filtre, (b) renommer sentinelle en `force_close`, (c) résoudre `force_close` post-sell en vrai status terminal (`tp_hit`/`sl_hit`/`timeout`) à partir de `pnl_pct` vs `STRATEGIES[strategy]` thresholds. Symétrique sur `live_trader.py` SOL. Recovery DB via `scripts/_recover_stuck_eth.py` (6 rows fixées : 1 tp_hit, 2 sl_hit, 3 timeout).
+- **SOL live** : `BE25_TP80_SL30` alloc 1.0, position $1.70/trade (max_position_sol=0.02), max_open=12. Live 14d : N=122, WR 36%, avg 0.0%, **break-even**.
+- **ETH live Phase 1** : `ETH_TP80_SL40_T2H` alloc 1.0, position $20/trade, eth_max_open=1, eth_daily_loss_limit=$30. Live 9 trades : DB pnl +$20 (incl $MUSK +$10.67 recovered). Wallet on-chain net Apr 27→29 = -$31.7 (mais ce calcul date d'avant le MUSK recovery).
+- **Sweeps en cours** :
+  - SOL `25116811803` (matrix split v14e.43, 3 shards parallèles) — in_progress, ETA 17:00-17:30 UTC
+  - ETH `25118472430` — in_progress, ETA <17:00 UTC
+  - **Aucun ranking propre actuel** : dernier SOL réussi Apr 25 (pré-RECALL), dernier ETH Apr 27 (OLD slip 100/100)
+- **Blacklist KOL SOL** : 14 KOLs filtrés, 13/14 confirmés statistiquement encore négatifs sur 7d. **Exception : `CarnagecallsGambles` recovered (CI95% +5.4 à +12.4% sur N=698)** — à un-blacklist.
+- **RECALL family** : 60 strats déployées Apr 28-29, **0 trade fired** depuis. Soit gate trop strict, soit pas de pump-then-dump qualifiant. À évaluer après sweep.
 
-**Bug 2 (CRITIQUE silent loss) — `$INCOME` orphan.** Buy on-chain réussi (tx `0xb435ab7e...`, 29.13 INCOME reçus), mais insert DB rejected par Postgres : `value "29136565813671862919" is out of range for type bigint`. Token avec 18 decimals + price très bas → raw token amount = 2.91e19 > bigint max (9.22e18). Le `CRITICAL` log a fired mais jusqu'à ce jour aucun monitoring ne le remontait. L'utilisateur a dû vendre manuellement via Rabby ~15h plus tard. Fix : caps préventifs sur `buy_input_lamports`, `buy_output_tokens`, `sell_output_lamports` (None si > 9e18) + `rt_is_pump_fun` cast `int(bool(...))` (DB col est int2, un True natif Python crashait aussi). Row INCOME insérée rétroactivement (`status=manual_recovered`, `entry_source=manual_recover`, id=270539).
+## v14e.43 (Apr 29) — récap fix livrés
 
-**À monitorer post-deploy v14e.42 :** plus aucun `CRITICAL: ETH live trade ... bought ... but DB insert failed` ne doit apparaître. Si ça réapparaît, c'est un autre champ ETH qui overflow → ajouter au cap.
+| ID | Fix | Statut |
+|---|---|---|
+| v14e.42 | `closing_retry` sentinel-leak ETH+SOL + recovery 6 stuck rows | ✅ déployé |
+| v14e.42 | Bigint overflow (INCOME orphan 2.91e19 raw tokens) — caps préventifs | ✅ déployé |
+| T4 | `eth_daily_loss_limit_usd` câblé + `_track_eth_pnl` accumule sur close paths | ✅ |
+| T5 | `BOND_FAST_TP50_SL20_T20` retiré du live SOL | ✅ |
+| T6 | `ETH_FAST_TP500_SL40_60M` confirmé paper-only | ✅ |
+| T7 | `kol-weekly-audit.yml` cron lundi 06:00 UTC | ✅ |
+| E5 | `_eth_open_lock = threading.Lock()` autour de `open_live_trade` | ✅ |
+| W8 | Mega-sweep SOL matrix split 3 shards (jupiter/dexscreener/both) + merge job | ✅ déployé |
+| Live tx tolerance | `live_trader_eth.py:1437` lit `eth_sell_slippage_bps` JSONB (était hardcodé 500) | ✅ |
+| ETH slip recalib | `ETH_BUY_SLIPPAGE_BPS 100→500`, `ETH_SELL 100→800` (empirique N=8) | ✅ |
+| $INCOME orphan recovery | row id=270539 status=manual_recovered | ✅ |
+| $MUSK orphan recovery | row id=271709 → bot retry-sell → +$10.67 net @ 16:26 UTC | ✅ |
 
-## v14e.42 (Apr 29 second pass) — todo cleanup batch
+## Actions actives
 
-**T5 ✅** — `BOND_FAST_TP50_SL20_T20` retiré du live SOL config. `live_trading.allocations` désormais `{BE25_TP80_SL30: 1.0}` seul. Backup `data/rt_trade_config_pre_t5_20260429T144956Z.json`. Le bot reload le config toutes 5min — propagation auto, no restart needed.
+### 🟢 Faisable immédiatement (en attente du sweep)
+- [ ] **NEW.** Reverse-engineer scoring thresholds — train logreg/XGB sur paper_trades 30d, target=WR & pnl_pct, output : feature importance + threshold optimal par strat. Voir section dédiée plus bas.
+- [ ] **NEW.** Wire alerte Telegram immédiate sur `CRITICAL: ... bought ... but DB insert failed` (cas INCOME/MUSK auraient été notifiés en <1min au lieu de découverts H+15).
+- [ ] **NEW.** Un-blacklist `CarnagecallsGambles` SOL (CI95% positive). Diff JSONB simple.
+- [ ] **NEW.** Re-run `_calibrate_eth_slip.py` post-MUSK (N=9 maintenant). Si MUSK pousse les médianes, ajuster ETH_BUY/SELL_SLIPPAGE_BPS.
 
-**T6 ✅** — `ETH_FAST_TP500_SL40_60M` confirmé paper-only (pas dans `eth_allocations`).
+### 🟡 Wait sur sweep en cours (~1-2h)
+- Top SOL/ETH ranking propre avec slip recalibré + RECALL family présente
+- Verdict T1 (`_calibrate_sell_slip` post-merge câblage) — débloqué si W8 réussit
+- Comparer Apr 27 sweep (OLD slip) vs Apr 29 sweep (NEW slip) pour voir l'impact ranking
 
-**R1 ✅** — RT lag fix v14e.34 tient : msg→detect max 24.7s sur dernière heure, < 30s threshold.
+### 🟡 Wait sur data
+- [ ] **E2.** Verdict ETH microtest à N≥10-15 trades. Actuellement N=9 (incluant MUSK +53% recovered). 1-3 jours.
+- [ ] **W1-W5.** Paired-tests (SCALP, AGE, LOCK, ETH winner cluster) à N≥30. ETA Mai 03-10.
+- [ ] **W9b.** RECALL family verdict à N≥30 par bucket. ETA Mai 26-Juin 5.
+- [ ] **T2.** Sell slip drift re-run à N≥200 SOL twin pairs (~Mai 03-05).
 
-**K4 ✅** — Post-fix v14e.40 (Apr 28 15:50 UTC) : 0 SOL main de KOL SOL-blacklisté. Les 28 mains ETH `mad_apes_gambles` détectés sont ATTENDUS (mad_apes RELIABLE_WINNER ETH, blacklist par-chain).
+### 🔴 Action utilisateur requise
+- [ ] **E3.** Top-up wallet ETH ($14 actuel post-MUSK ~$15 → cible $80-100). Adresse `0xC5c92E3AC207f686D09686Fe1dE79a302D9410E9`.
+- [ ] **K3.** Arbitrer ETH PROBABLE_BL : `jadendegens` (N=20 WR 0%), `aliensalphacalls` (N=20 WR 0%). N<30 mais WR=0% → p<10⁻⁶. Ajouter ou wait N=30.
+- [ ] **Décision deploy live SOL post-sweep** : config alloc + position sizing.
 
-**T7 ✅** — `.github/workflows/kol-weekly-audit.yml` créé. Cron lundi 06:00 UTC, lance `_kol_reliable_audit --exclude-artifact-strats` + `_kol_recovery_check`, alerte Telegram si nouveaux candidates, upload CSVs en artifact 30j.
+### 🔧 Backlog (pas urgent)
+- [ ] **R2.** Profiler `process_and_push` si lag >30s revient.
+- [ ] **T3.** `_eth_round_trip_smoke.py --execute` mensuel ou si base_fee >5 gwei.
+- [ ] **T8.** Auto-apply JSONB diff via PR si signal stable 4 sem K1/K2.
+- [ ] **T9-T10.** Dead-day filter (`_compute_day_regime`) — priorité basse.
+- [ ] **T11-T16.** Idées mécaniques nouvelles : DELAY entry, CIRCUIT BREAKER, VOLUME drop exit, LIQ-pull exit, MULTI-KOL confirmation, TIME-based BE.
 
-**W8 ✅ RÉSOLU v14e.43** — Matrix split par source. `mega-sweep-48h.yml` refactored : 3 jobs parallèles (jupiter / dexscreener / both) chacun ~2h sous le hard cap 6h, puis un job `merge_and_analyze` qui concat les 3 CSVs et tourne analyze + persist + slip-sens + recall + routing. `sim.py` gagne `--mega-source-shard {all,jupiter,dexscreener,both}` (default `all` pour usage local/dev). `if: always()` sur le merge → si 1 shard fail, on garde 2/3 de coverage plutôt que zéro. Marge confort 350min × 3 vs 5h précédent. ETH workflow inchangé (scope ~10× plus petit, tient en single < 1h).
+## Reverse engineering scoring (NEW)
 
-**T1 ⏸ DIFFÉRÉ** — `_calibrate_sell_slip.py` filtre `chain='solana'` only. À câbler dans le merge job du SOL workflow une fois W8 confirmé en prod (1er run réussi du nouveau matrix split).
+**Objectif** : trouver les params (weights / thresholds) qui maximisent WR × $/d sur le pool des stratégies, au lieu d'utiliser le score filter discret SCORE30/35/40/45/50.
 
-## v14e.43 (Apr 29 third pass) — ETH cost-drag truth + safety nets
+**Approche** :
+1. Pull `paper_trades` 30d closed avec features : `rt_score`, `rt_liquidity_usd`, `rt_volume_24h`, `rt_buy_sell_ratio`, `rt_token_age_hours`, `kol_score`, `kol_win_rate`, `kol_tier`, `entry_mcap`, snapshot features (sentiment, mention_velocity, whale_count, etc) joinés via token_snapshots
+2. Target double :
+  - Binary WR (1 si pnl>0 sinon 0) → logistic regression + XGB classifier
+  - Continuous pnl_pct → linear regression + XGB regressor
+3. Per-strategy feature importance : pour chaque strat, trouve les top-3 features qui prédisent son outcome
+4. Threshold optimization : pour chaque feature continue, trouve le seuil qui maximise `WR × N` (effective dollars edge)
+5. Cross-validation : train 0-21d, test 21-30d (walk-forward, évite overfit)
+6. Output : tableau "strategy → optimal feature thresholds" + "global score formula proposée"
 
-**ETH SLIP RECALIBRATION** — `scripts/_calibrate_eth_slip.py` créé. Sur N=8 closed live trades (ALIENPEPE, PARANOID, SCAM, ARMA, MOMMYS, PICKLES, APHEX, CYB) : adverse-side median slip **892 bps buy / 1600 bps sell**, cost drag total round-trip median 30.1% / mean 31.1%. Vs paper sim qui assumait 200 bps total = 17%. → **9× sous-estimé**.
-- `strategies.py` : `ETH_BUY_SLIPPAGE_BPS 100→500`, `ETH_SELL_SLIPPAGE_BPS 100→800` (shrinkage 0.65 sur N=8 pour rester conservateur)
-- `paper_trade_config.eth_buy_slippage_bps=500`, `eth_sell_slippage_bps=800` JSONB
-- Implied paper-sim drag avant: 17%, après: 28% (vs empirique 30%) — beaucoup plus réaliste
-- À revisiter à N≥20 — script écrit pour être re-run periodiquement
+**Ce que ça va donner** :
+- Confirmation/infirmation des SCORE30/35/40 actuels
+- Possibilité de remplacer le SCORE filter par un combo `liquidity + KOL_winrate + volume_bsr`
+- Verdict : le rt_score est-il informatif ou peut-on faire mieux avec features brutes ?
 
-**T4 ✅** — daily loss limit ETH câblé. `_check_eth_loss_limit(config)` gate les buys quand cumulative day pnl < -`eth_daily_loss_limit_usd` (JSONB, $30 actuel). `_track_eth_pnl(pnl_usd)` accumule sur les 2 close paths (standard + orphan-finalize). Reset auto à minuit UTC. Telegram alert via `alert_loss_limit_hit("eth_daily", ...)`.
+**Pré-requis** : `pip install scikit-learn xgboost` sur l'env local. Output `data/score_reverse_engineer_<ts>.csv`.
 
-**E5 ✅** — `_eth_open_lock = threading.Lock()` autour de `open_live_trade`. Le RT listener async/threadé pouvait racer 2 buys concurrents past `max_open_positions` + dedup. Lock global, contention surface tiny vu que les buys prennent qq secondes et `eth_max_open_positions=1`.
-
-**Cost-drag insight (informatif)** — sur les 8 trades : sum cost = $50, sum PnL = +$9.30, sum gross (avant cost) = +$59.30. **Le cost mange 84% du gross edge**. Pour Phase 2 ($100/trade), le cost drag % devrait baisser proportionnellement (gas devient ~3% de la position vs 9% à $20), mais le slip% reste identique → drag global ~22-25%. Toujours énorme mais viable si le KOL signal continue de produire +30%/trade gross sur les winners.
-
-**Réalité wallet (on-chain) Apr 27→29 :** wallet `0xc5c92e3...` initial 0.018670 ETH (~$43), final 0.003182 ETH (~$7.3). **Net réel −0.01378 ETH ≈ −$31.7**. Le DB sum pnl_usd = +$9.27 ne comptait PAS le gas ($16.82 cumul) NI le sell INCOME manuel raté (-0.001709 ETH = −$3.93 perdu en gas net). Net DB-aware = +9.27 − 16.82 ≈ −$7.5. Reste ~−$24 = INCOME orphan + gas approval/wrap + petits + WETH residuals. Plus dur que les "−$15" estimés à œil.
-
-**LIVE TX TOLERANCE FIX v14e.43** — `live_trader_eth.py:1437` hardcodait `slippage_bps=500` pour les sells, ignorant `live_trading.eth_sell_slippage_bps` JSONB (= 600). Wired now : `_lt_cfg.get('eth_sell_slippage_bps', 600)`. Empirical p75 sell adverse = 2500 bps → JSONB devrait monter à ~2000 (à valider après prochains trades, sinon trades légitimes vont revert).
-
-**Top ETH strats — sim Apr 27 (OLD slip 100/100, à re-run avec slip 500/800) :**
-| Rank | Strategy | Filter | sim N | sim WR | sim avg | sim $/d |
-|---|---|---|---|---|---|---|
-| 1 | TP300_SL40_6H_MCAP_S40 | SCORE35 AGE12 | 30 | 43.3% | +62.6% | $264 |
-| 2 | BE50_LOCK25_TP300_SL40_4H | NONE/NOZEROLIQ AGE12 | 52 | 57.7% | +36.0% | $260 |
-| 9-14 | ETH_SLOW6H_TP200_SL40 | various | 30-52 | 33-43% | +35-59% | $250 |
-| 17-20 | ETH_TP300_SL40_4H_MCAP_S40 | NONE/NOZEROLIQ | 52 | 36.5% | +34.3% | $247 |
-| 8044 | **ETH_TP80_SL40_T2H** (live) | NOZEROLIQ AGE12 | 52 | 50% | +23.2% | $167 |
-
-**Reality check sur les 8 tokens KOL (paper shadows, OLD slip — donc encore optimistes) :**
-| Strategy | shadow N | shadow WR | shadow avg | shadow sum |
-|---|---|---|---|---|
-| **ETH_SLOW6H_TP200_SL40** | 8 | 25% | **+15.2%** | **+121%** |
-| ETH_BE50_TP150_SL40_T2H | 8 | 25% | -6.7% | -54% |
-| ETH_TP80_SL40_T2H (live shadow) | 8 | 25% | -15.1% | -121% |
-| ETH_FAST_TP100_SL20 | 8 | 12.5% | -16.1% | -128% |
-| ETH_TP300_SL40_4H_MCAP_S40 | 5 | 0% | -42.4% | -212% |
-| TP300/BE50_LOCK25 (top sim) | 0 | — | — | (filter excluded) |
-
-Live ETH_TP80_SL40_T2H réalité Jupiter Ultra : sum +46% N=8 WR=50% avg+5.8% — **Jupiter Ultra positive slip a sauvé ce qui aurait été −121% en paper**. Drift live-paper ~+30pp net.
-
-**Verdict :** sur ces 8 tokens, **ETH_SLOW6H_TP200_SL40 aurait fait mieux que la strat live** (+15% paper vs −15% paper, mais live Jupiter Ultra peut faire flip). Le top sim winner (TP300_SL40_6H_MCAP_S40 +62.6% avg) n'a aucune shadow ETH — son filtre MCAP_MID exclut probablement les KOL memecoins. À valider au prochain sweep ETH avec slip 500/800.
-
-**Action pending :** re-trigger workflow_dispatch `mega-sweep-eth-48h` après commit slip recalib pour avoir un ranking propre avec les bons slip 500/800.
-
----
-
-# Pipeline Status — Updated Apr 28, 2026 15:50 UTC (v14e.41 deployed)
-
-État courant :
-- **ETH live Phase 1 microtest ACTIF** depuis 20:12 UTC. Live SOL = BE25_TP80_SL30 + BOND_FAST_TP50_SL20_T20 (la deuxième est artifact-deprecated v14e.36 — à retirer du live config). Live ETH = `eth_live_enabled=True`, 1 strat (`ETH_TP80_SL40_T2H`), pos $20, max 1 open.
-- **KOL chain-blacklist v14e.40 RÉPARÉ** : v14e.37/38 avait shipping-bug — `_load_paper_trade_config` filtrait `kol_chain_blacklist` hors du dict retourné car la clé n'était pas dans `defaults`. Fix v14e.40 : ajout dans `defaults`. Du 26 au 28 Apr, mad_apes + 12 autres KOLs blacklistés ont quand même ouvert ~343 paper mains SOL (-$2 752 paper). Live indemne (gate `live_trading.kol_blacklist` séparé). Post-fix le gate paper main + safe_scraper RT live re-fonctionnent.
-- **RECALL family v14e.40 + v14e.41** : 60 strats shadow couvrant les 2 modes drift (DIP vs 1st-call entry × PEAK vs post-1st ATH) × les mécaniques validées (BE15/25/30, LOCK5/10/15, FAST45/60, SLOW4H/6H, SCALP, DECAY, NZ, S30/S40, MCAP_MID, AGE2H/6H/24H, wide-TP TP100→TP500). v14e.41 ajoute le mode `drift_vs_peak` après replay $PARANOID 27 Apr (drift_vs_1st=-21% → bloqué par DIP30, mais drift_vs_peak=-54% capture pump-then-dump → +220% post-recall). Gate temporel resserré 1800s→600s. SL≥-50% obligatoire sur PEAK strats car le dump-mèche tape SL30/SL40 avant la recovery (replay $PARANOID : SL30 fired @ t+8min, TP200 @ t+52min → seul `RECALL_PEAK50_TP200_SL50_6H` aurait gagné). 5 strats opened sur scenario PARANOID, 30 sur deep-dip scenario, 0 sur non-recall — filtres validés.
-- **Trail/dip/split shadows DEPRECATED v14e.36** : 119 strats artefact retirées. Aucun nouveau shadow DTRAIL/PTRAIL/SPLIT/DIP/BOND/TD2/MCAP_DTRAIL.
-
-L'historique des décisions se lit dans le git log — ce TODO ne garde que ce qui est encore à faire.
-
----
-
-## 🚨 EN COURS — ETH live Phase 1 (ALIENPEPE résolu)
-
-- [x] **E1.** Premier trade live ETH ouvert : **$ALIENPEPE** (Apr 27 20:12 UTC, route=v2, gas $1.35, quote_slip 0bps, ds_slip 98bps). v14e.33 = Uniswap V2 fallback validé.
-- [x] **E1b.** **$ALIENPEPE désync DB ↔ on-chain — résolu Apr 28**. Le sell V2 a bien miné block 24974330 (22:20:11 UTC, tx `0x0bb165f1...`, 0.01524 ETH reçus = $34.84) mais le DB update qui suit `execute_sell` n'est jamais arrivé (probable crash/restart VPS entre mine et `.update()`). Le retry path `live_trader_eth.py:1022` re-soumettait le sell à chaque cycle alors que le wallet était à 0 token → revert silencieux indéfini. Trade resyncé manuellement via `scripts/_eth_alienpepe_db_resync.py` : status=`timeout`, exit $0.0003279, pnl **+74.22% (+$14.84)**, exit_minutes=127, bankroll ETH +$14.84. Fix systémique déployé : `_finalize_orphan_eth_sell()` dans `live_trader_eth.py` détecte (status=closing AND tx_signature_exit IS NULL AND wallet_balance=0), retrouve la sell tx via Transfer logs wallet→pool, parse ETH reçu (V3/V2/trace fallback), Chainlink ETH/USD au block exact, écrit la row + bankroll. Hooké en tête de boucle dans `process_open_trades`. **Reste à push VPS + verify next cycle.**
-- [ ] **E2.** Après 5-10 trades fermés (ETA 1-3 jours selon volume KOL ETH) : `python scripts/_eth_microtest_recap.py`. Verdict :
-  - drift médian > -3pp → Phase 2 ($50/trade, 2 strats)
-  - drift -3 à -7pp → continuer collecte
-  - drift < -7pp → abort + recalibrer `ETH_BUY_SLIPPAGE_BPS` empiriquement
-- [ ] **E3.** Top up wallet ETH : actuel $43 → $80-100. Adresse : `0xC5c92E3AC207f686D09686Fe1dE79a302D9410E9`.
-- [x] **E5.** v14e.43 — `_eth_open_lock = threading.Lock()` enrobe `open_live_trade` dans `_open_live_trade_locked`. ✅
-
----
-
-## 🚨 EN COURS — KOL audit weekly cycle
-
-Goal : confirmer blacklist tient, détecter recovery / nouveaux pourris.
-
-- [ ] **K1.** Lundi 06:00 UTC (cron à wire) : `python scripts/_kol_reliable_audit.py --days 14 --bootstrap 10000 --exclude-artifact-strats` → propose nouveaux blacklist candidates.
-- [ ] **K2.** Lundi 06:30 UTC (cron à wire) : `python scripts/_kol_recovery_check.py --days 7 --block-at 2026-04-27T21:18Z` → propose un-blacklist candidates.
-- [ ] **K3.** **ETH PROBABLE_BL à arbitrer** : jadendegens (N=20 WR 0% IC[-39%, -22%]), aliensalphacalls (N=20 WR 0% IC[-22%, -17%]). N<30 mais WR=0% sur 20 = p<10⁻⁶. Counterfactual 48h gain : +$2 163 ETH. Verdict utilisateur : ajouter ou attendre N=30 pour passer en RELIABLE.
-- [x] **K4.** Vérifié Apr 29 14:45 UTC — 995 shadow rows en 24h des 14 KOLs blacklistés. 0 SOL main post-deploy v14e.40. Per-chain gate fonctionne. ✅
-
----
-
-## 🎯 EN COURS — observation des shadows
-
-Pas de code à écrire, juste laisser la data grossir. ETA verdicts paired-test : **Mai 03-10**.
-
-### À N≥30 par strat
-- [ ] **W1.** Paired-test `SCALP_TP15_SL20_S35` vs base.
-- [ ] **W2.** Paired-test des AGE clones SOL vs leur parent.
-- [ ] **W3.** Paired-test des AGE clones ETH (4 existants + 8 v14e.31).
-- [ ] **W4.** Paired-test **LOCK family** vs BE base : LOCK10 SOL +1.88pp / ETH +2.85pp en backtest.
-- [ ] **W5.** Validation **ETH winner cluster** (26 strats v14e.31).
-- [x] **W9a.** **RECALL sweep extended v14e.41** (`scripts/_recall_sweep.py`) — backtest 14d sur 30 exit specs × 11 universes (first_call + 6 recall buckets + 4 unions). Wired dans mega-sweep-48h.yml. **Top findings 14d** :
-  - **Union beats first_call alone** : FAST60_TP40_SL30 cumul $sum +358 → +534 (+49%) en ajoutant recall_dip30 (N=295 vs 279).
-  - **Recall isolés sont massivement positifs** : SLOW6H_TP50_SL30 sur recall_dip30 = +33% EV WR 81% N=16, SLOW6H_TP100_SL50 sur recall_peak30 = +22% EV N=25, SLOW4H_TP50_SL30 sur recall_peak70 = +22% EV WR 73% N=15.
-  - Confirme : ajouter les recall events à n'importe quelle exit-spec déjà profitable booste son $sum cumulé sans dégrader le N.
-- [ ] **W9b.** **RECALL family v14e.40 + v14e.41** (60 strats shadow — 36 DIP + 24 PEAK, SOL+ETH). Wait N≥30 par bucket avant verdict. Découpage paired-test :
-  - DIP vs first_call_price : DIP10/DIP30/DIP50 × {plain TP/SL, BE+LOCK, FAST/SLOW timeouts, SCALP, DECAY, NZ/S30/S40/MCAP gates, AGE2H/AGE6H/AGE24}
-  - PEAK vs post-1st-call ATH : PEAK30/PEAK50/PEAK70 × {SL≥50% mandatory, BE+LOCK, SCALP, wide-TP TP100→TP500}
-  - Validation $PARANOID confirmée : `RECALL_PEAK50_TP200_SL50_6H` capture +200% TP @ t+52min, les SL30/40 strats sortent à t+8min sur la mèche. Vérifier ce pattern se reproduit sur N≥30.
-  - ETA verdict : Mai 26-Juin 5 selon volume recalls.
-
-### Mega sweep auto (cron 48h)
-- [x] **W6.** SOL : prochain run cron 02:00 UTC avec `--persist` → DB `mega_sweep_runs`.
-- [x] **W7.** ETH : prochain run 22:00 UTC avec chain-aware position $50.
-- [⚠️] **W8.** **BLOQUÉ** — `mega_sweep_runs` arrêté à Apr 25 21:51 (160 rows, plus rien depuis). 4 derniers crons SOL CANCELLED après 6h05m (hard limit GH hosted runner). Voir batch v14e.42 en tête. ETH OK.
-
----
-
-## 🚨 À VALIDER — RT lag fix v14e.34
-
-Apr 27 20:12 UTC : burst de 5 KOL calls détectés avec `msg→detect` 700-1050s (14-17 min de retard). Fix v14e.34 : tous les blocs lourds wrappés en `await asyncio.to_thread(...)`.
-
-- [x] **R1.** Vérifié Apr 29 14:45 UTC — msg→detect max 24.7s sur 1h. ✅
-- [ ] **R2.** Si lag persiste : profiler `process_and_push` ou `check_paper_trades` pour trouver le bloc qui mange 1000s+.
-
----
-
-## 🔧 BACKLOG TECH
-
-### Calibration drift (recurring)
-- [⏸] **T1.** Différé — `_calibrate_sell_slip.py` est SOL-only et le SOL sweep est cassé (W8). À débloquer ensemble.
-- [ ] **T2.** Re-run sell slip drift quand N≥200 twin pairs (~Mai 03-05).
-- [ ] **T3.** Re-run `_eth_round_trip_smoke.py --execute` mensuellement OU si base_fee ETH > 5 gwei.
-- [x] **T4.** v14e.43 — `_check_eth_loss_limit(config)` gate dans `open_live_trade` + `_track_eth_pnl(pnl_usd)` accumulé sur les 2 close paths (standard + orphan-finalize). Default $50, JSONB déjà à $30 (sera lu). Halt automatique des buys ETH si daily PnL < -limit. ✅
-
-### Live SOL config cleanup (post v14e.36)
-- [x] **T5.** Apr 29 — retiré, `live_trading.allocations` = `{BE25_TP80_SL30: 1.0}` seul. ✅
-- [x] **T6.** Apr 29 — confirmé paper-only (`eth_allocations` = `{ETH_TP80_SL40_T2H: 1.0}`). ✅
-
-### Auto-recovery wiring
-- [x] **T7.** Apr 29 — `.github/workflows/kol-weekly-audit.yml` créé (cron lundi 06:00 UTC, alerte Telegram, artifacts 30j). ✅
-- [ ] **T8.** Si signal stable post-K1/K2 sur 4 semaines → auto-apply JSONB diff via PR auto-générée (review humain garde le merge).
-
-### Dead-day filter (priorité basse)
-- [ ] **T9.** Brancher `_compute_day_regime` (sim.py) dans pipeline RT.
-- [ ] **T10.** Tester en shadow avec set `DEADGATE_*`.
-
-### Idées de nouvelles mécaniques (à coder si bandwidth)
-- [ ] **T11.** **DELAY entry** (DELAY30/60).
-- [ ] **T12.** **CIRCUIT BREAKER** (CRASH5_30S).
-- [ ] **T13.** **VOLUME drop exit**.
-- [ ] **T14.** **LIQ-pull exit**.
-- [ ] **T15.** **MULTI-KOL confirmation** — open seulement si 2+ KOLs callent dans X min.
-- [ ] **T16.** **TIME-based BE** : déjà supporté via `time_be_minute` mais 0 strat l'utilise.
-
----
-
-## 📌 RAPPELS PERSISTANTS
+## Rappels persistants
 
 ### Méthode statistique
-- **TOUJOURS paired-test** sur tokens intersection paper×live, JAMAIS aggregate avg quand sample sizes diffèrent.
-- N≥30 par strat avant verdict, N≥30 par (KOL, chain) avant blacklist reliable (N=15-29 = probable, à observer 1 semaine).
-- Bootstrap CI 95% + sign test obligatoires sur tout verdict KOL (script `_kol_reliable_audit.py`).
-- Filtrer artefacts (DTRAIL/DIP/etc) du dataset audit avec `--exclude-artifact-strats`.
+- TOUJOURS paired-test sur tokens intersection paper×live, JAMAIS aggregate avg quand sample sizes diffèrent.
+- N≥30 par strat avant verdict, N≥30 par (KOL, chain) avant blacklist reliable (15-29 = probable, observer 1 sem).
+- Bootstrap CI 95% + sign test obligatoires sur tout verdict KOL.
+- Filtrer artefacts (DTRAIL/DIP/SPLIT/TRAIL/etc) avec `--exclude-artifact-strats`.
 
 ### KOL routing v14e.38
-- **Per-chain blacklist active** : 14 SOL, 0 ETH. JSONB `paper_trade_config.kol_chain_blacklist`.
-- mad_apes_gambles : SOL ban / ETH allow (RELIABLE_WINNER N=104 +$1815/d, best ETH_FAST_TP100_SL20).
-- Telemetry préservée pour blacklist : kol_mentions + snapshots + ticks + paper SHADOWS continuent. Re-évaluation hebdo possible.
+- Per-chain blacklist active : 14 SOL, 0 ETH. JSONB `paper_trade_config.kol_chain_blacklist`.
+- mad_apes_gambles : SOL ban / ETH allow (RELIABLE_WINNER N=104).
+- Telemetry préservée : kol_mentions + snapshots + ticks + paper SHADOWS continuent pour blacklist.
 - KOL whitelist : DISABLED.
 
 ### Bankroll
-- Current : $53,409 / starting $29,000.
-- SOL live position size : ~$1.70/trade (0.01 SOL).
-- ETH live position size (Phase 1) : **$20/trade**, max 1 open simultanée.
+- Total : $53,409 / starting $29,000.
+- SOL live position : $1.70/trade (0.01 SOL). User veut scaler à $20/trade.
+- ETH live position : $20/trade Phase 1, max 1 open.
 
-### Slippage v14e.34 single source of truth
-- `strategies.BUY_SLIPPAGE_BPS = 225` (recalibration empirique 229 live trades, R²=5.8% sur 6 features).
-- JSONB override path REMOVED v14e.34. Tous layers (paper/sim/sim_engines/optimize) importent depuis strategies.py.
-- ETH : position-aware `_evm_slip_bps_with_gas` (gas $1.50 + slip 100 bps base + multipliers liq).
-- 14,953 lignes pre-fix recalculées dans columns `pnl_pct_recalc` / `pnl_usd_recalc` / `buy_slippage_bps_recalc` (originaux préservés).
+### Slippage v14e.34 + v14e.43
+- SOL : `BUY_SLIPPAGE_BPS = 225` source unique (strategies.py).
+- ETH : `BUY 500 / SELL 800` (recalibré v14e.43 sur N=8 empirique).
+- Live tx tolerance ETH : JSONB `live_trading.eth_buy_slippage_bps=500, eth_sell_slippage_bps=600`. Empirical p75 sell = 2500 → peut-être à monter à 2000 si reverts.
+- Cost model paper sim : `_evm_slip_bps_with_gas` + gas_as_bps + multipliers liq.
 
-### Cohérence sim/paper/live ETH (v14e.31)
-- Tous layers à position $50 + slip kernel `_evm_slip_bps_with_gas`. Live Phase 1 à $20 = écart cost-drag connu (+12pp).
+### Cohérence sim/paper/live
+- SOL : sim drift median -0.15pp / N=249 ✅. Fat-tail favorable (Jupiter Ultra positive slip 13% des trades).
+- ETH : sim drift +7.65pp / N=1 ⚠️ — companion sim ratée sur 7/8 trades (path closing_retry pré-fix). Reconstruction possible via `eval_history`.
+- Sim **PAS de gate `max_open=1`** → top sim $/d capacity-blind, multiplier ~30-40% pour live réel.
 
 ### Mega-sweep
-- ETH workflow `mega-sweep-eth-48h.yml` cron 22:00 UTC tous les 2 jours.
-- SOL workflow `mega-sweep-48h.yml` cron 02:00 UTC tous les 2 jours.
-- v14e.35 : **chaque run persist top-30+50 dans `mega_sweep_runs` Supabase**. Calibration sim-vs-actual via `_mega_sweep_calibration.py`.
-- v14e.34 : robustness analyzer `_strat_slip_sensitivity.py` post-sweep — flag fragile strats whose $/d sign-flips at slip 100→600 bps.
-- Triple gate FDR<alpha opt-in via `--require-fdr` (default OFF).
+- ETH workflow `mega-sweep-eth-48h.yml` cron 22:00 UTC tous les 2 jours (single job, ~1h).
+- SOL workflow `mega-sweep-48h.yml` cron 02:00 UTC tous les 2 jours, **matrix split 3 shards** depuis v14e.43.
+- v14e.35 : persist top-30+50 dans `mega_sweep_runs` Supabase + `_mega_sweep_calibration.py`.
+- v14e.34 : `_strat_slip_sensitivity.py` post-sweep flag fragile strats.
 
 ### Strats deck (577 dont 119 artefact-deprecated)
 | Family | SOL | ETH |
@@ -214,7 +124,7 @@ Apr 27 20:12 UTC : burst de 5 KOL calls détectés avec `msg→detect` 700-1050s
 | FAST | 73 | 18 |
 | SLOW | 13 | 5 |
 | SCALP | 36 | 17 |
-| Other | 80 | 10 |  *# was 199, -119 artefacts retirés*
+| Other | 80 | 10 |
 | AGE clones | 38 | 18 |
-| **RECALL DIP** (v14e.40+41) | **27** | **9** |  *# drift_vs_first_call_price*
-| **RECALL PEAK** (v14e.41) | **18** | **6** |  *# drift_vs_post-1st-call ATH ($PARANOID pattern)*
+| RECALL DIP (v14e.40+41) | 27 | 9 |
+| RECALL PEAK (v14e.41) | 18 | 6 |
