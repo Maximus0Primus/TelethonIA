@@ -94,6 +94,153 @@ def find_optimal_threshold(df, feature, target="won"):
     return best if best["threshold"] is not None else None
 
 
+def find_optimal_combo(df, features, target="won", min_n=10):
+    """v14e.43b: 2-feature AND combo scan. For every ordered pair (f1, f2),
+    scan a coarse 5x5 quantile grid and return the (thr1, thr2) that
+    maximizes WR_intersect × sqrt(N_intersect).
+    """
+    best = {"score": -np.inf}
+    quantiles = [0.10, 0.30, 0.50, 0.70, 0.90]
+    for i, f1 in enumerate(features):
+        if df[f1].isna().all() or df[f1].nunique() < 5: continue
+        for f2 in features[i+1:]:
+            if df[f2].isna().all() or df[f2].nunique() < 5: continue
+            for q1 in quantiles:
+                thr1 = df[f1].quantile(q1)
+                for q2 in quantiles:
+                    thr2 = df[f2].quantile(q2)
+                    mask = (df[f1] >= thr1) & (df[f2] >= thr2)
+                    n_in = int(mask.sum())
+                    if n_in < min_n or (len(df) - n_in) < min_n: continue
+                    wr_in = df.loc[mask, target].mean()
+                    wr_out = df.loc[~mask, target].mean()
+                    lift = wr_in - wr_out
+                    score = lift * np.sqrt(n_in)
+                    if score > best["score"]:
+                        best = {
+                            "score": float(score),
+                            "f1": f1, "thr1": float(thr1),
+                            "f2": f2, "thr2": float(thr2),
+                            "wr_in": float(wr_in),
+                            "wr_out": float(wr_out),
+                            "lift_pp": float(lift * 100),
+                            "n_in": n_in,
+                            "n_out": len(df) - n_in,
+                        }
+    return best if best.get("f1") else None
+
+
+def join_token_snapshots(df, batch_size=200):
+    """v14e.43b: join token_snapshots for richer features. Match on
+    (token_address, snapshot_at closest BEFORE created_at). Only keep
+    numeric snapshot features with >= 50% non-NaN coverage.
+    """
+    addrs = df["token_address"].dropna().unique().tolist() if "token_address" in df.columns else []
+    if not addrs:
+        print("  no token_address column — snapshots join skipped")
+        return df, []
+
+    print(f"  fetching token_snapshots for {len(addrs)} unique tokens...")
+    # Pull recent snapshots — use the same time window
+    max_ts = df["created_at"].max()
+    min_ts = df["created_at"].min() - pd.Timedelta(hours=2)  # 2h buffer for pre-trade snapshot
+
+    # Numeric features to consider (curated subset of the 298 cols, focusing on
+    # known signal-rich domains: sentiment, velocity, whale, breadth, lifecycle)
+    snap_features = [
+        "score", "score_velocity", "mention_velocity", "volume_velocity", "price_velocity",
+        "buy_sell_ratio_5m", "buy_sell_ratio_1h", "buy_sell_ratio_24h", "buy_sell_ratio_delta",
+        "whale_count", "whale_dominance", "top10_holder_pct", "txn_velocity",
+        "breadth", "breadth_val", "consensus_val", "conviction_val",
+        "bb_pct_b", "bb_width", "ath_ratio",
+        "sentiment", "avg_conviction", "data_confidence",
+        "boosts_active", "buys_24h", "txns_5m", "txns_1h", "txns_24h",
+        "lifecycle_phase_num", "phase_duration_cycles",
+        "ca_mention_count", "ca_mention_ratio",
+        "social_velocity", "mention_acceleration", "volume_acceleration",
+        "volatility_proxy", "is_dead", "is_pump",
+        "best_kol_win_rate", "best_kol_total_calls",
+        "bundle_count", "bundle_pct", "bubblemaps_score", "wash_trading_score",
+        "score_ema3", "mention_ema3", "volume_ema3",
+        "rsi_14", "macd_hist",  # if present
+    ]
+    snap_sel = "token_address,snapshot_at," + ",".join(snap_features)
+
+    # Fetch in batches by token_address
+    snaps = []
+    seen = set()
+    BATCH = 50
+    for i in range(0, len(addrs), BATCH):
+        chunk = addrs[i:i+BATCH]
+        try:
+            r = (sb.table("token_snapshots").select(snap_sel)
+                 .in_("token_address", chunk)
+                 .gte("snapshot_at", min_ts.isoformat())
+                 .lte("snapshot_at", max_ts.isoformat())
+                 .execute())
+            for x in (r.data or []):
+                key = (x["token_address"], x["snapshot_at"])
+                if key in seen: continue
+                seen.add(key)
+                snaps.append(x)
+        except Exception as e:
+            # Some columns may not exist — try without them
+            print(f"    snap fetch batch {i} failed ({str(e)[:80]}), retrying with reduced cols")
+            safe_sel = "token_address,snapshot_at,score,sentiment,whale_count,breadth_val,buy_sell_ratio_5m,mention_velocity,lifecycle_phase_num"
+            try:
+                r = (sb.table("token_snapshots").select(safe_sel)
+                     .in_("token_address", chunk)
+                     .gte("snapshot_at", min_ts.isoformat())
+                     .lte("snapshot_at", max_ts.isoformat())
+                     .execute())
+                for x in (r.data or []):
+                    key = (x["token_address"], x["snapshot_at"])
+                    if key in seen: continue
+                    seen.add(key); snaps.append(x)
+            except Exception as e2:
+                print(f"    fallback also failed: {e2}")
+    if not snaps:
+        print("  no snapshots returned")
+        return df, []
+    sdf = pd.DataFrame(snaps)
+    sdf["snapshot_at"] = pd.to_datetime(sdf["snapshot_at"])
+    print(f"  snapshots loaded: {len(sdf)} rows")
+
+    # For each trade, find the latest snapshot BEFORE created_at
+    df = df.sort_values("created_at").reset_index(drop=True)
+    sdf = sdf.sort_values("snapshot_at").reset_index(drop=True)
+    snap_cols = [c for c in sdf.columns if c not in ("token_address", "snapshot_at")]
+
+    # Use merge_asof per token for efficiency
+    merged_chunks = []
+    for tok, g_trade in df.groupby("token_address"):
+        g_snap = sdf[sdf["token_address"] == tok].sort_values("snapshot_at")
+        if g_snap.empty:
+            continue
+        merged = pd.merge_asof(
+            g_trade.sort_values("created_at"),
+            g_snap[["snapshot_at"] + snap_cols].rename(columns={"snapshot_at": "_snap_at"}),
+            left_on="created_at", right_on="_snap_at", direction="backward",
+            tolerance=pd.Timedelta(hours=2),
+        )
+        merged_chunks.append(merged)
+    if not merged_chunks:
+        print("  no trade × snapshot match")
+        return df, []
+    merged_df = pd.concat(merged_chunks, ignore_index=True)
+    # Filter snap features by NaN coverage >= 50%
+    kept_snap_cols = []
+    for c in snap_cols:
+        if c in merged_df.columns:
+            cov = merged_df[c].notna().mean()
+            if cov >= 0.5:
+                merged_df[c] = pd.to_numeric(merged_df[c], errors="coerce")
+                if merged_df[c].notna().any():
+                    kept_snap_cols.append(c)
+    print(f"  snapshot features kept (>=50% coverage): {len(kept_snap_cols)} of {len(snap_cols)}")
+    return merged_df, kept_snap_cols
+
+
 def train_logreg(X_train, y_train, X_test, y_test, feature_names):
     """Fit logistic regression, return AUC + coef."""
     sc = StandardScaler()
@@ -124,13 +271,19 @@ def main():
     ap.add_argument("--chain", default="solana")
     ap.add_argument("--min-n", type=int, default=80,
                     help="min samples per strategy to include")
+    ap.add_argument("--snapshots", action="store_true",
+                    help="join token_snapshots for richer features (slow)")
+    ap.add_argument("--combos", action="store_true",
+                    help="scan 2-feature AND combos (slower, +mins)")
+    ap.add_argument("--top-strats", type=int, default=15,
+                    help="how many top strats to combo-scan")
     args = ap.parse_args()
 
     since = (datetime.now(timezone.utc) - timedelta(days=args.days)).isoformat()
     print(f"=== Score reverse-engineer — chain={args.chain} window={args.days}d ===")
 
     # Pull paper_trades + features
-    cols = ("strategy,status,pnl_pct,position_usd,entry_price,exit_price,"
+    cols = ("token_address,strategy,status,pnl_pct,position_usd,entry_price,exit_price,"
             "rt_score,rt_liquidity_usd,rt_volume_24h,rt_buy_sell_ratio,"
             "rt_token_age_hours,rt_is_pump_fun,kol_score,kol_win_rate,kol_tier,"
             "kol_group,n_kol_confirmations,entry_score,entry_mcap,"
@@ -165,6 +318,15 @@ def main():
 
     # Drop fully-missing features (e.g. message_to_buy_seconds, kol_ml_pred)
     feats_used = [f for f in feats_used if df[f].notna().any()]
+
+    # v14e.43b: optional join with token_snapshots
+    if args.snapshots:
+        print(f"\n=== Joining token_snapshots ===")
+        df, snap_cols = join_token_snapshots(df)
+        feats_used = feats_used + snap_cols
+        feats_used = [f for f in feats_used if df[f].notna().any()]
+        print(f"  total features after snapshots: {len(feats_used)}")
+
     print(f"  features available (non-empty): {len(feats_used)}")
     print(f"  feature NaN coverage:")
     for f in feats_used:
@@ -250,7 +412,47 @@ def main():
         })
 
     out_df = pd.DataFrame(out_rows).sort_values("lift_pp", ascending=False)
-    print(f"\n  TOP 15 strategies by best-feature lift:")
+
+    # v14e.43b: 2-feature combo AND scan on the top strats
+    if args.combos:
+        print(f"\n=== 2-FEATURE AND combo scan on top {args.top_strats} strats ===")
+        combo_rows = []
+        for strat in out_df.head(args.top_strats)["strategy"]:
+            sub = df[df["strategy"] == strat]
+            if len(sub) < 30: continue
+            # Restrict to features with enough non-NaN
+            local_feats = [f for f in feats_used if sub[f].notna().mean() >= 0.5]
+            if len(local_feats) < 2: continue
+            best_combo = find_optimal_combo(sub, local_feats, min_n=10)
+            if best_combo:
+                base_wr = sub["won"].mean()
+                combo_rows.append({
+                    "strategy": strat,
+                    "N_total": len(sub),
+                    "base_wr": round(base_wr * 100, 1),
+                    "f1": best_combo["f1"],
+                    "thr1": best_combo["thr1"],
+                    "f2": best_combo["f2"],
+                    "thr2": best_combo["thr2"],
+                    "wr_in": round(best_combo["wr_in"] * 100, 1),
+                    "wr_out": round(best_combo["wr_out"] * 100, 1),
+                    "lift_pp": round(best_combo["lift_pp"], 1),
+                    "n_in": best_combo["n_in"],
+                })
+        cdf = pd.DataFrame(combo_rows).sort_values("lift_pp", ascending=False)
+        print(f"  TOP {len(cdf)} 2-feature combos:")
+        print(f"  {'strategy':<32} {'base_WR':>7} {'f1':<22} {'thr1':>9} {'f2':<22} {'thr2':>9} {'WR_in':>6} {'lift_pp':>7} {'N_in':>5}")
+        for _, x in cdf.iterrows():
+            f1s, f2s = x["f1"][:20], x["f2"][:20]
+            t1 = f"{x['thr1']:.2g}"; t2 = f"{x['thr2']:.2g}"
+            print(f"  {x['strategy']:<32} {x['base_wr']:>+5.1f}% {f1s:<22} {t1:>9} {f2s:<22} {t2:>9} {x['wr_in']:>+5.1f}% {x['lift_pp']:>+5.1f} {x['n_in']:>5}")
+        # Save combo CSV
+        combo_path = os.path.join(os.path.dirname(__file__), "..", "data",
+                                   f"score_re_combos_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.csv")
+        cdf.to_csv(combo_path, index=False)
+        print(f"  saved combo CSV -> {combo_path}")
+
+    print(f"\n  TOP 15 strategies by best single-feature lift:")
     print(f"  {'strategy':<32} {'N':>4} {'base_WR':>7} {'base_avg':>8} "
           f"{'best_feat':<22} {'thresh':>10} {'WR_>=':>6} {'lift_pp':>7} {'N>=':>5}")
     for _, x in out_df.head(15).iterrows():
