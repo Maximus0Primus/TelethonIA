@@ -239,6 +239,14 @@ def _passes_strategy_filter(token: dict, strategy_name: str) -> bool:
     rt_score = float(token.get("_rt_score") or token.get("rt_score") or 0)
     if rt_score < filt.get("min_rt_score", 0):
         return False
+    # v14e.43: BSR (rt_buy_sell_ratio) filter — derived from
+    # scripts/_score_reverse_engineer.py findings. Universal +5-7pp WR lift
+    # at thr>=0.52 SOL / >=0.55 ETH on cross-strat shadow data. Strats opt-in
+    # via min_buy_sell_ratio filter key. Default 0 = no gate.
+    bsr = token.get("_rt_buy_sell_ratio") or token.get("rt_buy_sell_ratio")
+    if filt.get("min_buy_sell_ratio") is not None:
+        if bsr is None or float(bsr) < float(filt["min_buy_sell_ratio"]):
+            return False
     # v14e.16: per-strategy token-age window. Applied ONLY when the strategy
     # filter explicitly declares `max_age_hours` / `min_age_hours`. That way
     # every pre-v14e.16 strategy keeps its current behavior (global RT 12h
@@ -1372,6 +1380,7 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
             "_rt_kol_score": "kol_score",
             "_rt_kol_win_rate": "kol_win_rate",
             "_rt_score": "rt_score",
+            "_rt_score_v2": "rt_score_v2",  # v14e.43 shadow A/B data collection
             "_rt_liquidity_usd": "rt_liquidity_usd",
             "_rt_volume_24h": "rt_volume_24h",
             "_rt_buy_sell_ratio": "rt_buy_sell_ratio",

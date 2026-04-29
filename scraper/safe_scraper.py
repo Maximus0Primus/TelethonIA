@@ -1343,6 +1343,39 @@ def _rt_compute_score(kol_username: str, ca: str, kol_info: dict,
     return round(max(0, min(100, rt_score)), 1)
 
 
+def _rt_compute_score_v2(kol_info: dict, token_info: dict) -> float:
+    """v14e.43 — alternative score formula derived from reverse-engineering
+    (`scripts/_score_reverse_engineer.py`) on 65K closed paper trades.
+
+    Findings: AUC 0.54 SOL / 0.50 ETH on rt_score actuel — mediocre. The 4
+    strongest single predictors empirically are:
+      - kol_win_rate (LogReg coef +0.451 on SOL)
+      - rt_buy_sell_ratio  (cross-strat universal lift +5-8pp WR at thr>=0.52)
+      - log(rt_volume_24h)
+      - log(entry_mcap)
+
+    Formula (clipped 0-100):
+      30*kol_win_rate + 5*min(bsr, 5) + 8*log10(volume+1) + 8*log10(mcap+1)
+
+    Computed AND PERSISTED IN PARALLEL with rt_score for shadow A/B. NOT used
+    for filtering yet — purely data collection until N>=500 closed trades
+    confirms it predicts WR better than the live rt_score. Then we'll
+    propose swapping the filter or adding a SCORE_V2 filter family.
+    """
+    import math
+    win_rate = float(kol_info.get("win_rate") or 0)
+    bsr = float(token_info.get("buy_sell_ratio") or 0)
+    vol = float(token_info.get("volume_24h") or 0)
+    mcap = float(token_info.get("market_cap") or 0)
+    score_v2 = (
+        30.0 * win_rate
+        + 5.0 * min(bsr, 5.0)
+        + 8.0 * math.log10(max(1.0, vol))
+        + 8.0 * math.log10(max(1.0, mcap))
+    )
+    return round(max(0.0, min(100.0, score_v2)), 1)
+
+
 def _rt_position_size(rt_score: float, kol_info: dict, token_info: dict,
                       tier: str, config: dict, strategy: str = "") -> float:
     """
@@ -1588,6 +1621,7 @@ def _rt_open_trades(ca: str, symbol: str, price: float, mcap: float,
         "_rt_kol_score": kol_info.get("score"),
         "_rt_kol_win_rate": kol_info.get("win_rate"),
         "_rt_score": rt_score,
+        "_rt_score_v2": _rt_compute_score_v2(kol_info, token_info),  # v14e.43 shadow A/B (data collection only)
         "_rt_liquidity_usd": token_info.get("liquidity_usd"),
         "_rt_volume_24h": token_info.get("volume_24h"),
         "_rt_buy_sell_ratio": token_info.get("buy_sell_ratio"),

@@ -3514,6 +3514,57 @@ def sim_cfg_to_fake_trade(cfg: dict, entry_price: float, created_at: str,
 
 
 # ---------------------------------------------------------------------------
+# v14e.43 — BSR (rt_buy_sell_ratio) filter A/B shadows.
+# Driven by `scripts/_score_reverse_engineer.py` findings on N=65K SOL +
+# N=3.2K ETH closed shadow trades:
+#   SOL: `rt_buy_sell_ratio >= 0.52` lifts WR by +5-7pp on cross-strat
+#        single-feature scan (universal pattern, ~5% of trades excluded).
+#   ETH: combo `rt_volume_24h >= $6K AND rt_buy_sell_ratio >= 0.55` lifts
+#        WR by +40-48pp on BE+LOCK T2H family (4 strats agree → real signal).
+# We do NOT direct-apply the gate — the CLAUDE.md rule is "TOUJOURS paired-
+# test". Instead, clone the top 5 SOL + top 5 ETH strats with `_BSR52`/
+# `_BSR55` suffix and let them run as shadows ~7-14d. Verdict at N>=30
+# paired-test vs base. If positive in live conditions too, add as filter
+# variant in the strategy registry.
+# ---------------------------------------------------------------------------
+
+# SOL — BSR52 (rt_buy_sell_ratio >= 0.52) clones of top 5 clean strats
+_BSR_SOL_CLONES = [
+    ("BE25_TP80_SL30_BSR52", 1.80, 0.70, 30, {"be_activation": 0.25}, {}),
+    ("FAST_TP50_SL30_S40_BSR52", 1.50, 0.70, 30, {}, {"min_rt_score": 40}),
+    ("FAST_TP50_SL30_BSR52", 1.50, 0.70, 30, {}, {}),
+    ("BE15_LOCK5_TP50_SL30_BSR52", 1.50, 0.70, 30,
+        {"be_activation": 0.15, "be_lock_pct": 0.05}, {}),
+    ("SCALP_TP15_NOSL_S35_BSR52", 1.15, 0.20, 120, {}, {"min_rt_score": 35}),
+]
+for name, tp, sl, h, extra, filt_extra in _BSR_SOL_CLONES:
+    spec = {"pct": 1.0, "tp_mult": tp, "sl_mult": sl, "horizon_min": h, "label": "main"}
+    spec.update(extra)
+    STRATEGIES[name] = [spec]
+    STRATEGY_FILTERS[name] = {"chain": "solana", "min_buy_sell_ratio": 0.52, **filt_extra}
+    SHADOW_STRATEGIES.append(name)
+
+# ETH — BSR55 clones of top 5 BE+LOCK family (where the combo signal is
+# strongest per reverse-engineer findings)
+_BSR_ETH_CLONES = [
+    ("ETH_TP80_SL40_T2H_BSR55", 1.80, 0.60, 120, {}),
+    ("ETH_BE25_LOCK10_TP80_SL40_T2H_BSR55", 1.80, 0.60, 120,
+        {"be_activation": 0.25, "be_lock_pct": 0.10}),
+    ("ETH_BE15_LOCK5_TP80_SL30_BSR55", 1.80, 0.70, 30,
+        {"be_activation": 0.15, "be_lock_pct": 0.05}),
+    ("ETH_BE15_LOCK10_TP80_SL30_BSR55", 1.80, 0.70, 30,
+        {"be_activation": 0.15, "be_lock_pct": 0.10}),
+    ("ETH_BE25_LOCK15_TP100_SL40_T2H_BSR55", 2.00, 0.60, 120,
+        {"be_activation": 0.25, "be_lock_pct": 0.15}),
+]
+for name, tp, sl, h, extra in _BSR_ETH_CLONES:
+    spec = {"pct": 1.0, "tp_mult": tp, "sl_mult": sl, "horizon_min": h, "label": "main"}
+    spec.update(extra)
+    STRATEGIES[name] = [spec]
+    STRATEGY_FILTERS[name] = {"chain": "ethereum", "min_buy_sell_ratio": 0.55}
+    SHADOW_STRATEGIES.append(name)
+
+# ---------------------------------------------------------------------------
 # v14e.36 — auto-deprecate every artifact-family strategy registered above.
 # Trail/dip/split/bond shadows pollute analytics (sim ranks them top via
 # 47x slip miscalibration) and cannot be promoted to live. This finalization

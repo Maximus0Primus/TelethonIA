@@ -819,6 +819,7 @@ def open_live_trade(client_sb, token_entry: dict, strategy: str,
         "kol_score": token_entry.get("_rt_kol_score"),
         "kol_win_rate": token_entry.get("_rt_kol_win_rate"),
         "rt_score": token_entry.get("_rt_score"),
+        "rt_score_v2": token_entry.get("_rt_score_v2"),  # v14e.43 shadow A/B
         "rt_liquidity_usd": token_entry.get("_rt_liquidity_usd"),
         "rt_volume_24h": token_entry.get("_rt_volume_24h"),
         "rt_buy_sell_ratio": token_entry.get("_rt_buy_sell_ratio"),

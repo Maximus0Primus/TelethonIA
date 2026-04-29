@@ -4230,7 +4230,12 @@ _MEGA_EXT_POLLING_MODES = ["fast", "static_30", "static_60", "static_120", "stat
                            "lazy_fast", "lazy_med", "lazy", "lazy_slow", "lazy_xslow"]
 _MEGA_EXT_FILTERS = ["NONE", "NOZEROLIQ", "SCORE30", "SCORE35", "SCORE40",
                      "SCORE45", "SCORE50", "MCAP_MID", "TOPKOL",
-                     "NOZEROLIQ_SCORE30", "NOZEROLIQ_SCORE40", "MCAP_MID_SCORE40"]
+                     "NOZEROLIQ_SCORE30", "NOZEROLIQ_SCORE40", "MCAP_MID_SCORE40",
+                     # v14e.43 — BSR (buy_sell_ratio) gates from reverse-engineer
+                     # findings: SOL universal lift +5-7pp WR at thr>=0.52,
+                     # ETH BE+LOCK family +40-48pp at thr>=0.55. Will rank
+                     # alongside SCORE filters at next sweep.
+                     "BSR52", "BSR55", "NOZEROLIQ_BSR52", "NOZEROLIQ_BSR55"]
 
 # v14e.27 — token-age dimension. Default scrape gate is 12h (safe_scraper +
 # pipeline). The age sweep tests whether relaxing to 24h or 48h opens an edge:
@@ -4453,6 +4458,13 @@ def _mega_apply_filter(u, fname):
     if fname == "SCORE50": return (u.get("rt_score") or 0) >= 50
     if fname == "MCAP_MID": return 30_000 <= (u.get("entry_mcap") or 0) <= 500_000
     if fname == "TOPKOL": return (u.get("kol_group") or "") in _MEGA_TOP_KOLS
+    # v14e.43 — BSR gates (rt_buy_sell_ratio) from reverse-engineer findings
+    if fname == "BSR52": return (u.get("rt_buy_sell_ratio") or 0) >= 0.52
+    if fname == "BSR55": return (u.get("rt_buy_sell_ratio") or 0) >= 0.55
+    if fname == "NOZEROLIQ_BSR52":
+        return (u.get("rt_liquidity_usd") or 0) > 0 and (u.get("rt_buy_sell_ratio") or 0) >= 0.52
+    if fname == "NOZEROLIQ_BSR55":
+        return (u.get("rt_liquidity_usd") or 0) > 0 and (u.get("rt_buy_sell_ratio") or 0) >= 0.55
 
 
 def _mega_apply_age_band(u, age_band):
