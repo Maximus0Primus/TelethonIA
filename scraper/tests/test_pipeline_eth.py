@@ -144,20 +144,20 @@ class TestEthFeeModel:
     """
     def test_eth_slip_bps_amortizes_gas_over_position(self):
         from paper_trader import _evm_slip_bps_with_gas
-        # $200 position, ethereum, buy: ETH_BUY_SLIPPAGE_BPS=100 + gas_bps from $1.50/$200
-        # gas_bps = 1.50 / 200 * 10000 = 75; total = 175 bps
-        assert _evm_slip_bps_with_gas(200, "ethereum", "buy") == 175
+        # $200 position, ethereum, buy: ETH_BUY_SLIPPAGE_BPS=500 + gas_bps from $1.50/$200
+        # gas_bps = 1.50 / 200 * 10000 = 75; total = 575 bps
+        assert _evm_slip_bps_with_gas(200, "ethereum", "buy") == 575
 
     def test_eth_slip_bps_small_position_floors_at_50(self):
         from paper_trader import _evm_slip_bps_with_gas
-        # $1 position: gas_bps = 1.50 / 1 * 10000 = 15000, total = 15100, but
+        # $1 position: gas_bps = 1.50 / 1 * 10000 = 15000, total = 15500, but
         # the upper clamp is 2000 bps (20%) — protects against absurd values.
         assert _evm_slip_bps_with_gas(1, "ethereum", "buy") == 2000
 
     def test_eth_slip_bps_large_position_mostly_base_slip(self):
         from paper_trader import _evm_slip_bps_with_gas
-        # $1000 position: gas_bps = 15; total = 115 (gas amortized to noise)
-        assert _evm_slip_bps_with_gas(1000, "ethereum", "buy") == 115
+        # $1000 position: gas_bps = 15; total = 515 (gas amortized to noise)
+        assert _evm_slip_bps_with_gas(1000, "ethereum", "buy") == 515
 
     def test_eth_min_position_is_low_enough_for_small_paper_trades(self):
         """v14e.28: ETH_MIN_POSITION_USD = 50, gas at this threshold = 6%."""
