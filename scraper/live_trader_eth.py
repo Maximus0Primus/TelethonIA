@@ -883,7 +883,10 @@ def open_live_trade(client_sb, token_entry: dict, strategy: str,
         "rt_volume_24h": token_entry.get("_rt_volume_24h"),
         "rt_buy_sell_ratio": token_entry.get("_rt_buy_sell_ratio"),
         "rt_token_age_hours": token_entry.get("_rt_token_age_hours"),
-        "rt_is_pump_fun": token_entry.get("_rt_is_pump_fun"),
+        # v14e.42: cast to int (DB col is int2, not bool). A truthy bool used to
+        # crash the insert with "invalid input syntax for type integer", which is
+        # exactly how $INCOME got orphaned (buy on-chain, no DB row).
+        "rt_is_pump_fun": int(bool(token_entry.get("_rt_is_pump_fun"))),
         "message_ts": token_entry.get("_rt_message_ts"),
         "price_at_message": token_entry.get("_rt_price_at_message"),
         "message_to_buy_seconds": _calc_message_to_buy(token_entry.get("_rt_message_ts")),
@@ -902,8 +905,16 @@ def open_live_trade(client_sb, token_entry: dict, strategy: str,
         "sol_price_at_entry": eth_usd,                    # ETH price USD
         "position_sol": round(eth_spent, 6),              # ETH amount
         "buy_exec_ms": result.get("exec_ms"),
-        "buy_input_lamports": eth_spent_wei,              # wei
-        "buy_output_tokens": result.get("tokens_received"),  # raw tokens
+        # v14e.42: bigint cap (2^63 ~ 9.22e18). Low-priced ETH tokens with 18
+        # decimals routinely exceed this on raw amounts (e.g. $INCOME held 29.13
+        # tokens = 2.91e19 raw). Drop the raw and keep a downscaled human value
+        # in position_sol if needed. The buy tx hash (tx_signature) preserves the
+        # ground truth — raw amounts can be re-derived from chain if ever needed.
+        "buy_input_lamports": (eth_spent_wei
+                                if eth_spent_wei < 9_000_000_000_000_000_000 else None),
+        "buy_output_tokens": (result.get("tokens_received")
+                               if (result.get("tokens_received") or 0) < 9_000_000_000_000_000_000
+                               else None),
         "dex_spot_price_at_entry": execution_price,
         "high_price_seen": execution_price,
         "entry_source": "uniswap_v3",
@@ -1127,13 +1138,15 @@ def _finalize_orphan_eth_sell(client_sb, trade: dict) -> bool:
         "sell_slippage_bps": 0,
         "slippage_actual_bps": int(trade.get("buy_slippage_bps") or 0),
         "sol_price_at_exit": eth_usd_at_sell,
-        "sell_output_lamports": int(eth_received_wei),
+        # v14e.42: bigint cap on raw ETH wei (rare for sells, but defensive).
+        "sell_output_lamports": (int(eth_received_wei)
+                                  if eth_received_wei < 9_000_000_000_000_000_000 else None),
         "sell_sol_received": round(eth_received, 6),
         "gas_usd_sell": gas_usd,
         "block_number_sell": int(receipt["blockNumber"]),
     }
 
-    _OPTIONAL = ("gas_usd_sell", "block_number_sell")
+    _OPTIONAL = ("gas_usd_sell", "block_number_sell", "sell_output_lamports")
     for _ in range(3):
         try:
             client_sb.table("paper_trades").update(update).eq("id", trade["id"]).execute()
@@ -1198,7 +1211,11 @@ def check_live_trades_eth(client_sb) -> dict:
         result = (
             client_sb.table("paper_trades")
             .select("*")
-            .in_("status", ["open", "closing"])
+            # v14e.42: include 'closing_retry'. Pre-fix, a successful retry sell
+            # wrote status='closing_retry' (sentinel leak) and the row dropped out
+            # of this scan forever, leaving 6 ETH trades silently orphaned even
+            # though their sells had landed on-chain.
+            .in_("status", ["open", "closing", "closing_retry"])
             .eq("source", "rt_live")
             .eq("chain", "ethereum")
             .execute()
@@ -1242,11 +1259,17 @@ def check_live_trades_eth(client_sb) -> dict:
             continue
 
         _paper_sim_ev = None
-        if trade.get("status") == "closing":
-            logger.info("live_trader_eth: retrying sell for stuck 'closing' trade %s",
-                        trade["symbol"])
-            ev = {"status": "closing_retry",
+        # v14e.42: stuck 'closing' OR 'closing_retry' — same retry path. Pre-fix,
+        # a successful retry wrote 'closing_retry' (sentinel leak) and the row
+        # dropped out of the scan filter forever. Now both stuck states are
+        # handled identically: skip eval, force-sell, derive terminal status
+        # post-fill from pnl vs strategy thresholds (see below).
+        if trade.get("status") in ("closing", "closing_retry"):
+            logger.info("live_trader_eth: retrying sell for stuck '%s' trade %s",
+                        trade["status"], trade["symbol"])
+            ev = {"status": "force_close",
                   "exit_price": current_price or entry_price}
+            decision_price = current_price or entry_price
         else:
             orch = _strategy_orchestration(strategy, _rt_cfg_orch)
             if not _should_poll_trade(trade_id, int(orch.get("polling_sec", 30))):
@@ -1317,7 +1340,7 @@ def check_live_trades_eth(client_sb) -> dict:
                     elapsed_minutes = 0
 
         # Atomic claim
-        if trade.get("status") != "closing":
+        if trade.get("status") not in ("closing", "closing_retry"):
             try:
                 claim = (
                     client_sb.table("paper_trades")
@@ -1373,6 +1396,27 @@ def check_live_trades_eth(client_sb) -> dict:
         pnl_pct = round((actual_exit_price / entry_price) - 1, 4) if (actual_exit_price and entry_price) else 0
         pnl_usd = round(pos_usd * pnl_pct, 2) if pos_usd else 0
 
+        # v14e.42: when force-closing a stuck trade, derive a real terminal status
+        # from the actual fill vs strategy thresholds. The original eval status was
+        # lost when status flipped to 'closing'/'closing_retry'; reconstruct it
+        # from pnl_pct so livestats and outlier monitor pick it up correctly.
+        if new_status == "force_close":
+            try:
+                from paper_trader import STRATEGIES as _STR
+                _tr = (_STR.get(strategy) or [{}])[0]
+                _tp_mult = _tr.get("tp_mult")
+                _sl_mult = _tr.get("sl_mult", 0.0)
+                if _tp_mult and pnl_pct >= (_tp_mult - 1):
+                    new_status = "tp_hit"
+                elif _sl_mult and pnl_pct <= (_sl_mult - 1):
+                    new_status = "sl_hit"
+                else:
+                    new_status = "timeout"
+            except Exception:
+                new_status = "timeout"
+            logger.info("live_trader_eth: force_close %s/%s resolved -> %s (pnl=%+.2f%%)",
+                        trade["symbol"], strategy, new_status, pnl_pct * 100)
+
         sell_slippage_bps = 0
         if actual_exit_price and current_price and current_price > 0:
             sell_slippage_bps = round((actual_exit_price / current_price - 1) * 10000)
@@ -1394,7 +1438,9 @@ def check_live_trades_eth(client_sb) -> dict:
             "slippage_actual_bps": int((trade.get("buy_slippage_bps") or 0)) + int(sell_slippage_bps or 0),
             "sol_price_at_exit": sell_result.get("eth_usd") or eth_usd,  # repurposed: ETH price
             "sell_exec_ms": sell_result.get("exec_ms"),
-            "sell_output_lamports": eth_received_wei,                    # repurposed: wei
+            # v14e.42: bigint cap on raw wei (defensive; same fix as buy-side).
+            "sell_output_lamports": (eth_received_wei
+                                      if eth_received_wei < 9_000_000_000_000_000_000 else None),
             "sell_sol_received": round(eth_received, 6) if eth_received else None,  # repurposed: ETH amount
             "paper_exit_price": paper_exit_price,
             "price_divergence_pct": price_divergence_pct,

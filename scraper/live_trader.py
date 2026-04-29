@@ -1138,10 +1138,11 @@ def check_live_trades(client_sb) -> dict:
 
     try:
         # v121: Also pick up 'closing' trades (claimed but sell failed/crashed — need retry)
+        # v14e.42: include 'closing_retry' for the same reason (sentinel-leak trap fix)
         result = (
             client_sb.table("paper_trades")
             .select("*")
-            .in_("status", ["open", "closing"])
+            .in_("status", ["open", "closing", "closing_retry"])
             .eq("source", "rt_live")
             .execute()
         )
@@ -1206,12 +1207,14 @@ def check_live_trades(client_sb) -> dict:
             continue
 
         # v121: Trade stuck in 'closing' from a previous failed sell — force sell immediately
-        _paper_sim_ev = None  # v141: default (closing_retry path has no paper simulation)
-        if trade.get("status") == "closing":
-            logger.info("live_trader: retrying sell for stuck 'closing' trade %s (%s)", trade["symbol"], trade["id"])
+        # v14e.42: same path for 'closing_retry' (sentinel-leak trap). Use 'force_close'
+        # as the sentinel; resolved to a real terminal status post-sell from pnl.
+        _paper_sim_ev = None  # v141: default (force-close path has no paper simulation)
+        if trade.get("status") in ("closing", "closing_retry"):
+            logger.info("live_trader: retrying sell for stuck '%s' trade %s (%s)",
+                        trade["status"], trade["symbol"], trade["id"])
             # Skip evaluation — this trade already decided to exit, just needs the sell
-            # Build a minimal ev dict so the sell logic below works
-            ev = {"status": "closing_retry", "exit_price": current_price or float(trade.get("entry_price") or 0)}
+            ev = {"status": "force_close", "exit_price": current_price or float(trade.get("entry_price") or 0)}
         else:
             # v132: Per-strategy orchestration (polling + price source) — matches paper_trader
             orch = _strategy_orchestration(strategy, _rt_cfg_orch)
@@ -1342,7 +1345,8 @@ def check_live_trades(client_sb) -> dict:
         # (paper_fast, reconcile, restart) closes the same trade concurrently.
         # We set status='closing' so no other loop can pick it up.
         # Skip claim for trades already in 'closing' (retry from previous failed sell).
-        if trade.get("status") != "closing":
+        # v14e.42: same skip for 'closing_retry' (sentinel-leak trap fix).
+        if trade.get("status") not in ("closing", "closing_retry"):
             try:
                 claim = (
                     client_sb.table("paper_trades")
@@ -1436,6 +1440,25 @@ def check_live_trades(client_sb) -> dict:
 
             pnl_pct = round((exit_price / entry_price) - 1, 4) if exit_price and entry_price else 0
             pnl_usd = round(pos_usd * pnl_pct, 2) if pos_usd else 0
+
+            # v14e.42: when force-closing a stuck trade, derive a real terminal status
+            # from actual fill vs strategy thresholds (mirrors live_trader_eth fix).
+            if new_status == "force_close":
+                try:
+                    from paper_trader import STRATEGIES as _STR
+                    _tr = (_STR.get(trade.get("strategy", "")) or [{}])[0]
+                    _tp_mult = _tr.get("tp_mult")
+                    _sl_mult = _tr.get("sl_mult", 0.0)
+                    if _tp_mult and pnl_pct >= (_tp_mult - 1):
+                        new_status = "tp_hit"
+                    elif _sl_mult and pnl_pct <= (_sl_mult - 1):
+                        new_status = "sl_hit"
+                    else:
+                        new_status = "timeout"
+                except Exception:
+                    new_status = "timeout"
+                logger.info("live_trader: force_close %s/%s resolved -> %s (pnl=%+.2f%%)",
+                            trade["symbol"], trade.get("strategy"), new_status, pnl_pct * 100)
 
             # Track daily PnL in SOL
             sol_price = _get_sol_price_usd()

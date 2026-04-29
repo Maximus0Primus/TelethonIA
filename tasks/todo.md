@@ -1,3 +1,15 @@
+# Pipeline Status — Updated Apr 29, 2026 (v14e.42 deployed)
+
+## v14e.42 (Apr 29) — closing_retry sentinel-leak + ETH bigint overflow
+
+**Bug 1 (DB cosmétique) — `closing_retry` trap.** Quand un sell ETH reverted/timeout, status passait `open→closing`. Le retry path à `live_trader_eth.py:1248` settait `ev["status"]="closing_retry"` (sentinelle) ; après retry sell réussi, `closing_retry` était écrit comme status terminal. Le filtre de scan `in_("status",["open","closing"])` n'incluait pas `closing_retry` → row jamais retouchée. **6 ETH live (CYB, APHEX, MOMMYS, ARMA, SCAM, PARANOID)** ont été silencieusement bloqués alors que les sells avaient bien minée on-chain (vérifié via `eth_getTransactionReceipt`). Fix : (a) inclure `closing_retry` dans le filtre, (b) renommer sentinelle en `force_close`, (c) résoudre `force_close` post-sell en vrai status terminal (`tp_hit`/`sl_hit`/`timeout`) à partir de `pnl_pct` vs `STRATEGIES[strategy]` thresholds. Symétrique sur `live_trader.py` SOL. Recovery DB via `scripts/_recover_stuck_eth.py` (6 rows fixées : 1 tp_hit, 2 sl_hit, 3 timeout).
+
+**Bug 2 (CRITIQUE silent loss) — `$INCOME` orphan.** Buy on-chain réussi (tx `0xb435ab7e...`, 29.13 INCOME reçus), mais insert DB rejected par Postgres : `value "29136565813671862919" is out of range for type bigint`. Token avec 18 decimals + price très bas → raw token amount = 2.91e19 > bigint max (9.22e18). Le `CRITICAL` log a fired mais jusqu'à ce jour aucun monitoring ne le remontait. L'utilisateur a dû vendre manuellement via Rabby ~15h plus tard. Fix : caps préventifs sur `buy_input_lamports`, `buy_output_tokens`, `sell_output_lamports` (None si > 9e18) + `rt_is_pump_fun` cast `int(bool(...))` (DB col est int2, un True natif Python crashait aussi). Row INCOME insérée rétroactivement (`status=manual_recovered`, `entry_source=manual_recover`, id=270539).
+
+**À monitorer post-deploy v14e.42 :** plus aucun `CRITICAL: ETH live trade ... bought ... but DB insert failed` ne doit apparaître. Si ça réapparaît, c'est un autre champ ETH qui overflow → ajouter au cap.
+
+---
+
 # Pipeline Status — Updated Apr 28, 2026 15:50 UTC (v14e.41 deployed)
 
 État courant :
