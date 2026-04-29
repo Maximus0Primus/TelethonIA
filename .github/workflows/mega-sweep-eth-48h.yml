@@ -1,31 +1,35 @@
 name: Mega Sweep Extended ETH (48h)
 
-# v14e.28 — ETH-only mirror of mega-sweep-48h. Filters universe + price_ticks
-# by chain='ethereum' via sim.py --chain ethereum, applies the v14e.28 ETH
-# slip/gas calibration ($1.50 gas + 100 bps base) so ETH strats are ranked
-# under the right cost model. Runs at 22:00 UTC every 2 days — different
-# slot from SOL (02:00) so the same GH runner doesn't double-load.
+# v14e.45 — split en matrix de 3 shards (jupiter / dexscreener / both) +
+# merge job, miroir de mega-sweep-48h.yml. Avant: single 4h job qui s'est
+# fait cancel à 4h00 (run 25118472430, max execution time exceeded).
+# Maintenant chaque shard tourne en parallèle, le merge agrège les CSVs et
+# persiste vers mega_sweep_runs (chain=ethereum).
 #
-# Output: _mega_sweep_eth_extended.csv. analyze_mega_sweep.py is re-run with
-# the ETH CSV so we get a separate _mega_sweep_eth_extended_annotated.csv +
-# _mega_sweep_eth_top_robust.csv. No clash with the SOL artifacts.
+# 22:00 UTC tous les 2 jours — offset 20h vs SOL (02:00) pour ne pas
+# stacker la charge Supabase / GH-runner.
 #
-# Routing ideas step skipped (Solana-specific — KOL specialization, family
-# realism keys are SOL trail/dip artifacts).
+# Routing ideas + recall sweep skipped (Solana-specific). Slip sensitivity
+# inclus pour round-trip robustness_ratio dans mega_sweep_runs (v14e.45 fix).
 
 on:
   schedule:
-    # "0 22 */2 * *" = every 2 days at 22:00 UTC (overnight EU/US). Offsets
-    # the SOL sweep at 02:00 UTC by 20h so CPU/Supabase load doesn't stack.
     - cron: '0 22 */2 * *'
   workflow_dispatch: {}
 
 jobs:
   sweep:
+    strategy:
+      # Continue les autres shards même si un fail. Le merge skip les
+      # CSVs manquants (concat tolère les absents).
+      fail-fast: false
+      matrix:
+        source: [jupiter, dexscreener, both]
+    name: sweep-eth-${{ matrix.source }}
     runs-on: ubuntu-latest
-    # ETH universe is ~10x smaller than SOL → expected runtime <1h. Keep 4h
-    # buffer in case Supabase is slow or universe explodes.
-    timeout-minutes: 240
+    # Marge sous le hard cap GH 6h. ETH single-job a tapé 4h00 sur run
+    # 25118472430 → 1/3 par shard ≈ 80min. 350min garde-fou si scope grossit.
+    timeout-minutes: 350
 
     steps:
       - uses: actions/checkout@v4
@@ -41,34 +45,87 @@ jobs:
           pip install --upgrade pip
           pip install supabase requests python-dotenv pandas numpy
 
-      - name: Run mega sweep extended (ETH)
-        id: sweep
+      - name: Run mega sweep extended ETH (shard=${{ matrix.source }})
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
-          # --chain ethereum filters trade universe + price_ticks to ETH only.
-          # --mega-csv-out distinguishes from the SOL output so artifacts
-          # don't collide.
+          # --chain ethereum + --mega-source-shard restreint la dim sources
+          # à 1 valeur. Le reste du grid (filters × smoothings × polling ×
+          # age_bands × strategies) tourne intégralement sous calibration ETH.
           cd scraper
-          python sim.py \
-            --mega-sweep-extended \
+          python sim.py --mega-sweep-extended \
             --chain ethereum \
+            --mega-source-shard ${{ matrix.source }} \
             --mega-workers 4 \
-            --mega-csv-out _mega_sweep_eth_extended.csv \
-            2>&1 | tee sweep_eth.out
-          if [ -f _mega_sweep_eth_extended.csv ]; then
-            mv _mega_sweep_eth_extended.csv ../
-            echo "ETH mega-sweep CSV produced"
+            --mega-csv-out _mega_sweep_eth_extended_${{ matrix.source }}.csv \
+            2>&1 | tee sweep_eth_${{ matrix.source }}.out
+          if [ -f _mega_sweep_eth_extended_${{ matrix.source }}.csv ]; then
+            mv _mega_sweep_eth_extended_${{ matrix.source }}.csv ../
+            echo "Shard ETH ${{ matrix.source }} CSV produced"
           else
-            echo "sim.py did not produce _mega_sweep_eth_extended.csv"
+            echo "sim.py did not produce shard CSV"
             exit 1
           fi
 
-      - name: Annotate with FDR + family realism + persist to DB
-        # v14e.41: SUPABASE env vars + --persist added so ETH top robust rows
-        # land in mega_sweep_runs (was missing — Apr 27 ETH success run wrote
-        # 0 rows). Mirrors the SOL workflow analyze step.
+      - name: Upload shard artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mega-sweep-eth-shard-${{ matrix.source }}
+          path: |
+            _mega_sweep_eth_extended_${{ matrix.source }}.csv
+            scraper/sweep_eth_${{ matrix.source }}.out
+          retention-days: 7
+
+  merge_and_analyze:
+    needs: sweep
+    if: always()  # run merge even if 1 shard failed — partial > nothing
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install deps
+        run: |
+          pip install --upgrade pip
+          pip install supabase requests python-dotenv pandas numpy
+
+      - name: Download shard CSVs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: mega-sweep-eth-shard-*
+          merge-multiple: true
+
+      - name: Concat shard CSVs into canonical _mega_sweep_eth_extended.csv
+        id: concat
+        run: |
+          python - <<'PY'
+          import os, glob, pandas as pd
+          shards = sorted(glob.glob('_mega_sweep_eth_extended_*.csv'))
+          if not shards:
+              raise SystemExit('FATAL: no ETH shard CSV downloaded')
+          dfs = []
+          for p in shards:
+              df = pd.read_csv(p)
+              print(f"  {p}: {len(df)} rows")
+              dfs.append(df)
+          out = pd.concat(dfs, ignore_index=True)
+          out.to_csv('_mega_sweep_eth_extended.csv', index=False)
+          print(f"\nConcatenated -> _mega_sweep_eth_extended.csv ({len(out)} rows total)")
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f"shards_found={len(shards)}\n")
+              f.write(f"total_rows={len(out)}\n")
+          PY
+
+      - name: Annotate with FDR + family realism + persist to DB (chain=ethereum)
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
@@ -82,7 +139,20 @@ jobs:
             --chain ethereum \
             2>&1 | tee analyze_eth.out
 
-      - name: Upload artifacts
+      - name: Slippage robustness on top-robust ETH winners
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          python scripts/_strat_slip_sensitivity.py \
+            --top-csv _mega_sweep_eth_top_robust.csv \
+            --top 20 \
+            --days 14 \
+            --persist-run-id ${{ github.run_id }} \
+            --out data/slip_sensitivity_eth_latest.csv \
+            2>&1 | tee slip_sensitivity_eth.out || true
+
+      - name: Upload final ETH artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -91,15 +161,20 @@ jobs:
             _mega_sweep_eth_extended.csv
             _mega_sweep_eth_extended_annotated.csv
             _mega_sweep_eth_top_robust.csv
-            scraper/sweep_eth.out
             analyze_eth.out
+            slip_sensitivity_eth.out
+            data/slip_sensitivity_eth_latest.csv
           retention-days: 30
 
       - name: Summary comment
         if: success()
         run: |
+          echo "## Mega Sweep ETH v14e.45 (matrix split)" >> "$GITHUB_STEP_SUMMARY"
+          echo "Shards merged: ${{ steps.concat.outputs.shards_found }}/3" >> "$GITHUB_STEP_SUMMARY"
+          echo "Total rows: ${{ steps.concat.outputs.total_rows }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
           if [ -f _mega_sweep_eth_top_robust.csv ]; then
-            echo "## Top 10 robust ETH configs (v14e.28 calibration)" >> "$GITHUB_STEP_SUMMARY"
+            echo "## Top 10 robust ETH configs" >> "$GITHUB_STEP_SUMMARY"
             echo '```' >> "$GITHUB_STEP_SUMMARY"
             head -11 _mega_sweep_eth_top_robust.csv >> "$GITHUB_STEP_SUMMARY"
             echo '```' >> "$GITHUB_STEP_SUMMARY"

@@ -4732,6 +4732,10 @@ def _mega_process_config(args):
     wr = float((arr > 0).mean()) * 100
     avg = float(arr.mean()) * 100
     med = float(np.median(arr)) * 100
+    # v14e.45: arr est une fraction (pnl_pct stocké en frac dans paper_trades),
+    # *100 = percent. Le median ne peut donc pas être < -100% (un trade ne perd
+    # pas plus de 100% du capital). Garde-fou contre une régression double-*100.
+    assert med >= -100.0 - 1e-6, f"impossible median_pnl_pct={med} (arr min={arr.min()}, max={arr.max()})"
     std = float(arr.std(ddof=1)) * 100 if n > 1 else 0
     sharpe = (avg / std) if std > 0 else 0
     eq = np.cumprod(1 + arr)

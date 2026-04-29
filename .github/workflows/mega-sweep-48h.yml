@@ -160,6 +160,7 @@ jobs:
             --top-csv _mega_sweep_top_robust.csv \
             --top 20 \
             --days 14 \
+            --persist-run-id ${{ github.run_id }} \
             --out data/slip_sensitivity_latest.csv \
             2>&1 | tee slip_sensitivity.out || true
 

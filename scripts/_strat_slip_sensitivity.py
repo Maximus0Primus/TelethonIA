@@ -185,6 +185,9 @@ def main():
     ap.add_argument("--top", type=int, default=20, help="How many strats to test")
     ap.add_argument("--top-csv", default="", help="Optional CSV with strategy column (e.g. _mega_sweep_top_robust.csv)")
     ap.add_argument("--out", default="", help="Output CSV path (default: data/slip_sensitivity_<ts>.csv)")
+    ap.add_argument("--persist-run-id", default="",
+                    help="If set, UPDATE mega_sweep_runs.robustness_ratio for this run_id × strategy. "
+                         "Closes the v14e.45 latent gap where the column was always NULL.")
     args = ap.parse_args()
 
     since = (datetime.now(timezone.utc) - timedelta(days=args.days)).isoformat()
@@ -256,6 +259,31 @@ def main():
         w.writeheader()
         w.writerows(rows)
     print(f"\nSaved -> {out}")
+
+    # v14e.45: round-trip robustness_ratio back into mega_sweep_runs.
+    # Latent gap depuis création table — la colonne était toujours NULL malgré
+    # is_top_robust=true. Fix: UPDATE par (run_id, strategy) après le CSV.
+    if args.persist_run_id:
+        try:
+            url = os.environ.get("SUPABASE_URL")
+            key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+            if not (url and key):
+                print(f"[persist] SUPABASE_URL/KEY missing — skipping DB UPDATE")
+            else:
+                from supabase import create_client
+                sb = create_client(url, key)
+                n_updated = 0
+                for r in rows:
+                    res = sb.table("mega_sweep_runs").update({
+                        "robustness_ratio": r["robustness_ratio"],
+                    }).eq("run_id", args.persist_run_id) \
+                      .eq("strategy", r["strategy"]).execute()
+                    if res.data:
+                        n_updated += len(res.data)
+                print(f"[persist] UPDATEd {n_updated} mega_sweep_runs rows "
+                      f"(run_id={args.persist_run_id}) with robustness_ratio")
+        except Exception as e:
+            print(f"[persist] DB UPDATE FAILED: {e}")
 
     # Summary
     print("\n" + "=" * 80)

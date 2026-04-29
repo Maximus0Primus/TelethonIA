@@ -225,7 +225,15 @@ def main():
     if "cross_regime_robust" in df_eligible.columns:
         base_filter = base_filter & df_eligible["cross_regime_robust"]
         print(f"  applying cross_regime_robust filter to top robust selection")
-    robust = df_eligible[base_filter].sort_values("avg_pnl_pct", ascending=False).head(args.top)
+    # v14e.45: dédup par (strategy, filter) avant head(top). Sans ça, le top-30
+    # est saturé par les variants source/smoothing/polling de la même strat de
+    # base (run 25116811803: 30 rows = 4 strats × 7-8 variants chacune).
+    robust = (
+        df_eligible[base_filter]
+        .sort_values("avg_pnl_pct", ascending=False)
+        .drop_duplicates(subset=["strategy", "filter"], keep="first")
+        .head(args.top)
+    )
     out_top = csv_path.parent / f"{csv_path.stem.replace('extended','top_robust')}.csv"
     robust.to_csv(out_top, index=False)
 
@@ -325,6 +333,7 @@ def main():
                             & (~df_eligible.index.isin(robust.index))
                         ]
                         .sort_values("avg_pnl_pct", ascending=False)
+                        .drop_duplicates(subset=["strategy", "filter"], keep="first")
                         .head(args.persist_extra)
                     )
                     for j, (_, rr) in enumerate(runners.iterrows(), start=len(records) + 1):
