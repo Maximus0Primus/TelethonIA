@@ -1,0 +1,98 @@
+name: KOL Weekly Audit
+
+# v14e.42 — wires T7 from todo. Runs Monday 06:00 UTC: blacklist audit +
+# recovery check. Pushes CSVs as artifacts and alerts Telegram if any new
+# blacklist or un-blacklist candidate appears. JSONB diff is *proposed only*
+# in the alert — human review still gates the merge.
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'   # Monday 06:00 UTC (after sim-align-gate + outlier monitor)
+  workflow_dispatch:
+    inputs:
+      days:
+        description: 'Lookback window in days'
+        default: '14'
+        required: false
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install deps
+        run: pip install supabase requests python-dotenv numpy
+
+      - name: Reliable audit (--exclude-artifact-strats)
+        id: reliable
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          python scripts/_kol_reliable_audit.py \
+              --days ${{ github.event.inputs.days || '14' }} \
+              --bootstrap 10000 \
+              --exclude-artifact-strats \
+              | tee /tmp/kol_reliable.out
+          # Surface counts to next steps
+          NEW_BL=$(grep -cE '^\s*\S+.*RELIABLE_BLACKLIST' /tmp/kol_reliable.out || true)
+          NEW_PROBABLE=$(grep -cE '^\s*\S+.*PROBABLE_BLACKLIST' /tmp/kol_reliable.out || true)
+          echo "new_bl=${NEW_BL}" >> "$GITHUB_OUTPUT"
+          echo "new_probable=${NEW_PROBABLE}" >> "$GITHUB_OUTPUT"
+
+      - name: Recovery check (un-blacklist candidates)
+        id: recovery
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          python scripts/_kol_recovery_check.py \
+              --days 7 \
+              --block-at '2026-04-27T21:18:00Z' \
+              | tee /tmp/kol_recovery.out
+          UN_BL=$(grep -cE '^\s*\S+.*UN_BLACKLIST_CANDIDATE' /tmp/kol_recovery.out || true)
+          REGR=$(grep -cE '^\s*\S+.*NEW_BLACKLIST_CANDIDATE' /tmp/kol_recovery.out || true)
+          echo "un_bl=${UN_BL}" >> "$GITHUB_OUTPUT"
+          echo "regr=${REGR}" >> "$GITHUB_OUTPUT"
+
+      - name: Alert Telegram if any candidate
+        if: ${{ steps.reliable.outputs.new_bl != '0'
+              || steps.reliable.outputs.new_probable != '0'
+              || steps.recovery.outputs.un_bl != '0'
+              || steps.recovery.outputs.regr != '0' }}
+        env:
+          MONITOR_BOT_TOKEN: ${{ secrets.MONITOR_BOT_TOKEN }}
+          MONITOR_CHAT_ID: ${{ secrets.MONITOR_CHAT_ID }}
+        run: |
+          if [ -n "$MONITOR_BOT_TOKEN" ] && [ -n "$MONITOR_CHAT_ID" ]; then
+            MSG="<b>KOL Weekly Audit</b>%0A"
+            MSG="${MSG}New BLACKLIST candidates: ${{ steps.reliable.outputs.new_bl }}%0A"
+            MSG="${MSG}New PROBABLE candidates: ${{ steps.reliable.outputs.new_probable }}%0A"
+            MSG="${MSG}UN-blacklist candidates: ${{ steps.recovery.outputs.un_bl }}%0A"
+            MSG="${MSG}Regression alerts: ${{ steps.recovery.outputs.regr }}%0A%0A"
+            MSG="${MSG}Review the artifacts + propose JSONB diff manually."
+            curl -s -X POST "https://api.telegram.org/bot${MONITOR_BOT_TOKEN}/sendMessage" \
+              -d chat_id="${MONITOR_CHAT_ID}" \
+              -d text="${MSG}" \
+              -d parse_mode=HTML \
+              -d disable_web_page_preview=true || true
+          fi
+
+      - name: Upload audit CSVs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kol-weekly-audit
+          path: |
+            data/kol_reliable_*.csv
+            data/kol_reliable_strats_*.csv
+            data/kol_recovery_*.csv
+          retention-days: 30

@@ -8,6 +8,26 @@
 
 **À monitorer post-deploy v14e.42 :** plus aucun `CRITICAL: ETH live trade ... bought ... but DB insert failed` ne doit apparaître. Si ça réapparaît, c'est un autre champ ETH qui overflow → ajouter au cap.
 
+## v14e.42 (Apr 29 second pass) — todo cleanup batch
+
+**T5 ✅** — `BOND_FAST_TP50_SL20_T20` retiré du live SOL config. `live_trading.allocations` désormais `{BE25_TP80_SL30: 1.0}` seul. Backup `data/rt_trade_config_pre_t5_20260429T144956Z.json`. Le bot reload le config toutes 5min — propagation auto, no restart needed.
+
+**T6 ✅** — `ETH_FAST_TP500_SL40_60M` confirmé paper-only (pas dans `eth_allocations`).
+
+**R1 ✅** — RT lag fix v14e.34 tient : msg→detect max 24.7s sur dernière heure, < 30s threshold.
+
+**K4 ✅** — Post-fix v14e.40 (Apr 28 15:50 UTC) : 0 SOL main de KOL SOL-blacklisté. Les 28 mains ETH `mad_apes_gambles` détectés sont ATTENDUS (mad_apes RELIABLE_WINNER ETH, blacklist par-chain).
+
+**T7 ✅** — `.github/workflows/kol-weekly-audit.yml` créé. Cron lundi 06:00 UTC, lance `_kol_reliable_audit --exclude-artifact-strats` + `_kol_recovery_check`, alerte Telegram si nouveaux candidates, upload CSVs en artifact 30j.
+
+**W8 ⚠️ NEW BLOCKER** — `mega_sweep_runs` ne se remplit plus depuis Apr 25 21:51 (160 rows). Les 4 derniers crons SOL ont été CANCELLED par GH après 6h05m. Le `timeout-minutes: 720` dans le YAML est ignoré : **les hosted runners GH ont une hard limit de 6h par job**. Le commit Apr 28 `34c99ce` "fix(v14e.41): mega sweep cron — SOL timeout fix" n'a PAS résolu (les workers ont été bumpés 2→4 mais le scope de sweep dépasse encore 6h). Solutions possibles :
+- (a) split en matrice de jobs (chain×family) → chacun < 6h
+- (b) self-hosted runner (le VPS pourrait servir mais charge déjà la prod)
+- (c) réduire le scope sweep (moins de strats × moins de filters)
+- ETH sweep tourne OK (1-3h, dernière run réussie Apr 27 22:56).
+
+**T1 ⏸ DIFFÉRÉ** — `_calibrate_sell_slip.py` filtre `chain='solana'` only. Inutile de le câbler dans le ETH workflow. Le SOL workflow est cassé (W8 ci-dessus). Tant que W8 pas résolu, T1 ne tourne pas. À débloquer ensemble.
+
 ---
 
 # Pipeline Status — Updated Apr 28, 2026 15:50 UTC (v14e.41 deployed)
@@ -43,7 +63,7 @@ Goal : confirmer blacklist tient, détecter recovery / nouveaux pourris.
 - [ ] **K1.** Lundi 06:00 UTC (cron à wire) : `python scripts/_kol_reliable_audit.py --days 14 --bootstrap 10000 --exclude-artifact-strats` → propose nouveaux blacklist candidates.
 - [ ] **K2.** Lundi 06:30 UTC (cron à wire) : `python scripts/_kol_recovery_check.py --days 7 --block-at 2026-04-27T21:18Z` → propose un-blacklist candidates.
 - [ ] **K3.** **ETH PROBABLE_BL à arbitrer** : jadendegens (N=20 WR 0% IC[-39%, -22%]), aliensalphacalls (N=20 WR 0% IC[-22%, -17%]). N<30 mais WR=0% sur 20 = p<10⁻⁶. Counterfactual 48h gain : +$2 163 ETH. Verdict utilisateur : ajouter ou attendre N=30 pour passer en RELIABLE.
-- [ ] **K4.** **Telemetry verification post-deploy** : confirmer que les 14 KOLs blacklist génèrent toujours des SHADOW trades (kol_mentions OK à 32min, mais 0 shadow rows observés vs 95 attendus). Re-check à 12h post-deploy. Si 0 shadows → bug dans la gate (devrait être `continue` outer-loop main only, shadow loop doit tourner).
+- [x] **K4.** Vérifié Apr 29 14:45 UTC — 995 shadow rows en 24h des 14 KOLs blacklistés. 0 SOL main post-deploy v14e.40. Per-chain gate fonctionne. ✅
 
 ---
 
@@ -70,7 +90,7 @@ Pas de code à écrire, juste laisser la data grossir. ETA verdicts paired-test 
 ### Mega sweep auto (cron 48h)
 - [x] **W6.** SOL : prochain run cron 02:00 UTC avec `--persist` → DB `mega_sweep_runs`.
 - [x] **W7.** ETH : prochain run 22:00 UTC avec chain-aware position $50.
-- [ ] **W8.** Vérifier après 1er run que `mega_sweep_runs` table se remplit. Vérifier aussi `data/slip_sensitivity_*.csv` (post-analyse v14e.34) et `data/sim_calibration_*.csv` (v14e.35).
+- [⚠️] **W8.** **BLOQUÉ** — `mega_sweep_runs` arrêté à Apr 25 21:51 (160 rows, plus rien depuis). 4 derniers crons SOL CANCELLED après 6h05m (hard limit GH hosted runner). Voir batch v14e.42 en tête. ETH OK.
 
 ---
 
@@ -78,7 +98,7 @@ Pas de code à écrire, juste laisser la data grossir. ETA verdicts paired-test 
 
 Apr 27 20:12 UTC : burst de 5 KOL calls détectés avec `msg→detect` 700-1050s (14-17 min de retard). Fix v14e.34 : tous les blocs lourds wrappés en `await asyncio.to_thread(...)`.
 
-- [ ] **R1.** Vérifier sur le prochain cycle batch (ETA Apr 27 ~22:00 UTC) que `msg→detect` reste < 30s. `journalctl -u kol-scraper --since '1h ago' | grep "msg.detect"`.
+- [x] **R1.** Vérifié Apr 29 14:45 UTC — msg→detect max 24.7s sur 1h. ✅
 - [ ] **R2.** Si lag persiste : profiler `process_and_push` ou `check_paper_trades` pour trouver le bloc qui mange 1000s+.
 
 ---
@@ -86,17 +106,17 @@ Apr 27 20:12 UTC : burst de 5 KOL calls détectés avec `msg→detect` 700-1050s
 ## 🔧 BACKLOG TECH
 
 ### Calibration drift (recurring)
-- [ ] **T1.** Câbler `_calibrate_sell_slip.py` dans `mega-sweep-48h.yml` post-sweep.
+- [⏸] **T1.** Différé — `_calibrate_sell_slip.py` est SOL-only et le SOL sweep est cassé (W8). À débloquer ensemble.
 - [ ] **T2.** Re-run sell slip drift quand N≥200 twin pairs (~Mai 03-05).
 - [ ] **T3.** Re-run `_eth_round_trip_smoke.py --execute` mensuellement OU si base_fee ETH > 5 gwei.
 - [ ] **T4.** Câbler `eth_daily_loss_limit_usd` dans le ETH dispatch.
 
 ### Live SOL config cleanup (post v14e.36)
-- [ ] **T5.** **`BOND_FAST_TP50_SL20_T20` dans live SOL** — cette strat est dans `_AUTO_DEPRECATED` v14e.36 (artefact family BOND_*). À retirer de `rt_trade_config.live_trading.allocations`. Confirmer qu'elle ne fire plus de live trades.
-- [ ] **T6.** Vérifier que `ETH_FAST_TP500_SL40_60M` (perdant -$432/48h, WR 12%) est paper-only et n'est pas en live.
+- [x] **T5.** Apr 29 — retiré, `live_trading.allocations` = `{BE25_TP80_SL30: 1.0}` seul. ✅
+- [x] **T6.** Apr 29 — confirmé paper-only (`eth_allocations` = `{ETH_TP80_SL40_T2H: 1.0}`). ✅
 
 ### Auto-recovery wiring
-- [ ] **T7.** Wire `_kol_recovery_check.py` + `_kol_reliable_audit.py --exclude-artifact-strats` en cron GH (lundi 06:00 UTC). Sortie : artefacts CSV + alerte Telegram si nouveaux candidates.
+- [x] **T7.** Apr 29 — `.github/workflows/kol-weekly-audit.yml` créé (cron lundi 06:00 UTC, alerte Telegram, artifacts 30j). ✅
 - [ ] **T8.** Si signal stable post-K1/K2 sur 4 semaines → auto-apply JSONB diff via PR auto-générée (review humain garde le merge).
 
 ### Dead-day filter (priorité basse)
