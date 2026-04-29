@@ -1,31 +1,34 @@
 name: Mega Sweep Extended (48h)
 
-# v14e.12 — génère `_mega_sweep_extended.csv` (~500K-800K configs) via
-# scraper/sim.py puis annote avec `scripts/analyze_mega_sweep.py`
-# (family_realism + FDR/Bonferroni). Tous les 2 jours à 02:00 UTC — timing
-# choisi pour éviter de chevaucher les autres crons (04:00 sim-align,
-# 04:30 outlier, 05:00 shadow audit).
+# v14e.43 — split en matrix de 3 shards (jupiter / dexscreener / both) +
+# merge job. Avant: single 5h+ job qui dépassait le hard cap 6h des
+# GitHub-hosted runners (timeout-minutes: 720 dans le YAML était ignoré).
+# Maintenant chaque shard tourne ~2h en parallèle, le merge agrège les
+# CSVs et fait toutes les analyses downstream (analyze + persist + slip-
+# sensitivity + recall + routing). Total wall-clock ~2h30, marge confort.
 #
-# Artefacts uploadés 30j pour pouvoir comparer les rankings au cours du
-# temps (shadow promotion, slip recalibration impact, v144.13 family mult
-# drift, etc.). Pas d'alerte Telegram — post-processeur analytique, user
-# check manuel via /best /shadow ou téléchargement artifact.
+# Tous les 2 jours à 02:00 UTC (offset des autres crons : 04:00 sim-align,
+# 04:30 outlier, 05:00 shadow audit). Artefacts conservés 30j pour comparer
+# les rankings dans le temps.
 
 on:
   schedule:
-    # "0 2 */2 * *" = tous les 2 jours à 02:00 UTC. GitHub uses UTC.
     - cron: '0 2 */2 * *'
   workflow_dispatch: {}
 
 jobs:
   sweep:
+    strategy:
+      # Continue les autres shards même si un fail — on perd 1/3 de coverage
+      # mais pas tout. Le merge skip silencieusement les CSVs manquants.
+      fail-fast: false
+      matrix:
+        source: [jupiter, dexscreener, both]
+    name: sweep-${{ matrix.source }}
     runs-on: ubuntu-latest
-    # v14e.41: --mega-sweep-extended (4M configs) gardé — l'utilisateur préfère
-    # l'exhaustivité au runtime. Workers bumped 2→4 (full GH vCPU) divise
-    # par ~2 le temps. Timeout porté à 720min (12h) — limite max plausible
-    # GitHub-hosted runner = 6h par job mais on peut chaîner. Si timeout
-    # encore atteint, prochain step = self-hosted runner ou réduire universe.
-    timeout-minutes: 720
+    # Marge sous le hard cap GH 6h. v14e.43 estimé ~2h/shard (1/3 du job
+    # monolithique 5h Apr 27). 350min = 5h50, garde-fou si le scope grossit.
+    timeout-minutes: 350
 
     steps:
       - uses: actions/checkout@v4
@@ -41,29 +44,89 @@ jobs:
           pip install --upgrade pip
           pip install supabase requests python-dotenv pandas numpy
 
-      - name: Run mega sweep extended
-        id: sweep
+      - name: Run mega sweep extended (shard=${{ matrix.source }})
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
-          # v14e.41: --mega-sweep-extended (full matrix, ~4M configs) gardé.
-          # Workers bumped 2→4 (full GH runner vCPU). Apr 27 timeout @ 5h →
-          # passé à 12h (timeout-minutes: 720). Output: _mega_sweep_extended.csv
-          # (analyze_mega_sweep.py default path).
+          # v14e.43: --mega-source-shard restreint la dim 'sources' à une
+          # seule valeur. Le reste du grid (filters × smoothings × polling
+          # × age_bands × strategies) tourne intégralement.
           cd scraper
           python sim.py --mega-sweep-extended \
+            --mega-source-shard ${{ matrix.source }} \
             --mega-workers 4 \
-            2>&1 | tee sweep.out
-          if [ -f _mega_sweep_extended.csv ]; then
-            mv _mega_sweep_extended.csv ../
-            echo "_mega_sweep_extended.csv produced"
+            --mega-csv-out _mega_sweep_extended_${{ matrix.source }}.csv \
+            2>&1 | tee sweep_${{ matrix.source }}.out
+          if [ -f _mega_sweep_extended_${{ matrix.source }}.csv ]; then
+            mv _mega_sweep_extended_${{ matrix.source }}.csv ../
+            echo "Shard ${{ matrix.source }} CSV produced"
           else
-            echo "sim.py did not produce _mega_sweep_extended.csv"
+            echo "sim.py did not produce shard CSV"
             exit 1
           fi
 
-      - name: Annotate with FDR + family realism
+      - name: Upload shard artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mega-sweep-shard-${{ matrix.source }}
+          path: |
+            _mega_sweep_extended_${{ matrix.source }}.csv
+            scraper/sweep_${{ matrix.source }}.out
+          retention-days: 7
+
+  merge_and_analyze:
+    needs: sweep
+    if: always()  # run merge even if 1 shard failed — partial is better than nothing
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install deps
+        run: |
+          pip install --upgrade pip
+          pip install supabase requests python-dotenv pandas numpy
+
+      - name: Download shard CSVs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: mega-sweep-shard-*
+          merge-multiple: true
+
+      - name: Concat shard CSVs into canonical _mega_sweep_extended.csv
+        id: concat
+        run: |
+          # Concat any shard CSV present. Drop duplicate header on rows 2+.
+          # Order doesn't matter (analyze_mega_sweep sorts internally).
+          python - <<'PY'
+          import os, glob, pandas as pd
+          shards = sorted(glob.glob('_mega_sweep_extended_*.csv'))
+          if not shards:
+              raise SystemExit('FATAL: no shard CSV downloaded')
+          dfs = []
+          for p in shards:
+              df = pd.read_csv(p)
+              print(f"  {p}: {len(df)} rows")
+              dfs.append(df)
+          out = pd.concat(dfs, ignore_index=True)
+          out.to_csv('_mega_sweep_extended.csv', index=False)
+          print(f"\nConcatenated -> _mega_sweep_extended.csv ({len(out)} rows total)")
+          # Surface to next step
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f"shards_found={len(shards)}\n")
+              f.write(f"total_rows={len(out)}\n")
+          PY
+
+      - name: Annotate with FDR + family realism + persist to DB
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
@@ -81,10 +144,6 @@ jobs:
             2>&1 | tee analyze.out
 
       - name: Sim/actual calibration report
-        # v14e.34: reads mega_sweep_runs (filled by --persist above and by
-        # past runs) and joins predictions vs realized paper $/day in the
-        # 7d post-run window. Detects chronic over-estimators (sim too
-        # optimistic) per strategy and per family. Output stays as artifact.
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
@@ -93,12 +152,6 @@ jobs:
             2>&1 | tee sim_calibration.out || true
 
       - name: Slippage robustness on top-robust winners
-        # v14e.34 — re-evaluates each top winning strategy at slip levels
-        # {50, 100, 225, 400, 600, 800} bps. Strats whose $/day flips sign or
-        # rank drops sharply at high slip are FRAGILE — flagged before any
-        # promotion. Direct response to the JSONB drift bug (Apr 27): we
-        # discovered $40K of recalc damage that was invisible because slip
-        # was assumed constant.
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
@@ -110,12 +163,7 @@ jobs:
             --out data/slip_sensitivity_latest.csv \
             2>&1 | tee slip_sensitivity.out || true
 
-      - name: Recall sweep (v14e.41 — first_call vs recall vs union)
-        # v14e.41: tests each exit spec on first_call universe + recall buckets
-        # (DIP10/30/50, PEAK30/50/70) + union (first_call ∪ recall_dipXX).
-        # Confirms whether adding recall opens to a base strategy improves EV.
-        # 14d backtest established: FAST60_TP40_SL30 + recall_dip30 lifted
-        # cum $sum +49% vs first_call alone. Output: scraper/_recall_sweep.csv.
+      - name: Recall sweep (v14e.41)
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
@@ -124,12 +172,7 @@ jobs:
             --output scraper/_recall_sweep.csv \
             2>&1 | tee recall_sweep.out || true
 
-      - name: Routing ideas refresh (per-KOL specialization + score-band gate)
-        # v14e.22: re-test the 4 routing hypotheses on the latest paper data
-        # alongside the strat-pool sweep. Apples-to-apples comparison on the
-        # same opportunity set. Output a sidecar JSON with verdicts so a
-        # future session can see if signals strengthen as data accumulates.
-        # Negative findings are also captured so we don't re-litigate them.
+      - name: Routing ideas refresh
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
@@ -138,7 +181,7 @@ jobs:
           python scripts/_analyze_routing_ideas.py 2>&1 | tee routing.out || true
           python scripts/_quantify_routing_dollar_day.py 2>&1 | tee routing_dollar_day.out || true
 
-      - name: Upload artifacts
+      - name: Upload final artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -147,7 +190,6 @@ jobs:
             _mega_sweep_extended.csv
             _mega_sweep_extended_annotated.csv
             _mega_sweep_top_robust.csv
-            scraper/sweep.out
             analyze.out
             routing.out
             routing_dollar_day.out
@@ -163,7 +205,10 @@ jobs:
       - name: Summary comment
         if: success()
         run: |
-          # Extrait le top 10 robust pour visibilité dans GH Actions UI
+          echo "## Mega Sweep v14e.43 (matrix split)" >> "$GITHUB_STEP_SUMMARY"
+          echo "Shards merged: ${{ steps.concat.outputs.shards_found }}/3" >> "$GITHUB_STEP_SUMMARY"
+          echo "Total rows: ${{ steps.concat.outputs.total_rows }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
           if [ -f _mega_sweep_top_robust.csv ]; then
             echo "## Top 10 robust configs" >> "$GITHUB_STEP_SUMMARY"
             echo '```' >> "$GITHUB_STEP_SUMMARY"

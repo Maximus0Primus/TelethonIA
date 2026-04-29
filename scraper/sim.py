@@ -4963,6 +4963,17 @@ def _mega_sweep_run(args):
         polling_modes = _MEGA_POLLING_MODES
         filters = _MEGA_FILTERS
         age_bands = _MEGA_AGE_BANDS
+
+    # v14e.43: optional source-shard filter so CI can split into 3 parallel jobs
+    # (each fits under 6h GH hard cap). 'all' keeps every source (local/dev).
+    shard = getattr(args, "mega_source_shard", "all")
+    if shard != "all":
+        if shard not in sources:
+            print(f"[mega-source-shard] '{shard}' not in current sources={sources} — running empty shard.")
+            sources = []
+        else:
+            sources = [shard]
+            print(f"[mega-source-shard] restricted to source='{shard}' (1/{len(_MEGA_EXT_SOURCES) if extended else len(_MEGA_SOURCES)} shards)")
     smoothings = _filter_smoothings_default(smoothings, getattr(args, "include_smoothing_artefacts", False))
     print(f"  sources={len(sources)} smoothings={len(smoothings)} polling={len(polling_modes)} "
           f"filters={len(filters)} age_bands={len(age_bands)} ({age_bands})")
@@ -5264,6 +5275,13 @@ def main():
                         help="Output CSV for --mega-sweep (default: scraper/_mega_sweep_full.csv)")
     parser.add_argument("--mega-since", type=str, default="2026-04-13T20:00:00Z",
                         help="Universe cutoff for --mega-sweep (default: post-v132)")
+    parser.add_argument("--mega-source-shard", type=str, default="all",
+                        choices=["all", "jupiter", "dexscreener", "both"],
+                        help="v14e.43: shard the extended sweep by source so each shard "
+                             "fits under the GitHub-hosted runner 6h hard cap. "
+                             "'all' (default) runs every source — kept for local/dev. "
+                             "Pick one of jupiter/dexscreener/both in CI matrix; the merge "
+                             "job concatenates the per-shard CSVs into the canonical one.")
     parser.add_argument("--include-trail-families", action="store_true",
                         help="v14e.19: opt-in to keep DTRAIL/TRAIL/DIP/PTRAIL/SPLIT/"
                              "SCALE_OUT/MOONBAG/WIDE_RUNNER families in mega-sweep. "

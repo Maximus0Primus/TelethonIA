@@ -20,13 +20,9 @@
 
 **T7 ✅** — `.github/workflows/kol-weekly-audit.yml` créé. Cron lundi 06:00 UTC, lance `_kol_reliable_audit --exclude-artifact-strats` + `_kol_recovery_check`, alerte Telegram si nouveaux candidates, upload CSVs en artifact 30j.
 
-**W8 ⚠️ NEW BLOCKER** — `mega_sweep_runs` ne se remplit plus depuis Apr 25 21:51 (160 rows). Les 4 derniers crons SOL ont été CANCELLED par GH après 6h05m. Le `timeout-minutes: 720` dans le YAML est ignoré : **les hosted runners GH ont une hard limit de 6h par job**. Le commit Apr 28 `34c99ce` "fix(v14e.41): mega sweep cron — SOL timeout fix" n'a PAS résolu (les workers ont été bumpés 2→4 mais le scope de sweep dépasse encore 6h). Solutions possibles :
-- (a) split en matrice de jobs (chain×family) → chacun < 6h
-- (b) self-hosted runner (le VPS pourrait servir mais charge déjà la prod)
-- (c) réduire le scope sweep (moins de strats × moins de filters)
-- ETH sweep tourne OK (1-3h, dernière run réussie Apr 27 22:56).
+**W8 ✅ RÉSOLU v14e.43** — Matrix split par source. `mega-sweep-48h.yml` refactored : 3 jobs parallèles (jupiter / dexscreener / both) chacun ~2h sous le hard cap 6h, puis un job `merge_and_analyze` qui concat les 3 CSVs et tourne analyze + persist + slip-sens + recall + routing. `sim.py` gagne `--mega-source-shard {all,jupiter,dexscreener,both}` (default `all` pour usage local/dev). `if: always()` sur le merge → si 1 shard fail, on garde 2/3 de coverage plutôt que zéro. Marge confort 350min × 3 vs 5h précédent. ETH workflow inchangé (scope ~10× plus petit, tient en single < 1h).
 
-**T1 ⏸ DIFFÉRÉ** — `_calibrate_sell_slip.py` filtre `chain='solana'` only. Inutile de le câbler dans le ETH workflow. Le SOL workflow est cassé (W8 ci-dessus). Tant que W8 pas résolu, T1 ne tourne pas. À débloquer ensemble.
+**T1 ⏸ DIFFÉRÉ** — `_calibrate_sell_slip.py` filtre `chain='solana'` only. À câbler dans le merge job du SOL workflow une fois W8 confirmé en prod (1er run réussi du nouveau matrix split).
 
 ---
 
