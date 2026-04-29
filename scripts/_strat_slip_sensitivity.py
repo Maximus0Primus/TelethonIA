@@ -118,8 +118,15 @@ def recalc_pnl(trade: dict, base_buy_slip_bps: int) -> float | None:
     return float(exitp) / new_entry - 1.0
 
 
-def aggregate_strat(trades: list[dict]) -> dict:
-    """Per-slip $/day + WR + N for one strategy. Returns dict keyed by slip_bps."""
+def aggregate_strat(trades: list[dict], pos_usd_fixed: float = 50.0) -> dict:
+    """Per-slip $/day + WR + N for one strategy. Returns dict keyed by slip_bps.
+
+    v14e.45 fix: pos_usd_fixed (default $50) normalizes the dollar P&L across
+    strats. Without this, ETH paper trades with Kelly sizing $50-$200 get an
+    artificially boosted dpd vs SOL trades uniformly $50. Matches the sim.py:4747
+    formula `dollars_day = 50 * avg * trade_rate`. Set pos_usd_fixed=0 to fall
+    back to the real paper position_usd (legacy behavior).
+    """
     if not trades:
         return {}
     # Date span (days observed)
@@ -134,7 +141,7 @@ def aggregate_strat(trades: list[dict]) -> dict:
             if p is None:
                 continue
             pnl_pcts.append(p)
-            pos = float(t.get("position_usd") or 0)
+            pos = pos_usd_fixed if pos_usd_fixed > 0 else float(t.get("position_usd") or 0)
             pnl_usds.append(p * pos)
         if not pnl_pcts:
             continue
@@ -200,6 +207,11 @@ def main():
                          "Closes the v14e.45 latent gap where the column was always NULL.")
     ap.add_argument("--chain", default="solana",
                     help="Chain to test (default solana). ETH workflow passes --chain ethereum.")
+    ap.add_argument("--position-usd", type=float, default=50.0,
+                    help="v14e.45 fix: normalize position size to a fixed value (default $50, "
+                         "matches sim.py:4747 dollars_per_day formula). Without this the script "
+                         "used the real paper trade position_usd which varies $50-$200 in ETH "
+                         "(Kelly sizing) and inflates fat-tail strats. Set to 0 to use real pos.")
     args = ap.parse_args()
 
     since = (datetime.now(timezone.utc) - timedelta(days=args.days)).isoformat()
@@ -219,7 +231,7 @@ def main():
     rows = []
     for i, s in enumerate(strats, 1):
         trades = fetch_strat_trades(s, since, chain=args.chain)
-        agg = aggregate_strat(trades)
+        agg = aggregate_strat(trades, pos_usd_fixed=args.position_usd)
         if not agg.get("by_slip"):
             print(f"[{i}/{len(strats)}] {s}: no usable trades, skip")
             continue
