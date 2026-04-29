@@ -24,6 +24,20 @@
 
 **T1 ⏸ DIFFÉRÉ** — `_calibrate_sell_slip.py` filtre `chain='solana'` only. À câbler dans le merge job du SOL workflow une fois W8 confirmé en prod (1er run réussi du nouveau matrix split).
 
+## v14e.43 (Apr 29 third pass) — ETH cost-drag truth + safety nets
+
+**ETH SLIP RECALIBRATION** — `scripts/_calibrate_eth_slip.py` créé. Sur N=8 closed live trades (ALIENPEPE, PARANOID, SCAM, ARMA, MOMMYS, PICKLES, APHEX, CYB) : adverse-side median slip **892 bps buy / 1600 bps sell**, cost drag total round-trip median 30.1% / mean 31.1%. Vs paper sim qui assumait 200 bps total = 17%. → **9× sous-estimé**.
+- `strategies.py` : `ETH_BUY_SLIPPAGE_BPS 100→500`, `ETH_SELL_SLIPPAGE_BPS 100→800` (shrinkage 0.65 sur N=8 pour rester conservateur)
+- `paper_trade_config.eth_buy_slippage_bps=500`, `eth_sell_slippage_bps=800` JSONB
+- Implied paper-sim drag avant: 17%, après: 28% (vs empirique 30%) — beaucoup plus réaliste
+- À revisiter à N≥20 — script écrit pour être re-run periodiquement
+
+**T4 ✅** — daily loss limit ETH câblé. `_check_eth_loss_limit(config)` gate les buys quand cumulative day pnl < -`eth_daily_loss_limit_usd` (JSONB, $30 actuel). `_track_eth_pnl(pnl_usd)` accumule sur les 2 close paths (standard + orphan-finalize). Reset auto à minuit UTC. Telegram alert via `alert_loss_limit_hit("eth_daily", ...)`.
+
+**E5 ✅** — `_eth_open_lock = threading.Lock()` autour de `open_live_trade`. Le RT listener async/threadé pouvait racer 2 buys concurrents past `max_open_positions` + dedup. Lock global, contention surface tiny vu que les buys prennent qq secondes et `eth_max_open_positions=1`.
+
+**Cost-drag insight (informatif)** — sur les 8 trades : sum cost = $50, sum PnL = +$9.30, sum gross (avant cost) = +$59.30. **Le cost mange 84% du gross edge**. Pour Phase 2 ($100/trade), le cost drag % devrait baisser proportionnellement (gas devient ~3% de la position vs 9% à $20), mais le slip% reste identique → drag global ~22-25%. Toujours énorme mais viable si le KOL signal continue de produire +30%/trade gross sur les winners.
+
 ---
 
 # Pipeline Status — Updated Apr 28, 2026 15:50 UTC (v14e.41 deployed)
@@ -48,7 +62,7 @@ L'historique des décisions se lit dans le git log — ce TODO ne garde que ce q
   - drift < -7pp → abort + recalibrer `ETH_BUY_SLIPPAGE_BPS` empiriquement
 - [ ] **E3.** Top up wallet ETH : actuel $43 → $80-100. Adresse : `0xC5c92E3AC207f686D09686Fe1dE79a302D9410E9`.
 - [ ] **E4.** **Rotation clé wallet ETH** — la clé est compromise (transcript persistant). À faire AVANT scaling Phase 2.
-- [ ] **E5.** **Race condition ETH dispatch** : `threading.Lock` autour de `live_trader_eth.open_live_trade` (~5 lignes). Pas urgent, eth_max_open=1 borne le risque.
+- [x] **E5.** v14e.43 — `_eth_open_lock = threading.Lock()` enrobe `open_live_trade` dans `_open_live_trade_locked`. ✅
 
 ---
 
@@ -105,7 +119,7 @@ Apr 27 20:12 UTC : burst de 5 KOL calls détectés avec `msg→detect` 700-1050s
 - [⏸] **T1.** Différé — `_calibrate_sell_slip.py` est SOL-only et le SOL sweep est cassé (W8). À débloquer ensemble.
 - [ ] **T2.** Re-run sell slip drift quand N≥200 twin pairs (~Mai 03-05).
 - [ ] **T3.** Re-run `_eth_round_trip_smoke.py --execute` mensuellement OU si base_fee ETH > 5 gwei.
-- [ ] **T4.** Câbler `eth_daily_loss_limit_usd` dans le ETH dispatch.
+- [x] **T4.** v14e.43 — `_check_eth_loss_limit(config)` gate dans `open_live_trade` + `_track_eth_pnl(pnl_usd)` accumulé sur les 2 close paths (standard + orphan-finalize). Default $50, JSONB déjà à $30 (sera lu). Halt automatique des buys ETH si daily PnL < -limit. ✅
 
 ### Live SOL config cleanup (post v14e.36)
 - [x] **T5.** Apr 29 — retiré, `live_trading.allocations` = `{BE25_TP80_SL30: 1.0}` seul. ✅

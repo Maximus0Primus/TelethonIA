@@ -158,6 +158,60 @@ _account = None
 # bought on still triggers an approval if needed.
 _approval_cache: set[tuple[str, str]] = set()
 
+# v14e.43 — ETH-side daily loss limit (T4 from todo). Mirrors live_trader.py
+# SOL impl but in USD (no SOL conversion needed). State resets at UTC midnight.
+# Halts open_live_trade buys when cumulative day PnL drops below
+# -eth_daily_loss_limit_usd. Existing trades still close normally (only buys
+# are gated). Prevents one bad day from compounding into next-day losses.
+_eth_daily_pnl_usd: float = 0.0
+_eth_daily_pnl_reset_date: str = ""
+_eth_daily_halted: bool = False
+
+# v14e.43 — ETH dispatch lock (E5 from todo). open_live_trade is called from
+# the RT listener which is async/threaded; without a lock two concurrent
+# KOL calls can race past max_open_positions and the dedup check, opening
+# 2× the intended exposure. The contention surface is tiny (one buy at a
+# time fits the eth_max_open_positions=1 cap perfectly), so a global lock
+# is the simplest correct fix. Negligible overhead — buys take seconds.
+import threading as _threading
+_eth_open_lock = _threading.Lock()
+
+
+def _check_eth_loss_limit(config: dict) -> bool:
+    """T4: returns True if ETH live BUYs should be halted today.
+
+    Reads `eth_daily_loss_limit_usd` from rt_trade_config.live_trading. Default
+    $50 (= 2.5x microtest position). Sells always proceed; only new entries
+    are blocked once the day loss exceeds the limit.
+    """
+    global _eth_daily_pnl_usd, _eth_daily_pnl_reset_date, _eth_daily_halted
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if _eth_daily_pnl_reset_date != today:
+        _eth_daily_pnl_usd = 0.0
+        _eth_daily_pnl_reset_date = today
+        _eth_daily_halted = False
+    daily_limit = float(config.get("eth_daily_loss_limit_usd", 50.0))
+    if daily_limit <= 0:
+        return False
+    if _eth_daily_pnl_usd < -daily_limit:
+        if not _eth_daily_halted:
+            logger.warning("ETH LIVE TRADING HALTED: daily loss $%.2f exceeds limit $%.2f",
+                           _eth_daily_pnl_usd, daily_limit)
+            _eth_daily_halted = True
+            try:
+                from alerter import alert_loss_limit_hit
+                alert_loss_limit_hit("eth_daily", _eth_daily_pnl_usd, daily_limit)
+            except Exception:
+                pass
+        return True
+    return False
+
+
+def _track_eth_pnl(pnl_usd: float):
+    """T4: accumulate ETH realized PnL into the daily-rollup counter."""
+    global _eth_daily_pnl_usd
+    _eth_daily_pnl_usd += pnl_usd
+
 # ERC20 Transfer event topic — used to recover received amount from the
 # target token's Transfer-to-recipient log. Works for V2 (where Swap event
 # decoding requires knowing token0/token1 ordering) and as a backup for V3.
@@ -745,8 +799,19 @@ def open_live_trade(client_sb, token_entry: dict, strategy: str,
       position_sol       → position_eth (ether amount)
       buy_input_lamports → wei amount sent
 
+    v14e.43: serialized via _eth_open_lock so concurrent KOL calls can't race
+    past max_open_positions / dedup. Also gated on _check_eth_loss_limit so a
+    bad day stops compounding into the next.
+
     Returns: {"success": bool, "execution_price": float|None, ...buy result}
     """
+    with _eth_open_lock:
+        return _open_live_trade_locked(client_sb, token_entry, strategy,
+                                        position_usd, config)
+
+
+def _open_live_trade_locked(client_sb, token_entry: dict, strategy: str,
+                             position_usd: float, config: dict) -> dict:
     _FAIL = {"success": False, "execution_price": None}
     ca = token_entry.get("token_address")
     symbol = token_entry.get("symbol", "???")
@@ -769,6 +834,12 @@ def open_live_trade(client_sb, token_entry: dict, strategy: str,
     entry_price = float(token_entry.get("price_usd", 0))
     if entry_price <= 0:
         logger.error("live_trader_eth: entry_price=0 for %s — aborting", symbol)
+        return _FAIL
+
+    # v14e.43 — daily loss limit gate (T4). Halts new buys once
+    # cumulative day pnl < -eth_daily_loss_limit_usd. Sells continue to
+    # process via check_live_trades_eth so existing positions can close.
+    if _check_eth_loss_limit(config):
         return _FAIL
 
     # v14e.32+: ETH-specific position cap (overrides Kelly-derived size).
@@ -1171,6 +1242,9 @@ def _finalize_orphan_eth_sell(client_sb, trade: dict) -> bool:
         logger.warning("orphan-finalize: bankroll update failed for %s: %s",
                        trade.get("symbol"), e)
 
+    # v14e.43 (T4): track day PnL so the daily-loss gate trips
+    _track_eth_pnl(pnl_usd)
+
     logger.info(
         "ETH ORPHAN-RECOVERED: %s %s exit=%.10f eth=%.6f usd=$%.2f "
         "pnl=%+.2f%% tx=%s block=%d",
@@ -1536,6 +1610,8 @@ def check_live_trades_eth(client_sb) -> dict:
         status_key = new_status.replace("_hit", "").replace("_stop", "")
         if status_key in result_counts:
             result_counts[status_key] += 1
+        # v14e.43 (T4): accumulate day PnL so the daily-loss gate trips
+        _track_eth_pnl(pnl_usd)
 
         logger.info(
             "ETH LIVE CLOSED: %s %s @ $%.10f | %.6f ETH ($%.2f) | route=%s | pnl=%+.2f%% (gas=$%.2f)",

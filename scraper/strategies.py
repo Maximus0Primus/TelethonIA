@@ -52,8 +52,16 @@ SELL_FEE_BPS = 0          # 0% — folded into slippage
 # N≥20 ETH live trades to fit empirically (mirror SOL v14e.24 methodology).
 # ---------------------------------------------------------------------------
 ETH_GAS_COST_USD_PER_SIDE = 1.50   # $1.50 each side, $3 round-trip (Apr 26 empirical + 25% buffer)
-ETH_BUY_SLIPPAGE_BPS = 100         # 1% slippage on entry — defensive for shallow memecoin pools
-ETH_SELL_SLIPPAGE_BPS = 100        # 1% slippage on exit
+# v14e.43 (Apr 29): empirical recalibration on N=8 KOL memecoin live trades.
+# Adverse-side median was 892 bps buy / 1600 bps sell, expected (signed mean)
+# 749 / 1216. Applied SHRINK=0.65 on the expected to keep paper sim from over-
+# pessimizing on small N — proposed by scripts/_calibrate_eth_slip.py and
+# also persisted in scoring_config.paper_trade_config.eth_*_slippage_bps so
+# live_trader_eth picks up the same numbers. Pre-fix sim drag was 17% (way
+# below empirical 30%); after this bump the implied drag rises to ~28%, much
+# closer to ground truth. Revisit at N≥20.
+ETH_BUY_SLIPPAGE_BPS = 500         # was 100 — empirical buy adverse median ~890 bps
+ETH_SELL_SLIPPAGE_BPS = 800        # was 100 — empirical sell adverse median ~1600 bps
 ETH_MIN_POSITION_USD = 50          # gas = 6% of $50 — viable; below $30 gas dominates >10%
 
 # ---------------------------------------------------------------------------
