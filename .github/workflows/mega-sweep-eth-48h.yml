@@ -161,6 +161,7 @@ jobs:
             _mega_sweep_eth_extended.csv
             _mega_sweep_eth_extended_annotated.csv
             _mega_sweep_eth_top_robust.csv
+            _mega_sweep_eth_top_recent.csv
             analyze_eth.out
             slip_sensitivity_eth.out
             data/slip_sensitivity_eth_latest.csv

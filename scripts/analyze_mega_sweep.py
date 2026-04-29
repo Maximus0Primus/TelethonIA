@@ -124,6 +124,18 @@ def main():
     ap.add_argument("--chain", default="solana",
                     help="Chain tag written to mega_sweep_runs.chain when --persist is set "
                          "(default: solana). ETH workflow passes --chain ethereum.")
+    # v14e.45: bi-ranking — second top-N optimisé pour détecter les strats fraîchement
+    # déployées qui surperforment sur la fenêtre récente mais que `cross_regime_robust`
+    # exclut (besoin ≥2 régimes ≈ ≥7-10 jours d'historique). Audit Apr 29 a montré
+    # que 19/20 top shadow strats (4j) étaient absentes du top sim 14j.
+    ap.add_argument("--recent-days", type=int, default=7,
+                    help="v14e.45: window (days) for the recent ranking — uses daily_pnl_json "
+                         "to compute avg_pnl on the last N days only. Default 7.")
+    ap.add_argument("--top-recent", type=int, default=30,
+                    help="v14e.45: number of recent-top configs to extract (default 30). "
+                         "Uses relaxed gates (no cross_regime_robust, n_recent>=15).")
+    ap.add_argument("--min-n-recent", type=int, default=15,
+                    help="v14e.45: minimum trades in the recent window to be eligible (default 15).")
     args = ap.parse_args()
 
     csv_path = Path(args.csv)
@@ -207,6 +219,34 @@ def main():
         else:
             print(f"  skipped: only {n_days} days, {len(daily_dicts)} configs (need >=5 days, >=10 configs)")
 
+    # v14e.45: Recent-window PnL — extracts avg_pnl on the last N days from
+    # daily_pnl_json so newly-deployed strats (LOCK / NZ_S40 / MCAP_S40 deployed
+    # 04-26 with 3-4d of data) have a fair shot at the bi-ranking. The 14d
+    # robust ranking inherently penalizes them via cross_regime_robust gate.
+    if "daily_pnl_json" in df_eligible.columns:
+        from datetime import datetime, timedelta, timezone
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=args.recent_days)).date()
+        cutoff_str = cutoff.isoformat()
+
+        def _recent_stats(s):
+            try:
+                dd = json.loads(s) if isinstance(s, str) and s else {}
+            except Exception:
+                return (0, None)
+            if not dd:
+                return (0, None)
+            recent_pnls = [float(p) for d, p in dd.items() if d >= cutoff_str]
+            if not recent_pnls:
+                return (0, None)
+            return (len(recent_pnls), float(np.mean(recent_pnls)))
+
+        recent_results = df_eligible["daily_pnl_json"].apply(_recent_stats)
+        df_eligible["recent_n_days"] = recent_results.apply(lambda t: t[0])
+        df_eligible["recent_avg_pnl_pct"] = recent_results.apply(lambda t: t[1])
+        n_recent_eligible = (df_eligible["recent_n_days"] > 0).sum()
+        print(f"[v14e.45 recent ranking] window={args.recent_days}d (since {cutoff_str}) — "
+              f"{n_recent_eligible:,} configs have data in window")
+
     # v14e.26 — Feature 5: Cross-regime robust flag
     if all(c in df_eligible.columns for c in ("pnl_active_pct", "pnl_quiet_pct", "wf_consistent")):
         df_eligible["cross_regime_robust"] = (
@@ -265,6 +305,34 @@ def main():
     out_top = csv_path.parent / f"{csv_path.stem.replace('extended','top_robust')}.csv"
     robust.to_csv(out_top, index=False)
 
+    # v14e.45: bi-ranking — second top-N optimisé pour les déploiements récents.
+    # Gates relâchés: pas de cross_regime_robust, n_recent>=min_n_recent (15 par
+    # défaut), recent_avg_pnl_pct>0. Laisse remonter les LOCK/NZ_S40/MCAP_S40 que
+    # le ranking 14d élimine à cause du gate cross_regime (besoin ≥7-10j).
+    recent = pd.DataFrame()
+    if "recent_avg_pnl_pct" in df_eligible.columns:
+        recent_filter = (
+            (df_eligible["recent_avg_pnl_pct"].fillna(-99) > 0)
+            & (df_eligible["recent_n_days"].fillna(0) >= 1)  # any data in window
+            & (df_eligible["family_realism"] >= 0.5)
+        )
+        # Phantom filter aussi sur recent (cohérence avec robust)
+        if _REGISTERED_STRATS_SET is not None and "strategy" in df_eligible.columns:
+            recent_filter = recent_filter & df_eligible["strategy"].isin(_REGISTERED_STRATS_SET)
+        # Eligibilité par n_sim_trades >= min_n_recent — abaisse la barre vs robust
+        if "n" in df_eligible.columns:
+            recent_filter = recent_filter & (df_eligible["n"] >= args.min_n_recent)
+        recent = (
+            df_eligible[recent_filter]
+            .sort_values("recent_avg_pnl_pct", ascending=False)
+            .drop_duplicates(subset=["strategy", "filter"], keep="first")
+            .head(args.top_recent)
+        )
+        out_recent = csv_path.parent / f"{csv_path.stem.replace('extended','top_recent')}.csv"
+        recent.to_csv(out_recent, index=False)
+        print(f"\n[v14e.45 bi-ranking] top_recent ({args.recent_days}d, n>={args.min_n_recent}, "
+              f"no cross_regime gate): {len(recent)} configs -> {out_recent.name}")
+
     # Print summary
     print()
     print("=" * 100)
@@ -317,7 +385,7 @@ def main():
                 run_id = os.environ.get("GITHUB_RUN_ID") or os.environ.get("RUN_ID")
                 run_source = "gh-actions" if os.environ.get("GITHUB_ACTIONS") else "local"
 
-                def _row_to_record(rr, rank, is_top):
+                def _row_to_record(rr, rank, is_top_robust, is_top_recent=False):
                     g = lambda k: rr[k] if k in rr.index and pd.notna(rr[k]) else None
                     return {
                         "run_at": run_at,
@@ -338,7 +406,12 @@ def main():
                         "bootstrap_rank_pct": float(g("bootstrap_rank_pct")) if g("bootstrap_rank_pct") is not None else None,
                         "rank_stability": float(g("rank_stability")) if g("rank_stability") is not None else None,
                         "cross_regime_robust": bool(g("cross_regime_robust")) if g("cross_regime_robust") is not None else None,
-                        "is_top_robust": bool(is_top),
+                        "is_top_robust": bool(is_top_robust),
+                        # v14e.45: bi-ranking flags + window data
+                        "is_top_recent": bool(is_top_recent),
+                        "recent_n_trades": int(g("recent_n_days")) if g("recent_n_days") is not None else None,
+                        "recent_avg_pnl_pct": float(g("recent_avg_pnl_pct")) if g("recent_avg_pnl_pct") is not None else None,
+                        "recent_window_days": int(args.recent_days),
                         "metadata": {
                             "smoothing": str(g("smoothing") or "") or None,
                             "polling_mode": str(g("polling_mode") or "") or None,
@@ -349,23 +422,50 @@ def main():
                         },
                     }
 
+                # v14e.45: build set of (strategy, filter) keys for recent so we
+                # can flag rows that are in BOTH selections (one row inserted, both
+                # booleans true) instead of inserting duplicates.
+                def _key(rr):
+                    return (str(rr.get("strategy") or ""), str(rr.get("filter") or "") or None)
+                recent_keys = set()
+                if len(recent) > 0:
+                    recent_keys = {_key(rr) for _, rr in recent.iterrows()}
+
                 records = []
-                # top robust rows (is_top_robust=true)
+                seen_keys = set()
+                # top robust rows (is_top_robust=true, is_top_recent if also in recent)
                 for i, (_, rr) in enumerate(robust.iterrows(), start=1):
-                    records.append(_row_to_record(rr, i, True))
-                # runners-up (next N by avg_pnl_pct, family>=0.5, not in robust)
+                    k = _key(rr)
+                    seen_keys.add(k)
+                    records.append(_row_to_record(rr, i, True, is_top_recent=(k in recent_keys)))
+                # v14e.45: top recent rows that aren't already in robust
+                if len(recent) > 0:
+                    rank_offset = len(records)
+                    for _, rr in recent.iterrows():
+                        k = _key(rr)
+                        if k in seen_keys:
+                            continue
+                        seen_keys.add(k)
+                        rank_offset += 1
+                        records.append(_row_to_record(rr, rank_offset, False, is_top_recent=True))
+                # runners-up (next N by avg_pnl_pct, family>=0.5, not in robust ∪ recent)
                 if args.persist_extra > 0:
                     runners = (
                         df_eligible[
                             (df_eligible["family_realism"] >= 0.5)
                             & (~df_eligible.index.isin(robust.index))
+                            & (~df_eligible.index.isin(recent.index if len(recent) > 0 else []))
                         ]
                         .sort_values("avg_pnl_pct", ascending=False)
                         .drop_duplicates(subset=["strategy", "filter"], keep="first")
                         .head(args.persist_extra)
                     )
-                    for j, (_, rr) in enumerate(runners.iterrows(), start=len(records) + 1):
-                        records.append(_row_to_record(rr, j, False))
+                    for _, rr in runners.iterrows():
+                        k = _key(rr)
+                        if k in seen_keys:
+                            continue
+                        seen_keys.add(k)
+                        records.append(_row_to_record(rr, len(records) + 1, False, is_top_recent=False))
 
                 if records:
                     # Batch insert (chunks of 100 to be polite)
@@ -378,6 +478,9 @@ def main():
     print(f"Files written:")
     print(f"  - {out_full}")
     print(f"  - {out_top}")
+    if "recent_avg_pnl_pct" in df_eligible.columns and len(recent) > 0:
+        out_recent_path = csv_path.parent / f"{csv_path.stem.replace('extended', 'top_recent')}.csv"
+        print(f"  - {out_recent_path}")
     print()
     print("Interpretation:")
     print("  - p_corrected (Bonferroni): very strict; passing => robust against multiple testing")

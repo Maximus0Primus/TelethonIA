@@ -191,6 +191,7 @@ jobs:
             _mega_sweep_extended.csv
             _mega_sweep_extended_annotated.csv
             _mega_sweep_top_robust.csv
+            _mega_sweep_top_recent.csv
             analyze.out
             routing.out
             routing_dollar_day.out
