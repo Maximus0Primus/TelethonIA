@@ -53,6 +53,22 @@ FEE_TIERS = [3000, 10000, 500, 100]
 # Quote via router.getAmountsOut (reverts if no pair) — no factory call needed.
 UNISWAP_V2_ROUTER = "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D"
 
+# v14e.44: Uniswap V4 support. V4 launched 2025 with a singleton PoolManager
+# (no per-pool factory pairs) — V3/V2 quoter calls return None even when the
+# token is liquid. DexScreener pairs labeled `v4` are exclusively here.
+# - PoolManager: singleton holding all V4 pools state
+# - V4Quoter:    view-only price oracle for V4 pools (revert-based return)
+# - UniversalRouter v2: only router that knows V4_SWAP command (0x10)
+V4_POOL_MANAGER = "0x000000000004444c5dc75cb358380d2e3de08a90"
+V4_QUOTER = "0x52F0E24D1c21C8A0cB1e5a5dD6198556BD9E1203"
+UNIVERSAL_ROUTER = "0x66a9893cC07D91D95644AEDD05D03f95e1dBA8Af"
+NATIVE_CURRENCY = "0x0000000000000000000000000000000000000000"   # V4 uses address(0) for native ETH
+# V4 (fee, tickSpacing) defaults — same fee tiers as V3 with their canonical
+# tickSpacing. Memecoins almost always use one of these standard combos with
+# hooks=0x0 (no custom hook).
+V4_FEE_TICK_PAIRS = [(3000, 60), (10000, 200), (500, 10), (100, 1)]
+V4_NO_HOOK = "0x0000000000000000000000000000000000000000"
+
 # ABIs (minimal)
 QUOTER_ABI = [{
     "inputs": [{"components": [
@@ -147,6 +163,67 @@ ERC20_ABI = [
     {"inputs":[],"name":"symbol","outputs":[{"type":"string"}],"stateMutability":"view","type":"function"},
     {"inputs":[{"name":"spender","type":"address"},{"name":"amount","type":"uint256"}],"name":"approve","outputs":[{"type":"bool"}],"stateMutability":"nonpayable","type":"function"},
     {"inputs":[{"name":"owner","type":"address"},{"name":"spender","type":"address"}],"name":"allowance","outputs":[{"type":"uint256"}],"stateMutability":"view","type":"function"},
+]
+
+# v14e.44 — Uniswap V4 ABIs (minimal). V4Quoter exposes a single nonpayable
+# helper that returns (amountOut, gasEstimate). UniversalRouter has the
+# generic execute(commands, inputs, deadline) entry point. We encode V4_SWAP
+# command bytes manually (web3 ABI encoder handles the inner struct/bytes).
+V4_QUOTER_ABI = [{
+    "inputs": [{"components": [
+        {"components": [
+            {"name": "currency0", "type": "address"},
+            {"name": "currency1", "type": "address"},
+            {"name": "fee", "type": "uint24"},
+            {"name": "tickSpacing", "type": "int24"},
+            {"name": "hooks", "type": "address"},
+        ], "name": "poolKey", "type": "tuple"},
+        {"name": "zeroForOne", "type": "bool"},
+        {"name": "exactAmount", "type": "uint128"},
+        {"name": "hookData", "type": "bytes"},
+    ], "name": "params", "type": "tuple"}],
+    "name": "quoteExactInputSingle",
+    "outputs": [
+        {"name": "amountOut", "type": "uint256"},
+        {"name": "gasEstimate", "type": "uint256"},
+    ],
+    "stateMutability": "nonpayable", "type": "function"
+}]
+
+UNIVERSAL_ROUTER_ABI = [{
+    "inputs": [
+        {"name": "commands", "type": "bytes"},
+        {"name": "inputs", "type": "bytes[]"},
+        {"name": "deadline", "type": "uint256"},
+    ],
+    "name": "execute", "outputs": [],
+    "stateMutability": "payable", "type": "function"
+}]
+
+# Permit2 (mainnet, deterministic CREATE2 deploy at this same address on
+# every chain). UniversalRouter pulls user tokens via Permit2 — direct
+# ERC20 allowance to UniversalRouter is NOT honored. So V4 sells need:
+#   (1) ERC20.approve(PERMIT2, MAX_UINT) — token says "Permit2 can pull"
+#   (2) PERMIT2.approve(token, UniversalRouter, MAX_UINT160, deadline)
+#       — Permit2 says "UniversalRouter can pull token via me"
+# Both txs are idempotent (cached in _approval_cache after first run).
+PERMIT2 = "0x000000000022D473030F116dDEE9F6B43aC78BA3"
+PERMIT2_ABI = [
+    {"inputs": [
+        {"name": "token", "type": "address"},
+        {"name": "spender", "type": "address"},
+        {"name": "amount", "type": "uint160"},
+        {"name": "expiration", "type": "uint48"},
+     ], "name": "approve", "outputs": [], "stateMutability": "nonpayable", "type": "function"},
+    {"inputs": [
+        {"name": "user", "type": "address"},
+        {"name": "token", "type": "address"},
+        {"name": "spender", "type": "address"},
+     ], "name": "allowance", "outputs": [
+        {"name": "amount", "type": "uint160"},
+        {"name": "expiration", "type": "uint48"},
+        {"name": "nonce", "type": "uint48"},
+     ], "stateMutability": "view", "type": "function"},
 ]
 
 
@@ -273,6 +350,50 @@ def _quote_with_best_fee(w3, amount_in_wei: int, token_in: str, token_out: str):
     return None, None, None
 
 
+def _v4_pool_key(token_in: str, token_out: str, fee: int, tick_spacing: int):
+    """Build a V4 PoolKey tuple. V4 uses native ETH (address(0)) instead of
+    WETH, so swap WETH→0x0 here. Token0 must be the lower address (sort by
+    int value); zeroForOne is whether we swap currency0 for currency1.
+    Returns (poolKey_tuple, zeroForOne_bool, currency_in_addr, currency_out_addr).
+    """
+    def _norm(addr):
+        return NATIVE_CURRENCY if addr.lower() == WETH.lower() else addr
+    cin = _norm(token_in)
+    cout = _norm(token_out)
+    if int(cin, 16) < int(cout, 16):
+        currency0, currency1, zero_for_one = cin, cout, True
+    else:
+        currency0, currency1, zero_for_one = cout, cin, False
+    pool_key = (_to_checksum(currency0) if currency0 != NATIVE_CURRENCY else NATIVE_CURRENCY,
+                _to_checksum(currency1) if currency1 != NATIVE_CURRENCY else NATIVE_CURRENCY,
+                fee, tick_spacing,
+                _to_checksum(V4_NO_HOOK) if V4_NO_HOOK != NATIVE_CURRENCY else V4_NO_HOOK)
+    return pool_key, zero_for_one, cin, cout
+
+
+def _quote_v4(w3, amount_in_wei: int, token_in: str, token_out: str):
+    """v14e.44 — Uniswap V4 quote. Tries common (fee, tickSpacing) combos
+    with hooks=0x0 (vast majority of memecoin pools). Returns the best
+    (amount_out, fee, tick_spacing, gas_est) across all probed pools, or
+    (None, None, None, None) if no V4 pool found.
+
+    Quoter uses the nonpayable revert-pattern internally — eth_call works
+    despite stateMutability=nonpayable.
+    """
+    quoter = w3.eth.contract(address=_to_checksum(V4_QUOTER), abi=V4_QUOTER_ABI)
+    best = (None, None, None, None)
+    for fee, tick_spacing in V4_FEE_TICK_PAIRS:
+        pool_key, zero_for_one, _, _ = _v4_pool_key(token_in, token_out, fee, tick_spacing)
+        try:
+            params = (pool_key, zero_for_one, amount_in_wei, b"")
+            amount_out, gas_est = quoter.functions.quoteExactInputSingle(params).call()
+            if amount_out > 0 and (best[0] is None or amount_out > best[0]):
+                best = (amount_out, fee, tick_spacing, gas_est)
+        except Exception:
+            continue
+    return best
+
+
 def _quote_v2(w3, amount_in_wei: int, token_in: str, token_out: str):
     """V2-only quote via UniswapV2Router02.getAmountsOut. Returns amount_out or None.
 
@@ -291,32 +412,29 @@ def _quote_v2(w3, amount_in_wei: int, token_in: str, token_out: str):
 
 
 def _quote_best_route(w3, amount_in_wei: int, token_in: str, token_out: str):
-    """v14e.33: Unified quote across V3 + V2. Picks the route with the highest
-    output (best price for the user).
+    """v14e.33+44: Unified quote across V3 + V2 + V4. Picks the route with
+    the highest output (best price for the user).
 
-    Returns (amount_out, route, fee_tier, gas_estimate) where:
-      route = "v3" | "v2"
-      fee_tier = V3 fee tier (3000/10000/500/100) or 3000 for V2 (constant fee)
-      gas_estimate = V3 quoter's gas est, or 200_000 default for V2
+    Returns (amount_out, route, fee_tier, gas_estimate, tick_spacing) where:
+      route = "v3" | "v2" | "v4"
+      fee_tier = V3/V4 fee tier (3000/10000/500/100) or 3000 for V2 (constant)
+      gas_estimate = quoter's gas est, or 200_000 default for V2
+      tick_spacing = V4 tick_spacing or None for V3/V2 (only V4 needs it for swap)
 
-    Returns (None, None, None, None) if no liquidity on either DEX.
+    Returns (None, None, None, None, None) if no liquidity on any DEX.
     """
     v3_out, v3_fee, v3_gas = _quote_with_best_fee(w3, amount_in_wei, token_in, token_out)
     v2_out = _quote_v2(w3, amount_in_wei, token_in, token_out)
+    v4_out, v4_fee, v4_ts, v4_gas = _quote_v4(w3, amount_in_wei, token_in, token_out)
 
-    # Both fail
-    if not v3_out and not v2_out:
-        return None, None, None, None
-    # V2 only
-    if not v3_out:
-        return v2_out, "v2", 3000, 200_000
-    # V3 only
-    if not v2_out:
-        return v3_out, "v3", v3_fee, v3_gas
-    # Both — pick higher output (better price). Ties go to V3 (cheaper gas via single-pool).
-    if v2_out > v3_out:
-        return v2_out, "v2", 3000, 200_000
-    return v3_out, "v3", v3_fee, v3_gas
+    # Build candidates list and pick max by amount_out
+    cand = []
+    if v3_out: cand.append((v3_out, "v3", v3_fee, v3_gas, None))
+    if v2_out: cand.append((v2_out, "v2", 3000, 200_000, None))
+    if v4_out: cand.append((v4_out, "v4", v4_fee, v4_gas or 250_000, v4_ts))
+    if not cand:
+        return None, None, None, None, None
+    return max(cand, key=lambda x: x[0])
 
 
 def _eth_usd_price(w3) -> float:
@@ -440,15 +558,21 @@ def execute_buy(ca: str, amount_usd: float, slippage_bps: int = 300,
     eth_amount = amount_usd / eth_usd
     amount_in_wei = w3r.to_wei(eth_amount, "ether")
 
-    # 1. Quote — forced or auto.
+    # 1. Quote — forced or auto. v14e.44: 5-tuple now includes tick_spacing for V4.
+    tick_spacing = None
     if force_route == "v3":
         v3_out, v3_fee, v3_gas = _quote_with_best_fee(w3r, amount_in_wei, WETH, ca)
         amount_out, route, fee_tier, gas_est = (v3_out, "v3", v3_fee, v3_gas) if v3_out else (None, None, None, None)
     elif force_route == "v2":
         v2_out = _quote_v2(w3r, amount_in_wei, WETH, ca)
         amount_out, route, fee_tier, gas_est = (v2_out, "v2", 3000, 200_000) if v2_out else (None, None, None, None)
+    elif force_route == "v4":
+        v4_out, v4_fee, v4_ts, v4_gas = _quote_v4(w3r, amount_in_wei, WETH, ca)
+        amount_out, route, fee_tier, gas_est, tick_spacing = (
+            (v4_out, "v4", v4_fee, v4_gas or 250_000, v4_ts) if v4_out
+            else (None, None, None, None, None))
     else:
-        amount_out, route, fee_tier, gas_est = _quote_best_route(w3r, amount_in_wei, WETH, ca)
+        amount_out, route, fee_tier, gas_est, tick_spacing = _quote_best_route(w3r, amount_in_wei, WETH, ca)
     if amount_out is None:
         return {"success": False, "error": f"no Uniswap pool found (route={force_route or 'auto'})"}
 
@@ -466,6 +590,40 @@ def execute_buy(ca: str, amount_usd: float, slippage_bps: int = 300,
         tx = router.functions.exactInputSingle(params).build_transaction({
             "from": acct.address, "value": amount_in_wei, "nonce": nonce,
             "gas": gas_est + 80_000, "maxFeePerGas": max_fee,
+            "maxPriorityFeePerGas": priority, "chainId": 1,
+        })
+    elif route == "v4":
+        # v14e.44 — V4 swap via UniversalRouter execute(commands, inputs, deadline).
+        # commands: 0x10 (V4_SWAP).
+        # inputs[0] = abi.encode(actions_bytes, params_bytes_array) where
+        #   actions = [0x06 SWAP_EXACT_IN_SINGLE, 0x0c SETTLE_ALL, 0x0f TAKE_ALL]
+        #   params[0] = SWAP_EXACT_IN_SINGLE struct
+        #   params[1] = SETTLE_ALL: input currency + max amount
+        #   params[2] = TAKE_ALL: output currency + min amount
+        # ETH→Token: msg.value = amount_in_wei (no approval needed for native).
+        from eth_abi import encode as _abi_encode
+        pool_key, zero_for_one, currency_in, currency_out = _v4_pool_key(
+            WETH, ca, fee_tier, tick_spacing)
+        actions_bytes = bytes([0x06, 0x0c, 0x0f])
+        swap_params = _abi_encode(
+            ["((address,address,uint24,int24,address),bool,uint128,uint128,bytes)"],
+            [(pool_key, zero_for_one, amount_in_wei, min_out, b"")],
+        )
+        settle_params = _abi_encode(["address", "uint256"],
+                                     [_to_checksum(currency_in) if currency_in != NATIVE_CURRENCY else NATIVE_CURRENCY,
+                                      amount_in_wei])
+        take_params = _abi_encode(["address", "uint256"],
+                                   [_to_checksum(currency_out) if currency_out != NATIVE_CURRENCY else NATIVE_CURRENCY,
+                                    min_out])
+        input0 = _abi_encode(["bytes", "bytes[]"],
+                              [actions_bytes, [swap_params, settle_params, take_params]])
+        commands = bytes([0x10])
+        deadline = int(time.time()) + 300
+        router = w3r.eth.contract(address=_to_checksum(UNIVERSAL_ROUTER),
+                                    abi=UNIVERSAL_ROUTER_ABI)
+        tx = router.functions.execute(commands, [input0], deadline).build_transaction({
+            "from": acct.address, "value": amount_in_wei, "nonce": nonce,
+            "gas": (gas_est or 250_000) + 100_000, "maxFeePerGas": max_fee,
             "maxPriorityFeePerGas": priority, "chainId": 1,
         })
     else:  # v2
@@ -585,6 +743,49 @@ def _ensure_approval(w3r, w3w, acct, token_address: str, amount_min: int,
                 router_address, token_address, tx_hash.hex())
 
 
+def _ensure_permit2_approval(w3r, w3w, acct, token_address: str, amount_min: int):
+    """v14e.44 — ensure both ERC20→Permit2 AND Permit2→UniversalRouter approvals
+    exist for V4 sells. UniversalRouter does NOT honor direct ERC20 allowance;
+    it always pulls via Permit2.transferFrom. Two on-chain txs the first time,
+    cached idempotent thereafter via _approval_cache.
+    """
+    # Step 1: ERC20.approve(Permit2)
+    _ensure_approval(w3r, w3w, acct, token_address, amount_min, router_address=PERMIT2)
+    # Step 2: Permit2.approve(token, UniversalRouter)
+    cache_key = (token_address.lower(), UNIVERSAL_ROUTER.lower())
+    if cache_key in _approval_cache:
+        return
+    permit2 = w3r.eth.contract(address=_to_checksum(PERMIT2), abi=PERMIT2_ABI)
+    cur_amt, cur_exp, _ = permit2.functions.allowance(
+        acct.address, _to_checksum(token_address), _to_checksum(UNIVERSAL_ROUTER)
+    ).call()
+    now_ts = int(time.time())
+    if cur_amt >= amount_min and cur_exp > now_ts + 600:
+        _approval_cache.add(cache_key)
+        return
+    base_fee = w3r.eth.get_block("latest")["baseFeePerGas"]
+    priority = w3r.to_wei(2, "gwei")
+    nonce = w3r.eth.get_transaction_count(acct.address)
+    MAX_UINT160 = (1 << 160) - 1
+    EXPIRATION = (1 << 48) - 1   # max uint48
+    tx = permit2.functions.approve(
+        _to_checksum(token_address), _to_checksum(UNIVERSAL_ROUTER),
+        MAX_UINT160, EXPIRATION,
+    ).build_transaction({
+        "from": acct.address, "nonce": nonce, "gas": 80_000,
+        "maxFeePerGas": base_fee * 2 + priority,
+        "maxPriorityFeePerGas": priority, "chainId": 1,
+    })
+    signed = acct.sign_transaction(tx)
+    tx_hash = w3w.eth.send_raw_transaction(signed.raw_transaction)
+    receipt = w3r.eth.wait_for_transaction_receipt(tx_hash, timeout=180)
+    if receipt["status"] != 1:
+        raise RuntimeError(f"Permit2 approve failed for {token_address} → UniversalRouter: {tx_hash.hex()}")
+    _approval_cache.add(cache_key)
+    logger.info("live_trader_eth: Permit2 approved %s → %s (tx %s)",
+                 token_address, UNIVERSAL_ROUTER, tx_hash.hex())
+
+
 def execute_sell(ca: str, amount_tokens: Optional[int] = None,
                  slippage_bps: int = 500,
                  force_route: str | None = None) -> dict:
@@ -615,20 +816,30 @@ def execute_sell(ca: str, amount_tokens: Optional[int] = None,
     if amount_tokens == 0:
         return {"success": False, "error": "zero balance to sell"}
 
+    tick_spacing = None
     if force_route == "v3":
         v3_out, v3_fee, v3_gas = _quote_with_best_fee(w3r, amount_tokens, ca, WETH)
         eth_out, route, fee_tier_used, gas_est = (v3_out, "v3", v3_fee, v3_gas) if v3_out else (None, None, None, None)
     elif force_route == "v2":
         v2_out = _quote_v2(w3r, amount_tokens, ca, WETH)
         eth_out, route, fee_tier_used, gas_est = (v2_out, "v2", 3000, 200_000) if v2_out else (None, None, None, None)
+    elif force_route == "v4":
+        v4_out, v4_fee, v4_ts, v4_gas = _quote_v4(w3r, amount_tokens, ca, WETH)
+        eth_out, route, fee_tier_used, gas_est, tick_spacing = (
+            (v4_out, "v4", v4_fee, v4_gas or 250_000, v4_ts) if v4_out
+            else (None, None, None, None, None))
     else:
-        eth_out, route, fee_tier_used, gas_est = _quote_best_route(w3r, amount_tokens, ca, WETH)
+        eth_out, route, fee_tier_used, gas_est, tick_spacing = _quote_best_route(w3r, amount_tokens, ca, WETH)
     if eth_out is None:
         return {"success": False, "error": f"no liquidity for sell (route={force_route or 'auto'})"}
 
     # Approve only the router we'll actually use.
-    target_router = SWAP_ROUTER_02 if route == "v3" else UNISWAP_V2_ROUTER
-    _ensure_approval(w3r, w3w, acct, ca, amount_tokens, router_address=target_router)
+    if route == "v4":
+        # V4 uses UniversalRouter via Permit2 (ERC20→Permit2 + Permit2→UR)
+        _ensure_permit2_approval(w3r, w3w, acct, ca, amount_tokens)
+    else:
+        target_router = SWAP_ROUTER_02 if route == "v3" else UNISWAP_V2_ROUTER
+        _ensure_approval(w3r, w3w, acct, ca, amount_tokens, router_address=target_router)
 
     min_out = (eth_out * (10000 - slippage_bps)) // 10000
     base_fee = w3r.eth.get_block("latest")["baseFeePerGas"]
@@ -650,6 +861,34 @@ def execute_sell(ca: str, amount_tokens: Optional[int] = None,
         tx = router.functions.multicall([swap_calldata, unwrap_calldata]).build_transaction({
             "from": acct.address, "value": 0, "nonce": nonce,
             "gas": gas_est + 130_000, "maxFeePerGas": max_fee,
+            "maxPriorityFeePerGas": priority, "chainId": 1,
+        })
+    elif route == "v4":
+        # v14e.44 — V4 sell via UniversalRouter. Token → native ETH (currency
+        # out = address(0)). Permit2 approval done above. msg.value = 0.
+        from eth_abi import encode as _abi_encode
+        pool_key, zero_for_one, currency_in, currency_out = _v4_pool_key(
+            ca, WETH, fee_tier_used, tick_spacing)
+        actions_bytes = bytes([0x06, 0x0c, 0x0f])
+        swap_params = _abi_encode(
+            ["((address,address,uint24,int24,address),bool,uint128,uint128,bytes)"],
+            [(pool_key, zero_for_one, amount_tokens, min_out, b"")],
+        )
+        settle_params = _abi_encode(["address", "uint256"],
+                                     [_to_checksum(currency_in) if currency_in != NATIVE_CURRENCY else NATIVE_CURRENCY,
+                                      amount_tokens])
+        take_params = _abi_encode(["address", "uint256"],
+                                   [_to_checksum(currency_out) if currency_out != NATIVE_CURRENCY else NATIVE_CURRENCY,
+                                    min_out])
+        input0 = _abi_encode(["bytes", "bytes[]"],
+                              [actions_bytes, [swap_params, settle_params, take_params]])
+        commands = bytes([0x10])
+        deadline = int(time.time()) + 300
+        router = w3r.eth.contract(address=_to_checksum(UNIVERSAL_ROUTER),
+                                    abi=UNIVERSAL_ROUTER_ABI)
+        tx = router.functions.execute(commands, [input0], deadline).build_transaction({
+            "from": acct.address, "value": 0, "nonce": nonce,
+            "gas": (gas_est or 250_000) + 130_000, "maxFeePerGas": max_fee,
             "maxPriorityFeePerGas": priority, "chainId": 1,
         })
     else:  # v2
@@ -686,6 +925,10 @@ def execute_sell(ca: str, amount_tokens: Optional[int] = None,
     #     amount equals what router unwraps and forwards to acct.
     if route == "v3":
         eth_received_wei = _parse_swap_output_from_logs(receipt, WETH)
+    elif route == "v4":
+        # V4 outputs native ETH directly to acct → no WETH Transfer event.
+        # Fall through to the balance-delta fallback below by setting None.
+        eth_received_wei = None
     else:
         eth_received_wei = _parse_transfer_to_recipient(receipt, WETH, UNISWAP_V2_ROUTER)
     if eth_received_wei is None or eth_received_wei <= 0:
