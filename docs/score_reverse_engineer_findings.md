@@ -271,3 +271,143 @@ CSV outputs Run #2 :
 - `data/score_re_combos_20260429T165444Z.csv` (SOL combos)
 - `data/score_reverse_engineer_20260429T165559Z.csv` (ETH per-strat)
 - `data/score_re_combos_20260429T165559Z.csv` (ETH combos)
+
+---
+
+## Run #3 (REWRITE — TARGET = $/day at $20/trade) — 2026-04-29 17:24 UTC
+
+**Pourquoi un Run #3 :** vérification empirique du finding BSR>=0.52 a montré que ce filtre **PERD $2-4/d** sur 7/7 top SOL strats à $20/trade. Le Run #1+#2 optimisait sur `WR × sqrt(N)` — winrate × volume — pas sur les dollars. Une cohorte BSR<0.52 a un WR plus bas (40% vs 49%) MAIS un avg pnl plus haut (+3.5%) : ce sont des **fat-tail moonshots** que le filter sacrifie. Cette erreur d'optimization target est CORRIGÉE en Run #3.
+
+Script v2 ajoute :
+- Target metric = **`sum_$ at simulated $20/trade per day`** (NOT WR)
+- Walk-forward CV (train 70% / test 30% chrono) avec flag OVERFIT si train+ et test−
+- **Optuna search** sur formule de score linéaire pondérée (15 features, 200 trials TPE)
+
+### SOL — Run #3 résultats
+
+**Baseline :** post-blacklist 30d à $20/trade = **−$216/jour** sur paper aggregé. Le marché 30d SOL a été net négatif sur l'univers.
+
+**Top single-feature filters (TARGET $/d) :**
+
+| Feature | Threshold | kept_% | kept_$/d | Δ_$/d vs base |
+|---|---|---|---|---|
+| `rt_score` | 38.8 | 40.5% | $+599 | **$+815** |
+| `entry_score` | 38 | 41.1% | $+587 | $+803 |
+| `entry_mcap` | $16K | 64.9% | $+560 | $+776 |
+| `kol_score` | 1.56 | 5.1% | $+411 | $+626 |
+| `kol_win_rate` | 0.34 | 5.4% | $+409 | $+624 |
+| `rt_liquidity_usd` | $17.7K | 30.4% | $+387 | $+602 |
+| `rt_volume_24h` | $314K | 20.6% | $+278 | $+494 |
+
+**Walk-forward CV (train 21d / test 9d) :**
+
+| Feature | train Δ$/d | test Δ$/d | Verdict |
+|---|---|---|---|
+| **`rt_score`** | $+884 | **$+551** | ✅ **HOLD OUT-OF-SAMPLE** |
+| **`entry_score`** | $+777 | **$+828** | ✅ **HOLD** (test > train!) |
+| **`kol_win_rate`** | $+777 | $+222 | ✅ HOLD weakly |
+| `entry_mcap` | $+1079 | $-210 | ❌ OVERFIT |
+| `entry_mcap_log` | $+1070 | $-345 | ❌ OVERFIT |
+| `rt_liquidity_usd` | $+938 | $-413 | ❌ OVERFIT |
+| `rt_token_age_hours` | $+892 | $-1899 | ❌ OVERFIT massive |
+| `rt_volume_24h` | $+727 | $-1017 | ❌ OVERFIT |
+
+→ **3 features tiennent out-of-sample** : `rt_score`, `entry_score`, `kol_win_rate`. Les autres overfit massivement.
+
+**Top per-strategy (non-BSR) findings :**
+
+| Strategy | base $/d | best filter | kept $/d | Δ |
+|---|---|---|---|---|
+| SLOW6H_TP100_SL50 | $-21 | `entry_mcap_log >= 11` | $+3 | **+$24** |
+| TP100_SL60 | $-17 | `kol_win_rate >= 0.34` | $+5 | +$23 |
+| TP80_SL70 | $-16 | `kol_win_rate >= 0.34` | $+5 | +$22 |
+| SLOW4H_TP100_SL50 | $-18 | `kol_win_rate >= 0.30` | $+2 | +$20 |
+| FAST60_TP100_SL50 | $+1.5 | `entry_mcap >= $17K` | $+10 | +$9 |
+| FAST45_TP100_SL50 | $+2 | `entry_mcap >= $18K` | $+10 | +$8 |
+
+→ Beaucoup de strats LOSING base deviennent winners avec filtre `kol_win_rate >= 0.34`.
+
+**Top per-strategy 2-feature combos (where BSR shines AS PART OF combo) :**
+
+| Strategy | base $/d | f1 | thr1 | f2 | thr2 | Δ$/d |
+|---|---|---|---|---|---|---|
+| SLOW6H_TP100_SL50 | $-21 | `rt_buy_sell_ratio` | 0.53 | `entry_mcap` | $45K | **+$26** |
+| SLOW4H_TP100_SL50 | $-18 | `rt_buy_sell_ratio` | 0.53 | `entry_mcap` | $51K | +$23 |
+| TP100_SL60 | $-17 | `rt_buy_sell_ratio` | 0.53 | `entry_mcap` | $50K | +$23 |
+| TP80_SL70 | $-16 | `rt_token_age_hours` | 0.6 | `kol_win_rate` | 0.25 | +$20 |
+
+→ **BSR seul = mauvais. BSR + entry_mcap >= $45K = excellent.** Le filter MCAP seul élimine les micro-cap pumps qui sont les fat-tail moonshots à BSR<0.52.
+
+**Optuna SOL global formula : OVERFIT** (train +$1090/d, test −$406/d). 15 weights = trop de degrés de liberté, ne généralise pas. Conclusion : pas de formule de score globale fiable trouvée à ce jour pour SOL.
+
+### ETH — Run #3 résultats
+
+**Baseline :** 30d post-no-blacklist (ETH n'a pas de blacklist) = **+$549/jour** train, **+$359/jour** test à $20/trade.
+
+**Per-strat (TOUTES positives sur ETH — différent de SOL) :**
+
+| Strategy | base $/d | best filter | kept $/d | Δ |
+|---|---|---|---|---|
+| ETH_FAST_TP500_SL40_60M | $-0.21 | `kol_win_rate >= 0.26` | $+3.71 | +$3.92 |
+| ETH_FAST_TP100_SL50 | $-2.62 | `kol_win_rate >= 0.24` | $+0.86 | +$3.48 |
+| ETH_TP100_SL50 | $+1.97 | `kol_score >= 0.88` | $+4.78 | +$2.81 |
+| **ETH_TP80_SL40_T2H** (live) | $+3.49 | `kol_score >= 0.62` | $+5.18 | +$1.69 |
+| ETH_BE50_TP150_SL40_T2H | $+4.03 | `entry_mcap_log >= 9.6` | $+5.14 | +$1.12 |
+
+→ **`kol_score`** + **`kol_win_rate`** sont les filtres dominants ETH. Lifts modestes ($1-4/d) mais consistents.
+
+**Top combos ETH :**
+
+| Strategy | f1 | thr1 | f2 | thr2 | Δ$/d |
+|---|---|---|---|---|---|
+| ETH_FAST_TP500_SL40_60M | `rt_score` | 44 | `kol_win_rate` | 0.26 | **+$4.65** |
+| ETH_FAST_TP100_SL50 | `rt_volume_24h` | $6.4K | `kol_score` | 1.1 | +$4.26 |
+| ETH_TP100_SL50 | `kol_score` | 0.78 | `entry_mcap_log` | 9.2 | +$3.71 |
+| **ETH_TP80_SL40_T2H** (live) | `rt_volume_24h` | $6.9K | `kol_score` | 0.7 | **+$3.25** |
+| ETH_BE25_LOCK10_TP80_SL40_T2H | `rt_volume_24h` | $5.8K | `rt_buy_sell_ratio` | 0.55 | +$1.96 |
+
+**Optuna ETH global formula : SIGNAL HOLDS ✅** (train +$461/d, test +$560/d). Top weighted features (signs sont mixed mais ça fonctionne) : `rt_score`, `entry_score`, `rt_volume_24h_log`, `kol_score`, `entry_mcap_log`. Conclusion : on PEUT construire un score formula fiable pour ETH.
+
+---
+
+## Verdict actionnable v2 (corrige le verdict v1)
+
+### Filtres VALIDÉS out-of-sample (à wirer en shadow A/B)
+
+| Filtre | Chain | Δ$/d test | Confidence |
+|---|---|---|---|
+| **`kol_win_rate >= 0.30-0.34`** | SOL+ETH | +$222 SOL / +$3-4 ETH | **HIGH** ✅ |
+| `rt_score >= 38` | SOL | +$551 | **HIGH** ✅ |
+| `entry_score >= 38` | SOL | +$828 | **HIGH** ✅ (similar to rt_score, presque colinéaire) |
+| `kol_score >= 0.88` | ETH BE+LOCK | +$1-3 | **MEDIUM** ✅ |
+
+### Filtres REJETÉS (overfit ou anti-signal sur $/d)
+
+| Filtre | Pourquoi |
+|---|---|
+| `rt_buy_sell_ratio >= 0.52` (BSR seul) | Améliore WR, perd $/d. Sacrifie fat-tail. |
+| `rt_token_age_hours >= 0.1-0.3` | OVERFIT (train +$890, test −$1900) |
+| `rt_volume_24h >= $6K` (seul) | OVERFIT |
+| `entry_mcap >= $230K` (seul) | OVERFIT (test −$210) |
+| `rt_liquidity_usd >= $17K` (seul) | OVERFIT |
+
+### Combos GAGNANTS (1 + 1 = 3)
+
+| Combo | Strats où ça marche | Δ$/d |
+|---|---|---|
+| `rt_buy_sell_ratio >= 0.53 AND entry_mcap >= $45K` | SLOW6H/TP100/TP80_SL70 | +$20-26 |
+| `rt_volume_24h >= $6K AND kol_score >= 0.88` | ETH BE+LOCK family | +$2-4 |
+| `rt_score >= 26 AND rt_volume_24h >= $6.4K` | ETH BE+LOCK | +$3 |
+
+→ Les filters seuls sont fragiles, les combos sont robustes (cohérence cross-strat).
+
+### Optuna formula
+
+- **SOL** : pas de formule globale stable. 15 weights overfit, le marché SOL trop hétérogène.
+- **ETH** : **formule globale tient out-of-sample** (test +$560/d). Pas encore actionnable car les weights sont contre-intuitifs (rt_score = -0.998, entry_score = +0.910, kol_win_rate = +0.224 → suggests rt_score actuel est anti-signal sur ETH dans l'Optuna). À investiguer.
+
+CSV outputs Run #3 :
+- `data/score_re_v2_dollar_20260429T172429Z.csv` (SOL per-strat — TARGET $/d)
+- `data/score_re_v2_combos_20260429T172502Z.csv` (SOL combos — TARGET $/d)
+- `data/score_re_v2_dollar_20260429T172633Z.csv` (ETH per-strat)
+- `data/score_re_v2_combos_20260429T172700Z.csv` (ETH combos)

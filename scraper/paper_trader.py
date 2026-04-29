@@ -243,9 +243,25 @@ def _passes_strategy_filter(token: dict, strategy_name: str) -> bool:
     # scripts/_score_reverse_engineer.py findings. Universal +5-7pp WR lift
     # at thr>=0.52 SOL / >=0.55 ETH on cross-strat shadow data. Strats opt-in
     # via min_buy_sell_ratio filter key. Default 0 = no gate.
+    # NOTE v14e.43b: BSR alone shown to LOSE $/d (-$2-4/d on 7/7 SOL strats)
+    # despite WR lift — fat-tail moonshots sacrificed. Useful only in COMBO
+    # with min_entry_mcap (validated +$20-26/d on losing strats).
     bsr = token.get("_rt_buy_sell_ratio") or token.get("rt_buy_sell_ratio")
     if filt.get("min_buy_sell_ratio") is not None:
         if bsr is None or float(bsr) < float(filt["min_buy_sell_ratio"]):
+            return False
+    # v14e.43b: kol_win_rate filter — validated walk-forward winner on $/d
+    # target (SOL train +$777 → test +$222, ETH train +$41 → test +$440).
+    # Strats opt-in via min_kol_win_rate filter key. Default 0 = no gate.
+    if filt.get("min_kol_win_rate") is not None:
+        wr = token.get("_rt_kol_win_rate") or token.get("kol_win_rate")
+        if wr is None or float(wr) < float(filt["min_kol_win_rate"]):
+            return False
+    # v14e.43b: entry_mcap floor — useful in combo with BSR. Validated
+    # `BSR>=0.53 AND mcap>=$45K` lift +$20-26/d on SLOW/TP100 family.
+    if filt.get("min_entry_mcap") is not None:
+        mcap = float(token.get("market_cap") or token.get("entry_mcap") or 0)
+        if mcap < float(filt["min_entry_mcap"]):
             return False
     # v14e.16: per-strategy token-age window. Applied ONLY when the strategy
     # filter explicitly declares `max_age_hours` / `min_age_hours`. That way

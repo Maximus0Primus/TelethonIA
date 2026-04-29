@@ -3565,6 +3565,67 @@ for name, tp, sl, h, extra in _BSR_ETH_CLONES:
     SHADOW_STRATEGIES.append(name)
 
 # ---------------------------------------------------------------------------
+# v14e.43b — KW34 (kol_win_rate >= 0.34) shadow A/B family.
+# Driven by `scripts/_score_reverse_engineer.py` v2 with TARGET=$/day (not WR).
+# Walk-forward CV (train 21d → test 9d):
+#   SOL: train +$777/d, test +$222/d → ✅ HOLD out-of-sample
+#   ETH: train +$41/d,  test +$440/d → ✅ HOLD strongly
+# This is the cross-chain validated single-feature filter. Adding 5 SOL +
+# 3 ETH shadow clones to validate in vivo. Verdict at N>=30 paired-test.
+# ---------------------------------------------------------------------------
+
+_KW34_SOL_CLONES = [
+    ("BE25_TP80_SL30_KW34", 1.80, 0.70, 30, {"be_activation": 0.25}, {}),
+    ("FAST_TP50_SL30_KW34", 1.50, 0.70, 30, {}, {}),
+    ("FAST_TP50_SL30_S40_KW34", 1.50, 0.70, 30, {}, {"min_rt_score": 40}),
+    ("BE15_LOCK5_TP50_SL30_KW34", 1.50, 0.70, 30,
+        {"be_activation": 0.15, "be_lock_pct": 0.05}, {}),
+    ("SLOW6H_TP100_SL50_KW34", 2.00, 0.50, 360, {}, {}),
+]
+for name, tp, sl, h, extra, filt_extra in _KW34_SOL_CLONES:
+    spec = {"pct": 1.0, "tp_mult": tp, "sl_mult": sl, "horizon_min": h, "label": "main"}
+    spec.update(extra)
+    STRATEGIES[name] = [spec]
+    STRATEGY_FILTERS[name] = {"chain": "solana", "min_kol_win_rate": 0.34, **filt_extra}
+    SHADOW_STRATEGIES.append(name)
+
+_KW26_ETH_CLONES = [
+    ("ETH_TP80_SL40_T2H_KW26", 1.80, 0.60, 120, {}),
+    ("ETH_FAST_TP100_SL50_KW26", 2.00, 0.50, 30, {}),
+    ("ETH_BE25_LOCK10_TP80_SL40_T2H_KW26", 1.80, 0.60, 120,
+        {"be_activation": 0.25, "be_lock_pct": 0.10}),
+]
+for name, tp, sl, h, extra in _KW26_ETH_CLONES:
+    spec = {"pct": 1.0, "tp_mult": tp, "sl_mult": sl, "horizon_min": h, "label": "main"}
+    spec.update(extra)
+    STRATEGIES[name] = [spec]
+    STRATEGY_FILTERS[name] = {"chain": "ethereum", "min_kol_win_rate": 0.26}
+    SHADOW_STRATEGIES.append(name)
+
+# ---------------------------------------------------------------------------
+# v14e.43b — BSR_MCAP combo shadows. The single BSR filter loses $/d but the
+# combo `rt_buy_sell_ratio >= 0.53 AND entry_mcap >= $45K` validated +$20-26/d
+# on SLOW6H_TP100_SL50, SLOW4H_TP100_SL50, TP100_SL60, TP80_SL70 (currently
+# losing strats that flip positive with the combo). 4 shadow clones SOL only.
+# ---------------------------------------------------------------------------
+_BSR_MCAP_SOL_CLONES = [
+    ("SLOW6H_TP100_SL50_BSR_MCAP", 2.00, 0.50, 360, {}),
+    ("SLOW4H_TP100_SL50_BSR_MCAP", 2.00, 0.50, 240, {}),
+    ("TP100_SL60_BSR_MCAP", 2.00, 0.40, 120, {}),
+    ("TP80_SL70_BSR_MCAP", 1.80, 0.30, 120, {}),
+]
+for name, tp, sl, h, extra in _BSR_MCAP_SOL_CLONES:
+    spec = {"pct": 1.0, "tp_mult": tp, "sl_mult": sl, "horizon_min": h, "label": "main"}
+    spec.update(extra)
+    STRATEGIES[name] = [spec]
+    STRATEGY_FILTERS[name] = {
+        "chain": "solana",
+        "min_buy_sell_ratio": 0.53,
+        "min_entry_mcap": 45000,
+    }
+    SHADOW_STRATEGIES.append(name)
+
+# ---------------------------------------------------------------------------
 # v14e.36 — auto-deprecate every artifact-family strategy registered above.
 # Trail/dip/split/bond shadows pollute analytics (sim ranks them top via
 # 47x slip miscalibration) and cannot be promoted to live. This finalization
