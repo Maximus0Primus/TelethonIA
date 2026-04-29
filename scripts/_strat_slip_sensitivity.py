@@ -96,16 +96,26 @@ def slip_mult_for(liq_usd: float) -> float:
 
 
 def recalc_pnl(trade: dict, base_buy_slip_bps: int) -> float | None:
-    """Recompute pnl_pct under a given base buy slip. Returns None if data missing."""
+    """Recompute pnl_pct under a given base buy slip. Returns None if data missing.
+
+    v14e.45 bug fix: previously this function applied sell_slip a SECOND time
+    via `(exit_price * (1 - sell_slip/10000))`, but exit_price stored in DB is
+    ALREADY net of sell slip (cf. paper_trader.py:1953
+    `exit_price = sl_price * _dynamic_sell_slip_factor(...)`). The double
+    counting was inflating fragility — strats that flipped sign at slip 600bps
+    were partially an artifact of the second sell penalty. Now we vary BUY
+    slip only and keep the realized exit_price as-is. This means the script
+    measures buy-slip sensitivity, not sell-slip sensitivity. To test sell
+    slip independently, would need dex_spot_price_at_exit (not stored).
+    """
     spot = trade.get("dex_spot_price_at_entry")
     exitp = trade.get("exit_price")
     if not spot or not exitp or spot <= 0:
         return None
     mult = slip_mult_for(float(trade.get("rt_liquidity_usd") or 0))
     new_buy_bps = base_buy_slip_bps * mult
-    sell_bps = trade.get("sell_slippage_bps") or 200  # persisted dynamic value
     new_entry = float(spot) * (1.0 + new_buy_bps / 10_000.0)
-    return (float(exitp) * (1.0 - float(sell_bps) / 10_000.0)) / new_entry - 1.0
+    return float(exitp) / new_entry - 1.0
 
 
 def aggregate_strat(trades: list[dict]) -> dict:
@@ -188,6 +198,8 @@ def main():
     ap.add_argument("--persist-run-id", default="",
                     help="If set, UPDATE mega_sweep_runs.robustness_ratio for this run_id × strategy. "
                          "Closes the v14e.45 latent gap where the column was always NULL.")
+    ap.add_argument("--chain", default="solana",
+                    help="Chain to test (default solana). ETH workflow passes --chain ethereum.")
     args = ap.parse_args()
 
     since = (datetime.now(timezone.utc) - timedelta(days=args.days)).isoformat()
@@ -206,7 +218,7 @@ def main():
 
     rows = []
     for i, s in enumerate(strats, 1):
-        trades = fetch_strat_trades(s, since)
+        trades = fetch_strat_trades(s, since, chain=args.chain)
         agg = aggregate_strat(trades)
         if not agg.get("by_slip"):
             print(f"[{i}/{len(strats)}] {s}: no usable trades, skip")
