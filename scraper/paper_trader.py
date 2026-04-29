@@ -372,6 +372,11 @@ _ema_state: dict[int, float] = {}
 #        dual_confirm (prev price + last breach), hysteresis (armed flags).
 _smooth_state: dict[int, dict] = {}
 
+# v14e.45: 2-tick confirm state for SL/BE — trade_id -> consecutive ticks below effective_sl.
+# Guards against single bad-quote outlier fires (Jupiter RFQ glitches, DEX stale ticks).
+# A breach must persist across 2 consecutive polls to actually fire the exit.
+_pending_sl_be: dict[int, int] = {}
+
 # v121: Cached SOL price for paper trade USD context
 _cached_sol_price: float = 0.0
 _cached_sol_price_ts: float = 0.0
@@ -1016,18 +1021,33 @@ def _fetch_prices_batch(addresses: list[str],
     # v123: ALWAYS apply Jupiter cache as primary (even during cooldown).
     # This ensures paper_fast, live_monitor, and price_refresh all use Jupiter
     # regardless of which loop fetched it.
+    # v14e.45: spread guard — reject Jupiter quote if it diverges from DexScreener
+    # by >20%. Catches transient Ultra RFQ glitches that fired phantom BE/SL
+    # exits while DEX state was sane (cf. $PAPERCLIP 04-27: DEX +33%, Jupiter -39%).
     jup_overrides = 0
+    jup_rejected_spread = 0
+    SPREAD_GUARD_PCT = 0.20
     for addr in addresses:
         jup_price = _jupiter_prices_cache.get(addr)
         if jup_price and jup_price > 0:
+            ds_price = _dex_prices_cache.get(addr)
+            if ds_price and ds_price > 0:
+                spread = abs(jup_price / ds_price - 1)
+                if spread > SPREAD_GUARD_PCT:
+                    logger.warning(
+                        "spread guard: Jupiter %.6g vs DEX %.6g (diverge %.1f%%) for %s — keeping DEX",
+                        jup_price, ds_price, spread * 100, addr[:8],
+                    )
+                    jup_rejected_spread += 1
+                    continue
             prices[addr] = jup_price
             _jupiter_overridden.add(addr)
             jup_overrides += 1
-    if jup_overrides:
+    if jup_overrides or jup_rejected_spread:
         _src = "fresh" if not _skip_jup else "cached"
         logger.info(
-            "paper_trader: Jupiter price primary for %d/%d tokens (%s)",
-            jup_overrides, len(addresses), _src,
+            "paper_trader: Jupiter price primary for %d/%d tokens (%s) — %d rejected (spread guard)",
+            jup_overrides, len(addresses), _src, jup_rejected_spread,
         )
 
     # v143.6 — stamp DS TTL so the next caller within 5s reuses this snapshot
@@ -1995,7 +2015,24 @@ def _evaluate_trade_exit(trade: dict, current_price: float | None,
         # TP/trail still use eval_price (DS catches fast pumps faster).
         sl_eval = current_price if current_price is not None else eval_price
 
-        if sl_eval <= effective_sl:
+        # v14e.45: 2-tick confirm — first breach defers fire, second consecutive fires.
+        # Reset counter when price recovers above effective_sl so a fresh breach
+        # restarts at 1 instead of inheriting stale state.
+        _trade_id = trade.get("id")
+        sl_breach_now = (sl_eval is not None and sl_eval <= effective_sl)
+        if not sl_breach_now and _trade_id in _pending_sl_be:
+            _pending_sl_be.pop(_trade_id, None)
+
+        if sl_breach_now:
+            _pending = _pending_sl_be.get(_trade_id, 0) + 1
+            _pending_sl_be[_trade_id] = _pending
+            if _pending < 2:
+                logger.info(
+                    "2-tick confirm: SL/BE first breach deferred for trade %s (sl_eval=%.6g effective_sl=%.6g)",
+                    _trade_id, sl_eval, effective_sl,
+                )
+                return {"high_price_seen": high_seen}
+            _pending_sl_be.pop(_trade_id, None)
             new_status = "sl_hit" if effective_sl <= sl_price else "be_stop"
             exit_price = effective_sl * _dynamic_sell_slip_factor(
                 trade, "sl_hit" if new_status == "sl_hit" else "be_stop",
