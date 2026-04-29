@@ -22,10 +22,23 @@ Outputs:
 Usage:
   python scripts/analyze_mega_sweep.py [--csv _mega_sweep_extended.csv] [--alpha 0.05]
 """
-import argparse, math, sys, json
+import argparse, math, sys, json, os
 from pathlib import Path
 import pandas as pd
 import numpy as np
+
+# v14e.45: import the registered STRATEGIES dict to filter out phantom sweep
+# combinations that don't have a runnable Python implementation. Without this,
+# the sweep can rank a strat (e.g. BE15_TP300_SL50_4H) that will never produce
+# paper trades because it's not in strategies.py.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scraper"))
+try:
+    from strategies import STRATEGIES as _REGISTERED_STRATS
+    _REGISTERED_STRATS_SET = set(_REGISTERED_STRATS.keys())
+    print(f"[strategies] {len(_REGISTERED_STRATS_SET)} registered strategies loaded for phantom filter")
+except Exception as _e:
+    print(f"[strategies] WARNING: could not import STRATEGIES ({_e}) — phantom filter DISABLED")
+    _REGISTERED_STRATS_SET = None
 
 # Family realism scores — calibrated from Apr 20 audit
 # DTRAIL10_ACT15_SL70: sim top vs live actual = 47x slip + 65% reconciler early-close
@@ -225,6 +238,21 @@ def main():
     if "cross_regime_robust" in df_eligible.columns:
         base_filter = base_filter & df_eligible["cross_regime_robust"]
         print(f"  applying cross_regime_robust filter to top robust selection")
+    # v14e.45: phantom filter — exclure strats non registered dans strategies.py.
+    # Le grid sweep peut ranker des combos qui n'existent pas en code (ex: run
+    # 25116811803 a ranké BE15_TP300_SL50_4H qui n'est pas dans STRATEGIES,
+    # donc 0 paper trade en réalité — ranking sim trompeur).
+    if _REGISTERED_STRATS_SET is not None and "strategy" in df_eligible.columns:
+        n_before = base_filter.sum()
+        is_registered = df_eligible["strategy"].isin(_REGISTERED_STRATS_SET)
+        n_phantom = (base_filter & ~is_registered).sum()
+        base_filter = base_filter & is_registered
+        if n_phantom > 0:
+            phantom_strats = df_eligible[base_filter | (~is_registered & (df_eligible["avg_pnl_pct"] > 0))]
+            phantom_names = sorted(phantom_strats[~phantom_strats["strategy"].isin(_REGISTERED_STRATS_SET)]["strategy"].unique())
+            print(f"  phantom filter: {n_phantom} rows excluded ({len(phantom_names)} non-registered strats)")
+            for ps in phantom_names[:10]:
+                print(f"    - {ps}")
     # v14e.45: dédup par (strategy, filter) avant head(top). Sans ça, le top-30
     # est saturé par les variants source/smoothing/polling de la même strat de
     # base (run 25116811803: 30 rows = 4 strats × 7-8 variants chacune).
