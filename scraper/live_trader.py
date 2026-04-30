@@ -1155,6 +1155,40 @@ def check_live_trades(client_sb) -> dict:
     if not open_trades:
         return result_counts
 
+    # v14e.47: stuck-orphan sweeper. A trade can stay 'open' indefinitely if the
+    # exit eval keeps short-circuiting (price=None, Jupiter quote missing on a
+    # dead memecoin, _pending_sl_be reset across restarts, etc.). Flag any 'open'
+    # trade older than max(2h, 2x strategy horizon) as 'closing_retry' so the
+    # existing force_close path at L1214 picks it up next pass and forces a sell.
+    _STALE_FLOOR_MIN = 120
+    _stale_flagged = 0
+    for _t in open_trades:
+        if _t.get("status") != "open":
+            continue
+        try:
+            _created = _t.get("created_at")
+            if not _created:
+                continue
+            _ct = datetime.fromisoformat(_created.replace("Z", "+00:00")) if isinstance(_created, str) else _created
+            _age_min = (now - _ct).total_seconds() / 60
+            _horizon = int(_t.get("horizon_minutes") or 0)
+            _stale_thresh = max(_STALE_FLOOR_MIN, 2 * _horizon)
+            if _age_min < _stale_thresh:
+                continue
+            client_sb.table("paper_trades").update(
+                {"status": "closing_retry"}
+            ).eq("id", _t["id"]).eq("status", "open").execute()
+            _t["status"] = "closing_retry"
+            _stale_flagged += 1
+            logger.warning(
+                "live_trader: stuck orphan flagged for force-sell — %s/%s (age=%.1fmin, thresh=%dmin, id=%s)",
+                _t.get("symbol"), _t.get("strategy"), _age_min, _stale_thresh, _t.get("id"),
+            )
+        except Exception as _e:
+            logger.debug("live_trader: stuck-sweeper error on trade %s: %s", _t.get("id"), _e)
+    if _stale_flagged:
+        logger.warning("live_trader: stuck-sweeper flagged %d trade(s) for force-sell", _stale_flagged)
+
     result_counts["checked"] = len(open_trades)
 
     # v119: Check trigger order fills FIRST (faster than DexScreener)
