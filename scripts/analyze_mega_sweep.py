@@ -261,6 +261,27 @@ def main():
         n_cr = int(df_eligible["cross_regime_robust"].sum())
         print(f"[v14e.26 Feature 5] cross_regime_robust = True: {n_cr:,} configs")
 
+    # v14e.49 — Rolling-window robustness (3d / 7d / 14d).
+    # Two derived flags from sim columns:
+    #   fragile_recent      — $/d_3d < 0.5 × $/d_14d  (with N_3d ≥ 10)
+    #   regime_change_3d    — $/d_3d > 1.5 × $/d_14d
+    # The sim already computes these per-config (sim.py); analyzer just adds a
+    # composite `recent_alive` column = NOT fragile_recent (and recent N usable).
+    if "fragile_recent" in df_eligible.columns:
+        # Booleans may have been serialised as strings via CSV — coerce.
+        for col in ("fragile_recent", "regime_change_3d"):
+            if col in df_eligible.columns:
+                df_eligible[col] = df_eligible[col].astype(str).str.lower().isin(("true", "1"))
+        df_eligible["recent_alive"] = (
+            (~df_eligible["fragile_recent"].fillna(False))
+            & (df_eligible["n_3d"].fillna(0).astype(int) >= 10)
+        )
+        n_fr = int(df_eligible["fragile_recent"].fillna(False).sum())
+        n_rc = int(df_eligible["regime_change_3d"].fillna(False).sum())
+        n_alive = int(df_eligible["recent_alive"].sum())
+        print(f"[v14e.49 rolling] fragile_recent={n_fr:,}  regime_change_3d={n_rc:,}  "
+              f"recent_alive={n_alive:,}")
+
     # Save annotated CSV
     out_full = csv_path.parent / f"{csv_path.stem}_annotated.csv"
     df_eligible.to_csv(out_full, index=False)
@@ -282,6 +303,15 @@ def main():
     if "cross_regime_robust" in df_eligible.columns:
         base_filter = base_filter & df_eligible["cross_regime_robust"]
         print(f"  applying cross_regime_robust filter to top robust selection")
+    # v14e.49 — drop strats that have collapsed in the last 3 days (fragile_recent).
+    # Done as a separate gate so it composes cleanly with cross_regime_robust:
+    # cross_regime says "weather-resistant", recent_alive says "still alive today".
+    if "fragile_recent" in df_eligible.columns:
+        n_before_alive = int(base_filter.sum())
+        base_filter = base_filter & (~df_eligible["fragile_recent"].fillna(False))
+        n_dropped = n_before_alive - int(base_filter.sum())
+        if n_dropped:
+            print(f"  applying fragile_recent filter (dropped {n_dropped:,} configs collapsing in 3d)")
     # v14e.45: phantom filter — exclure strats non registered dans strategies.py.
     # Le grid sweep peut ranker des combos qui n'existent pas en code (ex: run
     # 25116811803 a ranké BE15_TP300_SL50_4H qui n'est pas dans STRATEGIES,
@@ -378,6 +408,27 @@ def main():
         with pd.option_context("display.max_rows", None, "display.width", 240, "display.float_format", "{:,.4f}".format):
             print(robust[cols].to_string(index=False))
     print()
+
+    # v14e.49 — Rolling-window robustness table (3d / 7d / 14d).
+    # Shown only if sim emitted the new columns. Same row-set as `robust` so the
+    # reader can cross-check: a top robust strat with $/d_3d collapsing is a red flag.
+    rolling_cols = ["dollars_per_day_14d", "dollars_per_day_7d", "dollars_per_day_3d"]
+    if all(c in df_eligible.columns for c in rolling_cols) and len(robust) > 0:
+        print(f"ROLLING ROBUSTNESS (top {min(args.top, len(robust))}): 14d baseline → 3d trip-wire")
+        print("-" * 100)
+        rcols = ["strategy", "filter", "n", "dollars_per_day",
+                 "n_14d", "dollars_per_day_14d",
+                 "n_7d",  "dollars_per_day_7d",
+                 "n_3d",  "dollars_per_day_3d",
+                 "fragile_recent", "regime_change_3d"]
+        rcols = [c for c in rcols if c in robust.columns]
+        with pd.option_context("display.max_rows", None, "display.width", 240,
+                               "display.float_format", "{:,.2f}".format):
+            print(robust[rcols].to_string(index=False))
+        print()
+        print("  fragile_recent  = $/d_3d < 0.5 × $/d_14d  (and N_3d ≥ 10)")
+        print("  regime_change_3d = $/d_3d > 1.5 × $/d_14d  (recent over-perform; watch for overfit)")
+        print()
     # v14e.34: persist top-N to Supabase mega_sweep_runs for sim/actual calibration.
     # Writes one row per (strategy, filter) at the current run timestamp. Calibration
     # script later joins with paper_trades over the post-run window to compute drift.

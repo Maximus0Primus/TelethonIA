@@ -4266,6 +4266,7 @@ _MEGA_LAZY_SLOW_SEC = 600
 _MEGA_TICKS = None
 _MEGA_DAY_REGIME = {}  # v14e.26: {date_str: "active"/"quiet"/"dead"}
 _MEGA_TEST_DAYS = set()  # v14e.26: walk-forward test set (last 3 days)
+_MEGA_ROLLING_WINDOWS = {}  # v14e.49: {window_label: set(date_str) for last 14d/7d/3d}
 
 
 def _mega_init_worker(ticks_path, day_regime_path=None, sim_chain="solana"):
@@ -4276,7 +4277,7 @@ def _mega_init_worker(ticks_path, day_regime_path=None, sim_chain="solana"):
     inherited from parent so this is redundant — but cheap to be explicit.
     """
     import json
-    global _MEGA_TICKS, _MEGA_DAY_REGIME, _MEGA_TEST_DAYS, _SIM_CHAIN
+    global _MEGA_TICKS, _MEGA_DAY_REGIME, _MEGA_TEST_DAYS, _MEGA_ROLLING_WINDOWS, _SIM_CHAIN
     with open(ticks_path) as f:
         _MEGA_TICKS = json.load(f)
     if day_regime_path:
@@ -4284,6 +4285,12 @@ def _mega_init_worker(ticks_path, day_regime_path=None, sim_chain="solana"):
             _meta = json.load(f)
         _MEGA_DAY_REGIME = _meta.get("day_regime", {})
         _MEGA_TEST_DAYS = set(_meta.get("test_days", []))
+        # v14e.49: rolling time-window buckets {label: set(date)} — answers
+        # "did this strat keep working in the last 3d?" alongside the regime
+        # split which answers "does it work on bad-vibe days?".
+        _MEGA_ROLLING_WINDOWS = {
+            k: set(v) for k, v in _meta.get("rolling_windows", {}).items()
+        }
     _SIM_CHAIN = sim_chain
 
 
@@ -4350,6 +4357,27 @@ def _compute_day_regime(universe, ticks, peak_window_min=120, pump_threshold_pct
         else:
             day_regime[day] = "dead"
     return day_regime, pump_rates
+
+
+def _compute_rolling_windows(universe, windows=(3, 7, 14)):
+    """v14e.49: build {window_label: set(day_str)} for rolling time slices.
+
+    Anchor = max(created_at) in the universe (so a sweep over a static historical
+    range still gets meaningful 14d/7d/3d cuts relative to its OWN end-date,
+    not wall-clock now). Returns labels "3d", "7d", "14d".
+    """
+    if not universe:
+        return {}
+    days = sorted({u["created_at"][:10] for u in universe if u.get("created_at")})
+    if not days:
+        return {}
+    end = days[-1]
+    end_dt = datetime.fromisoformat(end)
+    out = {}
+    for w in windows:
+        cutoff = (end_dt - timedelta(days=w - 1)).date().isoformat()
+        out[f"{w}d"] = {d for d in days if d >= cutoff}
+    return out
 
 
 def _mega_poll_offsets(polling_mode, horizon_sec):
@@ -4777,6 +4805,65 @@ def _mega_process_config(args):
     # v14e.26 — daily_pnl_json: needed for Feature 4 (bootstrap rank stability) in analyze step
     daily_pnl = {day: round(float(np.mean(p) * 100), 3) for day, p in pnls_by_day.items()}
 
+    # v14e.49 — Rolling time-window robustness (3d / 7d / 14d).
+    # Same data, sliced by recency. Answers "is the strat still alive?" while
+    # the regime split (active/quiet/dead) answers "is it weather-resistant?".
+    # $/day formula matches the all-data path (avg_pct * trade_rate * $50),
+    # but trade_rate is recomputed per window so a strat that stops firing
+    # is correctly penalised (not averaged out by older active days).
+    rolling_metrics = {}
+    for w_label, w_days in _MEGA_ROLLING_WINDOWS.items():
+        if not w_days:
+            continue
+        w_pnls = []
+        for day, day_pnls in pnls_by_day.items():
+            if day in w_days:
+                w_pnls.extend(day_pnls)
+        n_w = len(w_pnls)
+        if n_w == 0:
+            rolling_metrics[w_label] = {"n": 0, "avg": None, "wr": None, "dpd": None}
+            continue
+        w_arr = np.array(w_pnls)
+        w_avg = float(w_arr.mean()) * 100
+        w_wr = float((w_arr > 0).mean()) * 100
+        w_days_obs = max(1, len(w_days))
+        n_pass_w = sum(
+            1 for u in universe
+            if u.get("created_at", "")[:10] in w_days
+            and _mega_apply_filter(u, fname)
+            and _mega_apply_age_band(u, age_band)
+        )
+        # universe size in this window (for trade_rate denominator)
+        universe_w = sum(1 for u in universe if u.get("created_at", "")[:10] in w_days) or 1
+        trade_rate_w = n_pass_w / universe_w * 18
+        dpd_w = 50 * (w_avg / 100) * trade_rate_w
+        rolling_metrics[w_label] = {
+            "n": n_w,
+            "avg": round(w_avg, 3),
+            "wr": round(w_wr, 2),
+            "dpd": round(dpd_w, 2),
+            "days_obs": w_days_obs,
+        }
+
+    def _rm(label, key, default=None):
+        return rolling_metrics.get(label, {}).get(key, default)
+
+    # Robustness flags — gated on N_3d ≥ 10 to avoid noise verdicts.
+    dpd_3d = _rm("3d", "dpd")
+    dpd_14d = _rm("14d", "dpd")
+    n_3d = _rm("3d", "n", 0) or 0
+    fragile_recent = False
+    regime_change = False
+    if dpd_14d is not None and dpd_3d is not None and n_3d >= 10 and abs(dpd_14d) > 0.5:
+        ratio = dpd_3d / dpd_14d if dpd_14d != 0 else None
+        if ratio is not None:
+            # Fragile: 3d earns < 50% of 14d baseline (or sign-flipped)
+            if ratio < 0.5:
+                fragile_recent = True
+            # Regime change: 3d > 1.5× baseline — could be overfit-prone luck
+            if ratio > 1.5:
+                regime_change = True
+
     return {
         "strategy": strat_name, "filter": fname, "age_band": age_band,
         "source": source, "smoothing": smoothing, "polling_mode": polling_mode,
@@ -4792,6 +4879,15 @@ def _mega_process_config(args):
         "wf_train_pnl_pct": round(wf_train_pnl, 3) if wf_train_pnl is not None else None,
         "wf_test_pnl_pct": round(wf_test_pnl, 3) if wf_test_pnl is not None else None,
         "wf_consistent": wf_consistent,
+        # v14e.49 rolling-window robustness columns
+        "n_14d": _rm("14d", "n", 0), "avg_pnl_pct_14d": _rm("14d", "avg"),
+        "wr_pct_14d": _rm("14d", "wr"), "dollars_per_day_14d": _rm("14d", "dpd"),
+        "n_7d": _rm("7d", "n", 0), "avg_pnl_pct_7d": _rm("7d", "avg"),
+        "wr_pct_7d": _rm("7d", "wr"), "dollars_per_day_7d": _rm("7d", "dpd"),
+        "n_3d": _rm("3d", "n", 0), "avg_pnl_pct_3d": _rm("3d", "avg"),
+        "wr_pct_3d": _rm("3d", "wr"), "dollars_per_day_3d": _rm("3d", "dpd"),
+        "fragile_recent": fragile_recent,
+        "regime_change_3d": regime_change,
         "daily_pnl_json": _json.dumps(daily_pnl, separators=(",", ":")),
     }
 
@@ -4907,6 +5003,23 @@ def _mega_sweep_run_eh(args):
         _json.dump(ticks, f)
     print(f"  ticks JSON: {ticks_path} ({os.path.getsize(ticks_path)/1e6:.1f} MB)")
 
+    # v14e.49 — Rolling windows in eval_history mode too (no regime data here,
+    # but recency cuts are independent of regime classification).
+    rolling_windows_eh = _compute_rolling_windows(universe, windows=(3, 7, 14))
+    regime_path_eh = None
+    if rolling_windows_eh:
+        regime_path_eh = os.path.join(os.path.dirname(csv_out), "_mega_regime_eh_tmp.json")
+        with open(regime_path_eh, "w") as f:
+            _json.dump({"day_regime": {}, "test_days": [],
+                        "rolling_windows": {k: sorted(v) for k, v in rolling_windows_eh.items()}}, f)
+        anchor = max((u["created_at"][:10] for u in universe if u.get("created_at")),
+                     default=None)
+        print(f"\nRolling windows (anchor={anchor}):")
+        for label in ("3d", "7d", "14d"):
+            wd = rolling_windows_eh.get(label, set())
+            if wd:
+                print(f"    {label:<4} {len(wd)} days  ({min(wd)} -> {max(wd)})")
+
     jobs = []
     for strat_name, (tp, sl, h, be) in full_pool.items():
         for fname in filters:
@@ -4920,7 +5033,7 @@ def _mega_sweep_run_eh(args):
     results = []
     t_start = _time.time()
     with mp.Pool(n_workers, initializer=_mega_init_worker,
-                 initargs=(ticks_path, None, _SIM_CHAIN)) as pool:
+                 initargs=(ticks_path, regime_path_eh, _SIM_CHAIN)) as pool:
         for i, r in enumerate(pool.imap_unordered(_mega_process_config, jobs, chunksize=50)):
             if r is not None:
                 results.append(r)
@@ -4934,6 +5047,11 @@ def _mega_sweep_run_eh(args):
         os.remove(ticks_path)
     except Exception:
         pass
+    if regime_path_eh:
+        try:
+            os.remove(regime_path_eh)
+        except Exception:
+            pass
 
     df = pd.DataFrame(results)
     df.to_csv(csv_out, index=False)
@@ -5110,11 +5228,23 @@ def _mega_sweep_run(args):
             mark = " <- TEST" if d in test_days else ""
             print(f"    {d}  pump_rate={pump_rates[d]*100:>5.1f}%  regime={r:<8}{mark}")
 
+    # v14e.49 — Rolling time-window buckets (3d / 7d / 14d) for recency cuts
+    rolling_windows = _compute_rolling_windows(universe, windows=(3, 7, 14))
+    if rolling_windows:
+        anchor = max((u["created_at"][:10] for u in universe if u.get("created_at")),
+                     default=None)
+        print(f"\nRolling windows (anchor={anchor}):")
+        for label in ("3d", "7d", "14d"):
+            wd = rolling_windows.get(label, set())
+            if wd:
+                print(f"    {label:<4} {len(wd)} days  ({min(wd)} -> {max(wd)})")
+
     # Persist regime metadata for workers
     regime_path = os.path.join(os.path.dirname(csv_out), "_mega_regime_tmp.json")
     with open(regime_path, "w") as f:
         _json.dump({"day_regime": day_regime, "test_days": sorted(test_days),
-                    "pump_rates": pump_rates}, f)
+                    "pump_rates": pump_rates,
+                    "rolling_windows": {k: sorted(v) for k, v in rolling_windows.items()}}, f)
 
     # v14e.26 BONUS — `--exclude-dead-days` filter universe before sweep
     if getattr(args, "exclude_dead_days", False):
