@@ -113,16 +113,35 @@ jobs:
           if not shards:
               raise SystemExit('FATAL: no shard CSV downloaded')
           dfs = []
+          skipped = []
           for p in shards:
-              df = pd.read_csv(p)
+              # Guard against header-only or fully empty shards (rare on SOL but
+              # mirrors the ETH workflow fix — one empty shard shouldn't kill
+              # the whole merge if the others have data).
+              try:
+                  df = pd.read_csv(p)
+              except pd.errors.EmptyDataError:
+                  print(f"  {p}: EMPTY (no parsable columns), skipping")
+                  skipped.append(p)
+                  continue
+              if df.empty:
+                  print(f"  {p}: 0 rows, skipping")
+                  skipped.append(p)
+                  continue
               print(f"  {p}: {len(df)} rows")
               dfs.append(df)
+          if not dfs:
+              raise SystemExit('FATAL: every shard was empty')
           out = pd.concat(dfs, ignore_index=True)
           out.to_csv('_mega_sweep_extended.csv', index=False)
           print(f"\nConcatenated -> _mega_sweep_extended.csv ({len(out)} rows total)")
+          if skipped:
+              print(f"Skipped empty shards: {skipped}")
           # Surface to next step
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
               f.write(f"shards_found={len(shards)}\n")
+              f.write(f"shards_used={len(dfs)}\n")
+              f.write(f"shards_skipped={len(skipped)}\n")
               f.write(f"total_rows={len(out)}\n")
           PY
 

@@ -113,15 +113,34 @@ jobs:
           if not shards:
               raise SystemExit('FATAL: no ETH shard CSV downloaded')
           dfs = []
+          skipped = []
           for p in shards:
-              df = pd.read_csv(p)
+              # ETH Jupiter Ultra coverage is sparse — the jupiter shard often
+              # comes back header-only or completely empty. Don't fail the merge
+              # over it; just skip and continue with the other shards (both/ds).
+              try:
+                  df = pd.read_csv(p)
+              except pd.errors.EmptyDataError:
+                  print(f"  {p}: EMPTY (no parsable columns), skipping")
+                  skipped.append(p)
+                  continue
+              if df.empty:
+                  print(f"  {p}: 0 rows, skipping")
+                  skipped.append(p)
+                  continue
               print(f"  {p}: {len(df)} rows")
               dfs.append(df)
+          if not dfs:
+              raise SystemExit('FATAL: every ETH shard was empty')
           out = pd.concat(dfs, ignore_index=True)
           out.to_csv('_mega_sweep_eth_extended.csv', index=False)
           print(f"\nConcatenated -> _mega_sweep_eth_extended.csv ({len(out)} rows total)")
+          if skipped:
+              print(f"Skipped empty shards: {skipped}")
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
               f.write(f"shards_found={len(shards)}\n")
+              f.write(f"shards_used={len(dfs)}\n")
+              f.write(f"shards_skipped={len(skipped)}\n")
               f.write(f"total_rows={len(out)}\n")
           PY
 
