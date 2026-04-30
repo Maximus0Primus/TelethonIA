@@ -60,8 +60,8 @@ ETH_GAS_COST_USD_PER_SIDE = 1.50   # $1.50 each side, $3 round-trip (Apr 26 empi
 # live_trader_eth picks up the same numbers. Pre-fix sim drag was 17% (way
 # below empirical 30%); after this bump the implied drag rises to ~28%, much
 # closer to ground truth. Revisit at N≥20.
-ETH_BUY_SLIPPAGE_BPS = 500         # was 100 — empirical buy adverse median ~890 bps
-ETH_SELL_SLIPPAGE_BPS = 800        # was 100 — empirical sell adverse median ~1600 bps
+ETH_BUY_SLIPPAGE_BPS = 350         # v14e.49b: recalibrated on N=10 (post-MUSK), shrinkage 0.65 — empirical buy adverse mean 554 bps
+ETH_SELL_SLIPPAGE_BPS = 650        # v14e.49b: recalibrated on N=10, empirical sell adverse mean 973 bps. Median total cost reality 21.5%, paper sim now 25.0%.
 ETH_MIN_POSITION_USD = 50          # gas = 6% of $50 — viable; below $30 gas dominates >10%
 
 # ---------------------------------------------------------------------------
@@ -3528,24 +3528,15 @@ def sim_cfg_to_fake_trade(cfg: dict, entry_price: float, created_at: str,
 # variant in the strategy registry.
 # ---------------------------------------------------------------------------
 
-# SOL — BSR52 (rt_buy_sell_ratio >= 0.52) clones of top 5 clean strats
-_BSR_SOL_CLONES = [
-    ("BE25_TP80_SL30_BSR52", 1.80, 0.70, 30, {"be_activation": 0.25}, {}),
-    ("FAST_TP50_SL30_S40_BSR52", 1.50, 0.70, 30, {}, {"min_rt_score": 40}),
-    ("FAST_TP50_SL30_BSR52", 1.50, 0.70, 30, {}, {}),
-    ("BE15_LOCK5_TP50_SL30_BSR52", 1.50, 0.70, 30,
-        {"be_activation": 0.15, "be_lock_pct": 0.05}, {}),
-    ("SCALP_TP15_NOSL_S35_BSR52", 1.15, 0.20, 120, {}, {"min_rt_score": 35}),
-]
-for name, tp, sl, h, extra, filt_extra in _BSR_SOL_CLONES:
-    spec = {"pct": 1.0, "tp_mult": tp, "sl_mult": sl, "horizon_min": h, "label": "main"}
-    spec.update(extra)
-    STRATEGIES[name] = [spec]
-    STRATEGY_FILTERS[name] = {"chain": "solana", "min_buy_sell_ratio": 0.52, **filt_extra}
-    SHADOW_STRATEGIES.append(name)
+# SOL — BSR52 KILLED v14e.49 (Apr 30 2026). 7d shadow on N=33 each:
+# BE25_TP80_SL30_BSR52 avg -5.41% WR 27.3%, FAST_TP50_SL30_BSR52 avg -5.75% WR 33.3%.
+# Confirmed the "EXPECTED NEGATIVE" warning in the original deploy note —
+# BSR alone sacrifices fat-tail moonshots without enough WR uplift.
+# Combo `BSR + entry_mcap` (see BSR_MCAP_AB) still under test.
 
 # ETH — BSR55 clones of top 5 BE+LOCK family (where the combo signal is
-# strongest per reverse-engineer findings)
+# strongest per reverse-engineer findings). KEPT — N=11 each, all 5 positive
+# (avg +5 to +19%, WR 36-64%). Let run for verdict at N>=30.
 _BSR_ETH_CLONES = [
     ("ETH_TP80_SL40_T2H_BSR55", 1.80, 0.60, 120, {}),
     ("ETH_BE25_LOCK10_TP80_SL40_T2H_BSR55", 1.80, 0.60, 120,
