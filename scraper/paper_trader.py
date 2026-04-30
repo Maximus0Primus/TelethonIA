@@ -1910,7 +1910,8 @@ def _evaluate_trade_exit(trade: dict, current_price: float | None,
                          now: datetime, sell_slip_factor: float,
                          sl_cascade: bool = False,
                          sell_fee_bps: int = SELL_FEE_BPS,
-                         decision_price: float | None = None) -> dict | None:
+                         decision_price: float | None = None,
+                         _readonly_pending_state: bool = False) -> dict | None:
     """v94: Shared exit logic for check_paper_trades + check_paper_trades_fast.
 
     Checks in order: SL → TP → timeout.
@@ -2018,21 +2019,30 @@ def _evaluate_trade_exit(trade: dict, current_price: float | None,
         # v14e.45: 2-tick confirm — first breach defers fire, second consecutive fires.
         # Reset counter when price recovers above effective_sl so a fresh breach
         # restarts at 1 instead of inheriting stale state.
+        # v14e.48: _readonly_pending_state lets divergence-probe callers
+        # (paper_sim_ev in live_trader{,_eth}.py) READ pending without mutating.
+        # Pre-fix: the probe call would silently increment to 2 and pop, leaving
+        # the dict empty so the main eval reset to pending=1 every tick — SL
+        # never fired live (orphan trade 278446 sat 7.8h with 1000+ ticks below SL).
         _trade_id = trade.get("id")
         sl_breach_now = (sl_eval is not None and sl_eval <= effective_sl)
         if not sl_breach_now and _trade_id in _pending_sl_be:
-            _pending_sl_be.pop(_trade_id, None)
+            if not _readonly_pending_state:
+                _pending_sl_be.pop(_trade_id, None)
 
         if sl_breach_now:
             _pending = _pending_sl_be.get(_trade_id, 0) + 1
-            _pending_sl_be[_trade_id] = _pending
+            if not _readonly_pending_state:
+                _pending_sl_be[_trade_id] = _pending
             if _pending < 2:
-                logger.info(
-                    "2-tick confirm: SL/BE first breach deferred for trade %s (sl_eval=%.6g effective_sl=%.6g)",
-                    _trade_id, sl_eval, effective_sl,
-                )
+                if not _readonly_pending_state:
+                    logger.info(
+                        "2-tick confirm: SL/BE first breach deferred for trade %s (sl_eval=%.6g effective_sl=%.6g)",
+                        _trade_id, sl_eval, effective_sl,
+                    )
                 return {"high_price_seen": high_seen}
-            _pending_sl_be.pop(_trade_id, None)
+            if not _readonly_pending_state:
+                _pending_sl_be.pop(_trade_id, None)
             new_status = "sl_hit" if effective_sl <= sl_price else "be_stop"
             exit_price = effective_sl * _dynamic_sell_slip_factor(
                 trade, "sl_hit" if new_status == "sl_hit" else "be_stop",

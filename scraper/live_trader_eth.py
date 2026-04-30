@@ -1617,6 +1617,7 @@ def check_live_trades_eth(client_sb) -> dict:
                     sell_slip_factor=_paper_slip_factor,
                     sell_fee_bps=_PT_SELL_FEE_BPS,
                     decision_price=decision_price,
+                    _readonly_pending_state=True,  # v14e.48: don't mutate _pending_sl_be (the main eval above owns it)
                 )
             except Exception:
                 pass

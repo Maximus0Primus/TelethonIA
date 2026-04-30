@@ -133,6 +133,110 @@ class TestExitLogic:
         assert elapsed < trade["horizon_minutes"]
 
 
+class TestTwoTickConfirm:
+    """v14e.45 / v14e.48: 2-tick confirm guard against 1-bad-quote SL fires.
+
+    Reproduces the v141+v14e.45 interaction bug where live_trader's two
+    eval calls per tick (main + paper_sim_ev probe) would jointly mutate
+    `_pending_sl_be` such that the main eval was permanently stuck at
+    pending=1 — SL never fired live (orphan trade 278446 sat 7.8h on
+    2026-04-30 with 1000+ ticks below SL).
+    """
+
+    def _trade_below_sl(self):
+        from datetime import datetime, timezone, timedelta
+        return {
+            "id": 278446, "symbol": "$NOKID", "token_address": "TEST",
+            "entry_price": 8.93e-05, "tp_price": 1.07e-04, "sl_price": 8.04e-05,
+            "horizon_minutes": 120,
+            "created_at": (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat(),
+            "status": "open", "strategy": "SCALP_TP20_SL10_S30",
+            "position_usd": 0.25, "is_shadow": False, "source": "rt_live",
+            "pnl_pct": None, "pnl_usd": None, "tranche_label": "main",
+            "rt_liquidity_usd": 20000, "high_price_seen": 8.93e-05,
+        }
+
+    def _reset(self):
+        import paper_trader
+        paper_trader._pending_sl_be.clear()
+
+    def test_first_breach_defers_second_breach_fires(self):
+        """Baseline 2-tick contract: 1st breach defers, 2nd consecutive fires sl_hit."""
+        from datetime import datetime, timezone
+        from paper_trader import _evaluate_trade_exit
+        self._reset()
+        trade = self._trade_below_sl()
+        sl_below = 1.46e-05  # well below sl_price
+        now = datetime.now(timezone.utc)
+        ev1 = _evaluate_trade_exit(trade, sl_below, now, sell_slip_factor=1.0,
+                                    sell_fee_bps=0)
+        assert ev1.get("status") is None, "1st breach must defer"
+        ev2 = _evaluate_trade_exit(trade, sl_below, now, sell_slip_factor=1.0,
+                                    sell_fee_bps=0)
+        assert ev2.get("status") == "sl_hit", "2nd consecutive breach must fire sl_hit"
+
+    def test_readonly_probe_does_not_consume_pending_state(self):
+        """v14e.48 fix: a readonly second eval call (paper_sim_ev probe in
+        live_trader) must NOT mutate _pending_sl_be — otherwise the next
+        main call sees pending=0 and SL never fires across multiple ticks.
+
+        Pre-fix repro: probe call would increment to 2 then pop, leaving
+        the dict empty. Next tick's main call resets to pending=1 → defers
+        forever. (The exact symptom of orphan trade 278446.)
+        """
+        from datetime import datetime, timezone
+        import paper_trader
+        from paper_trader import _evaluate_trade_exit
+        self._reset()
+        trade = self._trade_below_sl()
+        sl_below = 1.46e-05
+        now = datetime.now(timezone.utc)
+
+        # tick 1 — main eval defers (pending=1)
+        ev_main_1 = _evaluate_trade_exit(trade, sl_below, now,
+                                          sell_slip_factor=1.0, sell_fee_bps=0)
+        assert ev_main_1.get("status") is None
+        assert paper_trader._pending_sl_be.get(278446) == 1
+
+        # tick 1 — paper_sim_ev probe (readonly) must not mutate the state
+        ev_probe = _evaluate_trade_exit(trade, sl_below, now,
+                                         sell_slip_factor=0.9, sell_fee_bps=10,
+                                         _readonly_pending_state=True)
+        # probe sees pending+1=2 internally and reports the would-be sl_hit,
+        # but must NOT touch the dict (which the main eval owns).
+        assert paper_trader._pending_sl_be.get(278446) == 1, (
+            "readonly probe leaked into _pending_sl_be — main eval will be"
+            " stuck at pending=1 forever (orphan trade bug)"
+        )
+
+        # tick 2 — main eval should now see pending=2 and fire
+        ev_main_2 = _evaluate_trade_exit(trade, sl_below, now,
+                                          sell_slip_factor=1.0, sell_fee_bps=0)
+        assert ev_main_2.get("status") == "sl_hit", (
+            "2nd main tick must fire sl_hit; if it defers, the readonly probe"
+            " corrupted _pending_sl_be"
+        )
+
+    def test_recovery_resets_pending(self):
+        """If price recovers above effective_sl between breaches, counter resets."""
+        from datetime import datetime, timezone
+        import paper_trader
+        from paper_trader import _evaluate_trade_exit
+        self._reset()
+        trade = self._trade_below_sl()
+        now = datetime.now(timezone.utc)
+        # breach 1
+        _evaluate_trade_exit(trade, 1.46e-05, now, 1.0, sell_fee_bps=0)
+        assert paper_trader._pending_sl_be.get(278446) == 1
+        # recovery above SL
+        _evaluate_trade_exit(trade, 1.0e-04, now, 1.0, sell_fee_bps=0)
+        assert 278446 not in paper_trader._pending_sl_be
+        # fresh breach restarts at 1
+        ev_after = _evaluate_trade_exit(trade, 1.46e-05, now, 1.0, sell_fee_bps=0)
+        assert ev_after.get("status") is None
+        assert paper_trader._pending_sl_be.get(278446) == 1
+
+
 class TestStrategyAgeFilter:
     """v14e.16: per-strategy max_age_hours / min_age_hours disjoint bands.
 
