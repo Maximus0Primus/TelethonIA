@@ -32,6 +32,47 @@ WSOL_MINT = "So11111111111111111111111111111111111111112"
 LAMPORTS_PER_SOL = 1_000_000_000
 
 
+def _solana_rpc_url() -> str:
+    """Helius RPC if HELIUS_API_KEY env is set, else mainnet-beta public."""
+    key = os.environ.get("HELIUS_API_KEY", "")
+    if key:
+        return f"https://mainnet.helius-rpc.com/?api-key={key}"
+    return "https://api.mainnet-beta.solana.com"
+
+
+def _fetch_tx_fee_lamports(signature: str, timeout: float = 4.0) -> int | None:
+    """Query Solana RPC getTransaction to fetch on-chain meta.fee.
+    Returns base+priority fee in lamports, or None if RPC fails / tx not yet
+    confirmed. Safe to call from hot path: short timeout, single attempt,
+    swallows all errors."""
+    if not signature or len(signature) < 80:
+        return None
+    try:
+        r = requests.post(
+            _solana_rpc_url(),
+            json={
+                "jsonrpc": "2.0", "id": 1, "method": "getTransaction",
+                "params": [signature, {"maxSupportedTransactionVersion": 0,
+                                       "encoding": "json", "commitment": "confirmed"}],
+            },
+            timeout=timeout,
+        )
+        j = r.json()
+        if "result" in j and j["result"]:
+            return int(j["result"]["meta"]["fee"])
+    except Exception:
+        pass
+    return None
+
+
+def _tx_fee_usd(signature: str, sol_price_usd: float, timeout: float = 4.0) -> float | None:
+    """Fetch on-chain Solana fee in USD. Returns None if RPC unavailable."""
+    fee_lamports = _fetch_tx_fee_lamports(signature, timeout=timeout)
+    if fee_lamports is None or sol_price_usd <= 0:
+        return None
+    return round((fee_lamports / LAMPORTS_PER_SOL) * sol_price_usd, 6)
+
+
 def _is_solana_mint(ca: str) -> bool:
     """Hard gate before any Jupiter call. Rejects 0x (EVM) and any shape
     detect_chain does not classify as solana. Defence in depth — without this,
@@ -846,6 +887,9 @@ def open_live_trade(client_sb, token_entry: dict, strategy: str,
         "entry_source": entry_source,
         # v121: pair_address for OHLCV backtesting on live trades
         "pair_address": token_entry.get("_rt_pair_address"),
+        # v14e.50: on-chain Solana fee (base + priority). Best-effort: None if
+        # RPC unavailable; backfilled later by scripts/_backfill_solana_fees.py.
+        "gas_usd_buy": _tx_fee_usd(result["signature"], sol_price),
     }
 
     try:
@@ -1565,6 +1609,8 @@ def check_live_trades(client_sb) -> dict:
                 round(float(_paper_sim_ev.get("pnl_pct")), 4)
                 if _paper_sim_ev and _paper_sim_ev.get("pnl_pct") is not None else None
             ),
+            # v14e.50: on-chain Solana fee for the sell tx
+            "gas_usd_sell": _tx_fee_usd(sell_result["signature"], sol_price_at_exit or 0),
         }
         # v138: persist accumulated poll history alongside close fields
         from paper_trader import _flush_eval_history

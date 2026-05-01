@@ -1731,14 +1731,12 @@ def _rt_open_trades(ca: str, symbol: str, price: float, mcap: float,
                 logger.error("Live trading (open) failed: %s", e)
         # v14e.28: ETH live dispatch via Uniswap V3 + Flashbots Protect.
         # Gated behind a SEPARATE flag (eth_live_enabled) so flipping
-        # live_trading.enabled for SOL doesn't accidentally open ETH positions
-        # before infra is validated.
+        # live_trading.enabled for SOL doesn't accidentally open ETH positions.
         #
-        # ⚠️ DANGER: the close-side (check_live_trades in live_trader.py:1113) is
-        # Solana-only — execute_sell rejects non-Solana mints (live_trader.py:339).
-        # Flipping eth_live_enabled=True today opens ETH positions that the bot
-        # CANNOT auto-close. Manual close via execute_sell in live_trader_eth.py
-        # only. Do NOT flip until check_live_trades_eth is wired.
+        # Close-side: live_trader_eth.check_live_trades_eth is wired in the
+        # same live monitor loop below (~line 2722), so ETH positions auto-close
+        # via Uniswap V3 + Flashbots Protect when eth_live_enabled=True. Validated
+        # in production (v14e.28+: $MUSK +$10.67 auto-recovered via retry-sell).
         elif (live_cfg.get("enabled", False)
               and token_chain == "ethereum"
               and live_cfg.get("eth_live_enabled", False)):
