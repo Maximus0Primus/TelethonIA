@@ -54,6 +54,20 @@ Plus un sweet spot retrade **gap [6-12h]** (avg +22.68% WR 76% +$1999/14d).
 - ✅ Age-band grid étendu : **17 mécaniques × 3 bands = 51 shadows** (était limité aux 5 live, étendu à TP100/150/200, FAST_TP100_SL20, BE25_LOCK10/15, SCALP, SLOW4H/6H, etc.)
 - ✅ Total **SHADOW_STRATEGIES : 648** (était 612 v14e.52, 585 pré-session)
 
+### v14e.54 (May 2) — Promote 5 robust shadows en paper main (alertes Telegram)
+Cross-window robustness audit (`scripts/_best_strats_robustness.py`) sur 14d/7d/3d a identifié les strats positives sur les 3 fenêtres avec N≥20 et WR≥45%.
+
+**5 strats promues paper main** (hybrid_strategy.allocations 28 → 33) :
+- **SOL safe BE_LOCK10** : `BE25_LOCK10_TP80_SL30_S40` (N=95, WR 56%, +$18.47/d → +$36.94/d 7d → +$62.50/d 3d)
+- **SOL FAST + MCAP filter** : `FAST_TP50_SL30_MCAP_S40` (N=97, WR 51%, +$19.90/d → +$53/d → +$92/d)
+- **SOL moonshot WR 60%** : `BE25_LOCK15_TP200_SL40_4H_NZ_S40` (N=80, WR 60%, +$24.29/d, accelerating)
+- **SOL moonshot top 3d** : `BE50_LOCK25_TP200_SL40_4H_MCAP` (N=86, WR 48%, +$21/d → **+$112/d 3d**)
+- **ETH top WR all chains** : `ETH_BE25_LOCK15_TP100_SL40_T2H` (N=62, **WR 69%**, +$18/d → +$78/d 3d)
+
+Bankrolls seedés $1000 chacune (4 nouvelles, 1 existante avec balance $1046). starting_capital $37K → $41K. Backups : `data/rt_trade_config_pre_promote_*` + `data/rt_bankroll_pre_promote_*`.
+
+**Note feedback** : paper main = même calcul que shadow, juste alertes Telegram en plus. Pas de "wait pour valider" — la donnée shadow était suffisante.
+
 ### v14e.53b (May 2) — ETH age-band grid + RECALL relaxed (mirror SOL avec ajustements)
 14d audit ETH (`scripts/_eth_profitable.py`) révèle pattern **INVERSE de SOL** :
 ```
