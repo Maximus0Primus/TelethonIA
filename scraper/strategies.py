@@ -3610,6 +3610,40 @@ STRATEGY_FILTERS["AGE3H_SLOW4H_TP100_SL50"] = {"min_age_hours": 1, "max_age_hour
 SHADOW_STRATEGIES.append("AGE3H_SLOW4H_TP100_SL50")
 
 
+# (1bis) AGE-BAND GRID extended to non-live mechanics — v14e.53.
+# User pivot: live test served its purpose (drift characterized).
+# Now goal = find the BEST strategy via shadow expansion. The 5 live strats
+# are no longer special — A/B-test age bands across the most promising
+# mechanics from 14d audit (top by WR or by avg PnL on shadow).
+_OTHER_MECHANIC_SPECS = {
+    # Top performers from 14d audit
+    "TP100_SL50":          [{"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.50, "horizon_min": 120, "label": "main"}],
+    "TP150_SL50":          [{"pct": 1.0, "tp_mult": 2.50, "sl_mult": 0.50, "horizon_min": 120, "label": "main"}],
+    "TP200_SL50":          [{"pct": 1.0, "tp_mult": 3.00, "sl_mult": 0.50, "horizon_min": 120, "label": "main"}],
+    # Wider TP wins — moonshot family
+    "TP200_SL40_2H":       [{"pct": 1.0, "tp_mult": 3.00, "sl_mult": 0.60, "horizon_min": 120, "label": "main"}],
+    # FAST variants (different horizons)
+    "FAST_TP100_SL20":     [{"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.80, "horizon_min": 30, "label": "main"}],
+    "FAST60_TP50_SL30":    [{"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.70, "horizon_min": 60, "label": "main"}],
+    # BE+LOCK variants
+    "BE25_LOCK10_TP100_SL30": [{"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.70, "horizon_min": 30,
+                                 "be_activation": 0.25, "be_lock_pct": 0.10, "label": "main"}],
+    "BE25_LOCK15_TP100_SL30": [{"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.70, "horizon_min": 30,
+                                 "be_activation": 0.25, "be_lock_pct": 0.15, "label": "main"}],
+    # SCALP variants (small TP, fast)
+    "SCALP_TP15_SL15":     [{"pct": 1.0, "tp_mult": 1.15, "sl_mult": 0.85, "horizon_min": 30, "label": "main"}],
+    "SCALP_TP20_SL10":     [{"pct": 1.0, "tp_mult": 1.20, "sl_mult": 0.90, "horizon_min": 30, "label": "main"}],
+    # SLOW (long timeout, wide TP)
+    "SLOW4H_TP100_SL50":   [{"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.50, "horizon_min": 240, "label": "main"}],
+    "SLOW6H_TP150_SL50":   [{"pct": 1.0, "tp_mult": 2.50, "sl_mult": 0.50, "horizon_min": 360, "label": "main"}],
+}
+# Add 3 age bands (A1to3, A3to12, A24to48) for each — 12 mechanics x 3 = 36 shadows
+for _mech_name, _spec in _OTHER_MECHANIC_SPECS.items():
+    _add_age_band_clone(f"{_mech_name}_A1to3",   _spec, 1, 3)
+    _add_age_band_clone(f"{_mech_name}_A3to12",  _spec, 3, 12)
+    _add_age_band_clone(f"{_mech_name}_A24to48", _spec, 24, 48)
+
+
 # (3) RECALL × AGE6to12 combos — target the only profitable retrade window
 # (gap 6-12h after 1st call: WR 76% avg +22.68% +$1999 over 14d).
 # Pairs RECALL_DIP30 (the proven recall filter) with mechanics × this gap.

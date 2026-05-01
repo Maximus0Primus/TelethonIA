@@ -1,43 +1,73 @@
-# Pipeline Status — v14e.49e (Apr 30, 2026 19:20 UTC)
+# Pipeline Status — v14e.53 (May 2, 2026 — LIVE PAUSED)
 
-## CURRENT — Live Deck SOL (5 strats post v14e.49e swap)
+## 🛑 LIVE TRADING PAUSED (May 2 22:12 UTC)
 
-**5 strats live** alloc=1 chacune, position **$1.00/trade** (`max_position_sol=0.012` à SOL $83) :
-1. `BE25_TP80_SL30` — baseline BE family
-2. `FAST_TP50_SL30` — baseline FAST family
-3. `BE25_LOCK10_TP100_SL30_NZ_S40` — seul positif live (+6.6%) sur audit 21h
-4. **`FAST45_TP40_SL30_S30`** ★ NEW v14e.49e — WR 48.2% (top du panel), 14d +$11.90/d, N_main=67 paper main calibré
-5. **`BE15_LOCK5_TP50_SL30`** ★ NEW v14e.49e — signal fort 14d +$13.65/d / 3d +$115/d, **MAIS LOCK 5% slip-sensitive (test hypothèse user)**. À surveiller en priorité.
+Le live test a rempli son objectif initial : **mesurer le slippage Jupiter Ultra et caractériser le drift live↔paper**. Verdict acté (v14e.50 audit, N=175 paired pairs depuis Apr 29) :
+- **Drift médian = -1.46pp** = slip Jupiter Ultra normal (~146 bps round-trip)
+- **5 strats homogènes** (drift med -1.20 à -2.36pp) → pas de divergence par mécanique
+- **Tail risk rugs** = +1pp avg vs paper, structurel (slip 5000-85000 bps quand un token meurt entre buy et sell)
 
-`max_open_positions=24` (bumped v14e.49f, était 12 — cap touché 4× en 24h + 16 events ≥10), `daily_loss_limit_sol=0.5`, `min_sol_reserve=0.05`. Exposure max 0.338 SOL (24 × 0.012 + 0.05), wallet 0.56 SOL = 1.66× marge.
+**Action** : `live_trading.enabled = False` en DB (backup `data/rt_trade_config_pre_pause_20260501T221242Z.json`). Allocations + position size conservés pour reprise rapide quand un winner shadow émergera.
 
-**ETH live : DÉSACTIVÉ** (`eth_live_enabled=false`).
-
-**Killed live cette session** :
-- `SCALP_TP20_SL10_S30` (v14e.49c) — drift −17.63pp, SL=10% inviable à slip live 822 bps
-- `TP200_SL40_2H_NZ_S40` (v14e.49e) — 0/8 TP en 21h, sim −$54/d, dpd_3d aussi neg. Continue paper/shadow.
+**Pivot stratégique** : focus 100% sur **shadow expansion** pour identifier la meilleure strat possible. Plus de live tant qu'un candidat clair n'a pas émergé du registry.
 
 ---
 
-## ✅ Cette session (Apr 30) — toutes complétées
+## 🎯 OBJECTIF SESSION — Best strategy via shadow A/B grid
 
-- ✅ **v14e.49 promote 3 SOL shadows → paper main** : `BE15_LOCK5_TP50_SL30` (3d +$108/d), `FAST_TP100_SL20_S35` (3d +$98/d), `BE15_LOCK15_TP80_SL30` (3d +$62/d, WR 51.5%). Bankrolls seedés $1000 chacun, starting_capital $34k → $37k.
-- ✅ **v14e.49b kill SOL BSR52** (5 strats) — verdict EARLY confirmé négatif (avg −5.4 à −5.7%, WR 27-33% sur N=33). ETH BSR55 KEPT (5/5 positive, +5 à +19%).
-- ✅ **v14e.49b ETH slip recalib** 500/800 → 350/650 (N=10 post-MUSK, empirical 21.5% drag). JSONB + strategies.py.
-- ✅ **v14e.49b un-blacklist `CarnagecallsGambles` SOL** — recovered N=2076, avg +4.05%, WR 50.5%, +$596/d shadow. 14 → 13 KOLs banned SOL.
-- ✅ **v14e.49c kill SCALP live** + audit drift apples-to-apples (paper/shadow twin, pas companion sim).
-- ✅ **v14e.49d bump position 0.006 → 0.012 SOL** ($0.50 → $1.00) pour tester hypothèse "drift slip = position trop petite".
-- ✅ **Mega-sweep ETH workflow fix** (e1cb73e) — skip empty shards au lieu de fail le merge. SOL workflow fix mirror.
-- ✅ **Sim mega-sweep rolling windows 14d/7d/3d** ajouté (`sim.py` + `analyze_mega_sweep.py`) — pas committé encore (review user).
-- ✅ **Forensic v141→v14e.48 SL-blocked** : net delta +$2.62 sur 12 suspects, **pas de recompute requis**.
+Le 14d audit (`scripts/_what_is_profitable.py`) a révélé 2 sweet spots et 3 dead zones :
+```
+[ 0- 1h]  N=36818  avg=-1.92%  -$45,238   (pump.fun spam)
+[ 1- 3h]  N=14030  avg=+1.06%  +$10,626   *** SWEET SPOT 1 ***
+[ 3- 6h]  N= 8300  avg=-5.61%  -$32,260
+[ 6-12h]  N= 4923  avg=-12.55% -$25,518   (worst zone)
+[12-24h]  N=10279  avg=-4.09%  -$20,783   (AGE24 dead)
+[24-48h]  N= 6762  avg=+8.69%  +$28,621   *** SWEET SPOT 2 (AGE48) ***
+[48-72h]  N= 2668  avg=-10.57% -$13,429
+```
+
+Plus un sweet spot retrade **gap [6-12h]** (avg +22.68% WR 76% +$1999/14d).
 
 ---
 
-## 🟢 Faisable maintenant — bloqué sur rien
+## 🟢 Cette session — v14e.50 → v14e.53 deployed
 
-- [ ] **Re-mesurer drift apples-to-apples post-position-bump + 2 nouvelles strats** (24-48h) — si drift converge vers −1pp et buy_slip vers 225 bps, hypothèse position size confirmée. Sinon investiguer (priorité fee, MEV, polling).
-- [ ] **Test BE15_LOCK5 hypothèse slip-sensitivity** — LOCK 5% est très proche de l'entrée, attendu : SL fire en cascade sur slip wobble. Si N≥10 et drift > -8pp vs shadow → kill. Si drift ≈ -3pp comme BE25_LOCK10 → garder.
-- [x] ~~**Commit rolling windows feature** (`sim.py` + `analyze_mega_sweep.py`)~~ — committed v14e.49i.
+### v14e.50 (May 1) — Inline Solana fees + drift audit infrastructure
+- ✅ `live_trader.py` : `_fetch_tx_fee_lamports()` + `_tx_fee_usd()` inline → chaque trade enregistre `gas_usd_buy/sell` à l'insert (Helius RPC si `HELIUS_API_KEY`)
+- ✅ `scripts/_backfill_solana_fees.py` standalone (223 trades historiques backfillés, fee médian $0.018, mean $0.035 par round-trip)
+- ✅ `scripts/_drift_audit_full.py` paired Wilcoxon test live vs paper
+- ✅ `scripts/_drift_by_exit_type.py` segments drift par type d'exit
+- ✅ `scripts/_wallet_5h_forensic.py` audit forensique PnL+gas+slip
+
+### v14e.51 (May 1) — `max_age_hours=12` sur 5 live + 12 RECALL relaxed shadow
+- ✅ Filter `max_age_hours=12` ajouté aux 5 STRATEGY_FILTERS des strats live (block retrades >12h)
+- ✅ 12 nouvelles `RECALL_DIP10_*` / `RECALL_ANY_*` / `RECALL_AGE6H/12H/24H_ANY_*` shadow (filters relâchés vs DIP30 strict)
+- ✅ Tests integration mis à jour pour le nouveau contrat
+
+### v14e.52 (May 2) — 27 age-band probes des 5 live strats + AGE3H + RECALL×AGE6to12
+- ✅ 15 age-band clones des 5 live (A1to3 / A3to12 / A24to48)
+- ✅ 6 AGE3H_* shadows sur sweet spot 1-3h
+- ✅ 6 RECALL_DIP30_AGE6to12_* sur sweet spot retrade
+
+### v14e.53 (May 2) — LIVE PAUSED + age-band grid étendu à 17 mécaniques
+- ✅ Live paused via `scripts/_pause_live_trading.py` (DB JSONB flip)
+- ✅ Age-band grid étendu : **17 mécaniques × 3 bands = 51 shadows** (était limité aux 5 live, étendu à TP100/150/200, FAST_TP100_SL20, BE25_LOCK10/15, SCALP, SLOW4H/6H, etc.)
+- ✅ Total **SHADOW_STRATEGIES : 648** (était 612 v14e.52, 585 pré-session)
+
+---
+
+## 🔬 Decision rules — verdict shadow grid (~7-14 jours)
+
+À N≥15 par shadow, paired-test vs baseline same-token :
+
+| Hypothèse | Si confirmée → action |
+|---|---|
+| `*_A1to3` > baseline +5pp paired | → resserrer live filter à `min_age=1, max_age=3` |
+| `*_A24to48` positif sur 3+ mécaniques | → green-light AGE48 family promotion |
+| `AGE3H_*` top performer | → promote en paper main, candidate live |
+| `RECALL_DIP30_AGE6to12_*` +30%+ | → confirme sweet spot retrade, override la version sans age band |
+| `*_A3to12` négatif partout | → confirme l'observation 14d, resserrer le filter live |
+| `RECALL_PEAK*` toujours 0 trade | → kill les 15 strats mortes (cleanup code) |
 
 ---
 
@@ -45,82 +75,92 @@
 
 | Item | N actuel | N cible | ETA |
 |---|---:|---:|---|
-| BSR_MCAP_AB SOL (4 strats `_BSR_MCAP`) | 11 | 30 | ~7-10j |
-| KW_AB SOL (5 strats `_KW34`) | 4 | 30 | ~10j |
-| KW_AB ETH (3 strats `_KW26`) | 3 | 30 | ~14j |
-| SCORE_V2_AB (rt_score_v2 collecté) | data collection | AUC vs rt_score sur N=30 | ~3j (cible Mai 02) |
-| ETH BSR55 (KEPT v14e.49b, 5 strats) | 11 chacune | 30 | ~Mai 7-10 |
-| **Live drift re-mesure** post-bump position $1 | 0 | 15 trades/strat | ~24-48h |
-| W1-W5 paired-tests (SCALP, AGE, LOCK, ETH winner cluster) | varies | 30 | Mai 03-10 |
-| W9b RECALL family verdict par bucket | varies | 30 | Mai 26-Juin 5 |
-| T2 sell slip drift twin pairs | varies | 200 | ~Mai 03-05 |
+| **51 age-band shadows v14e.52/53** | 0 | 15 par strat | ~7-14j (Mai 9-16) |
+| **6 AGE3H_* shadows** | 0 | 15 | ~7-10j |
+| **6 RECALL_AGE6to12_* shadows** | 0 | 10 | ~10-14j (depend retrade frequency) |
+| **12 RECALL_DIP10/ANY shadows v14e.51** | 0 | 15 | ~10j |
+| BSR_MCAP_AB SOL | 11 | 30 | ~7-10j |
+| KW_AB SOL | 4 | 30 | ~10j |
+| SCORE_V2_AB | data collection | AUC vs rt_score sur N=30 | ~3j |
+| ETH BSR55 (5 strats) | 11 | 30 | ~Mai 7-10 |
 
 ---
 
 ## 🔴 User action requise
 
-- [x] ~~**K3** — `jadendegens` triple ban v14e.49g (Apr 30 19:40 UTC)~~ — N=36 ETH paper main WR 0% (p<10⁻¹¹), N=116 SOL paper main avg -30.65%, net 14d -$3,243.
-- [x] ~~**K3 part 2** — `aliensalphacalls` ban ETH+live v14e.49h (Apr 30 19:50 UTC)~~ — ETH N=10 WR 0% -$387, SOL live 0/4, SOL shadow saigne -$4.5K. SOL chain déjà banné v14e.37.
+_(rien d'urgent — live paused, shadow gather data tranquillement)_
 
 ---
 
-## 🔧 Backlog (pas urgent)
+## 📋 Backlog post-shadow-verdict
 
-- [ ] **R2** — Profiler `process_and_push` si lag >30s revient.
-- [ ] **T3** — `_eth_round_trip_smoke.py --execute` mensuel ou si base_fee >5 gwei.
-- [ ] **T8** — Auto-apply JSONB diff via PR si signal stable 4 sem K1/K2.
-- [ ] **T9-T10** — Dead-day filter (`_compute_day_regime`) — priorité basse.
-- [ ] **T11-T16** — Idées mécaniques nouvelles : DELAY entry, CIRCUIT BREAKER, VOLUME drop exit, LIQ-pull exit, MULTI-KOL confirmation, TIME-based BE.
-- [ ] **LOCK polling alignment (parqué)** — si BE25 vérif post-bump confirme `polling_sec=60 + median_5` est le bon réglage, appliquer même override aux LOCK SOL/ETH.
+1. **Resume live** quand un winner shadow émerge (N≥15 + paired-test +5pp vs baseline)
+2. **Kill RECALL_PEAK*** (15 strats mortes en 14d) → cleanup code
+3. **Promote AGE48 top 3** en paper main si confirmé sur N élargi
+4. **AGE24/AGE48 unification** → si A1to3 = sweet spot, refactorer les AGE48 existants
+5. **Schema migration** : index sur `paper_trades(token_address, source, status)` pour accélérer les audits cluster (queries 14d-30d devient lent à >100K rows)
 
 ---
 
 ## 📌 Rappels persistants (rule-encoded)
 
 ### Méthode statistique
-- **Paired-test apples-to-apples** sur tokens intersection — JAMAIS aggregate avg quand sample sizes diffèrent.
-- **N≥30 par strat** avant verdict, N≥30 par (KOL, chain) avant blacklist reliable (15-29 = probable, observer 1 sem).
-- Bootstrap CI 95% + sign test obligatoires sur tout verdict KOL.
-- Filtrer artefacts (DTRAIL/DIP/SPLIT/TRAIL) avec `--exclude-artifact-strats`.
-- **Drift live** : utiliser paper main twin OU shadow twin via paired-test, **PAS `paper_sim_pnl_pct` companion** (inflate de 2-3×). Leçon v14e.49c.
+- **Paired-test apples-to-apples** sur tokens intersection — JAMAIS aggregate avg quand N diffère.
+- **N≥30 par strat** avant verdict, N≥15 = "probable" pour décisions intermédiaires.
+- Bootstrap CI 95% + sign test obligatoires pour KOL ban/unban.
+- Filtrer artefacts (DTRAIL/DIP/SPLIT/TRAIL).
+- **Drift live** : paper main twin OU shadow twin via paired-test, **PAS `paper_sim_pnl_pct` companion** (inflate 2-3×).
 
 ### Slippage v14e.49b (single source = strategies.py)
-- **SOL** : `BUY_SLIPPAGE_BPS = 225` (median empirique 216, valeur OK au global)
-- **ETH** : `BUY 350 / SELL 650` (recalibré v14e.49b sur N=10 empirique)
-- JSONB miroir : `paper_trade_config.eth_buy_slippage_bps=350`, `eth_sell_slippage_bps=650`
+- **SOL** : `BUY_SLIPPAGE_BPS = 225` (median empirique 216)
+- **ETH** : `BUY 350 / SELL 650` (recalibré v14e.49b sur N=10)
+- JSONB miroir ETH : `paper_trade_config.eth_buy_slippage_bps=350`, `eth_sell_slippage_bps=650`
 - Live tx tolerance ETH : `eth_buy_slippage_bps=500, eth_sell_slippage_bps=600` (live ≠ paper sim)
 
-### Drift sim ↔ live
-- **SOL** : drift global aggregate ~−0.15pp ✓. POST-04-22 BE25 par exit_reason : be_stop −20pp, sl_hit −13pp, timeout stable.
-- Drift = fonction directe de `SL_pct` × buy_slip_actual. Strats à SL <15% inviables à position $0.50 (cf. SCALP). À tester à $1.00.
+### Drift live↔paper (v14e.50 acté)
+- **Drift médian global = -1.46pp** sur N=175 pairs = slip Jupiter Ultra normal
+- Drift moyen -4.84pp tiré par 5.7% rugs (slip exec 5000-85000 bps)
+- **31% trades : live > paper** (positive slippage)
+- **Tail risk rug** non modélisé dans le sim → coût hidden +1pp avg
+
+### Solana fees (v14e.50 mesurés)
+- Fee per round-trip : median **$0.018**, mean **$0.035** à $1/trade = 1.8-3.5% capital
+- Seuil rentabilité = avg PnL >+3.5% par trade
+- Inline tracking actif depuis v14e.50, backfill via `scripts/_backfill_solana_fees.py`
 
 ### KOL routing v14e.49b
-- Per-chain blacklist active : **13 SOL** (Carnage retiré), 0 ETH. JSONB `paper_trade_config.kol_chain_blacklist`.
-- `mad_apes_gambles` : SOL ban / ETH allow (RELIABLE_WINNER N=104).
-- Live KOL blacklist (flat all-chain) : MaestrosDegen, bagcalls, batman_gem, ryoshigamble, ryoshikdegen, venom_gambles.
+- Per-chain blacklist : **16 SOL** (post v14e.49i), 3 ETH. JSONB `paper_trade_config.kol_chain_blacklist`.
+- `mad_apes_gambles` : SOL ban / ETH allow.
+- `ryoshigamble` : flat unban v14e.49i (96.2% WR sur N=371 SOL)
+- `ryoshikdegen` : SOL ban / ETH allow.
+- `bagcalls`, `batman_gem` : double ban (flat live + chain).
+- Live KOL blacklist (flat all-chain) : 6 KOLs.
 - KOL whitelist : DISABLED.
 
 ### Bankroll
-- Total : ~$60K (v14e.49 starting_capital $37K + cumul +$23K).
-- SOL live : `max_position_sol = 0.012` = $1/trade. Cap 12 simultané. Exposure max 0.194 SOL.
-- ETH live : DÉSACTIVÉ (`eth_live_enabled=false`).
+- Total : ~$60K (starting_capital v14e.49 $37K + cumul +$23K).
+- **SOL live : PAUSED** depuis v14e.53. allocations conservées pour reprise rapide.
+- ETH live : DÉSACTIVÉ.
 
 ### Mega-sweep
-- SOL : cron `02:00 UTC tous les 2 jours`, matrix split 3 shards (jupiter/dexscreener/both).
-- ETH : cron `22:00 UTC tous les 2 jours`, single job, fix shard-empty appliqué (v14e.49 commit e1cb73e).
-- Persist top-30+50 dans `mega_sweep_runs` Supabase + `_mega_sweep_calibration.py`.
+- SOL : cron `02:00 UTC tous les 2 jours`, matrix split 3 shards.
+- ETH : cron `22:00 UTC tous les 2 jours`, single job.
+- Persist top-30+50 dans `mega_sweep_runs` Supabase.
 
-### Strats deck (594 dont 5 SOL BSR52 retirés v14e.49b)
-| Family | SOL | ETH |
-|--------|-----|-----|
-| BE | 33 | 9 |
-| LOCK | 33 | 20 |
-| FAST | 73 | 18 |
-| SLOW | 13 | 5 |
-| SCALP | 36 | 17 |
-| Other | 80 | 10 |
-| AGE clones | 38 | 18 |
-| RECALL DIP+PEAK | 45 | 15 |
-| BSR_MCAP combo (SOL only) | 4 | 0 |
-| KW34/26 (KOL win-rate filter) | 5 | 3 |
-| BSR55 ETH only (KEPT v14e.49b) | 0 | 5 |
+### Shadow registry — 648 strats actives (v14e.53)
+| Family | Count | Sweet spot tested |
+|--------|---:|---|
+| BE | ~33 SOL / 9 ETH | A1to3, A3to12, A24to48 (BE25 5 mecaniques) |
+| LOCK | ~33 SOL / 20 ETH | A1to3, A3to12, A24to48 (BE25_LOCK10/15) |
+| FAST | ~73 SOL / 18 ETH | A1to3, A3to12, A24to48 (FAST_TP50/100, FAST60) |
+| SLOW | ~13 SOL / 5 ETH | A1to3, A3to12, A24to48 (SLOW4H/6H) |
+| SCALP | ~36 SOL / 17 ETH | A1to3, A3to12, A24to48 (SCALP_TP15/20) |
+| AGE clones (existing AGE24/48/72) | 38 | — |
+| AGE3H_* (NEW v14e.52) | 6 | sweet spot 1-3h direct |
+| RECALL DIP30/50 | 22 + 4 | — |
+| RECALL_DIP10/ANY (NEW v14e.51) | 12 | drift relaxed |
+| RECALL_AGE6to12 (NEW v14e.52) | 6 | sweet spot retrade gap 6-12h |
+| RECALL_PEAK* | 15 | **0 trade 14d → mortes, à kill** |
+| BSR_MCAP combo (SOL only) | 4 | — |
+| KW34/26 (KOL win-rate filter) | 8 | — |
+| BSR55 ETH only | 5 | — |
