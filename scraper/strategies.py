@@ -292,6 +292,9 @@ for _tp_f, _sl_f in [(100, 50), (50, 30), (50, 50), (70, 50), (40, 30), (80, 25)
     ]
 STRATEGIES.update(_FAST_STRATEGIES)
 SHADOW_STRATEGIES.extend(_FAST_STRATEGIES.keys())
+# v14e.51: max_age_hours=12 on FAST_TP50_SL30 (live strategy) — block retrades.
+# Other FAST_TP* variants stay unfiltered (shadow only, want to keep coverage).
+STRATEGY_FILTERS["FAST_TP50_SL30"] = {"max_age_hours": 12}
 
 _FAST60_STRATEGIES = {}
 for _tp_f6, _sl_f6 in [(100, 50), (50, 30), (50, 50), (70, 50), (40, 30)]:
@@ -353,6 +356,10 @@ STRATEGIES["BE25_TP80_SL30"] = [
     {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.70, "horizon_min": 30,
      "be_activation": 0.25, "label": "main"},
 ]
+# v14e.51: max_age_hours=12 to block retrade clusters on already-mature tokens.
+# 14d audit (N=105 retrades): 2nd cluster avg=-4.69% vs 1st +0.40%, drift -5pp.
+# Retrades on age-mature tokens (>12h) belong to AGE24/AGE48/RECALL_*.
+STRATEGY_FILTERS["BE25_TP80_SL30"] = {"max_age_hours": 12}
 SHADOW_STRATEGIES.append("BE25_TP80_SL30")
 
 # v136: BE25 A/B variant — identical exit rules, different price_source config.
@@ -453,6 +460,8 @@ STRATEGIES["BE15_LOCK5_TP50_SL30"] = [
     {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.70, "horizon_min": 30,
      "be_activation": 0.15, "be_lock_pct": 0.05, "label": "main"},
 ]
+# v14e.51: max_age_hours=12 — see BE25_TP80_SL30 rationale above.
+STRATEGY_FILTERS["BE15_LOCK5_TP50_SL30"] = {"max_age_hours": 12}
 SHADOW_STRATEGIES.append("BE15_LOCK5_TP50_SL30")
 
 STRATEGIES["BE15_LOCK10_TP80_SL30"] = [
@@ -591,6 +600,7 @@ STRATEGIES["BE25_LOCK10_TP100_SL30_NZ_S40"] = [
 ]
 STRATEGY_FILTERS["BE25_LOCK10_TP100_SL30_NZ_S40"] = {
     "chain": "solana", "min_liquidity_usd": 1, "min_rt_score": 40,
+    "max_age_hours": 12,  # v14e.51: block retrade clusters on mature tokens
 }
 SHADOW_STRATEGIES.append("BE25_LOCK10_TP100_SL30_NZ_S40")
 
@@ -1417,6 +1427,7 @@ STRATEGIES["BE25_LOCK10_TP100_SL30_NZ_S40"] = [
 ]
 STRATEGY_FILTERS["BE25_LOCK10_TP100_SL30_NZ_S40"] = {
     "chain": "solana", "min_liquidity_usd": 1, "min_rt_score": 40,
+    "max_age_hours": 12,  # v14e.51: block retrade clusters on mature tokens
 }
 SHADOW_STRATEGIES.append("BE25_LOCK10_TP100_SL30_NZ_S40")
 
@@ -2884,7 +2895,7 @@ SHADOW_STRATEGIES.append("FAST60_TP70_SL50_NZ_S40")
 STRATEGIES["FAST45_TP40_SL30_S30"] = [
     {"pct": 1.0, "tp_mult": 1.40, "sl_mult": 0.70, "horizon_min": 45, "label": "main"},
 ]
-STRATEGY_FILTERS["FAST45_TP40_SL30_S30"] = {"min_rt_score": 30}
+STRATEGY_FILTERS["FAST45_TP40_SL30_S30"] = {"min_rt_score": 30, "max_age_hours": 12}  # v14e.51
 SHADOW_STRATEGIES.append("FAST45_TP40_SL30_S30")
 
 # Classic TP/SL with score gate.
@@ -3414,6 +3425,62 @@ _add_recall("RECALL_PEAK70_TP500_SL60_6H", 6.00, 0.40, 360,
 _add_recall("RECALL_PEAK30_S30_TP80_SL50", 1.80, 0.50, 240,
     {"min_drift_vs_peak": -0.70, "max_drift_vs_peak": -0.30,
      "max_hours_since_first": 6, "min_rt_score": 30})
+
+
+# ============================================================
+# v14e.51 — RECALL relaxed-filter variants (May 1).
+# 14d audit (N=2109 paper main, 105 retrade trades): 2nd cluster avg=-4.69%
+# vs 1st +0.40%, drift -5pp. Existing RECALL_DIP30 (drift -50/-30) only
+# captured ~3 strats with N>=5 in 14d because filter is too strict.
+# Source breakdown (14d): 78% retrades from DIFFERENT KOL, gap pic 6-12h,
+# 80% within 0.5-24h.
+#
+# These variants relax filters in 3 directions:
+#  (a) Wider drift bound: DIP10 = -50 to -10 (vs DIP30 -50/-30) catches
+#      mild dips that DIP30 misses.
+#  (b) ANY drift: no bound on price ratio, only require_recall=True.
+#      Tests the "any 2nd-call alone is signal" hypothesis.
+#  (c) Time-targeted: AGE6H/AGE12H/AGE24H windows match the observed
+#      retrade gap distribution (pic 6-12h, tail 12-24h).
+#
+# Mechanics paired with each filter: TP50/SL30 (baseline), BE25 (live
+# winner), BE15_LOCK5 (live test), FAST45_S30 (live test), BE25_LOCK10
+# (live winner). All shadow-only — promote to paper main via /best-combo
+# at N>=15 with cross-cluster paired-test.
+# ============================================================
+
+# --- DIP10: wider drift band (-50 to -10) ---
+_add_recall("RECALL_DIP10_TP50_SL30_2H", 1.50, 0.70, 120,
+    {"min_recall_drift": -0.50, "max_recall_drift": -0.10, "max_hours_since_first": 24})
+_add_recall("RECALL_DIP10_BE25_TP80_SL30", 1.80, 0.70, 120,
+    {"min_recall_drift": -0.50, "max_recall_drift": -0.10, "max_hours_since_first": 24},
+    be_act=0.25)
+_add_recall("RECALL_DIP10_BE25_LOCK10_TP80_SL30", 1.80, 0.70, 120,
+    {"min_recall_drift": -0.50, "max_recall_drift": -0.10, "max_hours_since_first": 24},
+    be_act=0.25, be_lock=0.10)
+
+# --- ANY drift: only require_recall, no price bound ---
+_add_recall("RECALL_ANY_TP50_SL30_2H", 1.50, 0.70, 120,
+    {"max_hours_since_first": 24})
+_add_recall("RECALL_ANY_BE25_TP80_SL30", 1.80, 0.70, 120,
+    {"max_hours_since_first": 24}, be_act=0.25)
+_add_recall("RECALL_ANY_BE15_LOCK5_TP50_SL30", 1.50, 0.70, 30,
+    {"max_hours_since_first": 24}, be_act=0.15, be_lock=0.05)
+_add_recall("RECALL_ANY_FAST45_TP40_SL30_S30", 1.40, 0.70, 45,
+    {"max_hours_since_first": 24, "min_rt_score": 30})
+
+# --- Time-targeted ANY: match the observed retrade gap pic 6-12h ---
+_add_recall("RECALL_AGE6H_ANY_TP50_SL30", 1.50, 0.70, 120,
+    {"max_hours_since_first": 6})
+_add_recall("RECALL_AGE6H_ANY_BE25_TP80_SL30", 1.80, 0.70, 120,
+    {"max_hours_since_first": 6}, be_act=0.25)
+_add_recall("RECALL_AGE12H_ANY_BE25_TP80_SL30", 1.80, 0.70, 120,
+    {"min_hours_since_first": 6, "max_hours_since_first": 12}, be_act=0.25)
+_add_recall("RECALL_AGE24H_ANY_BE25_LOCK10_TP100_SL30", 2.00, 0.70, 240,
+    {"min_hours_since_first": 12, "max_hours_since_first": 24},
+    be_act=0.25, be_lock=0.10)
+_add_recall("RECALL_AGE24H_ANY_FAST_TP50_SL30", 1.50, 0.70, 30,
+    {"min_hours_since_first": 12, "max_hours_since_first": 24})
 
 
 # --- ETH variants of the proven mechanics ---

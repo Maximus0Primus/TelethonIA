@@ -125,19 +125,20 @@ class TestAgeWindowShadowsIntegration(unittest.TestCase):
         self.assertTrue(_passes_strategy_filter(tok, "AGE72_FAST_TP50_SL30"))
 
     def test_main_strat_rejects_old_token_even_with_relaxed_gate(self):
-        """A 48h-old token must NOT open FAST_TP50_SL30 main even though the
-        global RT gate is now 72h. Regression guard: mains don't drift onto
-        aged tokens just because the global gate was relaxed."""
+        """v14e.51: 5 live strategies (BE25_TP80_SL30, FAST_TP50_SL30,
+        FAST45_TP40_SL30_S30, BE25_LOCK10_TP100_SL30_NZ_S40, BE15_LOCK5_TP50_SL30)
+        now declare max_age_hours=12 to block retrade clusters on aged tokens.
+        14d audit (N=105 retrades): 2nd cluster avg=-4.69% vs 1st +0.40%.
+        Aged-token traffic now routes to AGE24/AGE48/RECALL_* strats only."""
         from paper_trader import _passes_strategy_filter
-        # Main FAST_TP50_SL30 has no explicit age filter. v14e.16 contract:
-        # no age keys -> no filter applied, so the ONLY line of defense for
-        # mains is the RT global gate. This test documents that behavior:
-        # mains would accept a 48h token if RT gate let it through. The
-        # disjoint-band shadows are what actually isolate aged-token traffic.
-        tok = self._token(48)
-        # Chain match is OK, no age filter declared on FAST_TP50_SL30
-        self.assertTrue(_passes_strategy_filter(tok, "FAST_TP50_SL30"),
-                        "Expected no-age-filter behavior on mains post-v14e.16")
+        # 6h token: passes (under 12h cap)
+        tok_young = self._token(6)
+        self.assertTrue(_passes_strategy_filter(tok_young, "FAST_TP50_SL30"),
+                        "FAST_TP50_SL30 should accept 6h token (under max_age_hours=12)")
+        # 48h token: rejected by max_age_hours=12 filter (v14e.51)
+        tok_old = self._token(48)
+        self.assertFalse(_passes_strategy_filter(tok_old, "FAST_TP50_SL30"),
+                         "v14e.51: FAST_TP50_SL30 must reject 48h token (max_age_hours=12)")
 
 
 class TestKolLiveBlacklistGate(unittest.TestCase):

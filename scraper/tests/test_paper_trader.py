@@ -255,10 +255,15 @@ class TestStrategyAgeFilter:
         }
 
     def test_no_age_filter_on_existing_strat(self):
-        """FAST_TP50_SL30 has no age keys in STRATEGY_FILTERS -> no filtering."""
+        """v14e.51: FAST_TP50_SL30 now declares max_age_hours=12 (live strat).
+        Test the no-age-filter path via TP50_SL30 grid variant which still has no filter."""
         from paper_trader import _passes_strategy_filter
-        # 100h old token still passes when no age filter is declared
-        assert _passes_strategy_filter(self._token(100), "FAST_TP50_SL30") is True
+        # TP50_SL30 grid variant has no age filter -> 100h token passes
+        assert _passes_strategy_filter(self._token(100), "TP50_SL30") is True
+        # FAST_TP50_SL30 (live strat) now rejects 100h tokens
+        assert _passes_strategy_filter(self._token(100), "FAST_TP50_SL30") is False
+        # And accepts a fresh 6h token
+        assert _passes_strategy_filter(self._token(6), "FAST_TP50_SL30") is True
 
     def test_age24_shadow_band(self):
         from paper_trader import _passes_strategy_filter
