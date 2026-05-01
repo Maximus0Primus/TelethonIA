@@ -3483,6 +3483,158 @@ _add_recall("RECALL_AGE24H_ANY_FAST_TP50_SL30", 1.50, 0.70, 30,
     {"min_hours_since_first": 12, "max_hours_since_first": 24})
 
 
+# ============================================================
+# v14e.52 (May 2) — Age-band shadow grid + sweet-spot probes.
+# ----------------------------------------------------------------
+# 14d profitability audit (scripts/_what_is_profitable.py) revealed
+# 2 sweet spots and 3 dead zones for SOL 1st-call trades:
+#   [ 0- 1h]  N=36818  avg=-1.92%  -$45,238   (pump.fun spam, dead)
+#   [ 1- 3h]  N=14030  avg=+1.06%  +$10,626   *** SWEET SPOT 1 ***
+#   [ 3- 6h]  N= 8300  avg=-5.61%  -$32,260   (rug zone)
+#   [ 6-12h]  N= 4923  avg=-12.55% -$25,518   (worst 1st-call zone)
+#   [12-24h]  N=10279  avg=-4.09%  -$20,783   (AGE24 zone, dead on baseline)
+#   [24-48h]  N= 6762  avg=+8.69%  +$28,621   *** SWEET SPOT 2 (AGE48) ***
+#   [48-72h]  N= 2668  avg=-10.57% -$13,429   (over-mature)
+#
+# And a sweet spot for retrades: gap [6-12h] from 1st call
+#   avg=+22.68% WR=76% +$1999 (only positive retrade bucket)
+#
+# Strategy: rather than tighten the live filter prematurely, ADD shadows
+# to A/B-test each band against the live baseline. Promote to paper main
+# at N>=15 + paired-test vs baseline same-token cluster.
+#
+# Three families added:
+# (1) AGE-BAND CLONES of the 5 live strats (15 shadows: A1to3 / A3to12 /
+#     A24to48). Tells us whether `max_age_hours=12` should be tightened
+#     to A1to3 (most profitable), or if A24to48 is in fact the better
+#     live target than A1to3 for these mechanics.
+# (2) AGE3H_* family — 6 fresh shadows targeting only the 1-3h sweet
+#     spot, paired with mechanics that show edge there.
+# (3) RECALL × AGE6to12 — 6 RECALL_DIP30 variants gated to the only
+#     profitable retrade window (gap 6-12h after 1st call).
+# ============================================================
+
+def _add_age_band_clone(name, base_spec, min_age, max_age, extra_filt=None):
+    """Register a SHADOW clone of a live strat with a specific age band.
+    base_spec is a list of dicts (the STRATEGIES entry of the original).
+    """
+    STRATEGIES[name] = [dict(s) for s in base_spec]
+    filt = {"min_age_hours": min_age, "max_age_hours": max_age}
+    if extra_filt:
+        filt.update(extra_filt)
+    STRATEGY_FILTERS[name] = filt
+    SHADOW_STRATEGIES.append(name)
+
+
+# (1) AGE-BAND CLONES of the 5 live strats — measure each window in isolation
+# Three bands: A1to3 (sweet spot 1), A3to12 (zone faible), A24to48 (sweet spot 2 / AGE48 zone).
+_BE25_TP80_SPEC = [{"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.70, "horizon_min": 30,
+                    "be_activation": 0.25, "label": "main"}]
+_FAST_TP50_SPEC = [{"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.70, "horizon_min": 30,
+                    "label": "main"}]
+_FAST45_SPEC = [{"pct": 1.0, "tp_mult": 1.40, "sl_mult": 0.70, "horizon_min": 45,
+                 "label": "main"}]
+_BE25_LOCK10_NZ_S40_SPEC = [{"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.70, "horizon_min": 30,
+                              "be_activation": 0.25, "be_lock_pct": 0.10, "label": "main"}]
+_BE15_LOCK5_SPEC = [{"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.70, "horizon_min": 30,
+                     "be_activation": 0.15, "be_lock_pct": 0.05, "label": "main"}]
+
+# BE25_TP80_SL30 clones
+_add_age_band_clone("BE25_TP80_SL30_A1to3",  _BE25_TP80_SPEC, 1, 3)
+_add_age_band_clone("BE25_TP80_SL30_A3to12", _BE25_TP80_SPEC, 3, 12)
+_add_age_band_clone("BE25_TP80_SL30_A24to48", _BE25_TP80_SPEC, 24, 48)
+
+# FAST_TP50_SL30 clones
+_add_age_band_clone("FAST_TP50_SL30_A1to3",  _FAST_TP50_SPEC, 1, 3)
+_add_age_band_clone("FAST_TP50_SL30_A3to12", _FAST_TP50_SPEC, 3, 12)
+_add_age_band_clone("FAST_TP50_SL30_A24to48", _FAST_TP50_SPEC, 24, 48)
+
+# FAST45_TP40_SL30_S30 clones (keep min_rt_score=30 from original)
+_add_age_band_clone("FAST45_TP40_SL30_S30_A1to3",  _FAST45_SPEC, 1, 3,  {"min_rt_score": 30})
+_add_age_band_clone("FAST45_TP40_SL30_S30_A3to12", _FAST45_SPEC, 3, 12, {"min_rt_score": 30})
+_add_age_band_clone("FAST45_TP40_SL30_S30_A24to48", _FAST45_SPEC, 24, 48, {"min_rt_score": 30})
+
+# BE25_LOCK10_TP100_SL30_NZ_S40 clones (keep liq + score from original)
+_add_age_band_clone("BE25_LOCK10_TP100_SL30_NZ_S40_A1to3",  _BE25_LOCK10_NZ_S40_SPEC, 1, 3,
+    {"min_liquidity_usd": 1, "min_rt_score": 40})
+_add_age_band_clone("BE25_LOCK10_TP100_SL30_NZ_S40_A3to12", _BE25_LOCK10_NZ_S40_SPEC, 3, 12,
+    {"min_liquidity_usd": 1, "min_rt_score": 40})
+_add_age_band_clone("BE25_LOCK10_TP100_SL30_NZ_S40_A24to48", _BE25_LOCK10_NZ_S40_SPEC, 24, 48,
+    {"min_liquidity_usd": 1, "min_rt_score": 40})
+
+# BE15_LOCK5_TP50_SL30 clones
+_add_age_band_clone("BE15_LOCK5_TP50_SL30_A1to3",  _BE15_LOCK5_SPEC, 1, 3)
+_add_age_band_clone("BE15_LOCK5_TP50_SL30_A3to12", _BE15_LOCK5_SPEC, 3, 12)
+_add_age_band_clone("BE15_LOCK5_TP50_SL30_A24to48", _BE15_LOCK5_SPEC, 24, 48)
+
+
+# (2) AGE3H_* family — fresh shadows targeting the 1-3h sweet spot
+# Mechanics tested: BE25, FAST_TP50, FAST_TP100_SL20 (top FAST per memory),
+# BE25_LOCK10, SCALP_TP15_SL15 (catches small pumps in fresh window).
+STRATEGIES["AGE3H_BE25_TP80_SL30"] = [
+    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.25, "label": "main"},
+]
+STRATEGY_FILTERS["AGE3H_BE25_TP80_SL30"] = {"min_age_hours": 1, "max_age_hours": 3}
+SHADOW_STRATEGIES.append("AGE3H_BE25_TP80_SL30")
+
+STRATEGIES["AGE3H_FAST_TP50_SL30"] = [
+    {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.70, "horizon_min": 30, "label": "main"},
+]
+STRATEGY_FILTERS["AGE3H_FAST_TP50_SL30"] = {"min_age_hours": 1, "max_age_hours": 3}
+SHADOW_STRATEGIES.append("AGE3H_FAST_TP50_SL30")
+
+STRATEGIES["AGE3H_FAST_TP100_SL20"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.80, "horizon_min": 30, "label": "main"},
+]
+STRATEGY_FILTERS["AGE3H_FAST_TP100_SL20"] = {"min_age_hours": 1, "max_age_hours": 3}
+SHADOW_STRATEGIES.append("AGE3H_FAST_TP100_SL20")
+
+STRATEGIES["AGE3H_BE25_LOCK10_TP100_SL30"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.70, "horizon_min": 30,
+     "be_activation": 0.25, "be_lock_pct": 0.10, "label": "main"},
+]
+STRATEGY_FILTERS["AGE3H_BE25_LOCK10_TP100_SL30"] = {"min_age_hours": 1, "max_age_hours": 3}
+SHADOW_STRATEGIES.append("AGE3H_BE25_LOCK10_TP100_SL30")
+
+STRATEGIES["AGE3H_SCALP_TP15_SL15"] = [
+    {"pct": 1.0, "tp_mult": 1.15, "sl_mult": 0.85, "horizon_min": 30, "label": "main"},
+]
+STRATEGY_FILTERS["AGE3H_SCALP_TP15_SL15"] = {"min_age_hours": 1, "max_age_hours": 3}
+SHADOW_STRATEGIES.append("AGE3H_SCALP_TP15_SL15")
+
+STRATEGIES["AGE3H_SLOW4H_TP100_SL50"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.50, "horizon_min": 240, "label": "main"},
+]
+STRATEGY_FILTERS["AGE3H_SLOW4H_TP100_SL50"] = {"min_age_hours": 1, "max_age_hours": 3}
+SHADOW_STRATEGIES.append("AGE3H_SLOW4H_TP100_SL50")
+
+
+# (3) RECALL × AGE6to12 combos — target the only profitable retrade window
+# (gap 6-12h after 1st call: WR 76% avg +22.68% +$1999 over 14d).
+# Pairs RECALL_DIP30 (the proven recall filter) with mechanics × this gap.
+_add_recall("RECALL_DIP30_AGE6to12_TP50_SL30", 1.50, 0.70, 120,
+    {"min_recall_drift": -0.70, "max_recall_drift": -0.30,
+     "min_hours_since_first": 6, "max_hours_since_first": 12})
+_add_recall("RECALL_DIP30_AGE6to12_BE25_TP80_SL30", 1.80, 0.70, 120,
+    {"min_recall_drift": -0.70, "max_recall_drift": -0.30,
+     "min_hours_since_first": 6, "max_hours_since_first": 12},
+    be_act=0.25)
+_add_recall("RECALL_DIP30_AGE6to12_BE25_LOCK10_TP80_SL30", 1.80, 0.70, 120,
+    {"min_recall_drift": -0.70, "max_recall_drift": -0.30,
+     "min_hours_since_first": 6, "max_hours_since_first": 12},
+    be_act=0.25, be_lock=0.10)
+_add_recall("RECALL_DIP30_AGE6to12_FAST45_TP50_SL30", 1.50, 0.70, 45,
+    {"min_recall_drift": -0.70, "max_recall_drift": -0.30,
+     "min_hours_since_first": 6, "max_hours_since_first": 12})
+_add_recall("RECALL_DIP30_AGE6to12_SLOW4H_TP100_SL50", 2.00, 0.50, 240,
+    {"min_recall_drift": -0.70, "max_recall_drift": -0.30,
+     "min_hours_since_first": 6, "max_hours_since_first": 12})
+_add_recall("RECALL_DIP30_AGE6to12_SLOW6H_TP200_SL50", 3.00, 0.50, 360,
+    {"min_recall_drift": -0.70, "max_recall_drift": -0.30,
+     "min_hours_since_first": 6, "max_hours_since_first": 12})
+
+
 # --- ETH variants of the proven mechanics ---
 _add_recall("ETH_RECALL_DIP30_BE25_LOCK10_TP80_SL40_T2H", 1.80, 0.60, 120,
     {"chain": "ethereum",
