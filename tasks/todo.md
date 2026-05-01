@@ -125,10 +125,14 @@ Total **ETH strats : 118 → 168**. Total **SHADOW_STRATEGIES : 648 → 698**.
 | **36 ETH age-band shadows v14e.53b** (A3to6/A6to12/A12to24) | 0 | 15 par strat | ~7-14j (Mai 9-16) |
 | **5 AGE6H_ETH_* shadows** sweet spot 3-6h | 0 | 15 | ~7-14j |
 | **9 ETH_RECALL relaxed** (DIP10/ANY/AGE6to12) | 0 | 10 | ~10-14j (recall ETH rare) |
-| BSR_MCAP_AB SOL | 11 | 30 | ~7-10j |
-| KW_AB SOL | 4 | 30 | ~10j |
-| SCORE_V2_AB | data collection | AUC vs rt_score sur N=30 | ~3j |
-| ETH BSR55 (5 strats) | 11 | 30 | ~Mai 7-10 |
+| BSR_MCAP_AB SOL (4 strats `_BSR_MCAP`) | 11 | 30 | ~7-10j |
+| KW_AB SOL (5 strats `_KW34`) | 4 | 30 | ~10j |
+| KW_AB ETH (3 strats `_KW26`) | 3 | 30 | ~14j |
+| SCORE_V2_AB (rt_score_v2 collecté) | data collection | AUC vs rt_score sur N=30 | ~3j |
+| ETH BSR55 (KEPT v14e.49b, 5 strats) | 11 | 30 | ~Mai 7-10 |
+| W1-W5 paired-tests (SCALP, AGE, LOCK, ETH winner cluster) | varies | 30 | Mai 03-10 |
+| W9b RECALL family verdict par bucket | varies | 30 | Mai 26-Juin 5 |
+| T2 sell slip drift twin pairs | varies | 200 | ~Mai 03-05 |
 
 ---
 
@@ -138,13 +142,37 @@ _(rien d'urgent — live paused, shadow gather data tranquillement)_
 
 ---
 
-## 📋 Backlog post-shadow-verdict
+## 🔧 Backlog technique (pas urgent)
 
-1. **Resume live** quand un winner shadow émerge (N≥15 + paired-test +5pp vs baseline)
+- [ ] **R2** — Profiler `process_and_push` si lag >30s revient.
+- [ ] **T3** — `_eth_round_trip_smoke.py --execute` mensuel ou si base_fee >5 gwei.
+- [ ] **T8** — Auto-apply JSONB diff via PR si signal stable 4 sem K1/K2.
+- [ ] **T9-T10** — Dead-day filter (`_compute_day_regime`) — priorité basse.
+- [ ] **T11-T16** — Idées mécaniques nouvelles à tester en shadow :
+  - DELAY entry (attendre N sec après le call avant d'acheter)
+  - CIRCUIT BREAKER (skip buy si N losses consécutives en X min)
+  - VOLUME drop exit (sortie si volume drop >X%)
+  - LIQ-pull exit (sortie si liquidité drop >X%)
+  - MULTI-KOL confirmation (require N KOLs different sur même token)
+  - TIME-based BE (BE activation par durée plutôt que par %)
+- [ ] **LOCK polling alignment (parqué)** — appliquer `polling_sec=60 + median_5` aux LOCK SOL/ETH si BE25 confirme post-bump.
+
+---
+
+## 📋 Backlog post-shadow-verdict (séquencé)
+
+1. **Resume live** quand un winner shadow émerge (N≥15 + paired-test +5pp vs baseline). Backup config disponible : `data/rt_trade_config_pre_pause_20260501T221242Z.json`
 2. **Kill RECALL_PEAK*** (15 strats mortes en 14d) → cleanup code
 3. **Promote AGE48 top 3** en paper main si confirmé sur N élargi
-4. **AGE24/AGE48 unification** → si A1to3 = sweet spot, refactorer les AGE48 existants
-5. **Schema migration** : index sur `paper_trades(token_address, source, status)` pour accélérer les audits cluster (queries 14d-30d devient lent à >100K rows)
+4. **AGE24/AGE48 unification** → si A1to3 = sweet spot SOL, refactorer les AGE existants
+5. **Schema migration** : index sur `paper_trades(token_address, source, status)` pour accélérer les audits cluster (queries 14d-30d lentes à >100K rows)
+
+---
+
+## ⏸️ Tâches en suspens (à reprendre quand contexte le permet)
+
+- [ ] **Test BE15_LOCK5 hypothèse slip-sensitivity** (parked v14e.49e) — LOCK 5% très proche entrée → SL fire en cascade sur slip wobble. Si N≥10 et drift > -8pp vs shadow → kill. Si drift ≈ -3pp comme BE25_LOCK10 → garder. **Verdict v14e.50 N=28** : drift médian -2.36pp = 2× LOCK10 (-1.20pp) mais pas disqualifiant. Garder en observation.
+- [ ] **Rolling windows feature review** — committed v14e.49i. Revoir `analyze_mega_sweep.py` pour validation user.
 
 ---
 
