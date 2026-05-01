@@ -54,6 +54,35 @@ Plus un sweet spot retrade **gap [6-12h]** (avg +22.68% WR 76% +$1999/14d).
 - ✅ Age-band grid étendu : **17 mécaniques × 3 bands = 51 shadows** (était limité aux 5 live, étendu à TP100/150/200, FAST_TP100_SL20, BE25_LOCK10/15, SCALP, SLOW4H/6H, etc.)
 - ✅ Total **SHADOW_STRATEGIES : 648** (était 612 v14e.52, 585 pré-session)
 
+### v14e.53b (May 2) — ETH age-band grid + RECALL relaxed (mirror SOL avec ajustements)
+14d audit ETH (`scripts/_eth_profitable.py`) révèle pattern **INVERSE de SOL** :
+```
+ETH 1er call par age:
+[ 0- 1h]  N=2618  avg= +2.53%  +$4977   (SOL était NEGATIF -$45K !)
+[ 1- 3h]  N= 717  avg= -7.52%  -$4814   (SOL était sweet spot +$10K)
+[ 3- 6h]  N= 261  avg=+21.67%  +$7002   *** SWEET SPOT 1 ETH ***
+[ 6-12h]  N= 357  avg=+15.64%  +$3848   *** SWEET SPOT 2 ETH ***
+[12-24h]  N=  15  avg=-23.77%   -$713
+[24-48h]  N=  97  avg=-16.50%  -$3200   (SOL était sweet spot +$28K !)
+
+ETH retrades par GAP:
+[ 6-12h]  N=68  avg=+31.04%  +$1207     *** SWEET SPOT RETRADE ETH ***
+```
+ETH RECALL : **0 trades en 14d** sur 11 strats existantes (default `max_age_hours=12` ETH bloque tout recall, qui par def est >30min après 1er call).
+
+**50 nouveaux ETH shadows v14e.53b** :
+- ✅ **36 ETH age-bands** : 12 mécaniques × 3 bands (A3to6, A6to12, A12to24)
+  - Mécaniques : ETH_TP200_SL40_2H_NZ_S40, ETH_BE50_TP150_SL40_T2H, ETH_BE30_TP100_SL40, ETH_FAST_TP200_SL40_60M_MCAP_S40, ETH_TP80_SL40_T2H, ETH_FAST60_TP100_SL50_NZ_S40, ETH_TP100_SL50, ETH_FAST_TP100_SL20, ETH_BE25_LOCK10_TP100_SL20, ETH_BE25_LOCK15_TP100_SL40_T2H, ETH_BE25_LOCK20_TP100_SL30, ETH_BE50_LOCK25_TP200_SL40
+- ✅ **5 AGE6H_ETH_*** sur sweet spot 3-6h (BE30, BE25_LOCK15_T2H, FAST_TP100_SL20, TP200_SL40_2H, BE50_TP150_SL40_T2H)
+- ✅ **9 ETH_RECALL relaxed** : DIP10×2, ANY×2, AGE6to12×5 (override max_age_hours=72 pour bypass le default ETH 12h)
+
+Différences vs SOL (pattern miroir) :
+- ETH age bands sur **3-6h, 6-12h, 12-24h** (PAS 1-3h ni 24-48h qui saignent ETH)
+- ETH AGE6H = sweet spot **3-6h** (vs SOL AGE3H = 1-3h)
+- ETH RECALL avec `max_age_hours=72` explicite (override le default ETH 12h qui bloquait tout)
+
+Total **ETH strats : 118 → 168**. Total **SHADOW_STRATEGIES : 648 → 698**.
+
 ---
 
 ## 🔬 Decision rules — verdict shadow grid (~7-14 jours)
@@ -75,10 +104,13 @@ Plus un sweet spot retrade **gap [6-12h]** (avg +22.68% WR 76% +$1999/14d).
 
 | Item | N actuel | N cible | ETA |
 |---|---:|---:|---|
-| **51 age-band shadows v14e.52/53** | 0 | 15 par strat | ~7-14j (Mai 9-16) |
-| **6 AGE3H_* shadows** | 0 | 15 | ~7-10j |
-| **6 RECALL_AGE6to12_* shadows** | 0 | 10 | ~10-14j (depend retrade frequency) |
-| **12 RECALL_DIP10/ANY shadows v14e.51** | 0 | 15 | ~10j |
+| **51 SOL age-band shadows v14e.52/53** | 0 | 15 par strat | ~7-14j (Mai 9-16) |
+| **6 AGE3H_* SOL shadows** | 0 | 15 | ~7-10j |
+| **6 RECALL_AGE6to12_* SOL shadows** | 0 | 10 | ~10-14j (depend retrade frequency) |
+| **12 RECALL_DIP10/ANY SOL shadows v14e.51** | 0 | 15 | ~10j |
+| **36 ETH age-band shadows v14e.53b** (A3to6/A6to12/A12to24) | 0 | 15 par strat | ~7-14j (Mai 9-16) |
+| **5 AGE6H_ETH_* shadows** sweet spot 3-6h | 0 | 15 | ~7-14j |
+| **9 ETH_RECALL relaxed** (DIP10/ANY/AGE6to12) | 0 | 10 | ~10-14j (recall ETH rare) |
 | BSR_MCAP_AB SOL | 11 | 30 | ~7-10j |
 | KW_AB SOL | 4 | 30 | ~10j |
 | SCORE_V2_AB | data collection | AUC vs rt_score sur N=30 | ~3j |
@@ -147,7 +179,24 @@ _(rien d'urgent — live paused, shadow gather data tranquillement)_
 - ETH : cron `22:00 UTC tous les 2 jours`, single job.
 - Persist top-30+50 dans `mega_sweep_runs` Supabase.
 
-### Shadow registry — 648 strats actives (v14e.53)
+### Pattern critique : SOL ↔ ETH sont OPPOSÉS sur l'âge des tokens
+
+```
+                SOL (14d)         ETH (14d)
+[ 0- 1h]    -$45K  saigne     +$5K   positif
+[ 1- 3h]    +$10K  sweet 1    -$5K   saigne
+[ 3- 6h]    -$32K  saigne     +$7K   sweet 1
+[ 6-12h]    -$25K  saigne     +$4K   sweet 2
+[12-24h]    -$21K  saigne     -$1K   saigne (les deux)
+[24-48h]    +$28K  sweet 2    -$3K   saigne
+[48-72h]    -$13K  saigne     +$0.6K positif (N petit)
+
+Retrade gap [6-12h]: SOL +22% / ETH +31%  (les deux profitable)
+```
+
+**Implication** : pas de strat one-size-fits-all. Les filters age/RECALL doivent être **chain-aware**. Le default `max_age_hours=12` ETH (paper_trader.py:282) est bien calibré ETH. Sur SOL le filter `max_age_hours=12` v14e.51 sur les 5 live laisse passer les 3-12h qui saignent — verdict shadow A1to3 va dire si on doit resserrer encore.
+
+### Shadow registry — 698 strats actives (v14e.53b)
 | Family | Count | Sweet spot tested |
 |--------|---:|---|
 | BE | ~33 SOL / 9 ETH | A1to3, A3to12, A24to48 (BE25 5 mecaniques) |

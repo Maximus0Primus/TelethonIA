@@ -3692,6 +3692,167 @@ _add_recall("ETH_RECALL_PEAK50_BE25_LOCK10_TP150_SL40_T4H", 2.50, 0.60, 240,
     be_act=0.25, be_lock=0.10)
 
 
+# ============================================================
+# v14e.53b (May 2) — ETH age-band grid + RECALL relaxed (mirror v14e.52/53 SOL).
+# ----------------------------------------------------------------
+# 14d ETH profitability audit (scripts/_eth_profitable.py): pattern INVERSE of SOL.
+#   [ 0- 1h]  N=2618  avg= +2.53%  +$4977   (positive — SOL was -$45K !)
+#   [ 1- 3h]  N= 717  avg= -7.52%  -$4814   (NEGATIVE — SOL was +$10K sweet spot)
+#   [ 3- 6h]  N= 261  avg=+21.67%  +$7002   *** SWEET SPOT 1 ETH ***
+#   [ 6-12h]  N= 357  avg=+15.64%  +$3848   *** SWEET SPOT 2 ETH ***
+#   [12-24h]  N=  15  avg=-23.77%   -$713   (small N but clear)
+#   [24-48h]  N=  97  avg=-16.50%  -$3200   (saigne — SOL was +$28K sweet spot !)
+#
+# AGE24_ETH (existing): WR 66% avg +25.63% +$160/d  (GOLD)
+# AGE48_ETH (existing): WR 25% avg -15.31% -$19/d   (saigne — kill candidate)
+#
+# ETH RECALL_*: 0 trades in 14d on 11 strats. Cause: max_age_hours=12 default
+# on ETH blocks recalls (recall by definition >30min after 1st call → token
+# already mature). Need to override default to >12h on ETH RECALL.
+#
+# ETH retrades sweet spot: gap [6-12h] N=68 avg=+31.04% +$1207 (better than SOL's +22%).
+#
+# Bands chosen for ETH (different from SOL):
+#   - A3to6:  sweet spot 1 (+$7K, WR 69%)
+#   - A6to12: sweet spot 2 (+$3.8K, WR 56%)
+#   - A12to24: tiny N but negative — A/B verdict ref
+# Skip A1to3 (saigne -$4.8K) and A24to48 (saigne -$3.2K, AGE48_ETH already covers).
+# ============================================================
+
+def _add_eth_age_band_clone(name, base_spec, min_age, max_age, extra_filt=None):
+    """Register a SHADOW ETH clone with a specific age band.
+    Forces chain=ethereum (overrides the default 12h cap via explicit max_age_hours)."""
+    STRATEGIES[name] = [dict(s) for s in base_spec]
+    filt = {"chain": "ethereum", "min_age_hours": min_age, "max_age_hours": max_age}
+    if extra_filt:
+        filt.update(extra_filt)
+    STRATEGY_FILTERS[name] = filt
+    SHADOW_STRATEGIES.append(name)
+
+
+_ETH_MECHANIC_SPECS = {
+    # Top performers from 14d audit
+    "ETH_TP200_SL40_2H_NZ_S40":           [{"pct": 1.0, "tp_mult": 3.00, "sl_mult": 0.60, "horizon_min": 120, "label": "main"}],
+    "ETH_BE50_TP150_SL40_T2H":            [{"pct": 1.0, "tp_mult": 2.50, "sl_mult": 0.60, "horizon_min": 120,
+                                            "be_activation": 0.50, "label": "main"}],
+    "ETH_BE30_TP100_SL40":                [{"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.60, "horizon_min": 30,
+                                            "be_activation": 0.30, "label": "main"}],
+    "ETH_FAST_TP200_SL40_60M_MCAP_S40":   [{"pct": 1.0, "tp_mult": 3.00, "sl_mult": 0.60, "horizon_min": 60, "label": "main"}],
+    "ETH_TP80_SL40_T2H":                  [{"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.60, "horizon_min": 120, "label": "main"}],
+    "ETH_FAST60_TP100_SL50_NZ_S40":       [{"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.50, "horizon_min": 60, "label": "main"}],
+    "ETH_TP100_SL50":                     [{"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.50, "horizon_min": 30, "label": "main"}],
+    "ETH_FAST_TP100_SL20":                [{"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.80, "horizon_min": 30, "label": "main"}],
+    "ETH_BE25_LOCK10_TP100_SL20":         [{"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.80, "horizon_min": 30,
+                                            "be_activation": 0.25, "be_lock_pct": 0.10, "label": "main"}],
+    "ETH_BE25_LOCK15_TP100_SL40_T2H":     [{"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.60, "horizon_min": 120,
+                                            "be_activation": 0.25, "be_lock_pct": 0.15, "label": "main"}],
+    "ETH_BE25_LOCK20_TP100_SL30":         [{"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.70, "horizon_min": 30,
+                                            "be_activation": 0.25, "be_lock_pct": 0.20, "label": "main"}],
+    "ETH_BE50_LOCK25_TP200_SL40":         [{"pct": 1.0, "tp_mult": 3.00, "sl_mult": 0.60, "horizon_min": 30,
+                                            "be_activation": 0.50, "be_lock_pct": 0.25, "label": "main"}],
+}
+
+# 12 mechanics x 3 bands (A3to6, A6to12, A12to24) = 36 ETH age-band shadows
+for _eth_mech_name, _eth_spec in _ETH_MECHANIC_SPECS.items():
+    _extra = {}
+    # Preserve filter sub-keys present in original ETH strats (S40, NZ_S40, MCAP_S40, etc.)
+    if "_NZ_S40" in _eth_mech_name or "_S40" in _eth_mech_name:
+        _extra["min_rt_score"] = 40
+    if "_NZ_" in _eth_mech_name:
+        _extra["min_liquidity_usd"] = 1
+    if "_MCAP_" in _eth_mech_name:
+        _extra.update({"min_mcap": 30_000, "max_mcap": 500_000})
+    _add_eth_age_band_clone(f"{_eth_mech_name}_A3to6",   _eth_spec, 3, 6,   _extra)
+    _add_eth_age_band_clone(f"{_eth_mech_name}_A6to12",  _eth_spec, 6, 12,  _extra)
+    _add_eth_age_band_clone(f"{_eth_mech_name}_A12to24", _eth_spec, 12, 24, _extra)
+
+
+# AGE6H_ETH_* family — sweet spot 3-6h (top of all 1st-call windows, +$7K 14d)
+# 5 mechanics tested
+STRATEGIES["AGE6H_ETH_BE30_TP100_SL40"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.60, "horizon_min": 30,
+     "be_activation": 0.30, "label": "main"},
+]
+STRATEGY_FILTERS["AGE6H_ETH_BE30_TP100_SL40"] = {
+    "chain": "ethereum", "min_age_hours": 3, "max_age_hours": 6,
+}
+SHADOW_STRATEGIES.append("AGE6H_ETH_BE30_TP100_SL40")
+
+STRATEGIES["AGE6H_ETH_BE25_LOCK15_TP100_SL40_T2H"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.60, "horizon_min": 120,
+     "be_activation": 0.25, "be_lock_pct": 0.15, "label": "main"},
+]
+STRATEGY_FILTERS["AGE6H_ETH_BE25_LOCK15_TP100_SL40_T2H"] = {
+    "chain": "ethereum", "min_age_hours": 3, "max_age_hours": 6,
+}
+SHADOW_STRATEGIES.append("AGE6H_ETH_BE25_LOCK15_TP100_SL40_T2H")
+
+STRATEGIES["AGE6H_ETH_FAST_TP100_SL20"] = [
+    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.80, "horizon_min": 30, "label": "main"},
+]
+STRATEGY_FILTERS["AGE6H_ETH_FAST_TP100_SL20"] = {
+    "chain": "ethereum", "min_age_hours": 3, "max_age_hours": 6,
+}
+SHADOW_STRATEGIES.append("AGE6H_ETH_FAST_TP100_SL20")
+
+STRATEGIES["AGE6H_ETH_TP200_SL40_2H"] = [
+    {"pct": 1.0, "tp_mult": 3.00, "sl_mult": 0.60, "horizon_min": 120, "label": "main"},
+]
+STRATEGY_FILTERS["AGE6H_ETH_TP200_SL40_2H"] = {
+    "chain": "ethereum", "min_age_hours": 3, "max_age_hours": 6,
+}
+SHADOW_STRATEGIES.append("AGE6H_ETH_TP200_SL40_2H")
+
+STRATEGIES["AGE6H_ETH_BE50_TP150_SL40_T2H"] = [
+    {"pct": 1.0, "tp_mult": 2.50, "sl_mult": 0.60, "horizon_min": 120,
+     "be_activation": 0.50, "label": "main"},
+]
+STRATEGY_FILTERS["AGE6H_ETH_BE50_TP150_SL40_T2H"] = {
+    "chain": "ethereum", "min_age_hours": 3, "max_age_hours": 6,
+}
+SHADOW_STRATEGIES.append("AGE6H_ETH_BE50_TP150_SL40_T2H")
+
+
+# ETH RECALL relaxed — fix the "0 trades in 14d" issue.
+# Default ETH max_age_hours=12 was implicitly applied; here we override with
+# max_hours_since_first (recall age) and skip the implicit age cap by setting
+# max_age_hours=72 explicitly. Plus relax drift (DIP10/ANY) and target the
+# 6-12h retrade sweet spot.
+_add_recall("ETH_RECALL_DIP10_TP50_SL30_2H", 1.50, 0.70, 120,
+    {"chain": "ethereum", "max_age_hours": 72,
+     "min_recall_drift": -0.50, "max_recall_drift": -0.10, "max_hours_since_first": 24})
+_add_recall("ETH_RECALL_DIP10_BE25_TP80_SL40_T2H", 1.80, 0.60, 120,
+    {"chain": "ethereum", "max_age_hours": 72,
+     "min_recall_drift": -0.50, "max_recall_drift": -0.10, "max_hours_since_first": 24},
+    be_act=0.25)
+_add_recall("ETH_RECALL_ANY_TP50_SL30_2H", 1.50, 0.70, 120,
+    {"chain": "ethereum", "max_age_hours": 72,
+     "max_hours_since_first": 24})
+_add_recall("ETH_RECALL_ANY_BE25_TP80_SL40_T2H", 1.80, 0.60, 120,
+    {"chain": "ethereum", "max_age_hours": 72,
+     "max_hours_since_first": 24},
+    be_act=0.25)
+# Sweet spot retrade ETH: gap 6-12h after 1st call = +31% avg / WR 63%
+_add_recall("ETH_RECALL_AGE6to12_TP50_SL30", 1.50, 0.70, 120,
+    {"chain": "ethereum", "max_age_hours": 72,
+     "min_hours_since_first": 6, "max_hours_since_first": 12})
+_add_recall("ETH_RECALL_AGE6to12_BE30_TP100_SL40", 2.00, 0.60, 30,
+    {"chain": "ethereum", "max_age_hours": 72,
+     "min_hours_since_first": 6, "max_hours_since_first": 12},
+    be_act=0.30)
+_add_recall("ETH_RECALL_AGE6to12_BE25_LOCK15_TP100_SL40_T2H", 2.00, 0.60, 120,
+    {"chain": "ethereum", "max_age_hours": 72,
+     "min_hours_since_first": 6, "max_hours_since_first": 12},
+    be_act=0.25, be_lock=0.15)
+_add_recall("ETH_RECALL_AGE6to12_BE50_TP150_SL40_T2H", 2.50, 0.60, 120,
+    {"chain": "ethereum", "max_age_hours": 72,
+     "min_hours_since_first": 6, "max_hours_since_first": 12},
+    be_act=0.50)
+_add_recall("ETH_RECALL_AGE6to12_TP200_SL40_2H", 3.00, 0.60, 120,
+    {"chain": "ethereum", "max_age_hours": 72,
+     "min_hours_since_first": 6, "max_hours_since_first": 12})
+
+
 # ---------------------------------------------------------------------------
 # v14e — Chain-indexed strategy registry.
 # ---------------------------------------------------------------------------
