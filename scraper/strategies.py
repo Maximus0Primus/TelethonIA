@@ -3199,84 +3199,10 @@ STRATEGY_FILTERS["ETH_RECALL_DIP30_S30_TP50_SL30"] = {
 }
 SHADOW_STRATEGIES.append("ETH_RECALL_DIP30_S30_TP50_SL30")
 
-# ============================================================
-# v14e.41 — PEAK-based recall family (pump-then-dump pattern).
-# Catches the $PARANOID 27 Apr scenario: 1st KOL calls, pump +72%,
-# then dumps -54% from peak before next KOL recalls. Drift_vs_1st
-# only -21% (filtered out by DIP30) but drift_vs_peak = -54%
-# (passes DIP30/DIP50 peak filters). Post-recall ran +220% (3x).
-#
-# Uses kol_call_outcomes.ath_after_call as the peak reference. If
-# null (peak not yet computed), strats requiring peak drift skip.
-# ============================================================
-
-# SOL — recall after deep dip from peak (-50 to -30%)
-STRATEGIES["RECALL_PEAK30_TP50_SL30"] = [
-    {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.70, "horizon_min": 120, "label": "main"},
-]
-STRATEGY_FILTERS["RECALL_PEAK30_TP50_SL30"] = {
-    "require_recall": True,
-    "min_drift_vs_peak": -0.50, "max_drift_vs_peak": -0.30,
-    "max_hours_since_first": 6,
-}
-SHADOW_STRATEGIES.append("RECALL_PEAK30_TP50_SL30")
-
-# Deeper peak dump (-70 to -50%) — the $PARANOID sweet spot
-STRATEGIES["RECALL_PEAK50_TP100_SL40_6H"] = [
-    {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.60, "horizon_min": 360, "label": "main"},
-]
-STRATEGY_FILTERS["RECALL_PEAK50_TP100_SL40_6H"] = {
-    "require_recall": True,
-    "min_drift_vs_peak": -0.70, "max_drift_vs_peak": -0.50,
-    "max_hours_since_first": 6,
-}
-SHADOW_STRATEGIES.append("RECALL_PEAK50_TP100_SL40_6H")
-
-# Wide TP for the moonshot end of pump-dump-rebuy
-STRATEGIES["RECALL_PEAK50_TP200_SL50_6H"] = [
-    {"pct": 1.0, "tp_mult": 3.00, "sl_mult": 0.50, "horizon_min": 360, "label": "main"},
-]
-STRATEGY_FILTERS["RECALL_PEAK50_TP200_SL50_6H"] = {
-    "require_recall": True,
-    "min_drift_vs_peak": -0.85, "max_drift_vs_peak": -0.50,
-    "max_hours_since_first": 12,
-}
-SHADOW_STRATEGIES.append("RECALL_PEAK50_TP200_SL50_6H")
-
-# Quick recovery scalp (15-30 min after 1st, dip from peak ≥30%)
-STRATEGIES["RECALL_PEAK30_FAST_TP50_SL30"] = [
-    {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.70, "horizon_min": 30, "label": "main"},
-]
-STRATEGY_FILTERS["RECALL_PEAK30_FAST_TP50_SL30"] = {
-    "require_recall": True,
-    "min_drift_vs_peak": -0.70, "max_drift_vs_peak": -0.30,
-    "min_hours_since_first": 0.15, "max_hours_since_first": 2,
-}
-SHADOW_STRATEGIES.append("RECALL_PEAK30_FAST_TP50_SL30")
-
-# Same with BE25 lock for the ones that pop then dump again
-STRATEGIES["RECALL_PEAK30_BE25_TP80_SL30"] = [
-    {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.70, "horizon_min": 120,
-     "be_activation": 0.25, "label": "main"},
-]
-STRATEGY_FILTERS["RECALL_PEAK30_BE25_TP80_SL30"] = {
-    "require_recall": True,
-    "min_drift_vs_peak": -0.85, "max_drift_vs_peak": -0.30,
-    "max_hours_since_first": 6,
-}
-SHADOW_STRATEGIES.append("RECALL_PEAK30_BE25_TP80_SL30")
-
-# ETH peak variant
-STRATEGIES["ETH_RECALL_PEAK30_TP50_SL30"] = [
-    {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.70, "horizon_min": 120, "label": "main"},
-]
-STRATEGY_FILTERS["ETH_RECALL_PEAK30_TP50_SL30"] = {
-    "chain": "ethereum",
-    "require_recall": True,
-    "min_drift_vs_peak": -0.70, "max_drift_vs_peak": -0.30,
-    "max_hours_since_first": 6,
-}
-SHADOW_STRATEGIES.append("ETH_RECALL_PEAK30_TP50_SL30")
+# v14e.41 PEAK family REMOVED v14e.55 (May 2): kol_call_outcomes.ath_after_call
+# fill rate = 5.0% over 14d (1667/2720 NULL outcome_status, 976 dead_no_ohlcv).
+# All PEAK variants skipped at evaluation — 0 trades 14d. Re-add only after
+# outcome_tracker fill rate ≥50% (see todo backlog).
 
 # ============================================================
 # v14e.41 — RECALL × proven mechanics matrix.
@@ -3383,48 +3309,7 @@ _add_recall("RECALL_DIP30_AGE6H_LOCK10_TP100_SL40", 2.00, 0.60, 240,
     be_act=0.25, be_lock=0.10)
 
 
-# --- PEAK family (drift_vs_post-1st-call ATH) — SL≥50% mandatory ---
-# Wider SL variants of the existing peak strats (mèche-survivable)
-_add_recall("RECALL_PEAK30_TP50_SL50", 1.50, 0.50, 120,
-    {"min_drift_vs_peak": -0.70, "max_drift_vs_peak": -0.30, "max_hours_since_first": 6})
-_add_recall("RECALL_PEAK30_TP80_SL50", 1.80, 0.50, 240,
-    {"min_drift_vs_peak": -0.70, "max_drift_vs_peak": -0.30, "max_hours_since_first": 6})
-
-# BE/LOCK on peak dump
-_add_recall("RECALL_PEAK30_BE25_LOCK10_TP100_SL50", 2.00, 0.50, 240,
-    {"min_drift_vs_peak": -0.70, "max_drift_vs_peak": -0.30, "max_hours_since_first": 6},
-    be_act=0.25, be_lock=0.10)
-_add_recall("RECALL_PEAK50_BE25_LOCK15_TP150_SL50_6H", 2.50, 0.50, 360,
-    {"min_drift_vs_peak": -0.85, "max_drift_vs_peak": -0.50, "max_hours_since_first": 12},
-    be_act=0.25, be_lock=0.15)
-
-# FAST/SLOW timeouts on peak
-_add_recall("RECALL_PEAK30_FAST45_TP50_SL50", 1.50, 0.50, 45,
-    {"min_drift_vs_peak": -0.70, "max_drift_vs_peak": -0.30,
-     "min_hours_since_first": 0.15, "max_hours_since_first": 2})
-_add_recall("RECALL_PEAK50_SLOW4H_TP100_SL50", 2.00, 0.50, 240,
-    {"min_drift_vs_peak": -0.85, "max_drift_vs_peak": -0.50, "max_hours_since_first": 6})
-
-# SCALP on peak (capture quick bounce off the dip)
-_add_recall("RECALL_PEAK30_SCALP_TP15_SL20", 1.15, 0.80, 120,
-    {"min_drift_vs_peak": -0.70, "max_drift_vs_peak": -0.30, "max_hours_since_first": 6})
-_add_recall("RECALL_PEAK50_SCALP_TP20_SL30", 1.20, 0.70, 120,
-    {"min_drift_vs_peak": -0.85, "max_drift_vs_peak": -0.50, "max_hours_since_first": 6})
-
-# Wide-TP / extreme moonshots on deep peak dumps (the $PARANOID +220% pattern)
-_add_recall("RECALL_PEAK50_TP100_SL50_6H", 2.00, 0.50, 360,
-    {"min_drift_vs_peak": -0.85, "max_drift_vs_peak": -0.50, "max_hours_since_first": 12})
-_add_recall("RECALL_PEAK50_TP200_SL60_6H", 3.00, 0.40, 360,
-    {"min_drift_vs_peak": -0.85, "max_drift_vs_peak": -0.50, "max_hours_since_first": 12})
-_add_recall("RECALL_PEAK70_TP200_SL50_6H", 3.00, 0.50, 360,
-    {"min_drift_vs_peak": -0.95, "max_drift_vs_peak": -0.70, "max_hours_since_first": 24})
-_add_recall("RECALL_PEAK70_TP500_SL60_6H", 6.00, 0.40, 360,
-    {"min_drift_vs_peak": -0.95, "max_drift_vs_peak": -0.70, "max_hours_since_first": 24})
-
-# Score-gated peak
-_add_recall("RECALL_PEAK30_S30_TP80_SL50", 1.80, 0.50, 240,
-    {"min_drift_vs_peak": -0.70, "max_drift_vs_peak": -0.30,
-     "max_hours_since_first": 6, "min_rt_score": 30})
+# SOL PEAK matrix REMOVED v14e.55 (May 2) — see top of v14e.41 PEAK section.
 
 
 # ============================================================
@@ -3680,16 +3565,7 @@ _add_recall("ETH_RECALL_DIP30_TP150_SL50_4H", 2.50, 0.50, 240,
 _add_recall("ETH_RECALL_DIP30_SLOW4H_TP100_SL50", 2.00, 0.50, 240,
     {"chain": "ethereum",
      "min_recall_drift": -0.70, "max_recall_drift": -0.30, "max_hours_since_first": 48})
-_add_recall("ETH_RECALL_PEAK30_TP100_SL50", 2.00, 0.50, 240,
-    {"chain": "ethereum",
-     "min_drift_vs_peak": -0.70, "max_drift_vs_peak": -0.30, "max_hours_since_first": 6})
-_add_recall("ETH_RECALL_PEAK50_TP200_SL50_6H", 3.00, 0.50, 360,
-    {"chain": "ethereum",
-     "min_drift_vs_peak": -0.85, "max_drift_vs_peak": -0.50, "max_hours_since_first": 12})
-_add_recall("ETH_RECALL_PEAK50_BE25_LOCK10_TP150_SL40_T4H", 2.50, 0.60, 240,
-    {"chain": "ethereum",
-     "min_drift_vs_peak": -0.85, "max_drift_vs_peak": -0.50, "max_hours_since_first": 12},
-    be_act=0.25, be_lock=0.10)
+# ETH PEAK strats REMOVED v14e.55 (May 2) — same reason as SOL PEAK family.
 
 
 # ============================================================

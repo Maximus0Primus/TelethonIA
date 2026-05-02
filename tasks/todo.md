@@ -138,7 +138,13 @@ Total **ETH strats : 118 → 168**. Total **SHADOW_STRATEGIES : 648 → 698**.
 
 ## 🔴 User action requise
 
-_(rien d'urgent — live paused, shadow gather data tranquillement)_
+### MEGA-SWEEP SOL en panne (timeout cap 6h GH free-tier)
+- **Statut** : 5 runs cancelled sur 6 derniers (Apr 27 → May 1). Dernier success = Apr 29 15:05 (run 25116811803). ETH workflow OK (last success May 1 22:53).
+- **Run dispatch test** : `25261805651` lancé May 2 21:02 UTC pour confirmer/infirmer le timeout. À checker au prochain retour de session.
+  - Si ✅ success → fluke (queue GH chargée), pas d'action immédiate. Pull top robust pour décisions promote.
+  - Si ❌ cancelled → option B : ajouter flag `--mega-strat-shard` dans `sim.py` pour passer de 3 à 4 shards (split jupiter en 2 par range de strats). ~30 lignes, 0 perte de précision (juste parallélisation plus fine).
+- **NOT possible** : self-hosted runner sur VPS (rejeté user).
+- Workflow : `.github/workflows/mega-sweep-48h.yml`
 
 ---
 
@@ -148,24 +154,18 @@ _(rien d'urgent — live paused, shadow gather data tranquillement)_
 - [ ] **T3** — `_eth_round_trip_smoke.py --execute` mensuel ou si base_fee >5 gwei.
 - [ ] **T8** — Auto-apply JSONB diff via PR si signal stable 4 sem K1/K2.
 - [ ] **T9-T10** — Dead-day filter (`_compute_day_regime`) — priorité basse.
-- [ ] **T11-T16** — Idées mécaniques nouvelles à tester en shadow :
-  - DELAY entry (attendre N sec après le call avant d'acheter)
-  - CIRCUIT BREAKER (skip buy si N losses consécutives en X min)
-  - VOLUME drop exit (sortie si volume drop >X%)
-  - LIQ-pull exit (sortie si liquidité drop >X%)
-  - MULTI-KOL confirmation (require N KOLs different sur même token)
-  - TIME-based BE (BE activation par durée plutôt que par %)
 - [ ] **LOCK polling alignment (parqué)** — appliquer `polling_sec=60 + median_5` aux LOCK SOL/ETH si BE25 confirme post-bump.
+- [ ] **outcome_tracker fill rate** — diagnostiquer pourquoi 61% des `kol_call_outcomes` ont `outcome_status=NULL` 14d et 36% sont `dead_no_ohlcv`. Si fill remonte à ≥50%, ré-ajouter 3-5 RECALL_PEAK shadows (mécanique $PARANOID +220% encore intéressante en théorie).
 
 ---
 
 ## 📋 Backlog post-shadow-verdict (séquencé)
 
 1. **Resume live** quand un winner shadow émerge (N≥15 + paired-test +5pp vs baseline). Backup config disponible : `data/rt_trade_config_pre_pause_20260501T221242Z.json`
-2. **Kill RECALL_PEAK*** (15 strats mortes en 14d) → cleanup code
+2. ~~Kill RECALL_PEAK*~~ — ✅ DONE May 2 22:45 UTC. 22 PEAK strats supprimées (5 SOL initial + 1 ETH initial + 13 SOL _add_recall + 3 ETH _add_recall). SHADOW_STRATEGIES: 698 → 676. Cause root: `kol_call_outcomes.ath_after_call` fill rate = 5.0% sur 14d (1667/2720 NULL outcome_status, 976 dead_no_ohlcv) → 0 trades 14d sur toute la family. Re-add seulement si outcome_tracker fill rate ≥50%.
 3. **Promote AGE48 top 3** en paper main si confirmé sur N élargi
 4. **AGE24/AGE48 unification** → si A1to3 = sweet spot SOL, refactorer les AGE existants
-5. **Schema migration** : index sur `paper_trades(token_address, source, status)` pour accélérer les audits cluster (queries 14d-30d lentes à >100K rows)
+5. ~~Schema migration index `paper_trades`~~ — ✅ DONE May 2 22:30 UTC. Index `idx_paper_trades_strategy_status_created` créé sur `(strategy, status, created_at DESC)` (changement vs todo originale `(token_address, source, status)` qui était sous-optimal — `source` n'a que 2 valeurs distinctes, et `(token_address, status)` existe déjà via `idx_paper_trades_token`). Vérifié EXPLAIN sur audit 6 strats × 14d : index utilisé, 6.0ms pour 1281 rows.
 
 ---
 
