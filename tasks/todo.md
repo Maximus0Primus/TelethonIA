@@ -1,4 +1,4 @@
-# Pipeline Status — v14e.53 (May 2, 2026 — LIVE PAUSED)
+# Pipeline Status — v14e.55 (May 2, 2026 — LIVE PAUSED)
 
 ## 🛑 LIVE TRADING PAUSED (May 2 22:12 UTC)
 
@@ -30,7 +30,15 @@ Plus un sweet spot retrade **gap [6-12h]** (avg +22.68% WR 76% +$1999/14d).
 
 ---
 
-## 🟢 Cette session — v14e.50 → v14e.53 deployed
+## 🟢 Cette session — v14e.50 → v14e.55 deployed
+
+### v14e.55 (May 2 23:00 UTC) — Score V3 + RECALL_PEAK kill + DB index
+- ✅ **Score V3** (`safe_scraper._rt_compute_score_v3`) : V1 base + binned bonuses sur sweet spots SOL 7j (MCAP 50-100k +15, AGE 1-3h +10, AGE 24-72h +8, MCAP ≥1M -10, AGE 3-6h -8, LIQ <10k -10). In-sample AUC 0.562 vs V1 0.534 (+0.028). Filter ≥35 : WR +1.92pp et avg PnL 2× sur 3j. **Persisté en parallèle** (col `rt_score_v3` ajoutée à `paper_trades`), pas utilisé en filter, walk-forward attendu Mai 9-16.
+- ✅ **V2 dépréciée** (kept for backward compat) : audit N=37K paired montre AUC 0.486 (anti-prédictif). Les 4 features V2 (kol_wr, BSR, vol, mcap linéaires) sont individuellement anti-prédictives.
+- ✅ **RECALL_PEAK kill** : 22 strats supprimées (`kol_call_outcomes.ath_after_call` fill rate 5%). SHADOW_STRATEGIES 698 → 676.
+- ✅ **DB index** `idx_paper_trades_strategy_status_created` (strategy, status, created_at DESC) — accélère audits per-strat 14d-30d.
+
+
 
 ### v14e.50 (May 1) — Inline Solana fees + drift audit infrastructure
 - ✅ `live_trader.py` : `_fetch_tx_fee_lamports()` + `_tx_fee_usd()` inline → chaque trade enregistre `gas_usd_buy/sell` à l'insert (Helius RPC si `HELIUS_API_KEY`)
@@ -118,21 +126,21 @@ Total **ETH strats : 118 → 168**. Total **SHADOW_STRATEGIES : 648 → 698**.
 
 | Item | N actuel | N cible | ETA |
 |---|---:|---:|---|
-| **51 SOL age-band shadows v14e.52/53** | 0 | 15 par strat | ~7-14j (Mai 9-16) |
-| **6 AGE3H_* SOL shadows** | 0 | 15 | ~7-10j |
-| **6 RECALL_AGE6to12_* SOL shadows** | 0 | 10 | ~10-14j (depend retrade frequency) |
-| **12 RECALL_DIP10/ANY SOL shadows v14e.51** | 0 | 15 | ~10j |
-| **36 ETH age-band shadows v14e.53b** (A3to6/A6to12/A12to24) | 0 | 15 par strat | ~7-14j (Mai 9-16) |
-| **5 AGE6H_ETH_* shadows** sweet spot 3-6h | 0 | 15 | ~7-14j |
-| **9 ETH_RECALL relaxed** (DIP10/ANY/AGE6to12) | 0 | 10 | ~10-14j (recall ETH rare) |
-| BSR_MCAP_AB SOL (4 strats `_BSR_MCAP`) | 11 | 30 | ~7-10j |
-| KW_AB SOL (5 strats `_KW34`) | 4 | 30 | ~10j |
-| KW_AB ETH (3 strats `_KW26`) | 3 | 30 | ~14j |
-| SCORE_V2_AB (rt_score_v2 collecté) | data collection | AUC vs rt_score sur N=30 | ~3j |
-| ETH BSR55 (KEPT v14e.49b, 5 strats) | 11 | 30 | ~Mai 7-10 |
-| W1-W5 paired-tests (SCALP, AGE, LOCK, ETH winner cluster) | varies | 30 | Mai 03-10 |
-| W9b RECALL family verdict par bucket | varies | 30 | Mai 26-Juin 5 |
-| T2 sell slip drift twin pairs | varies | 200 | ~Mai 03-05 |
+| **51 SOL age-band shadows v14e.52/53** | 0 | 15 par strat | |
+| **6 AGE3H_* SOL shadows** | 0 | 15 | |
+| **6 RECALL_AGE6to12_* SOL shadows** | 0 | 10 | (depend retrade frequency) |
+| **12 RECALL_DIP10/ANY SOL shadows v14e.51** | 0 | 15 |  |
+| **36 ETH age-band shadows v14e.53b** (A3to6/A6to12/A12to24) | 0 | 15 par strat | 
+| **5 AGE6H_ETH_* shadows** sweet spot 3-6h | 0 | 15 | |
+| **9 ETH_RECALL relaxed** (DIP10/ANY/AGE6to12) | 0 | 10 | |
+| BSR_MCAP_AB SOL (4 strats `_BSR_MCAP`) | 11 | 30 | |
+| KW_AB SOL (5 strats `_KW34`) | 4 | 30 | 
+| KW_AB ETH (3 strats `_KW26`) | 3 | 30 | 
+| **SCORE_V3_AB** (rt_score_v3 v14e.55) | 0 (deploy pending) | walk-forward AUC ≥ V1 sur 7-14j out-of-sample | Mai 9-16 |
+| ETH BSR55 (KEPT v14e.49b, 5 strats) | 11 | 30 | 
+| W1-W5 paired-tests (SCALP, AGE, LOCK, ETH winner cluster) | varies | 30 | 
+| W9b RECALL family verdict par bucket | varies | 30 | 
+| T2 sell slip drift twin pairs | varies | 200 | 
 
 ---
 
@@ -150,10 +158,10 @@ Total **ETH strats : 118 → 168**. Total **SHADOW_STRATEGIES : 648 → 698**.
 
 ## 🔧 Backlog technique (pas urgent)
 
+- [ ] **Score V3 walk-forward audit** (Mai 9-16) — sur N≥30 trades fermés post-déploiement v14e.55, recalculer AUC V3 vs V1 sur out-of-sample. Si AUC V3 ≥ V1 + 0.015 → swap `min_rt_score` filter en `min_rt_score_v3` sur le live deck. Si AUC V3 < V1 → garder V1 et investiguer pourquoi les bonuses MCAP/AGE n'ont pas tenu (regime change ?). Script à créer : `scripts/_score_v3_walk_forward.py`.
 - [ ] **R2** — Profiler `process_and_push` si lag >30s revient.
 - [ ] **T3** — `_eth_round_trip_smoke.py --execute` mensuel ou si base_fee >5 gwei.
 - [ ] **T8** — Auto-apply JSONB diff via PR si signal stable 4 sem K1/K2.
-- [ ] **T9-T10** — Dead-day filter (`_compute_day_regime`) — priorité basse.
 - [ ] **LOCK polling alignment (parqué)** — appliquer `polling_sec=60 + median_5` aux LOCK SOL/ETH si BE25 confirme post-bump.
 - [ ] **outcome_tracker fill rate** — diagnostiquer pourquoi 61% des `kol_call_outcomes` ont `outcome_status=NULL` 14d et 36% sont `dead_no_ohlcv`. Si fill remonte à ≥50%, ré-ajouter 3-5 RECALL_PEAK shadows (mécanique $PARANOID +220% encore intéressante en théorie).
 

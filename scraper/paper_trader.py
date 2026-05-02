@@ -1417,6 +1417,7 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
             "_rt_kol_win_rate": "kol_win_rate",
             "_rt_score": "rt_score",
             "_rt_score_v2": "rt_score_v2",  # v14e.43 shadow A/B data collection
+            "_rt_score_v3": "rt_score_v3",  # v14e.55 shadow A/B (binned bonuses on V1 base)
             "_rt_liquidity_usd": "rt_liquidity_usd",
             "_rt_volume_24h": "rt_volume_24h",
             "_rt_buy_sell_ratio": "rt_buy_sell_ratio",

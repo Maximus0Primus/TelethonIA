@@ -1357,10 +1357,11 @@ def _rt_compute_score_v2(kol_info: dict, token_info: dict) -> float:
     Formula (clipped 0-100):
       30*kol_win_rate + 5*min(bsr, 5) + 8*log10(volume+1) + 8*log10(mcap+1)
 
-    Computed AND PERSISTED IN PARALLEL with rt_score for shadow A/B. NOT used
-    for filtering yet — purely data collection until N>=500 closed trades
-    confirms it predicts WR better than the live rt_score. Then we'll
-    propose swapping the filter or adding a SCORE_V2 filter family.
+    v14e.55 (May 2) audit on N=37K paired trades: V2 AUC = 0.486 (anti-predictive).
+    All 4 features are INDIVIDUALLY anti-predictive in current regime:
+    kol_win_rate AUC 0.45, BSR 0.43, vol 0.50, mcap 0.50 — V2 just scaled them.
+    Kept here for backward compatibility (rt_score_v2 column still populated)
+    but superseded by V3 (binned bonuses on V1 base, AUC 0.562). See _rt_compute_score_v3.
     """
     import math
     win_rate = float(kol_info.get("win_rate") or 0)
@@ -1374,6 +1375,42 @@ def _rt_compute_score_v2(kol_info: dict, token_info: dict) -> float:
         + 8.0 * math.log10(max(1.0, mcap))
     )
     return round(max(0.0, min(100.0, score_v2)), 1)
+
+
+def _rt_compute_score_v3(rt_score: float, token_info: dict) -> float:
+    """v14e.55 (May 2) — V1 base + binned bonuses on the strongest non-monotonic
+    signals discovered via 7d SOL audit (N=70,740 closed trades):
+
+      MCAP sweet spot 50-100k:  WR 55.3% vs base 42% (+13pp) — biggest signal
+      AGE sweet spot 1-3h:      WR 52.1% vs base 42% (+10pp)
+      AGE sweet spot 24-72h:    WR 46.7% vs base 42% (+5pp)
+      MCAP >= 1M:               WR 33.8% — dump zone
+      AGE 3-6h:                 WR 31.8% — known dead zone
+      LIQ in (0, 10k):          WR 32.9% avg PnL -0.18 — micro-rug zone
+
+    Performance vs V1 (paired SOL data, multiple windows):
+      AUC: V1 0.534 -> V3 0.562 (+0.028)
+      Filter >=35: V1 WR 43.5%, +$0.010 -> V3 WR 45.8%, +$0.021 (2x PnL)
+      Filter >=35 trades: +6-10% throughput (bonuses lift more rows)
+
+    Computed AND PERSISTED IN PARALLEL with rt_score and rt_score_v2 for
+    shadow A/B walk-forward validation. NOT used for filtering yet — collect
+    7-14 days then re-audit on out-of-sample data before switching strat
+    filters from rt_score to rt_score_v3.
+    """
+    age_h = float(token_info.get("token_age_hours") or 0)
+    liq = float(token_info.get("liquidity_usd") or 0)
+    mcap = float(token_info.get("market_cap") or 0)
+
+    score_v3 = float(rt_score)
+    if 50_000 <= mcap < 100_000: score_v3 += 15
+    elif mcap >= 1_000_000:      score_v3 -= 10
+    if 1.0 <= age_h < 3.0:       score_v3 += 10
+    elif 24.0 <= age_h < 72.0:   score_v3 += 8
+    elif 3.0 <= age_h < 6.0:     score_v3 -= 8
+    if 0 < liq < 10_000:         score_v3 -= 10
+
+    return round(max(0.0, min(100.0, score_v3)), 1)
 
 
 def _rt_position_size(rt_score: float, kol_info: dict, token_info: dict,
@@ -1622,6 +1659,7 @@ def _rt_open_trades(ca: str, symbol: str, price: float, mcap: float,
         "_rt_kol_win_rate": kol_info.get("win_rate"),
         "_rt_score": rt_score,
         "_rt_score_v2": _rt_compute_score_v2(kol_info, token_info),  # v14e.43 shadow A/B (data collection only)
+        "_rt_score_v3": _rt_compute_score_v3(rt_score, token_info),  # v14e.55 shadow A/B (binned bonuses, V1 base)
         "_rt_liquidity_usd": token_info.get("liquidity_usd"),
         "_rt_volume_24h": token_info.get("volume_24h"),
         "_rt_buy_sell_ratio": token_info.get("buy_sell_ratio"),
