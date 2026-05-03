@@ -2031,21 +2031,35 @@ def _kco_phase_a_sync(client: Client, stats: dict) -> None:
     logger.info("KCO Phase A: found %d calls from %d mentions",
                 len(all_calls), len(mentions))
 
-    # Step 4: Get existing kol_call_outcomes to skip already-synced mentions
+    # Step 4: Get existing kol_call_outcomes to skip already-synced rows.
+    # v14e.56b: also pull (kol_group, token_address) — the table has a UNIQUE
+    # constraint `uq_kco_kol_token` on that pair. Filtering on mention_id alone
+    # let through new mentions for an already-known (kol, token) combo, which
+    # then failed at insert time and spammed the logs with 9+ ERRORs per cron
+    # run. Pre-filter in memory to skip those silently.
     try:
         existing = _kco_paginate_query(
-            client, "kol_call_outcomes", "mention_id",
+            client, "kol_call_outcomes", "mention_id, kol_group, token_address",
         )
     except Exception as e:
         logger.error("KCO Phase A: failed to query existing outcomes: %s", e)
         return
 
     existing_mention_ids = {r["mention_id"] for r in existing}
+    existing_kol_token = {
+        (r.get("kol_group"), r.get("token_address"))
+        for r in existing
+        if r.get("kol_group") and r.get("token_address")
+    }
 
     # Step 5: Insert new rows (pair_address resolved later by Phase B)
     new_rows = []
     for mention_id, call in all_calls.items():
         if mention_id in existing_mention_ids:
+            continue
+        if (call["kol_group"], call["token_address"]) in existing_kol_token:
+            # v14e.56b: another mention for this (kol, token) is already synced —
+            # skip silently to avoid the uq_kco_kol_token constraint violation.
             continue
         row = {
             "mention_id": call["mention_id"],
