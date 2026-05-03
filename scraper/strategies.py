@@ -337,6 +337,49 @@ for _tp_s6, _sl_s6 in [(100, 50), (50, 30), (50, 50), (70, 50), (40, 30)]:
 STRATEGIES.update(_SLOW6H_STRATEGIES)
 SHADOW_STRATEGIES.extend(_SLOW6H_STRATEGIES.keys())
 
+# --- v14e.56e: SLOW + BE / SLOW + BE+LOCK combos (shadow A/B) ---
+# 8d audit shows SLOW4H_TP50_SL30 / SLOW4H_TP50_SL50 lead the SOL ranking
+# ($91-94/d, WR 53-57%, N=122 each). The mega-sweep tests configs but does
+# NOT generate new BE/LOCK combos on the SLOW core. Adding 6 candidate
+# combos here in shadow only — verdict expected at N>=15 paired (5-7 days).
+# Hypothesis: BE/LOCK on a 4H/6H horizon protects against pump fade and
+# locks gains on the 30-50% wins that drive SLOW core PnL.
+STRATEGIES["SLOW4H_BE25_TP50_SL30"] = [
+    {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.70, "horizon_min": 240,
+     "be_activation": 0.25, "label": "main"},
+]
+SHADOW_STRATEGIES.append("SLOW4H_BE25_TP50_SL30")
+
+STRATEGIES["SLOW4H_BE25_LOCK10_TP50_SL30"] = [
+    {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.70, "horizon_min": 240,
+     "be_activation": 0.25, "be_lock_pct": 0.10, "label": "main"},
+]
+SHADOW_STRATEGIES.append("SLOW4H_BE25_LOCK10_TP50_SL30")
+
+STRATEGIES["SLOW4H_BE15_LOCK5_TP50_SL30"] = [
+    {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.70, "horizon_min": 240,
+     "be_activation": 0.15, "be_lock_pct": 0.05, "label": "main"},
+]
+SHADOW_STRATEGIES.append("SLOW4H_BE15_LOCK5_TP50_SL30")
+
+STRATEGIES["SLOW4H_BE25_TP70_SL50"] = [
+    {"pct": 1.0, "tp_mult": 1.70, "sl_mult": 0.50, "horizon_min": 240,
+     "be_activation": 0.25, "label": "main"},
+]
+SHADOW_STRATEGIES.append("SLOW4H_BE25_TP70_SL50")
+
+STRATEGIES["SLOW4H_BE15_TP50_SL30"] = [
+    {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.70, "horizon_min": 240,
+     "be_activation": 0.15, "label": "main"},
+]
+SHADOW_STRATEGIES.append("SLOW4H_BE15_TP50_SL30")
+
+STRATEGIES["SLOW6H_BE25_LOCK10_TP50_SL30"] = [
+    {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.70, "horizon_min": 360,
+     "be_activation": 0.25, "be_lock_pct": 0.10, "label": "main"},
+]
+SHADOW_STRATEGIES.append("SLOW6H_BE25_LOCK10_TP50_SL30")
+
 # --- Breakeven stop grid (v106) ---
 _BE_STRATEGIES = {}
 for _be_act in [15, 20, 30]:
