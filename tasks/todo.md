@@ -55,6 +55,7 @@ Retrade gap [6-12h]: SOL +22% / ETH +31%  (les deux profitable)
 - [ ] **Fix #3 fresh-mint anti-rug RT gate** — `pump.fun + age<2h + liq/mcap>1.0` → shadow-only. Pattern 14d audité = 2 tokens (UPEG + MEN), zéro faux positif.
 - [ ] **Score V3 walk-forward audit** (Mai 9-16) — sur N≥30 trades fermés post-v14e.55. Si AUC V3 ≥ V1 + 0.015 → swap `min_rt_score` filter. Script à créer : `scripts/_score_v3_walk_forward.py`.
 - [ ] **Kill 4 SOL `_BSR_MCAP`** du `SHADOW_STRATEGIES` (verdict décisif, à appliquer côté code).
+- [ ] **Companion shadow post-promote** — fix `paper_trader.py:1644` pour garder le shadow ongoing même quand une strat est promue en paper main. Permet paired-test apples-to-apples post-promote (détecter drift vs market shift). Coût : +85 shadow rows/jour, storage trivial. Risk : touche logique centrale, demande audit ML training pre/post.
 - [ ] **Test BE15_LOCK5 hypothèse slip-sensitivity** — drift -2.36pp à N=28, re-check à N=50.
 - [ ] **R2** Profiler `process_and_push` si lag >30s revient.
 - [ ] **T3** `_eth_round_trip_smoke.py --execute` mensuel ou si base_fee >5 gwei.
@@ -77,6 +78,7 @@ Retrade gap [6-12h]: SOL +22% / ETH +31%  (les deux profitable)
 - N≥30 = verdict, N≥15 = "probable" pour décisions intermédiaires.
 - **avg% > base ≠ $/d > base** quand un filter coupe le volume. Toujours auditer $/d 7d en plus du paired test.
 - Drift live = paper twin paired-test, **PAS `paper_sim_pnl_pct` companion** (inflate 2-3×).
+- ⚠️ **Shadow companion s'éteint au promote** : `paper_trader.py:1644` skip toute SHADOW_STRATEGIES dans `real_strats`. Conséquence : les 5 strats promues v14e.54 n'ont **PLUS de shadow companion** depuis May 2. Audit "shadow vs main 3d" sur ces strats compare en réalité **pre-promote vs post-promote** sur des fenêtres temporelles différentes — apples-to-oranges. Pour ces strats, comparer aux strats SHADOW-only (jamais promues) sur les mêmes jours, pas à leur propre shadow gelé.
 
 ### Slippage (single source = strategies.py)
 - SOL : `BUY_SLIPPAGE_BPS = 225`.
