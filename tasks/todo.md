@@ -30,7 +30,30 @@ Plus un sweet spot retrade **gap [6-12h]** (avg +22.68% WR 76% +$1999/14d).
 
 ---
 
-## 🟢 Cette session — v14e.50 → v14e.56 deployed
+## 🟢 Cette session — v14e.50 → v14e.56b deployed
+
+### v14e.56b (May 3 ~13:50 UTC) — mega-sweep 6-shard split + KCO orphan resurrection + zcallz ban
+
+**Mega-sweep SOL 6-shard split** (option C, ~60 lignes) :
+- ✅ `sim.py` : ajout flag `--mega-strat-shard X/N` (default `1/1` = no split, zéro régression). Strat split déterministe par index sorted modulo N.
+- ✅ `mega-sweep-48h.yml` : matrix passe à `source: [jupiter, dexscreener, both] × strat: ['1/2', '2/2']` = **6 shards parallel** (~1.5-2h chacun). 5/6 derniers runs étaient cancelled au cap 6h sur source-only (3 shards × ~5-6h chacun). Nouveau target ~1.5-2h/shard sous le cap.
+- ✅ Smoke test : 697 strats → 349/348 split disjoint complet déterministe.
+- Verdict : prochain cron May 4 02:00 UTC ou `gh workflow run mega-sweep-48h.yml` manuel.
+- ETH workflow inchangé (118-168 strats, 3-shard tient sous le cap).
+
+**KCO orphan resurrection** (option B, script standalone) :
+- ✅ `scripts/_kco_resurrect_dead.py` : idempotent, dry-run par défaut, force-mark `dead_no_ohlcv` les rows NULL outcome_status >72h. Backup table `_backup_kco_resurrect_20260503` (1089 rows).
+- ✅ Run réel : 1089 rows updated. NULL 1507 → **484** (61.3% → 19.7%). dead_no_ohlcv 890 → **1912** (36.2% → 77.8%).
+- 484 NULL restants = calls <72h, normalement in-flight Phase B/C. C'est attendu.
+- Pas touché à `outcome_tracker.py` (3-phase pipeline, ML training depends on it). Script externe = zéro régression.
+- Revert : `UPDATE kol_call_outcomes SET outcome_status=NULL WHERE outcome_status='dead_no_ohlcv' AND last_checked_at='2026-05-03T13:41:47.074006+00:00';`
+
+**Ban zcallz SOL chain** (audit pattern UPEG retroactif) :
+- ✅ Pattern `pump.fun + age<2h + liq/mcap>1.0` 14d = 2 tokens distincts (UPEG + MEN). MEN callé par `zcallz`.
+- ✅ Stats `zcallz` SOL : 7d shadow N=346 **WR 0%** -$8.9K. 3d shadow N=1014 **-$10,145**. SOL blacklist : 17 → **18 KOLs**.
+- Ne touche pas ETH (stats KOL ETH non auditées).
+
+### v14e.56 (May 3 ~10:50 UTC) — UPEG ticker-hijack incident + RT shape gate + TheReaperGems SOL ban
 
 ### v14e.56 (May 3 ~10:50 UTC) — UPEG ticker-hijack incident + RT shape gate + TheReaperGems SOL ban
 
@@ -232,8 +255,8 @@ Total **ETH strats : 118 → 168**. Total **SHADOW_STRATEGIES : 648 → 698**.
 - Seuil rentabilité = avg PnL >+3.5% par trade
 - Inline tracking actif depuis v14e.50, backfill via `scripts/_backfill_solana_fees.py`
 
-### KOL routing v14e.49b → v14e.56
-- Per-chain blacklist : **17 SOL** (post v14e.56 +TheReaperGems), 3 ETH. JSONB `paper_trade_config.kol_chain_blacklist`.
+### KOL routing v14e.49b → v14e.56b
+- Per-chain blacklist : **18 SOL** (post v14e.56b +zcallz), 3 ETH. JSONB `paper_trade_config.kol_chain_blacklist`.
 - `mad_apes_gambles` : SOL ban / ETH allow.
 - `ryoshigamble` : flat unban v14e.49i (96.2% WR sur N=371 SOL)
 - `ryoshikdegen` : SOL ban / ETH allow.

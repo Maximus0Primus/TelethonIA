@@ -19,15 +19,20 @@ on:
 jobs:
   sweep:
     strategy:
-      # Continue les autres shards même si un fail — on perd 1/3 de coverage
+      # Continue les autres shards même si un fail — on perd 1/6 de coverage
       # mais pas tout. Le merge skip silencieusement les CSVs manquants.
       fail-fast: false
       matrix:
         source: [jupiter, dexscreener, both]
-    name: sweep-${{ matrix.source }}
+        # v14e.56: strat-shard secondaire — 3 sources x 2 strat-halves = 6 shards
+        # parallèles. Chaque shard ~1.5-2h (était ~5-6h en v14e.43 avec source-only,
+        # qui s'était mis a hit le cap 6h GH). Strat split deterministe par index
+        # sorted % 2 dans sim.py — meme strat toujours dans meme shard.
+        strat: ['1/2', '2/2']
+    name: sweep-${{ matrix.source }}-s${{ matrix.strat }}
     runs-on: ubuntu-latest
-    # Marge sous le hard cap GH 6h. v14e.43 estimé ~2h/shard (1/3 du job
-    # monolithique 5h Apr 27). 350min = 5h50, garde-fou si le scope grossit.
+    # Marge sous le hard cap GH 6h. v14e.56: ~1.5-2h/shard (moitie du job v14e.43
+    # source-only). 350min = 5h50, garde-fou large.
     timeout-minutes: 350
 
     steps:
@@ -44,23 +49,33 @@ jobs:
           pip install --upgrade pip
           pip install supabase requests python-dotenv pandas numpy
 
-      - name: Run mega sweep extended (shard=${{ matrix.source }})
+      - name: Compute shard tag (filesystem-safe)
+        id: tag
+        run: |
+          # Replace '/' with '-' so '1/2' becomes '1-2' for filenames + artifact names
+          STRAT_TAG="${{ matrix.strat }}"
+          STRAT_TAG="${STRAT_TAG//\//-}"
+          echo "strat_tag=${STRAT_TAG}" >> "$GITHUB_OUTPUT"
+          echo "shard_tag=${{ matrix.source }}_s${STRAT_TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Run mega sweep extended (source=${{ matrix.source }} strat=${{ matrix.strat }})
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
-          # v14e.43: --mega-source-shard restreint la dim 'sources' à une
-          # seule valeur. Le reste du grid (filters × smoothings × polling
-          # × age_bands × strategies) tourne intégralement.
+          # v14e.43: --mega-source-shard restreint la dim 'sources'.
+          # v14e.56: --mega-strat-shard X/N split additionnel sur strategies.
+          # Resultat: source x strat_half = 6 shards parallel sous cap GH 6h.
           cd scraper
           python sim.py --mega-sweep-extended \
             --mega-source-shard ${{ matrix.source }} \
+            --mega-strat-shard ${{ matrix.strat }} \
             --mega-workers 4 \
-            --mega-csv-out _mega_sweep_extended_${{ matrix.source }}.csv \
-            2>&1 | tee sweep_${{ matrix.source }}.out
-          if [ -f _mega_sweep_extended_${{ matrix.source }}.csv ]; then
-            mv _mega_sweep_extended_${{ matrix.source }}.csv ../
-            echo "Shard ${{ matrix.source }} CSV produced"
+            --mega-csv-out _mega_sweep_extended_${{ steps.tag.outputs.shard_tag }}.csv \
+            2>&1 | tee sweep_${{ steps.tag.outputs.shard_tag }}.out
+          if [ -f _mega_sweep_extended_${{ steps.tag.outputs.shard_tag }}.csv ]; then
+            mv _mega_sweep_extended_${{ steps.tag.outputs.shard_tag }}.csv ../
+            echo "Shard ${{ steps.tag.outputs.shard_tag }} CSV produced"
           else
             echo "sim.py did not produce shard CSV"
             exit 1
@@ -70,10 +85,10 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: mega-sweep-shard-${{ matrix.source }}
+          name: mega-sweep-shard-${{ steps.tag.outputs.shard_tag }}
           path: |
-            _mega_sweep_extended_${{ matrix.source }}.csv
-            scraper/sweep_${{ matrix.source }}.out
+            _mega_sweep_extended_${{ steps.tag.outputs.shard_tag }}.csv
+            scraper/sweep_${{ steps.tag.outputs.shard_tag }}.out
           retention-days: 7
 
   merge_and_analyze:
@@ -226,8 +241,8 @@ jobs:
       - name: Summary comment
         if: success()
         run: |
-          echo "## Mega Sweep v14e.43 (matrix split)" >> "$GITHUB_STEP_SUMMARY"
-          echo "Shards merged: ${{ steps.concat.outputs.shards_found }}/3" >> "$GITHUB_STEP_SUMMARY"
+          echo "## Mega Sweep v14e.56 (matrix split 3 sources x 2 strat-halves = 6 shards)" >> "$GITHUB_STEP_SUMMARY"
+          echo "Shards merged: ${{ steps.concat.outputs.shards_found }}/6" >> "$GITHUB_STEP_SUMMARY"
           echo "Total rows: ${{ steps.concat.outputs.total_rows }}" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           if [ -f _mega_sweep_top_robust.csv ]; then

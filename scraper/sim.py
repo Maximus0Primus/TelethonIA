@@ -5144,6 +5144,27 @@ def _mega_sweep_run(args):
     full_pool.update(_MEGA_NEW_STRATS)
     full_pool = _filter_trail_families(full_pool, getattr(args, "include_trail_families", False))
     full_pool = _filter_hyst_standalone(full_pool, getattr(args, "include_hyst", False))
+    # v14e.56: optional strat-shard filter — allows splitting the strategy pool across
+    # additional CI parallel jobs when --mega-source-shard alone hits the GH 6h cap.
+    # Format: "X/N" where X in [1..N]. Strats are split deterministically by sorted name
+    # hash (modulo) so the same strat always lands in the same shard across runs.
+    # Default "1/1" = no split (behaviour identical to pre-v14e.56). Empty/missing
+    # arg keeps the full pool — zero regression for local/dev runs.
+    strat_shard_raw = getattr(args, "mega_strat_shard", "1/1") or "1/1"
+    try:
+        _ssx, _ssn = strat_shard_raw.split("/")
+        _ssx, _ssn = int(_ssx), int(_ssn)
+        assert 1 <= _ssx <= _ssn, "shard index out of range"
+    except Exception:
+        print(f"[mega-strat-shard] invalid '{strat_shard_raw}' — falling back to 1/1 (no split)")
+        _ssx, _ssn = 1, 1
+    if _ssn > 1:
+        # Deterministic split by sorted name index — same strat always in same shard
+        # regardless of dict iteration order. Hash-mod gives even distribution.
+        _names_sorted = sorted(full_pool.keys())
+        _kept = {n: full_pool[n] for i, n in enumerate(_names_sorted) if (i % _ssn) == (_ssx - 1)}
+        print(f"[mega-strat-shard] {_ssx}/{_ssn} kept {len(_kept)}/{len(full_pool)} strategies")
+        full_pool = _kept
     print(f"Strategies: {len(full_pool)} (incl. {len(_MEGA_NEW_STRATS)} new TP200+ variants)")
 
     # v142: sb_get() paginates internally via offset+limit; the previous manual
@@ -5443,6 +5464,13 @@ def main():
                              "'all' (default) runs every source — kept for local/dev. "
                              "Pick one of jupiter/dexscreener/both in CI matrix; the merge "
                              "job concatenates the per-shard CSVs into the canonical one.")
+    parser.add_argument("--mega-strat-shard", type=str, default="1/1",
+                        help="v14e.56: secondary shard on the strategy pool (X/N format). "
+                             "Used together with --mega-source-shard to split the sweep "
+                             "into more parallel CI jobs (3 sources × 2 strat halves = 6 "
+                             "shards) when source-only sharding hits the 6h cap. Default "
+                             "'1/1' = no split (full pool, pre-v14e.56 behaviour). The "
+                             "split is deterministic by sorted strat name index modulo N.")
     parser.add_argument("--include-trail-families", action="store_true",
                         help="v14e.19: opt-in to keep DTRAIL/TRAIL/DIP/PTRAIL/SPLIT/"
                              "SCALE_OUT/MOONBAG/WIDE_RUNNER families in mega-sweep. "
