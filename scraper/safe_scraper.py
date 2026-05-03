@@ -2086,7 +2086,18 @@ async def _rt_on_new_message(event: events.NewMessage.Event):
             # multi-chain tokens endpoint once per CA, cached for this session.
             from enrich import _fetch_dexscreener_by_address
             from chain_detect import detect_chain, resolve_evm_chain
-            shape_chain = detect_chain(ca) or "solana"
+            # v14e.56: hard skip on unrecognized CA shape. chain_detect.py docstring
+            # explicitly warns callers to treat None as "skip this token — never
+            # default to solana silently". Previous `or "solana"` fallback could
+            # silently route a malformed/garbage CA (broken extraction, ticker→CA
+            # hijack residue, truncated copy-paste) through a SOL Jupiter quote.
+            # The downstream DexScreener call rejects such CAs anyway (returns None
+            # at enrich.py:540-543), so this just surfaces the skip earlier with a
+            # clearer log — zero behavioral change for valid Solana/EVM addresses.
+            shape_chain = detect_chain(ca)
+            if shape_chain is None:
+                logger.info("RT SKIP: %s — unrecognized CA shape: %s", symbol, ca[:16])
+                continue
             if shape_chain == "ethereum":  # ambiguous — could be ETH/BSC/Base
                 cached = _rt_evm_chain_cache.get(ca.lower())
                 if cached:

@@ -30,7 +30,29 @@ Plus un sweet spot retrade **gap [6-12h]** (avg +22.68% WR 76% +$1999/14d).
 
 ---
 
-## 🟢 Cette session — v14e.50 → v14e.55 deployed
+## 🟢 Cette session — v14e.50 → v14e.56 deployed
+
+### v14e.56 (May 3 ~10:50 UTC) — UPEG ticker-hijack incident + RT shape gate + TheReaperGems SOL ban
+
+**Incident** : 8 paper main + 343 shadow trades fired sur `$UPEG` (CA SOL `Bwx2Rqsh1UmzV1ZfKFxDBoeRBTnzocCcJJcuTpGx8H84`, fresh-mint pump.fun 1.7h, top5_pct=68.97%, bundle_pct=34.83%, lp_locked=0%) sur trigger TheReaperGems. Net: 7 winners +$56 vs 2 rugs -$100 = **−$44 net**. Le vrai $UPEG est sur ETH (`0x44b28991...`, fait 128x). Le bot a acheté un scam SOL fresh-mint qui parasite le ticker.
+
+**Cause identifiée** :
+- TheReaperGems shadow 3d a basculé en rug magnet : N=703, avg -44%, **WR 18.6%**, **rug rate 30.2%** (vs 14d avant: avg +37%, WR 81.6%, 0 rugs). KOL hacké ou tournique en pump-and-dump fresh-mints.
+- Pas de gate anti-rug en RT (top10/bundle/lp_locked sont fetchés en batch post-buy, trop tard).
+- Le `chain_detect.py:47-48` warn "treat None as skip" est violé par `safe_scraper.py:2089` `or "solana"` fallback silencieux.
+
+**Actions appliquées** :
+- ✅ **Ban TheReaperGems SOL chain blacklist** (DB JSONB, 16 → 17 KOLs SOL banned). Backup table `_backup_ban_reapergems_20260503`. Ne ban PAS ETH (stats ETH KOL non auditées). Stop saignement immédiat.
+- ✅ **Fix #1 RT shape gate** (`safe_scraper.py:2089-2100`) : `detect_chain(ca) or "solana"` → `detect_chain(ca)` + skip explicite si `None`. Garbage CA / 0x mal-formé / extraction buggée → skip plus tôt avec log `RT SKIP: <symbol> — unrecognized CA shape`. Zéro régression : `_fetch_dexscreener_by_address` rejetait déjà ces CAs (enrich.py:540-543), on déplace juste le skip + log clair.
+
+**Mystère non résolu** : le message Telegram qui a déclenché le buy (`paper_trades.message_ts = 09:23:10`) n'est pas en `kol_mentions`. Les seuls TheReaperGems messages voisins sont 09:17:30 ("$UPEG whales buying $UCORE") et 09:52:17 — mais le RT loop skip les tickers sans CA (`if not ca: continue` ligne 2060), donc impossible que ce message ait fired le buy. Hypothèse forte : un message à 09:23:10 contenait soit une URL DexScreener/pump.fun avec le CA SOL scam (parsée via `msg.entities`), soit le CA en clair. Logs VPS nécessaires pour confirmer.
+
+**Backlog fix #2 / #3 (à valider avant déploiement, non urgent vu le ban)** :
+- [ ] **Fix #2 verb-proximity** : filtrer les tickers en position passive (`$X (whales|holders|dev|chart) (buying|aping|holding) $Y`, `better than $X`, `vs $X`). Risque: faux positifs sur calls légitimes. Demande N≥30 messages historiques pour calibrer les patterns sans casser.
+- [ ] **Fix #3 fresh-mint anti-rug RT** : ajouter un check "if `is_pump_fun=1` AND `token_age<2h` AND `liq/mcap>1.0` AND extraction_method='ticker'" → shadow-only (pas paper main). Demande audit historique pour quantifier faux positifs (combien de fresh-mint pump.fun avec liq>mcap sont en réalité légitimes ?).
+- [ ] **Audit logs VPS** pour identifier exact contenu message 09:23:10 — informe la calibration des fix #2/#3.
+
+
 
 ### v14e.55 (May 2 23:00 UTC) — Score V3 + RECALL_PEAK kill + DB index
 - ✅ **Score V3** (`safe_scraper._rt_compute_score_v3`) : V1 base + binned bonuses sur sweet spots SOL 7j (MCAP 50-100k +15, AGE 1-3h +10, AGE 24-72h +8, MCAP ≥1M -10, AGE 3-6h -8, LIQ <10k -10). In-sample AUC 0.562 vs V1 0.534 (+0.028). Filter ≥35 : WR +1.92pp et avg PnL 2× sur 3j. **Persisté en parallèle** (col `rt_score_v3` ajoutée à `paper_trades`), pas utilisé en filter, walk-forward attendu Mai 9-16.
@@ -210,8 +232,8 @@ Total **ETH strats : 118 → 168**. Total **SHADOW_STRATEGIES : 648 → 698**.
 - Seuil rentabilité = avg PnL >+3.5% par trade
 - Inline tracking actif depuis v14e.50, backfill via `scripts/_backfill_solana_fees.py`
 
-### KOL routing v14e.49b
-- Per-chain blacklist : **16 SOL** (post v14e.49i), 3 ETH. JSONB `paper_trade_config.kol_chain_blacklist`.
+### KOL routing v14e.49b → v14e.56
+- Per-chain blacklist : **17 SOL** (post v14e.56 +TheReaperGems), 3 ETH. JSONB `paper_trade_config.kol_chain_blacklist`.
 - `mad_apes_gambles` : SOL ban / ETH allow.
 - `ryoshigamble` : flat unban v14e.49i (96.2% WR sur N=371 SOL)
 - `ryoshikdegen` : SOL ban / ETH allow.
