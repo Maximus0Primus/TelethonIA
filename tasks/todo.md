@@ -74,29 +74,29 @@ Retrade gap [6-12h]: SOL +22% / ETH +31%  (les deux profitable)
 | `*_A24to48` positif sur 3+ mécaniques | green-light AGE48 family promotion |
 | `AGE3H_*` top performer | promote en paper main, candidate live |
 | `RECALL_DIP30_AGE6to12_*` +30%+ | confirme sweet spot retrade |
-| `*_A3to12` négatif partout | resserrer le filter live SOL |
+| **`*_A3to12` positif sur 9+ mécaniques** | **NEW v14e.56b** : confirme A3to12 capture RECALL window (signal early Δ +7 à +17pp paired sur N=4-8). Si tient à N=15 → promote 3-5 top en paper main, candidate live. Inversion vs verdict 14d audit (qui disait 3-12h saigne) — probablement le filter A3to12 capture le 2e+ entry, pas le 1er call. |
 
 ---
 
-## 🟡 Wait sur data — N en cours d'accumulation
+## 🟡 Wait sur data — N en cours d'accumulation (audit May 3 ~14:00 UTC)
 
-| Item | N actuel | N cible |
-|---|---:|---:|
-| **51 SOL age-band shadows v14e.52/53** | 0 | 15 par strat |
-| **6 AGE3H_* SOL shadows** | 0 | 15 |
-| **6 RECALL_AGE6to12_* SOL shadows** | 0 | 10 |
-| **12 RECALL_DIP10/ANY SOL shadows v14e.51** | 0 | 15 |
-| **36 ETH age-band shadows v14e.53b** (A3to6/A6to12/A12to24) | 0 | 15 par strat |
-| **5 AGE6H_ETH_* shadows** sweet spot 3-6h | 0 | 15 |
-| **9 ETH_RECALL relaxed** (DIP10/ANY/AGE6to12) | 0 | 10 |
-| BSR_MCAP_AB SOL (4 strats `_BSR_MCAP`) | 11 | 30 |
-| KW_AB SOL (5 strats `_KW34`) | 4 | 30 |
-| KW_AB ETH (3 strats `_KW26`) | 3 | 30 |
-| **SCORE_V3_AB** (rt_score_v3 v14e.55, deployed May 2 23:00) | accumule | walk-forward AUC ≥ V1 sur 7-14j (Mai 9-16) |
-| ETH BSR55 (5 strats) | 11 | 30 |
-| W1-W5 paired-tests (SCALP, AGE, LOCK, ETH cluster) | varies | 30 |
-| W9b RECALL family verdict par bucket | varies | 30 |
-| T2 sell slip drift twin pairs | varies | 200 |
+| Item | N actuel/strat | N cible | Note |
+|---|---:|---:|---|
+| **51 SOL age-band shadows v14e.52/53** | 4.8-7.3 | 15 | Early signal A3to12 positif (+7 à +17pp), A1to3 mixte, A24to48 trop tôt |
+| **6 AGE3H_* SOL shadows** | 7 | 15 | |
+| **6 RECALL_AGE6to12_* SOL shadows** | 5.9 | 10 | |
+| **12 RECALL_DIP10/ANY SOL shadows v14e.51** | 5.9 | 15 | |
+| **36 ETH age-band shadows v14e.53b** | 2 | 15 | ETH volume KOL en chute -75% (Apr 27 24/d → May 3 2/d). ETA verdict éloigné |
+| **5 AGE6H_ETH_* shadows** sweet spot 3-6h | — | 15 | Idem ETH volume |
+| **9 ETH_RECALL relaxed** | — | 10 | Idem ETH volume |
+| **BSR_MCAP_SOL (4 strats `_BSR_MCAP`)** | 49.3 | 30 | ✅ **VERDICT NÉGATIF DÉCISIF** : Δ -12 à -16pp paired vs baseline (N=65-73). À KILL |
+| **BSR55_ETH (5 strats)** | 22 | 30 | 4/5 positifs sur paired Δ +2.5 à +3pp MAIS $/d net inférieur à baseline ($26 vs $33 sur top). Filter coupe trop de volume → **PAS de promote**. Garder en shadow telemetry. |
+| KW_AB SOL (5 strats `_KW34`) | 8.4 | 30 | |
+| KW_AB ETH (3 strats `_KW26`) | 7 | 30 | |
+| **SCORE_V3_AB** (rt_score_v3 v14e.55) | accumule | walk-forward AUC ≥ V1 sur 7-14j (Mai 9-16) | |
+| W1-W5 paired-tests (SCALP, AGE, LOCK, ETH cluster) | varies | 30 | |
+| W9b RECALL family verdict par bucket | varies | 30 | |
+| T2 sell slip drift twin pairs | varies | 200 | |
 
 ---
 
@@ -129,6 +129,10 @@ Retrade gap [6-12h]: SOL +22% / ETH +31%  (les deux profitable)
 ---
 
 ## 📌 Rappels persistants (rule-encoded)
+
+### Filter combos verdict (v14e.56b audit)
+- **BSR_MCAP SOL** (`BSR≥0.53 AND mcap≥$45K`) — validé v14e.43b walk-forward (+$20-26/d sur SLOW/TP100). **Inversé à N=65-73** : Δ paired -12 à -16pp vs baseline. Cause probable : regime change marché + le filter MCAP coupe les moonshots SOL qui font le profit. **Action : kill 4 strats `_BSR_MCAP` du SHADOW_STRATEGIES** (non encore appliqué code, à valider).
+- **BSR55 ETH** (`BSR≥0.55` ETH only) — gardé v14e.49b. À N=22 paired-test 4/5 positifs Δ +2.5 à +3pp MAIS $/d net 7d inférieur à baseline (ex: ETH_BE25_LOCK15_TP100_SL40_T2H_BSR55 +$26.63/d vs base sans filter +$32.73/d). **Le filter monte l'avg% en coupant trop de volume → $/d net plus bas**. Règle rule-encoded : **avg% supérieur n'implique PAS $/d supérieur** quand le filter réduit le call rate. Toujours auditer $/d réel sur 7d en plus du paired test. Pas de promote BSR55 en paper main tant que ETH KOL volume ne rebondit pas (chute -75% Apr 27 → May 3).
 
 ### Méthode statistique
 - **Paired-test apples-to-apples** sur tokens intersection — JAMAIS aggregate avg quand N diffère.
