@@ -1057,6 +1057,59 @@ STRATEGY_FILTERS["BE50_LOCK25_TP300_SL40_4H_MCAP_S40"] = {
 }
 SHADOW_STRATEGIES.append("BE50_LOCK25_TP300_SL40_4H_MCAP_S40")
 
+# ---- v14e.57 (May 7): 5 picks from enriched _propose_combo_extensions.py ----
+# Mega-sweep run 25477911459 top SOL family is TP200_SL40_4H BE/LOCK variants.
+# Without filter, real PnL = -$60-90/d (sim over-fits moonshots, drift $150+).
+# With NZ_S40 / MCAP / age-band filter, real flips to +$15-21/d. These 5 add
+# the missing filter combos for the top-performing BE25_LOCK10/15 + BE50_LOCK25
+# bases. All shadow-only, will accumulate ~5-7 days before paired-test verdict.
+
+STRATEGIES["BE25_LOCK10_TP200_SL40_4H_NZ_S40"] = [
+    {"pct": 1.0, "tp_mult": 3.00, "sl_mult": 0.60, "horizon_min": 240,
+     "be_activation": 0.25, "be_lock_pct": 0.10, "label": "main"},
+]
+STRATEGY_FILTERS["BE25_LOCK10_TP200_SL40_4H_NZ_S40"] = {
+    "chain": "solana", "min_liquidity_usd": 1, "min_rt_score": 40,
+}
+SHADOW_STRATEGIES.append("BE25_LOCK10_TP200_SL40_4H_NZ_S40")
+
+STRATEGIES["BE25_LOCK10_TP200_SL40_4H_MCAP_S40"] = [
+    {"pct": 1.0, "tp_mult": 3.00, "sl_mult": 0.60, "horizon_min": 240,
+     "be_activation": 0.25, "be_lock_pct": 0.10, "label": "main"},
+]
+STRATEGY_FILTERS["BE25_LOCK10_TP200_SL40_4H_MCAP_S40"] = {
+    "chain": "solana", "min_mcap": 30_000, "max_mcap": 500_000, "min_rt_score": 40,
+}
+SHADOW_STRATEGIES.append("BE25_LOCK10_TP200_SL40_4H_MCAP_S40")
+
+STRATEGIES["BE25_LOCK10_TP200_SL40_4H_A1to3"] = [
+    {"pct": 1.0, "tp_mult": 3.00, "sl_mult": 0.60, "horizon_min": 240,
+     "be_activation": 0.25, "be_lock_pct": 0.10, "label": "main"},
+]
+STRATEGY_FILTERS["BE25_LOCK10_TP200_SL40_4H_A1to3"] = {
+    "chain": "solana", "min_age_hours": 1, "max_age_hours": 3,
+}
+SHADOW_STRATEGIES.append("BE25_LOCK10_TP200_SL40_4H_A1to3")
+
+STRATEGIES["BE25_LOCK15_TP200_SL40_4H_NZ_S40_A24to48"] = [
+    {"pct": 1.0, "tp_mult": 3.00, "sl_mult": 0.60, "horizon_min": 240,
+     "be_activation": 0.25, "be_lock_pct": 0.15, "label": "main"},
+]
+STRATEGY_FILTERS["BE25_LOCK15_TP200_SL40_4H_NZ_S40_A24to48"] = {
+    "chain": "solana", "min_liquidity_usd": 1, "min_rt_score": 40,
+    "min_age_hours": 24, "max_age_hours": 48,
+}
+SHADOW_STRATEGIES.append("BE25_LOCK15_TP200_SL40_4H_NZ_S40_A24to48")
+
+STRATEGIES["BE50_LOCK25_TP200_SL40_4H_A24to48"] = [
+    {"pct": 1.0, "tp_mult": 3.00, "sl_mult": 0.60, "horizon_min": 240,
+     "be_activation": 0.50, "be_lock_pct": 0.25, "label": "main"},
+]
+STRATEGY_FILTERS["BE50_LOCK25_TP200_SL40_4H_A24to48"] = {
+    "chain": "solana", "min_age_hours": 24, "max_age_hours": 48,
+}
+SHADOW_STRATEGIES.append("BE50_LOCK25_TP200_SL40_4H_A24to48")
+
 # ---- Bloc M: SCALP × NZ filter SOL (4) ----
 STRATEGIES["SCALP_TP15_SL20_S35_NZ"] = [
     {"pct": 1.0, "tp_mult": 1.15, "sl_mult": 0.80, "horizon_min": 120, "label": "main"},

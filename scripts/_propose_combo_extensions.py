@@ -170,6 +170,17 @@ def load_strats_with_tranches() -> dict:
         return {}
 
 
+def load_strategy_filters() -> dict:
+    """Read STRATEGY_FILTERS dict so we can MERGE filters when adding a
+    suffix to a base that already has a filter (e.g. _A24to48 on top of
+    _NZ_S40 must keep min_liquidity_usd + min_rt_score)."""
+    try:
+        from strategies import STRATEGY_FILTERS
+        return dict(STRATEGY_FILTERS)
+    except Exception:
+        return {}
+
+
 def load_top_from_csv(csv_path: Path, limit: int) -> list[dict]:
     """Load top N strats from a mega-sweep CSV (col `strategy`, `pnl_per_day`)."""
     import csv
@@ -266,7 +277,8 @@ def _detect_chain(strat_name: str) -> str:
 
 
 def propose_filter_extensions(
-    base_strat: str, existing: set[str], strats_dict: dict
+    base_strat: str, existing: set[str], strats_dict: dict,
+    filters_dict: dict | None = None,
 ) -> list[dict]:
     """For a given base strat, propose filter-suffix variants that don't exist.
 
@@ -279,6 +291,9 @@ def propose_filter_extensions(
     if not base_tranches:
         return []  # base not in STRATEGIES dict — can't safely propose
     chain = _detect_chain(base_strat)
+    # v14e.57 fix: merge with parent's existing filter so suffixes like
+    # _A24to48 don't drop _NZ_S40's liq/score constraints.
+    base_filter = (filters_dict or {}).get(base_strat, {}) or {}
     proposals = []
     # Suffixes already on base (skip conflicting axes).
     base_present_suffixes = {
@@ -297,13 +312,15 @@ def propose_filter_extensions(
         candidate_name = base_strat + suffix
         if candidate_name in existing:
             continue
+        # Merge: base filter (already has chain + parent constraints) ∪ new axis dict.
+        merged = {"chain": chain, **base_filter, **filter_dict}
         proposals.append({
             "name": candidate_name,
             "base": base_strat,
             "kind": "filter",
             "suffix": suffix,
             "tranches": base_tranches,
-            "filter_dict": {"chain": chain, **filter_dict},
+            "filter_dict": merged,
         })
     return proposals
 
@@ -392,6 +409,7 @@ def main() -> int:
         return 1
 
     strats_dict = load_strats_with_tranches()
+    filters_dict = load_strategy_filters()
     existing = set(strats_dict.keys()) or load_existing_strats()
     print(f"Loaded {len(existing)} existing strategies from STRATEGIES dict.\n")
 
@@ -407,7 +425,8 @@ def main() -> int:
         for p in be_lock:
             p["kind"] = "be_lock"
         # v14e.57: filter-suffix variants (score / liq / mcap / age-band)
-        filter_props = propose_filter_extensions(r["strategy"], existing, strats_dict)
+        filter_props = propose_filter_extensions(
+            r["strategy"], existing, strats_dict, filters_dict)
         proposals = (be_lock + filter_props)[:args.max_proposals]
         if proposals:
             all_proposals.append((r, proposals))

@@ -227,6 +227,14 @@ Si 0-1h saigne -$157K/14j (50% volume), pourquoi pas appliquer `min_age=1h` GLOB
 - ✅ Mega-sweep cross-check sim↔real : drift catastrophique sur TP200_SL40_4H sans filter
 - ✅ Top 7j SOL identifié : BE25_LOCK10_TP60_SL30, FAST_TP40_SL30_DS, FAST_TP50_SL30_BOTH (Tier S)
 - ✅ Age-band sweet spots SOL confirmés : [1-3h] et [24-48h]
+- ✅ **Combo proposer enrichi (commit `80b7f0c`)** — script `scripts/_propose_combo_extensions.py` étendu avec 8 axes filter (S30/S35/S40/NZ_S40/MCAP/MCAP_S40/A1to3/A24to48). Top 5 mega-sweep `25477911459` → 24 combos générés (vs 0 prior). Bug fix : merge filter parent quand suffix sur base ayant déjà un STRATEGY_FILTERS (e.g. `_NZ_S40_A24to48` garde liq+score). Limitations connues : skip source family `_BOTH/_DS/_JUPITER/_NOLAZY` (need source-routing infra).
+- ✅ **5 picks ajoutés à `strategies.py`** (v14e.57 block, lignes ~1060-1110) :
+  1. `BE25_LOCK10_TP200_SL40_4H_NZ_S40` — reproduit le pattern NZ_S40 winner ($19/d real attendu)
+  2. `BE25_LOCK10_TP200_SL40_4H_MCAP_S40` — alternative MCAP+score
+  3. `BE25_LOCK10_TP200_SL40_4H_A1to3` — age band sweet spot 1
+  4. `BE25_LOCK15_TP200_SL40_4H_NZ_S40_A24to48` — sweet spot 2 sur top sim already-NZ_S40
+  5. `BE50_LOCK25_TP200_SL40_4H_A24to48` — sweet spot 2 sur baseline pure
+  Verdict attendu : N≥30 par strat (~5-7j), paired-test post-companion-fix vs leur baseline.
 - 🟡 Decision pending : aucun candidat ne valide les 9 critères live $50/trade. Plus proche : `BE25_LOCK10_TP60_SL30`.
 - 📌 Next iteration prévue : 2026-05-09 ou 10 (après 2-3j de companion-shadow data accumulée + market normal post-May-7).
 
