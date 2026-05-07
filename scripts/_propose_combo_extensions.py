@@ -159,8 +159,8 @@ def load_top_from_db(limit: int) -> list[dict]:
         client = create_client(url, key)
         # Latest run_id
         runs = client.table("mega_sweep_runs").select(
-            "run_id, strategy, pnl_per_day, n_trades, created_at"
-        ).order("created_at", desc=True).limit(500).execute()
+            "run_id, strategy, pnl_per_day, n_sim_trades, run_at"
+        ).order("run_at", desc=True).limit(500).execute()
         rows = runs.data or []
         if not rows:
             return []
@@ -170,7 +170,7 @@ def load_top_from_db(limit: int) -> list[dict]:
         return [
             {"strategy": r["strategy"],
              "pnl_per_day": float(r.get("pnl_per_day") or 0),
-             "n": int(r.get("n_trades") or 0)}
+             "n": int(r.get("n_sim_trades") or 0)}
             for r in same_run[:limit]
         ]
     except Exception as e:
