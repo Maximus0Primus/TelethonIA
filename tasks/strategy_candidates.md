@@ -188,6 +188,63 @@ Pour qu'une strat passe en **live $50/trade**, elle doit valider :
 
 ---
 
+## 🚫 KOL blacklists état actuel (snapshot 2026-05-07)
+
+Source : `scoring_config` table, JSONB.
+
+### Live (`rt_trade_config.live_trading.kol_blacklist`) — 6 KOLs all-chain
+Bloque le live trading pour ces KOLs sur **toutes les chaînes**, paper main continue à tirer normalement.
+
+```
+MaestrosDegen, bagcalls, batman_gem, venom_gambles, jadendegens, aliensalphacalls
+```
+
+### Paper chain (`paper_trade_config.kol_chain_blacklist`)
+
+Bloque paper main + shadow par chain. Permet split fin (e.g. ban SOL / allow ETH).
+
+**Solana — 16 KOLs**
+```
+mad_apes_gambles, papicall, markdegens, ramcalls, leoclub69, ChairmanDN1,
+chiggajogambles, bounty_journal, DegenSeals, aliensalphacalls, LevisAlpha,
+jadendegens, bagcalls, ryoshikdegen, TheReaperGems, zcallz
+```
+
+**Ethereum — 3 KOLs**
+```
+jadendegens, aliensalphacalls, batman_gem
+```
+
+### Paper flat (`paper_trade_config.kol_blacklist`) — non configuré (`null`)
+
+### Splits notables (cross-chain par KOL)
+
+| KOL | SOL | ETH | Live | Note |
+|---|---|---|---|---|
+| `mad_apes_gambles` | 🔴 ban | 🟢 allow | 🟢 allow | SOL toxique, ETH OK |
+| `ryoshikdegen` | 🔴 ban | 🟢 allow | 🟢 allow | idem |
+| `bagcalls` | 🔴 ban | 🟢 allow | 🔴 ban | double ban (flat live + chain SOL) |
+| `batman_gem` | 🟢 allow | 🔴 ban | 🔴 ban | double ban (flat live + chain ETH) |
+| `jadendegens` | 🔴 ban | 🔴 ban | 🔴 ban | triple ban |
+| `aliensalphacalls` | 🔴 ban | 🔴 ban | 🔴 ban | triple ban |
+| `MaestrosDegen` | 🟢 allow | 🟢 allow | 🔴 ban | live-only ban (no signal en paper) |
+| `venom_gambles` | 🟢 allow | 🟢 allow | 🔴 ban | live-only ban (no signal en paper) |
+| `batman_gem` | 🟢 allow | 🔴 ban | 🔴 ban | flat live + chain ETH |
+
+### Règle d'usage (extrait MEMORY)
+
+> Flat live ban (`live_trading.kol_blacklist`) ne bloque QUE le live, PAS le paper main. Si stat clearly bad (e.g. WR 1.5% sur N=300 SOL), il faut DOUBLER avec `kol_chain_blacklist.<chain>`.
+
+### À auditer (Q1 ouverte ci-dessous)
+
+- N≥30 fire rate sur chaque banni (réel cost de la ban) ?
+- Aucun unban à reconsidérer (signal qui s'améliore) ?
+- Aucun KOL allowed qui devrait être banni (paired-test post-7j) ?
+
+Last audit complet : v14e.49g/h/i (2026-04-30) sur jadendegens, aliensalphacalls, ryoshigamble (unban), ryoshikdegen (split), bagcalls, batman_gem.
+
+---
+
 ## ❓ Open questions / next iterations
 
 ### Q1. KOL blacklist optimale ?
