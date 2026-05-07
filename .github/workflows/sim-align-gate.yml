@@ -56,6 +56,14 @@ jobs:
           echo "within=$WITHIN_COUNT" >> "$GITHUB_OUTPUT"
           echo "n=$N_COUNT" >> "$GITHUB_OUTPUT"
 
+          # Skip cleanly when no eligible trades in window (e.g. live deck
+          # paused or thin). Avoids spurious 0% ratio failures + empty Telegram
+          # alerts. Re-arms automatically once live closes trades again.
+          if [ "${N_COUNT:-0}" -eq 0 ]; then
+            echo "No live trades to gate — skipping alignment check."
+            exit 0
+          fi
+
           # Gate in a single python script so the logic stays readable.
           # Thresholds: avg |diff| <= 5pp and within_10pp ratio >= 80%.
           python <<PYEOF
