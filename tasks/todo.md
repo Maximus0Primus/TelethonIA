@@ -1,3 +1,28 @@
+# Pipeline Status — v14e.56c (May 3, 2026, refresh May 7)
+
+## 🎯 Paired-test verdict 14j (May 7, audit après accumulation)
+
+**WINNER: filtre `_S40` (min_score=40)** — battu sa baseline sur 4+ strats apples-to-apples (token intersection) :
+
+| Variant | Baseline | N | diff_pp | v/b won | $ diff 14j |
+|---|---|---:|---:|---|---:|
+| `FAST_TP50_SL30_S40` | FAST_TP50_SL30 | 228 | +0.07 | 141/78 (64%) | **+$755** |
+| `TP50_SL15_S40` | TP50_SL15 | 172 | +0.07 | 91/55 (62%) | +$638 |
+| `FAST_TP50_SL30_MCAP_S40` | FAST_TP50_SL30 | 146 | +0.08 | 85/53 (62%) | +$598 |
+| `BE25_TP80_SL30_S35` | BE25_TP80_SL30 | 313 | +0.06 | 147/127 (54%) | +$507 |
+| `BE25_TP80_SL30_S40` | BE25_TP80_SL30 | 255 | +0.05 | 130/94 (58%) | +$329 |
+
+→ **Promote candidate 1: `FAST_TP50_SL30_S40`** (déjà shadow, faut alloc paper main + bankroll seed).
+→ **Promote candidate 2: `BE25_TP80_SL30_S35`** (N=313, dollar-positive, low-variance).
+
+## ❌ Hypothèses testées et rejetées (May 7)
+
+- **AGE3H_SOL (WR 58% aggregate)** — paired-test 6/6 strats : 5/6 neutres-négatives (jusqu'à -0.12pp). WR aggregate = effet sélection-token, pas valeur du filter. **PAS de promote.**
+- **BSR55_ETH** — paired-test 5/5 : avg_diff = 0.01-0.03pp (zéro). BSR55 fire au même moment que baseline → coupe juste du volume. Confirme verdict initial todo.
+- **BE15_LOCK5 slip-sensitivity** — drift live↔paper = **0.00pp** (N=19, fenêtre 30 avr→1 mai avant pause live). Cross-LOCK shadow : LOCK5 = même SL_hit rate que LOCK10/15/20. **Hypothèse rejetée.**
+
+---
+
 # Pipeline Status — v14e.56c (May 3, 2026)
 
 ## 🛑 LIVE PAUSED (May 2 22:12 UTC)
@@ -37,13 +62,13 @@ Retrade gap [6-12h]: SOL +22% / ETH +31%  (les deux profitable)
 | Item | N actuel/strat | Note |
 |---|---:|---|
 | 51 SOL age-band shadows v14e.52/53 | 4.8-7.3 | Early signal A3to12 positif, A1to3 mixte, A24to48 trop tôt |
-| 6 AGE3H_* SOL shadows | 7 | |
+| 6 AGE3H_* SOL shadows | 31 | ❌ Paired-test May 7 : 5/6 neutres-négatives, pas de promote |
 | 6 RECALL_AGE6to12_* SOL shadows | 5.9 | |
 | 12 RECALL_DIP10/ANY SOL shadows | 5.9 | |
 | 36 ETH age-band shadows v14e.53b | 2 | ETH KOL volume -75% (Apr 27 24/d → May 3 2/d) |
 | 5 AGE6H_ETH_* + 9 ETH_RECALL relaxed | — | Idem ETH volume |
 | **BSR_MCAP_SOL (4 strats)** | 49.3 | ✅ **VERDICT KILL** : Δ -12 à -16pp paired (N=65-73) |
-| **BSR55_ETH (5 strats)** | 22 | 4/5 paired Δ +2.5 à +3pp MAIS $/d net <baseline ($26 vs $33). Filter coupe trop de volume → **PAS de promote**, garder shadow telemetry |
+| **BSR55_ETH (5 strats)** | 51 | ❌ Paired-test May 7 : avg_diff = 0.01-0.03pp (zéro edge), BSR55 fire au même moment que baseline. **PAS de promote** (confirmé). |
 | KW34_SOL / KW26_ETH | 7-8.4 | |
 | SCORE_V3_AB | accumule | walk-forward AUC ≥ V1 sur 7-14j (Mai 9-16) |
 
@@ -52,11 +77,10 @@ Retrade gap [6-12h]: SOL +22% / ETH +31%  (les deux profitable)
 ## 🔧 Backlog technique
 
 - [ ] **Fix #2 verb-proximity ticker filter** — `$X (whales|holders|dev) (buying|aping) $Y` patterns. Demande N≥30 messages historiques pour calibrer.
-- [ ] **Fix #3 fresh-mint anti-rug RT gate** — `pump.fun + age<2h + liq/mcap>1.0` → shadow-only. Pattern 14d audité = 2 tokens (UPEG + MEN), zéro faux positif.
 - [ ] **Score V3 walk-forward audit** (Mai 9-16) — sur N≥30 trades fermés post-v14e.55. Si AUC V3 ≥ V1 + 0.015 → swap `min_rt_score` filter. Script à créer : `scripts/_score_v3_walk_forward.py`.
 - [ ] **Kill 4 SOL `_BSR_MCAP`** du `SHADOW_STRATEGIES` (verdict décisif, à appliquer côté code).
-- [ ] **Companion shadow post-promote** — fix `paper_trader.py:1644` pour garder le shadow ongoing même quand une strat est promue en paper main. Permet paired-test apples-to-apples post-promote (détecter drift vs market shift). Coût : +85 shadow rows/jour, storage trivial. Risk : touche logique centrale, demande audit ML training pre/post.
-- [ ] **Test BE15_LOCK5 hypothèse slip-sensitivity** — drift -2.36pp à N=28, re-check à N=50.
+- [x] ~~**Companion shadow post-promote**~~ — May 7 v14e.57 : `paper_trader.py:1644` patché. `is_promoted` flag bypass cooldown/open_combos dedup (reserved to real) mais ré-emet le shadow row companion. ML training (train_model.py:766 `.eq("is_shadow",True)`) enrichit son dataset, auto_backtest filtre `.eq("is_shadow",False)` donc pas de double-count. Vérif post-deploy : `SELECT strategy, COUNT(*) FROM paper_trades WHERE strategy IN (<promoted_strats>) AND is_shadow=true AND created_at > <deploy_ts> GROUP BY 1;` doit retourner >0 par strat promue.
+- [x] ~~**Test BE15_LOCK5 hypothèse slip-sensitivity**~~ — May 7 : drift live↔paper = 0.00pp à N=19, cross-LOCK shadow LOCK5 = même SL rate. Hypothèse rejetée.
 - [ ] **R2** Profiler `process_and_push` si lag >30s revient.
 - [ ] **T3** `_eth_round_trip_smoke.py --execute` mensuel ou si base_fee >5 gwei.
 - [ ] **LOCK polling alignment** — appliquer `polling_sec=60 + median_5` aux LOCK SOL/ETH si BE25 confirme post-bump.
@@ -65,9 +89,11 @@ Retrade gap [6-12h]: SOL +22% / ETH +31%  (les deux profitable)
 
 ## 📋 Backlog post-shadow-verdict (séquencé)
 
-1. **Resume live** quand un winner shadow émerge (N≥15 + paired-test +5pp vs baseline).
-2. **Promote AGE48 top 3** en paper main si confirmé sur N élargi.
-3. **AGE24/AGE48 unification** → si A1to3 = sweet spot SOL, refactorer les AGE existants.
+1. **Promote `FAST_TP50_SL30_S40`** en paper main (winner paired-test May 7, N=228, +$755/14j vs base, 64% v_winrate). Alloc + bankroll seed $1000.
+2. **Promote `BE25_TP80_SL30_S35`** en paper main (winner paired-test, N=313, +$507/14j, 54% v_winrate, low-variance). Alloc + bankroll seed $1000.
+3. **Resume live** une fois 2 promus stables (N≥30 paper main, drift contrôlé sur 7j).
+4. ~~Promote AGE48 top 3~~ — paired-test verdict pas convaincant May 7, à re-tester si N grossit.
+5. **AGE24/AGE48 unification** → si A1to3 = sweet spot SOL, refactorer les AGE existants.
 
 ---
 

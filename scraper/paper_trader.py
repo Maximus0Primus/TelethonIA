@@ -1641,14 +1641,21 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
             # 1 HTTP roundtrip per call. Cuts measured ds→pre_buy from ~15s to ~3s.
             shadow_rows: list[dict] = []
             for strat_name in SHADOW_STRATEGIES:
-                if strat_name in real_strats:
-                    continue  # opened as real trade (this call or sibling call)
+                # v14e.57: companion shadow post-promote. Previously skipped any
+                # strat already opened as real → promoted strats lost their
+                # shadow twin, breaking apples-to-apples paired drift detection
+                # post-promote (live execution drift, paper-vs-live A/B). Now we
+                # ALSO insert a shadow row for promoted strats, but bypass the
+                # cooldown/open_combos dedup (those guard real trades only) and
+                # never re-mark open_combos at the end (already marked by main).
+                is_promoted = strat_name in real_strats
                 if not _passes_strategy_filter(token, strat_name):
                     continue
-                if (addr, strat_name) in open_combos:
-                    continue
-                if (addr, strat_name) in cooldown_combos:
-                    continue
+                if not is_promoted:
+                    if (addr, strat_name) in open_combos:
+                        continue
+                    if (addr, strat_name) in cooldown_combos:
+                        continue
 
                 # v144.3: Apply Bot ML gate to shadows too — same skip/half logic as main.
                 # Currently disabled (ml_threshold=99) but enforces parity if re-enabled.
@@ -1679,8 +1686,11 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
                         "tranche_label": tranche["label"],
                         "position_usd": _pos,
                     })
-                # v108: Mark as opened so subsequent tokens in this call don't re-insert
-                open_combos.add((addr, strat_name))
+                # v108: Mark as opened so subsequent tokens in this call don't re-insert.
+                # v14e.57: only mark for non-promoted shadows; promoted strats are
+                # already in open_combos via the main flow.
+                if not is_promoted:
+                    open_combos.add((addr, strat_name))
 
             # Single batch insert (Supabase supports list payload). Falls back to
             # per-row inserts if the batch fails so partial success is possible.
