@@ -157,6 +157,19 @@ Profil : WR ≥ 48%, med proche 0, $/d > $30 stable sur 7j, shadow_only=true.
 
 ---
 
+## 🧪 Recette de décision promote → live
+
+Le pipeline statistique à appliquer **systématiquement** avant chaque promote (shadow → paper main → live). Une strat qui ne valide pas ces 6 étapes reste en shadow.
+
+1. **N ≥ 30** par strat (verdict intermédiaire) ou **N ≥ 100** (verdict solide). En dessous, c'est du bruit.
+2. **Cross-window robustness** : positif sur **14d ET 7d ET 3d**. Si une fenêtre diverge, investiguer (one-off ? regime shift ? promote récent qui dilue ?).
+3. **Paired-test apples-to-apples** vs baseline sur **même tokens** (intersection). Jamais comparer aggregate avg/$/d entre strats sur des universes différents.
+4. **Bootstrap CI 95%** sur la moyenne du diff paired. Si l'IC inclut 0 → c'est du bruit, on ne promote pas.
+5. **Régime stability check** : perf stable jour-par-jour, ou portée par 1-2 outliers ? Test : virer le top 2 trades de la fenêtre, est-ce encore positif ?
+6. **Edge minimum vs coûts** : avg pct ≥ **+3%** par trade (couvre coût Solana ~3.5% round-trip : slippage entry + slippage exit + gas). En dessous, l'edge mathématique disparaît dans les frictions.
+
+**Ces 6 étapes sont nécessaires mais pas suffisantes** — les 9 critères ci-dessous ajoutent les conditions opérationnelles (companion-shadow drift, KOL filter audit, age-band overlap).
+
 ## 🛑 Critères de décision pour $50/trade live
 
 Pour qu'une strat passe en **live $50/trade**, elle doit valider :
