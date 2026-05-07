@@ -17,8 +17,12 @@
 4. **Multi-window stability** : un winner doit performer sur 3j ET 7j ET 14j (ou expliquer la divergence). Une seule fenêtre = potentiel one-off.
 5. **Sim ↔ Real cross-validation** : mega-sweep sim peut over-fit moonshots (`TP200_SL40_4H` audited May 7 : sim +$92/d, real -$69/d, drift $161). Toujours valider sim contre paper réel sur la MÊME strat.
 6. **Age-band integration** : les filtres d'âge ne sont pas optionnels. Le 0-1h band est un piège massif (cf. §Findings).
-7. **KOL blacklist caveat** : la blacklist actuelle (18 SOL + 3 ETH) n'est pas garantie optimale. Re-auditer périodiquement (cf. §Open).
+7. **KOL blacklist caveat** : la blacklist actuelle (16 SOL + 3 ETH + 6 live) n'est pas garantie optimale. Re-auditer périodiquement (cf. §Open).
 8. **Market-day correction** : May 7 today = -$48K total / WR 32% market-wide. Ne pas pénaliser une strat sur la base d'un seul mauvais jour. May 4 (+$39K, WR 64.5%) = inverse upward bias.
+9. **KOL-conditioning OBLIGATOIRE** : tout résultat d'audit doit explicitement préciser **quelle blacklist était active**. Une strat évaluée avec la blacklist `_X` peut donner un verdict opposé sous blacklist `_Y`. Les blacklists ne sont pas universelles — un KOL peut être destructeur pour FAST mais profitable pour SLOW (différentes vitesses de pump/dump). Format obligatoire dans les findings :
+   > Audit `STRAT_NAME` (window `7j`, blacklist `current=16SOL+3ETH+6live`, N=...).
+   - Pour les decisions critiques (promote vers live), faire un **counter-factual blacklist** : la même strat évaluée sans blacklist, ou avec une blacklist alternative — l'edge tient-il ?
+   - À l'avenir, considérer des **blacklists par famille** (FAST vs BE vs SLOW) plutôt qu'une seule blacklist globale, si l'analyse counter-factual montre des asymétries fortes.
 
 **Pièges déjà observés (à NE PAS refaire)** :
 - ❌ Comparer `AGE3H_X vs X` sur agrégat → 58% WR aggregate, mais paired-test 5/6 strats neutres-négatives. WR était un effet sélection-token, pas valeur du filter.
@@ -167,8 +171,9 @@ Le pipeline statistique à appliquer **systématiquement** avant chaque promote 
 4. **Bootstrap CI 95%** sur la moyenne du diff paired. Si l'IC inclut 0 → c'est du bruit, on ne promote pas.
 5. **Régime stability check** : perf stable jour-par-jour, ou portée par 1-2 outliers ? Test : virer le top 2 trades de la fenêtre, est-ce encore positif ?
 6. **Edge minimum vs coûts** : avg pct ≥ **+3%** par trade (couvre coût Solana ~3.5% round-trip : slippage entry + slippage exit + gas). En dessous, l'edge mathématique disparaît dans les frictions.
+7. **Blacklist sensitivity** : recompute les étapes 1-6 avec blacklist DÉSACTIVÉE. Si l'edge tient → strat robuste. Si l'edge disparaît → la perf vient de la blacklist, pas de la strat → ne pas promote (ou alors valider que la blacklist actuelle est l'optimale absolue, ce qui est très rarement le cas).
 
-**Ces 6 étapes sont nécessaires mais pas suffisantes** — les 9 critères ci-dessous ajoutent les conditions opérationnelles (companion-shadow drift, KOL filter audit, age-band overlap).
+**Ces 7 étapes sont nécessaires mais pas suffisantes** — les 9 critères ci-dessous ajoutent les conditions opérationnelles (companion-shadow drift, KOL filter audit, age-band overlap).
 
 ## 🛑 Critères de décision pour $50/trade live
 
@@ -181,7 +186,7 @@ Pour qu'une strat passe en **live $50/trade**, elle doit valider :
 5. ✅ **Sim ↔ Real drift < $10/d** sur la dernière mega-sweep
 6. ✅ **Companion-shadow paired-drift < 5pp** sur 7j post-promote (now possible avec v14e.57)
 7. ✅ **Live test : N ≥ 30 trades à $0.50** avant scale to $50, drift contrôlé
-8. ✅ **KOL filter audit** : la strat performe sur la blacklist actuelle ET sans (test sensitivity)
+8. ✅ **KOL filter audit** : la strat performe sur la blacklist actuelle ET sans (test sensitivity, cf. recette §7). Si fort gap → la strat dépend de la blacklist plutôt que d'avoir un edge intrinsèque. Bonus : tester si une blacklist alternative (par-famille) améliore $/d.
 9. ✅ **Age-band overlap** : la strat fire majoritairement sur sweet spots (1-3h ou 24-48h), pas 0-1h massif
 
 **État actuel** : aucune strat ne valide les 9 critères. Plus proche du pack : `BE25_LOCK10_TP60_SL30` valide 1, 2 (à confirmer 14j), 4. Manque 3, 5, 6, 7, 8, 9.
@@ -247,11 +252,20 @@ Last audit complet : v14e.49g/h/i (2026-04-30) sur jadendegens, aliensalphacalls
 
 ## ❓ Open questions / next iterations
 
-### Q1. KOL blacklist optimale ?
-État actuel : 18 SOL chain + 3 ETH chain + 6 flat live blacklist (paper_trade_config.kol_chain_blacklist).
+### Q1. KOL blacklist optimale ? (per-strat ?)
+État actuel : 16 SOL chain + 3 ETH chain + 6 flat live blacklist (cf. §KOL blacklists état actuel).
+
+**Sous-questions** :
 - Re-auditer chaque KOL actuellement banni (paper main fire rate ?, opportunity cost ?)
 - Re-auditer chaque KOL actuellement allowed (post-7j, certains saignent ?)
-- Script à créer : `scripts/_kol_blacklist_audit.py` avec paired-test KOL-allowed vs KOL-banned trades
+- **Per-strategy blacklist** : la même blacklist est-elle optimale pour FAST et SLOW ? Hypothèse : un KOL "FOMO call" (early pump puis dump) sera destructeur pour FAST_TP50_SL30 (catch le top puis dump, SL fire) mais profitable pour SLOW4H (catch le retracement). Counter-factual : per famille, retirer chaque KOL banni un par un et mesurer le delta $/d.
+- **Counter-factual sans blacklist** : pour les top candidats (Tier S), recompute $/d, WR, paired-test avec blacklist DÉSACTIVÉE — l'edge tient-il sans le filter ? Si oui = strat robuste. Si non = la perf vient principalement de la blacklist, pas de la strat.
+- **KOL allow-list expérimentation** : au lieu de blacklist (deny by default), tester whitelist (allow by default) sur les top 20 KOLs — gain marginal en signal vs perte en volume ?
+
+**Scripts à créer** :
+- `scripts/_kol_blacklist_audit.py` — paired-test KOL-allowed vs KOL-banned trades
+- `scripts/_kol_per_strat_breakdown.py` — pour chaque KOL × strat, $/d et WR. Identifie les KOLs qui sont profitables pour certaines strats et destructeurs pour d'autres.
+- `scripts/_blacklist_counterfactual.py` — recompute top candidats Tier S avec/sans blacklist active. Output : delta $/d, delta WR, sensitivity score.
 
 ### Q2. Filter `_NZ_S40` vs `_MCAP_S40` head-to-head ?
 Mega-sweep May 7 montre que les deux sauvent la famille TP200_SL40_4H. Lequel mieux ?
