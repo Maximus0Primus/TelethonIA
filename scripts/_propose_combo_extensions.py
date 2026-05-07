@@ -58,6 +58,38 @@ LOCK_VALUES = [None, 5, 10, 15]   # 4 options
 # Skip nonsense: LOCK without BE, LOCK >= BE.
 
 
+# v14e.57: filter-suffix axes to also propose. These are validated patterns
+# that have shown edge in paired-tests or sim/real cross-checks (May 7 audit):
+# - _S30/_S35/_S40 : score threshold filter (paired-test +0.05-0.07pp on
+#   FAST_TP50_SL30, BE25_TP80_SL30, TP50_SL15 baselines).
+# - _NZ_S40 / _MCAP / _MCAP_S40 : liq + score / mcap range filters that
+#   "rescue" TP200_SL40_4H family from sim over-fit (real -$70 → +$15-21/d).
+# - _A1to3 / _A24to48 : age-band sweet spots (SOL 14j: [1-3h] +$42K WR 53%,
+#   [24-48h] +$22K WR 48%, vs [0-1h] -$157K WR 39%).
+#
+# The dict maps suffix → STRATEGY_FILTERS dict (chain auto-injected from base).
+# Source-family suffixes (_BOTH/_DS/_JUPITER/_NOLAZY) are skipped here since
+# they're not filter-driven; they need source-routing infra.
+FILTER_AXES: dict[str, dict] = {
+    "_S30":      {"min_rt_score": 30},
+    "_S35":      {"min_rt_score": 35},
+    "_S40":      {"min_rt_score": 40},
+    "_NZ_S40":   {"min_liquidity_usd": 1, "min_rt_score": 40},
+    "_MCAP":     {"min_mcap": 30_000, "max_mcap": 500_000},
+    "_MCAP_S40": {"min_mcap": 30_000, "max_mcap": 500_000, "min_rt_score": 40},
+    "_A1to3":    {"min_age_hours": 1, "max_age_hours": 3},
+    "_A24to48":  {"min_age_hours": 24, "max_age_hours": 48},
+}
+
+# Suffixes that conflict (one per axis kind) — don't stack a strat that
+# already has a same-kind suffix.
+CONFLICTING_SUFFIX_GROUPS = [
+    {"_S30", "_S35", "_S40", "_NZ_S40", "_MCAP_S40"},   # score / liq / mcap+score
+    {"_MCAP", "_MCAP_S40"},                              # mcap range
+    {"_A1to3", "_A24to48"},                              # age band
+]
+
+
 def parse_strat_name(name: str) -> dict | None:
     """Parse a strat name like 'SLOW4H_TP50_SL30' or 'BE25_LOCK10_TP80_SL30'.
     Returns dict {family, horizon_min, tp_pct, sl_pct, be_pct, lock_pct} or None.
@@ -125,6 +157,17 @@ def load_existing_strats() -> set[str]:
     except Exception as e:
         print(f"WARN: failed to import STRATEGIES ({e}), using empty set")
         return set()
+
+
+def load_strats_with_tranches() -> dict:
+    """Read STRATEGIES dict with full tranche definitions, for filter
+    extension proposals where horizon parsing from name is unreliable
+    (e.g. `BE25_LOCK15_TP200_SL40_4H_NZ_S40` has no FAST/SLOW prefix)."""
+    try:
+        from strategies import STRATEGIES
+        return dict(STRATEGIES)
+    except Exception:
+        return {}
 
 
 def load_top_from_csv(csv_path: Path, limit: int) -> list[dict]:
@@ -217,9 +260,98 @@ def propose_combos(base_strat: str, existing: set[str]) -> list[dict]:
     return proposals
 
 
+def _detect_chain(strat_name: str) -> str:
+    """Infer chain from strat name prefix."""
+    return "ethereum" if strat_name.startswith("ETH_") else "solana"
+
+
+def propose_filter_extensions(
+    base_strat: str, existing: set[str], strats_dict: dict
+) -> list[dict]:
+    """For a given base strat, propose filter-suffix variants that don't exist.
+
+    v14e.57: extends BE×LOCK with score/liq/mcap/age-band filters that have
+    shown real-world edge in May 7 audit. Uses STRATEGIES dict for tranche
+    info (horizon, mults) since name-parsing fails for hybrid forms like
+    `BE25_LOCK15_TP200_SL40_4H_NZ_S40` that have no FAST/SLOW prefix.
+    """
+    base_tranches = strats_dict.get(base_strat)
+    if not base_tranches:
+        return []  # base not in STRATEGIES dict — can't safely propose
+    chain = _detect_chain(base_strat)
+    proposals = []
+    # Suffixes already on base (skip conflicting axes).
+    base_present_suffixes = {
+        suffix for suffix in FILTER_AXES
+        if base_strat.endswith(suffix) or f"{suffix}_" in base_strat
+    }
+    for suffix, filter_dict in FILTER_AXES.items():
+        if suffix in base_present_suffixes:
+            continue
+        # Skip if any same-kind suffix already on base.
+        if any(
+            base_present_suffixes & group and suffix in group
+            for group in CONFLICTING_SUFFIX_GROUPS
+        ):
+            continue
+        candidate_name = base_strat + suffix
+        if candidate_name in existing:
+            continue
+        proposals.append({
+            "name": candidate_name,
+            "base": base_strat,
+            "kind": "filter",
+            "suffix": suffix,
+            "tranches": base_tranches,
+            "filter_dict": {"chain": chain, **filter_dict},
+        })
+    return proposals
+
+
+def _format_filter_dict(fd: dict) -> str:
+    """Render a STRATEGY_FILTERS dict literal with canonical key order."""
+    ordered_keys = ["chain"] + [k for k in fd.keys() if k != "chain"]
+    items = []
+    for k in ordered_keys:
+        v = fd[k]
+        if isinstance(v, str):
+            items.append(f'"{k}": "{v}"')
+        elif isinstance(v, int) and v >= 1000:
+            items.append(f'"{k}": {v:_}')  # 30_000 style
+        else:
+            items.append(f'"{k}": {v}')
+    return "{" + ", ".join(items) + "}"
+
+
+def _render_tranche_dict(tranche: dict) -> str:
+    """Render a single tranche dict back to source-like form."""
+    parts = []
+    for k, v in tranche.items():
+        if isinstance(v, str):
+            parts.append(f'"{k}": "{v}"')
+        elif isinstance(v, float):
+            parts.append(f'"{k}": {v:.2f}')
+        else:
+            parts.append(f'"{k}": {v}')
+    return "{" + ", ".join(parts) + "}"
+
+
 def render_python_snippet(prop: dict) -> str:
     """Generate paste-ready Python for strategies.py."""
     name = prop["name"]
+    if prop.get("kind") == "filter":
+        # Filter extension: copy tranches verbatim from base, add STRATEGY_FILTERS.
+        tranches = prop["tranches"]
+        tranche_lines = ",\n    ".join(_render_tranche_dict(t) for t in tranches)
+        out = (
+            f'STRATEGIES["{name}"] = [\n'
+            f'    {tranche_lines},\n'
+            f']\n'
+            f'STRATEGY_FILTERS["{name}"] = {_format_filter_dict(prop["filter_dict"])}\n'
+            f'SHADOW_STRATEGIES.append("{name}")'
+        )
+        return out
+    # Legacy be_lock kind: rebuild tranche from parsed parts.
     tp_mult = 1 + prop["tp_pct"] / 100
     sl_mult = 1 - prop["sl_pct"] / 100
     horizon = prop["horizon_min"]
@@ -259,7 +391,8 @@ def main() -> int:
         print("ERROR: no top strats found in CSV or DB. Did the mega-sweep run?")
         return 1
 
-    existing = load_existing_strats()
+    strats_dict = load_strats_with_tranches()
+    existing = set(strats_dict.keys()) or load_existing_strats()
     print(f"Loaded {len(existing)} existing strategies from STRATEGIES dict.\n")
 
     print(f"=== TOP {args.top} BASE STRATS (by pnl_per_day) ===\n")
@@ -269,8 +402,13 @@ def main() -> int:
 
     all_proposals = []
     for r in top:
-        proposals = propose_combos(r["strategy"], existing)
-        proposals = proposals[:args.max_proposals]
+        # BE×LOCK combos (legacy axis)
+        be_lock = propose_combos(r["strategy"], existing)
+        for p in be_lock:
+            p["kind"] = "be_lock"
+        # v14e.57: filter-suffix variants (score / liq / mcap / age-band)
+        filter_props = propose_filter_extensions(r["strategy"], existing, strats_dict)
+        proposals = (be_lock + filter_props)[:args.max_proposals]
         if proposals:
             all_proposals.append((r, proposals))
 
@@ -282,7 +420,8 @@ def main() -> int:
     for base, props in all_proposals:
         print(f"--- BASE: {base['strategy']} (pnl/d={base['pnl_per_day']:.1f}, N={base['n']}) ---")
         for prop in props:
-            print(f"  → {prop['name']}")
+            kind_tag = f"  [{prop.get('kind','be_lock')}]"
+            print(f"  ->{prop['name']}{kind_tag}")
         print()
 
     print("=== PASTE-READY PYTHON SNIPPETS ===\n")
