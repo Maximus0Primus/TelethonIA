@@ -248,6 +248,45 @@ jadendegens, aliensalphacalls, batman_gem
 
 Last audit complet : v14e.49g/h/i (2026-04-30) sur jadendegens, aliensalphacalls, ryoshigamble (unban), ryoshikdegen (split), bagcalls, batman_gem.
 
+### Audit live blacklist 2026-05-07 (paper data 14j, source kol_group)
+
+> ⚠️ Pour les KOLs aussi en `paper_chain_blacklist`, les trades observés sont **shadow telemetry uniquement** (paper main bloqué, mais shadow continue). Quantifie ce que coûterait un unban.
+
+| KOL | Chain | N | WR | avg pp | sum_usd 14j | $/d | Verdict |
+|---|---|---:|---:|---:|---:|---:|---|
+| `aliensalphacalls` | SOL | 1308 | 33.6% | -15.6% | **-$9,710** | -$694 | ✅ ban JUSTIFIÉ massif |
+| `aliensalphacalls` | ETH | 24 | 45.8% | +5.4% | -$226 | -$16 | 🟡 ETH marginal (avg+ mais sum-) |
+| `bagcalls` | SOL | 339 | **2.9%** | -4.4% | -$722 | -$52 | ✅ ban JUSTIFIÉ (1 token spam'd 339×) |
+| `batman_gem` | ETH | 366 | 31.1% | -11.6% | **-$2,116** | -$151 | ✅ ban JUSTIFIÉ |
+| `batman_gem` | SOL | 22 | **0.0%** | -38.8% | -$427 | -$30 | ✅ ban JUSTIFIÉ (N petit mais 0% WR) |
+| `jadendegens` | SOL | **4,521** | 35.1% | -10.5% | **-$22,570** | **-$1,612** | ✅ ban ULTRA JUSTIFIÉ (top spam-toxic) |
+| `jadendegens` | ETH | 158 | 15.2% | -29.4% | -$3,218 | -$230 | ✅ ban JUSTIFIÉ |
+| `venom_gambles` | SOL | 344 | **0.0%** | -48.3% | **-$8,045** | -$575 | ✅ ban JUSTIFIÉ (perte massive) |
+| **`venom_gambles`** | **ETH** | **73** | **80.8%** | **+35.8%** | **+$1,305** | **+$93** | 🚨 **BAN INJUSTIFIÉ ETH — top performer !** |
+| `MaestrosDegen` | both | **0** | n/a | n/a | $0 | $0 | ⚠️ NO SIGNAL 14j (KOL inactif ou pas dans groupes scrapés) |
+
+**Findings critiques** :
+
+1. 🚨 **`venom_gambles` est le seul cas litigieux** : SOL catastrophique (-$575/d) MAIS ETH **excellent** (+$93/d, WR 80.8%, med +62.9%). Le ban live all-chain actuel **bloque +$93/d ETH alors qu'il pourrait fire**. Pour exploiter ce split :
+   - **Option A (sans code change)** : KEEP ban live (perte +$93/d ETH acceptée pour éviter le risque -$575/d SOL si SOL re-fire en live).
+   - **Option B (avec code change)** : ajouter `live_trading.kol_chain_blacklist` (per-chain, comme `paper_trade_config.kol_chain_blacklist`). Ensuite unban venom du `kol_blacklist` global + ajouter à `live_chain.solana`. Permet allow ETH live.
+   - **Action interim** : ajouter venom à `paper_chain_blacklist.solana` (déjà -$8K en paper shadow → confirme toxicité SOL, devrait être paper-banni aussi).
+
+2. ✅ **`jadendegens` mérite son triple ban** : -$1,842/d cumul cross-chain en paper shadow, 4,679 fires en 14j sur 22 tokens (= spam pumper professionnel). Unban = catastrophe.
+
+3. ⚠️ **`MaestrosDegen`** : 0 fires en 14j. Soit le KOL est inactif, soit RT listener ne capture pas. Ban "préventif" sans data. **Action** : retirer du blacklist pour collecter data, ou laisser (cost zéro).
+
+4. 🟡 **`aliensalphacalls` ETH** : N=24 avg +5.4% mais médian -11.6% et sum -$226 = moonshot reliance. Ban global justifié quand SOL est -$694/d. ETH-only signal trop faible.
+
+**Action items** :
+
+| # | Action | Priorité |
+|---|---|---|
+| 1 | Ajouter `venom_gambles` à `paper_chain_blacklist.solana` (déjà toxique en paper shadow) | 🔴 haute |
+| 2 | Décider Option A vs B pour venom_gambles ETH (gain +$93/d ETH si unban + per-chain live infra) | 🟡 medium |
+| 3 | Décider sort de `MaestrosDegen` (unban pour data ou keep prophylactique) | 🟢 basse |
+| 4 | Re-audit complet dans 7j (Mai 14) — verdict shadow post-companion-fix | 📅 schedule |
+
 ---
 
 ## ❓ Open questions / next iterations
