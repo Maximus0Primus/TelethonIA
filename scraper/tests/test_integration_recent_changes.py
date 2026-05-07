@@ -172,6 +172,44 @@ class TestKolLiveBlacklistGate(unittest.TestCase):
         self.assertEqual(len(expected), 5)
 
 
+class TestLiveChainBlacklistGate(unittest.TestCase):
+    """v14e.57: live_trading.kol_chain_blacklist (per-chain) lets us split
+    a KOL across chains in live (e.g. venom_gambles SOL ban / ETH allow)
+    without copying paper_trade_config.kol_chain_blacklist verbatim."""
+
+    @staticmethod
+    def _is_blocked(kol: str, chain: str, live_cfg: dict) -> bool:
+        """Mirror of safe_scraper.py:1742+ gate logic in isolation."""
+        flat = set(live_cfg.get("kol_blacklist") or [])
+        per_chain = (live_cfg.get("kol_chain_blacklist") or {}).get(chain, []) or []
+        return kol in flat or kol in set(per_chain)
+
+    def test_chain_split_allows_eth_blocks_sol(self):
+        live_cfg = {
+            "enabled": True,
+            "kol_blacklist": [],
+            "kol_chain_blacklist": {"solana": ["venom_gambles"]},
+        }
+        self.assertTrue(self._is_blocked("venom_gambles", "solana", live_cfg))
+        self.assertFalse(self._is_blocked("venom_gambles", "ethereum", live_cfg))
+
+    def test_flat_ban_overrides_per_chain(self):
+        """If a KOL is on the flat blacklist, both chains are blocked
+        regardless of kol_chain_blacklist contents."""
+        live_cfg = {
+            "kol_blacklist": ["jadendegens"],
+            "kol_chain_blacklist": {"solana": []},
+        }
+        self.assertTrue(self._is_blocked("jadendegens", "solana", live_cfg))
+        self.assertTrue(self._is_blocked("jadendegens", "ethereum", live_cfg))
+
+    def test_missing_per_chain_does_not_block(self):
+        """No kol_chain_blacklist key → falls back to flat-only behavior."""
+        live_cfg = {"kol_blacklist": ["foo"]}
+        self.assertFalse(self._is_blocked("bar", "solana", live_cfg))
+        self.assertFalse(self._is_blocked("bar", "ethereum", live_cfg))
+
+
 class TestRtPipelineSkipReasons(unittest.TestCase):
     """v14e.16: verify the global age gate in safe_scraper reads
     config['max_token_age_hours_rt'] with default 72.

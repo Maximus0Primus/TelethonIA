@@ -1730,7 +1730,13 @@ def _rt_open_trades(ca: str, symbol: str, price: float, mcap: float,
         # putting capital at risk while N<30 paper sample builds.
         # v14e.37: also honor paper_trade_config.kol_chain_blacklist per-chain
         # (statistical reliable_blacklist, shared with paper main gate).
+        # v14e.57: NEW live_trading.kol_chain_blacklist (per-chain, mirrors
+        # paper). Lets us split a KOL like venom_gambles (SOL toxic / ETH
+        # profitable) without giving up the all-chain ban or copying every
+        # paper-banned KOL into the live list.
         live_kol_blacklist = set(live_cfg.get("kol_blacklist", []))
+        live_chain_bl_raw = live_cfg.get("kol_chain_blacklist", {}) or {}
+        live_chain_bl = set(live_chain_bl_raw.get(token_chain, []) or [])
         try:
             from paper_trader import _load_paper_trade_config
             _ptc = _load_paper_trade_config(_get_supabase()) or {}
@@ -1739,8 +1745,18 @@ def _rt_open_trades(ca: str, symbol: str, price: float, mcap: float,
         except Exception:
             _chain_bl = set()
         _is_chain_banned = kol_username in _chain_bl
-        if kol_username in live_kol_blacklist or _is_chain_banned:
-            _reason = "v14e.37 chain blacklist" if _is_chain_banned else "v14e.14 flat blacklist"
+        _is_live_chain_banned = kol_username in live_chain_bl
+        if (
+            kol_username in live_kol_blacklist
+            or _is_chain_banned
+            or _is_live_chain_banned
+        ):
+            if _is_live_chain_banned:
+                _reason = f"v14e.57 live chain blacklist ({token_chain})"
+            elif _is_chain_banned:
+                _reason = "v14e.37 chain blacklist"
+            else:
+                _reason = "v14e.14 flat blacklist"
             logger.info(
                 "RT LIVE SKIP (%s): %s on %s — paper/shadow telemetry only",
                 _reason, kol_username, token_chain,
