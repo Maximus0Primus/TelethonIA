@@ -193,26 +193,34 @@ Pour qu'une strat passe en **live $50/trade**, elle doit valider :
 
 ---
 
-## 🚫 KOL blacklists état actuel (snapshot 2026-05-07)
+## 🚫 KOL blacklists état actuel (snapshot 2026-05-07 post-audit Option B)
 
 Source : `scoring_config` table, JSONB.
 
-### Live (`rt_trade_config.live_trading.kol_blacklist`) — 6 KOLs all-chain
-Bloque le live trading pour ces KOLs sur **toutes les chaînes**, paper main continue à tirer normalement.
+### Live flat (`rt_trade_config.live_trading.kol_blacklist`) — 4 KOLs all-chain
+Bloque le live sur **toutes les chaînes**, paper main continue normalement.
 
 ```
-MaestrosDegen, bagcalls, batman_gem, venom_gambles, jadendegens, aliensalphacalls
+bagcalls, batman_gem, jadendegens, aliensalphacalls
+```
+
+### Live chain (`rt_trade_config.live_trading.kol_chain_blacklist`) — NEW v14e.57
+Per-chain (mirror du paper). Permet split fin en live.
+
+**Solana — 1 KOL** (`venom_gambles` SOL ban / ETH allow)
+```
+venom_gambles
 ```
 
 ### Paper chain (`paper_trade_config.kol_chain_blacklist`)
 
 Bloque paper main + shadow par chain. Permet split fin (e.g. ban SOL / allow ETH).
 
-**Solana — 16 KOLs**
+**Solana — 17 KOLs** (added venom_gambles 2026-05-07)
 ```
 mad_apes_gambles, papicall, markdegens, ramcalls, leoclub69, ChairmanDN1,
 chiggajogambles, bounty_journal, DegenSeals, aliensalphacalls, LevisAlpha,
-jadendegens, bagcalls, ryoshikdegen, TheReaperGems, zcallz
+jadendegens, bagcalls, ryoshikdegen, TheReaperGems, zcallz, venom_gambles
 ```
 
 **Ethereum — 3 KOLs**
@@ -222,19 +230,17 @@ jadendegens, aliensalphacalls, batman_gem
 
 ### Paper flat (`paper_trade_config.kol_blacklist`) — non configuré (`null`)
 
-### Splits notables (cross-chain par KOL)
+### Splits notables (cross-chain par KOL, post-audit 2026-05-07)
 
-| KOL | SOL | ETH | Live | Note |
-|---|---|---|---|---|
-| `mad_apes_gambles` | 🔴 ban | 🟢 allow | 🟢 allow | SOL toxique, ETH OK |
-| `ryoshikdegen` | 🔴 ban | 🟢 allow | 🟢 allow | idem |
-| `bagcalls` | 🔴 ban | 🟢 allow | 🔴 ban | double ban (flat live + chain SOL) |
-| `batman_gem` | 🟢 allow | 🔴 ban | 🔴 ban | double ban (flat live + chain ETH) |
-| `jadendegens` | 🔴 ban | 🔴 ban | 🔴 ban | triple ban |
-| `aliensalphacalls` | 🔴 ban | 🔴 ban | 🔴 ban | triple ban |
-| `MaestrosDegen` | 🟢 allow | 🟢 allow | 🔴 ban | live-only ban (no signal en paper) |
-| `venom_gambles` | 🟢 allow | 🟢 allow | 🔴 ban | live-only ban (no signal en paper) |
-| `batman_gem` | 🟢 allow | 🔴 ban | 🔴 ban | flat live + chain ETH |
+| KOL | Paper SOL | Paper ETH | Live SOL | Live ETH | Note |
+|---|---|---|---|---|---|
+| `mad_apes_gambles` | 🔴 ban | 🟢 allow | 🟢 allow | 🟢 allow | SOL toxique, ETH OK |
+| `ryoshikdegen` | 🔴 ban | 🟢 allow | 🟢 allow | 🟢 allow | idem |
+| `bagcalls` | 🔴 ban | 🟢 allow | 🔴 ban | 🔴 ban | flat live + chain SOL |
+| `batman_gem` | 🟢 allow | 🔴 ban | 🔴 ban | 🔴 ban | flat live + chain ETH |
+| `jadendegens` | 🔴 ban | 🔴 ban | 🔴 ban | 🔴 ban | banned everywhere |
+| `aliensalphacalls` | 🔴 ban | 🔴 ban | 🔴 ban | 🔴 ban | banned everywhere |
+| **`venom_gambles`** v14e.57 | 🔴 ban | 🟢 allow | 🔴 ban | 🟢 **ALLOW** | SOL banned 4× / ETH allowed (top performer +$93/d WR 80.8%) |
 
 ### Règle d'usage (extrait MEMORY)
 
@@ -280,12 +286,19 @@ Last audit complet : v14e.49g/h/i (2026-04-30) sur jadendegens, aliensalphacalls
 
 **Action items** :
 
-| # | Action | Priorité |
+| # | Action | Status |
 |---|---|---|
-| 1 | Ajouter `venom_gambles` à `paper_chain_blacklist.solana` (déjà toxique en paper shadow) | 🔴 haute |
-| 2 | Décider Option A vs B pour venom_gambles ETH (gain +$93/d ETH si unban + per-chain live infra) | 🟡 medium |
-| 3 | Décider sort de `MaestrosDegen` (unban pour data ou keep prophylactique) | 🟢 basse |
-| 4 | Re-audit complet dans 7j (Mai 14) — verdict shadow post-companion-fix | 📅 schedule |
+| 1 | Ajouter `venom_gambles` à `paper_chain_blacklist.solana` | ✅ DONE (migration `v14e57_blacklist_audit_may7`) |
+| 2 | Implémenter Option B : `live_trading.kol_chain_blacklist` per-chain | ✅ DONE (commit `25ff5de`, safe_scraper.py:1742, +3 tests) |
+| 3 | Move venom du flat live → live chain SOL only (allow ETH live) | ✅ DONE (migration `v14e57_split_venom_live_eth_allow`) |
+| 4 | Remove `MaestrosDegen` du live blacklist (no signal 14j) | ✅ DONE |
+| 5 | Re-audit complet dans 7j (Mai 14) — verdict shadow post-companion-fix | 📅 scheduled |
+
+**Net post-audit** :
+- Live blacklist all-chain : 6 → **4 KOLs** (-Maestros, -venom)
+- Live chain SOL : **1 KOL** (venom_gambles, structure neuve)
+- Paper chain SOL : 16 → **17 KOLs** (+venom)
+- Quand live resume : `venom_gambles` ETH calls fire en live (capture +$93/d signal), SOL bloqué (évite -$575/d). MaestrosDegen libéré pour collecter de la data si actif.
 
 ---
 
