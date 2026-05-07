@@ -304,6 +304,33 @@ Last audit complet : v14e.49g/h/i (2026-04-30) sur jadendegens, aliensalphacalls
 
 ## ❓ Open questions / next iterations
 
+### Q1bis. Audit méta blacklist 2026-05-07 — verdict + 4 cas litigieux
+
+**Verdict global** : la blacklist SOL/ETH est **bonne à ~80%** sur 14j de paper shadow (volume amplifié × ~600 strats actives).
+
+- **13/17 SOL bannis** confirmés bad : papicall (-$4K/d), leoclub69, zcallz, chiggajogambles, DegenSeals, TheReaperGems, markdegens, aliensalphacalls, venom_gambles, LevisAlpha, ryoshikdegen, bagcalls, jadendegens (mais variance — voir bas).
+- **3/3 ETH bannis** confirmés bad : jadendegens, batman_gem, aliensalphacalls.
+- **Allowed side ETH** : tous profitables (DegenSeals +$316/d, TheReaperGems +$112, mad_apes_ETH +$586, etc.) → ETH blacklist propre.
+
+**4 cas litigieux à investiguer (next iteration)** :
+
+| KOL | 14j $/d | 7j $/d | Hypothèse |
+|---|---:|---:|---|
+| **`bounty_journal`** | **+$1,046** | **+$3,341** WR 60% | 🚨 faux positif probable — flip majeur 14j ET 7j positif |
+| `mad_apes_gambles` SOL | -$589 | **+$1,800** WR 56% | 🟡 7j flip positif après bad 14j |
+| `jadendegens` SOL | -$1,612 | +$2,293 WR 93% | 🟡 variance forte (1-2 jours moonshot ?) |
+| `ChairmanDN1` SOL | -$793 | +$615 WR 95% | 🟡 idem |
+| `ramcalls` SOL | -$361 | +$918 WR 96% | 🟡 idem |
+
+**Caveat critique de lecture** : les `$/d` shadow sont amplifiés par le volume (~600 strats × N tokens). L'impact paper main réel = **~2-5% de ces chiffres** (rapport active strats / total shadow). Donc bounty_journal "+$14K/14j shadow" ≈ ~$300-700/14j paper main si unban.
+
+**Actions deferred pour next iteration (Mai 14 ou +)** :
+- [ ] Daily breakdown bounty_journal + 4 autres litigieux 7j → outlier ou nouveau signal ?
+- [ ] Per-strat-family audit (bounty_journal × FAST/BE/SLOW/SCALP) — la blacklist optimale est-elle per-famille ?
+- [ ] Si bounty_journal confirmé : unban paper SOL + test shadow main 7j → si tient, paper main avec alloc petite ($500 seed).
+- [ ] Si mad_apes_gambles 14j stabilise positif : unban paper SOL aussi (mais already allowed ETH where +$586/d).
+- [ ] Re-audit des 4 jours +24h post-promote v14e.57 picks (`BE25_LOCK10_TP200_SL40_4H_*`) pour voir si les bannis qu'on consider unban changent la perf.
+
 ### Q1. KOL blacklist optimale ? (per-strat ?)
 État actuel : 16 SOL chain + 3 ETH chain + 6 flat live blacklist (cf. §KOL blacklists état actuel).
 
@@ -372,7 +399,9 @@ Si 0-1h saigne -$157K/14j (50% volume), pourquoi pas appliquer `min_age=1h` GLOB
   5. `BE50_LOCK25_TP200_SL40_4H_A24to48` — sweet spot 2 sur baseline pure
   Verdict attendu : N≥30 par strat (~5-7j), paired-test post-companion-fix vs leur baseline.
 - 🟡 Decision pending : aucun candidat ne valide les 9 critères live $50/trade. Plus proche : `BE25_LOCK10_TP60_SL30`.
-- 📌 Next iteration prévue : 2026-05-09 ou 10 (après 2-3j de companion-shadow data accumulée + market normal post-May-7).
+- ✅ **Audit live blacklist appliqué** (commits `17ed2f0` + `25ff5de` + `b19181f`, migrations `v14e57_blacklist_audit_may7` + `v14e57_split_venom_*`) : MaestrosDegen unban (no signal), venom_gambles split SOL ban / ETH allow via nouvelle infra `live_trading.kol_chain_blacklist`. Live flat 6→4, paper SOL 16→17.
+- ✅ **Audit méta blacklist** (Q1bis) : 13/17 SOL + 3/3 ETH confirmés bad. **4 cas litigieux** marqués pour next iteration : `bounty_journal` (top suspect, +$3,341/d 7j shadow), `mad_apes_gambles` SOL, `jadendegens` 7j-flip, `ChairmanDN1`, `ramcalls`.
+- 📌 Next iteration prévue : 2026-05-09 ou 10 (après 2-3j de companion-shadow data accumulée + market normal post-May-7). Tasks différées : daily breakdown des 4 litigieux + per-strat-family audit + re-test 7j.
 
 ---
 
