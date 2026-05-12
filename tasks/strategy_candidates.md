@@ -586,6 +586,72 @@ FROM paired GROUP BY strategy ORDER BY n_paired DESC;
 - [ ] **Dedup-diff** parqué — re-examiner après 14j de data post-v14e.58.
 - [ ] **Bug RT KOL matching** (post-restart 13:36) — `0/98 KOL groups matched`. Bloque actuellement la vérif du fix. À investiguer.
 
+#### G. ⚠️ Revision du top 7d (May 12 PM) — first-call only (dedup-aware) renverse le ranking
+
+**Contexte** : la liste §C above ("Le nouveau top SOL shadow 7d filter-rich") est basée sur le **total pnl 7d shadow** — qui pour les strats `_NZ_S40` filter-rich est dominé par les **re-entries du companion shadow bypass (v14e.57)**. Donc le ranking §C **NE reflète PAS** ce que paper main avec dedup 24h aurait fait. Re-analyse forcée après une question utilisateur sur la stabilité 20j de FAST_TP40_SL30_S40 (mon premier live pick).
+
+**Multi-window 30d/14d/7d sur 30 strats shadow filtre dpd_30 > $0** :
+
+Vrais stables (multi-window cohérent, med ≥ −3, WR ≥ 45) :
+
+| # | Strat | $/d 30d | $/d 14d | $/d 7d | med 14d | WR 14d | N 14d |
+|---|---|---|---|---|---|---|---|
+| 🥇 | **BE25_LOCK15_TP200_SL40_4H_NZ_S40** | $18 | $35 | $27 | **+4.0** | **54%** | 137 |
+| 🥈 | **BE25_LOCK10_TP80_SL30_S40** | $15 | $33 | $28 | **+2.0** | **53%** | 154 |
+| 🥉 | **SCALP_TP10_SL15** | $10 | $28 | $13 | **+9.5** | **61%** | 350 |
+| 4 | SCALP_TP15_SL15 | $13 | $34 | $14 | **+10.2** | 55% | 350 |
+| 5 | FAST_TP50_SL30_MCAP_S40 | $12 | $32 | $11 | +2.0 | 54% | 105 |
+| 6 | BE15_LOCK5_TP50_SL30 | $15 | $39 | $38 | −1.4 | 46% | 193 |
+
+Top 7d "fancy" qui étaient mes premiers picks — moonshot pur (med catastrophique) :
+
+| Strat | $/d 30d | $/d 14d | $/d 7d | med 14d | Verdict |
+|---|---|---|---|---|---|
+| TP300_SL50_4H_NZ_S40 | $38 | $58 | $81 | **−26.9** | 💀 pure moonshot |
+| TP200_SL40_2H_NZ_S40 | $26 | $52 | $78 | −14.3 | 💀 |
+| TP200_SL40_4H_MCAP_S40 | $23 | $51 | $57 | **−27.4** | 💀 |
+| TP300_SL40_6H_MCAP_S40 | $23 | $49 | $18 | **−40.6** | 💀 + crash 7d |
+| **FAST_TP40_SL30_S40** (mon 1er live pick) | $18 | $47 | $67 | −5.5 | 🟡 moonshot-day dep. (May 11 +$231 + May 8 +$191 = 80% du 14d profit) |
+| BE25_LOCK10_TP100_SL30_NZ_S40 | $30 | $59 | $118 | −5.9 | 🟡 $RKC carries 66% du 7d |
+
+**Verification dedup-aware (first-call only)** sur les top stables, 14d et 30d :
+
+| Strat | n_first 14d | WR | med | $/d 14d first | $/d 30d first | re_pnl 14d |
+|---|---|---|---|---|---|---|
+| 🥇 **SCALP_TP15_SL15** | 324 | **55.6%** | **+11.9** | **$36** | **$14** | −$21 |
+| 🥈 **SCALP_TP10_SL15** | 324 | **61.4%** | +9.5 | $28 | $10 | −$5 |
+| 🥉 FAST_TP50_SL30_MCAP_S40 | 84 | 54.8% | +2.2 | $26 | $9 | +$83 |
+| 4 **BE25_LOCK15_TP200_SL40_4H_NZ_S40** | 103 | 51.5% | +2.9 | $24 | **$13** | +$148 |
+| 5 BE15_LOCK5_TP50_SL30 | 157 | 45.9% | −1.4 | $21 | $6 | +$258 |
+| 6 BE25_LOCK10_TP80_SL30_S40 | 120 | 50.8% | +1.1 | $14 | $6 | +$274 |
+| 💀 BE25_LOCK10_TP100_SL30_NZ_S40 | 36 | 41.7% | **−24.8** | **$5** | $6 | **+$753** |
+
+**Findings critiques** :
+
+1. **BE25_LOCK10_TP100_SL30_NZ_S40** était classé #1 sur 7d total ($118/d) — **first-call only révèle $5/d avec med −24.8%**. Le +$753 re-entry est dominé par le moonshot $RKC du 11 mai (~$500). **NE PAS PROMOTE EN LIVE — c'est un piège.**
+
+2. **SCALP_TP15_SL15** et **SCALP_TP10_SL15** sont les **vrais champions** : med 14d **POSITIF** (+11.9 et +9.5), WR 55-61%, dedup-safe (re-entries ~0), $/d stable sur 30d + 14d + 7d. **NON PROMOTED** = pas affectés par le bug v14e.57, données propres.
+
+3. **BE25_LOCK15_TP200_SL40_4H_NZ_S40** : meilleur dans la liste filter-rich §C corrigée — med +2.9 first-call, $13/d 30d stable, design BE+LOCK. **Top choix si on veut TP-wide + filter NZ.**
+
+4. **FAST_TP40_SL30_S40** (mon 1er live pick) — 30d $18/d / 14d $47/d / 7d $67/d. La trajectoire $18→$47→$67 reverse-chrono est un **flag de regime-luck**, pas de skill. Sans les 2 jours top May 8+11 ($231+$191), il fait **$6/d sur 11j**. **NE PAS PROMOTE EN LIVE.**
+
+**Revision du #🥇 recommandation live $50/trade** :
+
+| Pick | Justification |
+|---|---|
+| ~~FAST_TP40_SL30_S40~~ | ❌ rejeté — moonshot-day dep. |
+| ~~BE25_LOCK10_TP100_SL30_NZ_S40~~ | ❌ rejeté — first-call $5/d, $RKC effect |
+| **`SCALP_TP15_SL15`** | ✅ **NOUVEAU TOP** — med +11.9, WR 55.6%, dedup-safe, NON PROMOTED (data propre), N=575 sur 30d |
+| **`BE25_LOCK15_TP200_SL40_4H_NZ_S40`** | 🥈 alternative BE+LOCK design, med +2.9, plus conservateur |
+
+**Caveat** : SCALP_TP15_SL15 est NON PROMOTED → pas de companion-shadow paired-drift mesuré. Reste à valider en live test $0.50/trade pendant 2-3j avant scale.
+
+**Action items révisés** :
+- [ ] Promote SCALP_TP15_SL15 + BE25_LOCK15_TP200_SL40_4H_NZ_S40 en paper main (allocations) → générer companion shadow data sur 7j
+- [ ] À J+7 (~Mai 19) : mesurer companion-shadow paired-drift sur ces 2 strats. Si <5pp → green light live test $0.50.
+- [ ] Garder l'ancienne reco FAST_TP40_SL30_S40 en historique (sert d'exemple de "piège 7d signal").
+
 ### 2026-05-07 (v14e.57 day)
 - ✅ Paired-test apples-to-apples 14j top : winner `_S40` filter family ($755/14j paired diff)
 - ❌ Hypothèses rejetées : AGE3H_SOL, BSR55_ETH, BE15_LOCK5 slip
