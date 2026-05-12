@@ -216,23 +216,29 @@ venom_gambles
 
 Bloque paper main + shadow par chain. Permet split fin (e.g. ban SOL / allow ETH).
 
-**Solana — 17 KOLs** (audit 2026-05-12 : 3 unban + 3 ban catastrophiques)
+**Solana — 18 KOLs** (audit 2026-05-12 PM : +CarnagecallsGambles)
 ```
 mad_apes_gambles, papicall, markdegens, leoclub69, ChairmanDN1,
 DegenSeals, aliensalphacalls, LevisAlpha, jadendegens, bagcalls,
 ryoshikdegen, TheReaperGems, zcallz, venom_gambles,
-robo_gambles, certifiedprintor, CSCalls
+robo_gambles, certifiedprintor, CSCalls, CarnagecallsGambles
 ```
 
-> **Historique audit blacklist** :
+> **Historique audit blacklist SOL** :
 > - 2026-04-30 (v14e.49b) : `CarnagecallsGambles` UNBANNED (was +$596/d 7d at the time)
 > - 2026-05-07 (v14e.57) : `venom_gambles` ADDED (paper SOL toxic -$575/d, split allow ETH)
-> - 2026-05-12 audit : UNBAN `bounty_journal` (+$2578/d 7d, +$497/d 30d, WR 58.8%, N=4528 — top performer caché), UNBAN `chiggajogambles` (+$1019/d 7d récent flip), UNBAN `ramcalls` (14d +$459/d WR 96.3% watchful). BAN `robo_gambles` (WR 0%, med −57.6%), `certifiedprintor` (WR 1.6%, med −48.3%), `CSCalls` (WR 1.0%, med −22.5%). Backup table `_backup_blacklist_audit_20260512`.
+> - 2026-05-12 audit : UNBAN `bounty_journal` (+$2578/d 7d, +$497/d 30d, WR 58.8%, N=4528 — top performer caché), UNBAN `chiggajogambles` (+$1019/d 7d récent flip), UNBAN `ramcalls` (14d +$459/d WR 96.3% watchful). BAN `robo_gambles` (WR 0%, med −57.6%), `certifiedprintor` (WR 1.6%, med −48.3%), `CSCalls` (WR 1.0%, med −22.5%).
+> - 2026-05-12 PM : BAN `CarnagecallsGambles` (re-ban après Apr 30 unban). 30d −$1746/d N=10217 = top $ damage panel. Backup `_backup_blacklist_audit_20260512`.
 
-**Ethereum — 3 KOLs**
+**Ethereum — 6 KOLs** (audit 2026-05-12 : +3 catastrophic bans)
 ```
-jadendegens, aliensalphacalls, batman_gem
+jadendegens, aliensalphacalls, batman_gem,
+dddegens, CryptoChefCooks, degenncabal
 ```
+
+> **Historique audit blacklist ETH** :
+> - 2026-05-12 audit : BAN `dddegens` (N=368 30d, −$68/d 30d, **−$199/d 7d worsening**, med −37, WR 32%). BAN `CryptoChefCooks` (N=84, **WR 0%**, med −25). BAN `degenncabal` (N=63, **WR 0%**, med **−42**). Les 3 catastrophiques de la list ETH allowed.
+> - `aliensalphacalls` ETH : N=14 trop petit (vs WR 78.6% sur 30d) — KEEP ban watchful jusqu'à N≥30 propre.
 
 ### Paper flat (`paper_trade_config.kol_blacklist`) — non configuré (`null`)
 
@@ -884,10 +890,11 @@ UPDATE scoring_config SET paper_trade_config = jsonb_set(
 
 ##### Action items §J
 
-- [x] Apply blacklist update Supabase (3 unban + 3 ban)
+- [x] Apply blacklist update Supabase SOL (3 unban + 3 ban)
 - [x] Backup `_backup_blacklist_audit_20260512` créée
-- [ ] **Re-audit dans 7j (~Mai 19)** : confirmer que les 3 unban tiennent positif post-companion-shadow propre (post-v14e.58)
-- [ ] **Décision CarnagecallsGambles** : −$1746/d = top toxic en damage absolu. Investiguer pourquoi unbanned Apr 30 (était +$596/d) → maintenant −$1746/d. Re-ban probable mais valider counter-factual.
+- [x] **CarnagecallsGambles BANNED** (12 mai PM) — top $ damage 30d −$1746/d N=10217. Sa flip Apr 30 → May 12 (+$596 → −$1746) montre que les unban-sur-7d-signal sont risqués. SOL blacklist 17 → 18.
+- [x] **ETH blacklist audit** — BAN dddegens (−$199/d 7d worsening + med −37), CryptoChefCooks (WR 0%), degenncabal (WR 0%, med −42). ETH blacklist 3 → 6. aliensalphacalls ETH kept ban watchful (N=14 30d trop petit pour validation unban malgré WR 78.6%).
+- [ ] **Re-audit dans 7j (~Mai 19)** : confirmer que les 3 unban SOL (bounty_journal, chiggajogambles, ramcalls) tiennent positif post-companion-shadow propre. Re-évaluer aliensalphacalls ETH si N>30 atteint.
 - [ ] **DROP `_backup_blacklist_audit_20260512`** vers Mai 19 si rollback non-nécessaire.
 
 #### 📚 Note méthodologique consolidée (à appliquer désormais)
