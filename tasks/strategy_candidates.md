@@ -379,6 +379,125 @@ Si 0-1h saigne -$157K/14j (50% volume), pourquoi pas appliquer `min_age=1h` GLOB
 
 ---
 
+## 🔨 Mechanism reference — Dedup 24h + companion-shadow drift
+
+> Section de référence sur les 2 mécanismes critiques qui gouvernent comment les trades s'ouvrent et comment on mesure le live drift.
+
+### A. Dedup 24h cooldown (paper main + shadow)
+
+**Ce que ça fait** : empêche d'ouvrir un trade `(token, strategy)` si un trade identique a déjà été ouvert ou fermé dans les dernières 24h. Le but : éviter que les KOLs qui re-spam un dead token génèrent une cascade de trades perdants sur la même paire.
+
+**Configuration** :
+- Source : `scoring_config.paper_trade_config.dedup_cooldown_hours` (JSONB)
+- Valeur actuelle : **24h**
+- Source unique de vérité dans `paper_trader.py:_load_paper_trade_config()` ligne 1066
+
+**Algorithme** (`paper_trader.py:open_paper_trades()`) :
+
+1. **Open-combos check** (ligne 1242-1251) : query `paper_trades` où `status='open'` pour les tokens du batch → set `(token, strategy)` à skip.
+2. **Cooldown-combos check** (ligne 1253-1283) : query `paper_trades` où `status != 'open'` ET `exit_at > now - 24h` → set `(token, strategy)` à skip.
+3. Pour chaque `(token, strategy)` candidat :
+   - Si dans `open_combos` → skip (existe déjà ouvert)
+   - Si dans `cooldown_combos_main` → skip MAIN (cf. v14e.58 fix ci-dessous)
+   - Pour shadow loop : si dans `cooldown_combos` (= all) AND `not is_promoted` → skip shadow aussi
+
+**Historique des versions** :
+- **v105** : a élargi le cooldown à toutes les trades (main + shadow), pour éviter le pollution des données shadow par re-entries spam.
+- **v144.2** : exclude `source='rt_live'` du cooldown (live et paper sont des univers distincts).
+- **v14e.58** (mai 12) : split en deux sets — `cooldown_combos_main` (is_shadow=False only, gates main) + `cooldown_combos` (all, gates shadow non-promoted). Fix régression v14e.57.
+
+**Impact sur perf live** : avec dedup 24h actif, certaines strats **manquent les re-pumps** (KOL re-call un token 2-3h après le 1er → blocked). Selon l'analyse mai 12 (cf. §E iteration log) :
+- Strats BE_LOCK family **bénéficieraient** d'un dedup réduit (4h ?) — re-entries +$266 à +$761 sur 5j sur certaines
+- Strats SCALP / SLOW4H / TP_NZ_S40 family **gagnent rien à perdre** dedup — re-entries flat ou negatives
+- **Décision parquée** : variance trop forte sur 7j shadow ($RKC moonshot = 66% du re-entry profit sur BE25_LOCK10_NZ_S40). Re-évaluer post-v14e.58 sur 14j.
+
+### B. Companion shadow paired-drift (mesure du coût d'être en live)
+
+**Ce que ça mesure** : la différence en pp de PnL entre un trade **live réel** (`source='rt_live'`) et son **shadow twin** (`is_shadow=true` ouvert sur le même token, même cycle, même strat).
+
+```
+paired_drift_pp = pnl_pct(live) - pnl_pct(shadow_companion)
+```
+
+**Pourquoi ça existe** : la note memory "shadow = main cosmétique" garantit que main paper et shadow calculent le PnL **identiquement** (même entry_price, même logique TP/SL, même position $50). Mais la version **live** subit :
+
+- Slippage Jupiter réel (entry + exit)
+- Frais Solana (~$0.02-0.06/round-trip = 2-6% à $1, 0.04-0.12% à $50)
+- MEV (sandwich attacks)
+- Latency price-vs-fill
+
+Donc `live_pnl < shadow_pnl` toujours d'un certain écart. Le drift médian par strat = **coût d'être en live**.
+
+**Le seuil "< 5pp sur 7j post-promote"** : si la drift médiane dépasse 5pp en absolu, les conditions live divergent trop du modèle paper → strat pas viable à scale.
+
+**Référence empirique** (memory note "v14e.49 drift live↔paper ACTÉ non-divergent", 1 mai) :
+- N=175 pairs apples-to-apples sur 5 strats sur 47.9h depuis live deploy
+- Drift médian par strat : **−1.20 à −2.36pp** (homogène, sain)
+- 31% des paires : live > paper (positive slip — chance Jupiter)
+- Tail des rugs (5.7%) : slip 5000-85000 bps = catastrophique mais rare
+- Conclusion : pas de divergence systémique au seuil 5pp ✓
+
+### C. Le problème associé — bug v14e.57 (résolu par v14e.58)
+
+**Background** : avant v14e.54 (2 mai), shadow loop dans `paper_trader.py:1644` créait des shadows pour TOUS les `SHADOW_STRATEGIES`, incluant les strats promoted (= déployées en paper main). v14e.54 a ajouté un skip `if strat_name in real_strats: continue` pour éviter les doubles inserts. **Effet secondaire** : les strats promoted ont perdu leur shadow twin → paired-drift mesure devenait impossible (= "pre vs post" temporel, pas paired).
+
+**v14e.57 (commit `985a11d`, 7 mai 21:00 UTC)** : a réintroduit la création des shadows pour strats promoted, MAIS avec un bypass de `open_combos` + `cooldown_combos` au shadow loop pour permettre la mesure paired-drift propre.
+
+**Bug** : la création du shadow companion fonctionne, MAIS la query `cooldown_combos` (ligne 1262, populate depuis `paper_trades` sans filtre `is_shadow`) inclut TOUTES les fermetures — main + shadow. Quand un shadow companion ferme (souvent <1h via TP/SL/timeout), il pollue `cooldown_combos`. Le main loop (ligne 1459 pré-fix) consulte ce même set → main re-entry bloqué.
+
+**Cascade** :
+1. Cycle T : KOL call token X → main `SCALP_TP15_SL30` ouvre + shadow companion ouvre
+2. Cycle T+30min : shadow companion ferme `sl_hit` à 30% loss → `exit_at` < cooldown_window
+3. Cycle T+1h : autre KOL call token X → `cooldown_combos` contient `(X, SCALP_TP15_SL30)` (vient de la fermeture shadow)
+4. Main loop ligne 1459 : skip → MAIN bloqué
+5. Shadow loop ligne 1654 : passe (`is_promoted` bypass) → shadow companion s'ouvre à nouveau
+6. Shadow ferme dans <24h → cooldown bloque pour 24h supplémentaires
+7. **Boucle infinie : main jamais re-fire sur ce strat tant que shadow re-pollue le cooldown**
+
+**Symptôme observé** : 14 paper main SOL strats (SCALP, SLOW4H, BE15_LOCK, BE25_LOCK_S40, TP200_S40, FAST_TP100_S35, FAST45_S30, BE50_LOCK25_MCAP) ont **freeze depuis 7 mai 17:22-19:43 UTC** (dernier fire pre-bug). Seules AGE24/48/72_FAST_TP50_SL30 ont continué à firer (leur filtre age-band rate l'effet de cascade — chaque token ne match qu'une AGE band particulière).
+
+**Fix v14e.58 (commit `8b5e4d1`, 12 mai)** : split `cooldown_combos` en deux :
+- `cooldown_combos_main` (uniquement is_shadow=False) → gate main re-entry (ligne 1467)
+- `cooldown_combos` (all = main + shadow) → gate shadow re-entry (ligne 1657)
+
+Restore le comportement pre-v14e.57 pour main (dedup sur ses propres fermetures uniquement) tout en préservant l'anti-spam v105 pour shadow (re-entry sur dead token).
+
+**Impact sur les bankrolls** : 5 jours frozen → 14 strats SOL avec 0 main fires. Backfill appliqué le 12 mai (first-call dedup-aware) — net −$771 sur 945 trades = signal réel de regime shift, pas artefact (cf. §B iteration log).
+
+### D. Verify queries
+
+```sql
+-- Vérifier que main fire post-fix v14e.58
+SELECT strategy, COUNT(*), MAX(cycle_ts) AS last
+FROM paper_trades
+WHERE chain='solana' AND is_shadow=false AND source='rt'
+  AND cycle_ts >= '2026-05-12 13:36:26+00'
+GROUP BY strategy ORDER BY last DESC;
+
+-- Mesurer paired-drift live ↔ shadow companion (post-promote)
+WITH paired AS (
+  SELECT
+    l.strategy, l.token_address,
+    l.pnl_pct AS live_pp, s.pnl_pct AS shadow_pp,
+    l.pnl_pct - s.pnl_pct AS drift_pp
+  FROM paper_trades l
+  JOIN paper_trades s
+    ON l.token_address = s.token_address
+    AND l.strategy = s.strategy
+    AND abs(extract(epoch from (l.cycle_ts - s.cycle_ts))) < 30
+    AND s.is_shadow = true
+  WHERE l.source = 'rt_live'
+    AND l.status != 'open' AND s.status != 'open'
+    AND l.cycle_ts > NOW() - INTERVAL '7 days'
+)
+SELECT strategy, COUNT(*) AS n_paired,
+  ROUND(percentile_cont(0.5) WITHIN GROUP (ORDER BY drift_pp)::numeric, 2) AS median_drift_pp,
+  ROUND(AVG(drift_pp)::numeric, 2) AS mean_drift_pp
+FROM paired GROUP BY strategy ORDER BY n_paired DESC;
+```
+
+---
+
 ## 📜 Iteration log
 
 ### 2026-05-12 (post-bug v14e.57 cooldown poisoning, fix v14e.58, Tier S collapse)
