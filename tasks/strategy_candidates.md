@@ -753,6 +753,75 @@ Top 7d "fancy" qui étaient mes premiers picks — moonshot pur (med catastrophi
 - [ ] Mesurer paired-drift sur 7j (companion shadow vs live)
 - [ ] Si drift <5pp et N≥30 → scale à $50/trade
 - [ ] En parallèle : monitor SCALP_TP15_SL15 + BE25_LOCK15_TP200_4H_NZ_S40 pour diversification phase 2
+#### I. 🚨 Critical revision — blacklist filter applied (= what main avec dedup + blacklist fait vraiment)
+
+**Le point manqué** : §H rank était basé sur shadow data brut. Mais `paper_trade_config.kol_chain_blacklist.solana` (17 KOLs : mad_apes_gambles, papicall, markdegens, ramcalls, leoclub69, ChairmanDN1, chiggajogambles, bounty_journal, DegenSeals, aliensalphacalls, LevisAlpha, jadendegens, bagcalls, ryoshikdegen, TheReaperGems, zcallz, venom_gambles) bloque MAIN mais shadow continue à recevoir leurs trades. Donc le ranking sur shadow surcompte les KOLs toxic qui ne firent jamais main.
+
+Re-analyse avec `kol_group NOT IN (blacklist_17)` :
+
+##### Comparaison shadow brut vs blacklist filter (30d, dedup_24h-approx) :
+
+| Strat | shadow brut | **avec BL** | Δ | bl_pnl_30d | % events from BL |
+|---|---|---|---|---|---|
+| TP200_SL40_2H_NZ_S40 | $26 | **$36** | +$10 | −$285 | 35% |
+| **FAST_TP40_SL30_S40** | $18 | **$27** | +$9 | −$267 | 38% |
+| **BE50_LOCK25_TP200_SL40_4H_NZ_S40** | $16 | **$26** | +$10 | −$296 | 35% |
+| 🔥 **DECAY_TP50_SL50_E15** | **−$14** | **+$26** | **+$40** | **−$1186** | 38% |
+| 🔥 **TP50_SL50** | **−$16** | **+$25** | **+$41** | **−$1222** | 38% |
+| TD2_BE5_TP120_SL44_T25 | $18 | $17 | −$1 | +$38 | 39% |
+| SCALP_TP15_SL15 | $13 | $16 | +$3 | −$72 | 38% |
+| BE25_LOCK15_TP200_SL40_4H_NZ_S40 | $14 | $14 | 0 | −$22 | 32% |
+
+##### 🔥 Winners cachés révélés par le blacklist :
+
+- **DECAY_TP50_SL50_E15** : shadow brut **−$14/d** 30d → looked like net loser. Avec blacklist : **+$26/d**. Les 17 KOLs bannis lui faisaient perdre $1186 sur 30j. **N=375 = sample massif.** Code : généré dynamiquement (`strategies.py:275-280` via `_DECAY_STRATEGIES`), TP starts +50% decays to +15% at t=120min, SL −50%.
+- **TP50_SL50** : shadow brut **−$16/d** → looked terrible. Avec blacklist : **+$25/d**. Same magnitude flip. Code : `strategies.py:171-173`, simple TP +50% / SL −50% / horizon 120min.
+
+##### Final top tier post-blacklist (= reality with dedup + blacklist actifs)
+
+| # | Strat | $/d 30d BL | $/d 14d BL | $/d 7d BL | med 14d | N 30d | Notes |
+|---|---|---|---|---|---|---|---|
+| 🥇 | **BE50_LOCK25_TP200_SL40_4H_NZ_S40** | $26 | $51 | **$47** | **−1.3** | 124 | STABLE cross-window + BE+LOCK safety + med proche 0 |
+| 🥈 | **FAST_TP40_SL30_S40** | $27 | $59 | $76 | −5.2 | 162 | Trajectory IMPROVING, mais variance moonshot-day |
+| 🥉 | **DECAY_TP50_SL50_E15** | $26 | $58 | $2 | **+3.4** | 375 | Med positif, gros N, MAIS 7d cooling à $2 |
+| 4 | **TP50_SL50** | $25 | $57 | $10 | **+0.8** | 375 | Med positif, gros N, 7d $10 cooling moindre |
+| 5 | TP200_SL40_2H_NZ_S40 | $36 | $73 | $87 | −11.7 | 126 | Highest $/d mais moonshot reliance |
+| 6 | TD2_BE5_TP120_SL44_T25 | $17 | (pas vérif) | (pas vérif) | (pas vérif) | 496 | Blacklist HURT légèrement, mais robust dedup-indep |
+
+##### Recommandation reco $50/trade FINALE post-blacklist :
+
+| Profil objectif | Strat | $/mois ($50) | Confiance |
+|---|---|---|---|
+| **MAX stable + safety BE/LOCK** | `BE50_LOCK25_TP200_SL40_4H_NZ_S40` | ~$780/mo | 🟢🟢🟢 |
+| Plus aggressive uptrend | `FAST_TP40_SL30_S40` | ~$810/mo | 🟢🟢 (variance) |
+| MAX big-sample reveal | `DECAY_TP50_SL50_E15` | ~$780/mo | 🟢🟢 (cooling 7d) |
+| Conservative | `TP50_SL50` | ~$750/mo | 🟢🟢 (cooling 7d) |
+| Stable dedup-indep | `TD2_BE5_TP120_SL44_T25` | ~$510/mo | 🟢 |
+
+**Verdict critique** : ma reco précédente "TD2_BE5_TP120" était techniquement valide mais le blacklist effect réordonne. Le **vrai top avec blacklist actif** est **BE50_LOCK25_TP200_SL40_4H_NZ_S40** :
+- 30d / 14d / 7d cohérents ($26 / $51 / $47, **pas de cooling**)
+- Med14 −1.3 = très proche 0 (pas moonshot)
+- BE+LOCK design = safety built-in
+- 35% events from blacklisted = blacklist le PROTÈGE de l'attrition toxic
+- N=124 OK
+
+**Action items §I** :
+- [ ] Décision live $50 : commencer par BE50_LOCK25_TP200_SL40_4H_NZ_S40 (premier choix) avec test $0.50 d'abord
+- [ ] **Méthodo critique apprise** : TOUJOURS filtrer la blacklist actuelle (`paper_trade_config.kol_chain_blacklist.solana`) lors du ranking shadow. Sans ce filtre, les strats qui captent beaucoup de toxic KOLs (38% events des SCALP/DECAY/TP50_SL50) sont **systématiquement sous-évaluées**.
+- [ ] Re-faire un audit blacklist counter-factual sur les Tier S (BE50_LOCK25_NZ_S40, DECAY_TP50_SL50_E15, TP50_SL50) — l'edge tient-il **sans blacklist** ? Si oui = strat intrinsèquement bonne. Si non = dépend de la blacklist (cf. recette §7 dans Méthodologie).
+
+#### 📚 Note méthodologique consolidée (à appliquer désormais)
+
+Pour évaluer **toute strat candidate** pour live, la query doit appliquer **3 filtres simultanément** :
+
+1. **`is_shadow = TRUE` + `source = 'rt'`** : utiliser shadow data RT (paper main brut a v14e.57 bug)
+2. **`rank=1 per (token, day)`** : simuler dedup 24h
+3. **`kol_group NOT IN paper_chain_blacklist.solana`** : exclure les KOLs blacklist
+
+Manquer #3 sur-estime tout ce qui capte des KOLs toxic. Manquer #2 surestime les BE_LOCK avec re-entries. Manquer #1 est miner par le bug v14e.57.
+
+---
+
 - [x] Vérifier le nom complet de TD2_BE5_TP120_SL44_T25 dans `strategies.py` — confirmé `scraper/strategies.py:1797-1807` :
   - **TD2** = TIME_DECAY_V2 fine winner
   - **BE5** = SL move to entry à t=5min, peu importe le peak
