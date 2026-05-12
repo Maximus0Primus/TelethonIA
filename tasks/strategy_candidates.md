@@ -3,7 +3,7 @@
 **Goal** : déployer **$50/trade live** avec confiance haute. Construction itérative du shortlist final.
 
 > Living document — mettre à jour après chaque audit, paired-test, ou run mega-sweep.
-> Dernière itération : **2026-05-07** (audit complet post-pause-live).
+> Dernière itération : **2026-05-12** (collapse Tier S + bug v14e.57 cooldown fix + nouveau ranking filter-rich).
 
 ---
 
@@ -380,6 +380,92 @@ Si 0-1h saigne -$157K/14j (50% volume), pourquoi pas appliquer `min_age=1h` GLOB
 ---
 
 ## 📜 Iteration log
+
+### 2026-05-12 (post-bug v14e.57 cooldown poisoning, fix v14e.58, Tier S collapse)
+
+#### A. 🐛 Bug v14e.57 → fix v14e.58 (commit `8b5e4d1`)
+
+**Root cause** : la cooldown query dans `open_paper_trades` (paper_trader.py:1262) ne filtrait PAS `is_shadow`. Quand v14e.57 (`985a11d`) a ré-introduit le **companion shadow pour strats promoted** (avec bypass cooldown au shadow loop ligne 1654), les fermetures shadow ont pollué `cooldown_combos`. Conséquence : 14 paper main SOL strats GELÉES depuis May 7 21:57 UTC.
+
+**Symptôme observé** : entre May 7 21:00 et May 12 13:36, seuls AGE24/48/72_FAST_TP50_SL30 firaient en main (leur age-band filtre les excluait du collapse de cooldown). Les 14 autres (SCALP, SLOW4H, BE15_LOCK, BE25_LOCK_*S40, TP200_*S40, FAST_TP100_S35, FAST45_S30, BE50_LOCK25_*MCAP) avec 0 main fires.
+
+**Fix** : split `cooldown_combos` en deux sets — `cooldown_combos_main` (is_shadow=False only) pour main loop, `cooldown_combos` (all) pour shadow loop. Preserve v105 anti-spam shadow, débloque main.
+
+**Backfill** (first-call dedup-aware) : 14 strats SOL `strategy_bankrolls_per_chain` mis à jour avec ce que main aurait fait pendant les 5j frozen. **Net : −$771 sur 945 trades** (signal réel — la plupart des strats ont break en regime shift, voir B). Backup table `_backup_bankroll_v14e58_backfill_20260512`.
+
+**Caveat méthodo** : per memory note "shadow = main" est vrai pour le calcul PnL par-trade, mais shadow companion (post v14e.57) fire sur CHAQUE call KOL (bypass dedup), alors que main avec dedup 24h ne fire que sur le 1er call par token. Donc shadow_pnl total ≠ main_pnl. Pour backfill réaliste : utiliser uniquement le 1er shadow par (token, strat).
+
+#### B. 💀 Tier S/A May 7 — collapse général en 5 jours
+
+8/10 candidats Tier S/A May 7 ont effondrés. Le 7d signal du May 7 n'a PAS prédit May 8-12 :
+
+| Strat (Tier May 7) | $/d May 7 | $/d 12 mai | Verdict |
+|---|---|---|---|
+| BE25_LOCK10_TP60_SL30 (S #1) | +$57 | **−$13** | 💀 collapse |
+| FAST_TP40_SL30_DS (S #2, WR 52%) | +$52 | **−$12** | 💀 collapse |
+| FAST_TP50_SL30_BOTH (S #3) | +$49 | **−$13** | 💀 collapse |
+| TP50_SL15_NOLAZY (A) | +$71 | **−$16** | 💀 collapse |
+| TP50_SL15_BOTH (A) | +$70 | **−$15** | 💀 collapse |
+| FAST_TP50_SL30_S40 (A) | +$24 | **−$16** | 💀 collapse |
+| FAST60_TP50_SL50_S30 (B 3j) | +$60 (3j) | **−$20** | 💀 collapse |
+| BE25_TP80_SL30_LAZYSLOW (B 3j) | +$65 (3j) | **−$28** | 💀 collapse |
+| BE50_LOCK25_TP200_SL40_4H_NZ_S40 (A) | +$55 | **+$40** | ✅ tient |
+| BE15_TP70_SL50_NZ (B) | +$72 (3j) | **+$26** | ✅ tient |
+
+**Leçon** : un winner 7j est instable. **Plus jamais promote sur 7j seul** — exiger 14j stable + 3j positif + raisonnement mécanique.
+
+#### C. 🆕 Le nouveau top SOL shadow 7d (filter-rich domine)
+
+| # | Strat | $/d 7j | N | WR | Présent May 7 ? |
+|---|---|---:|---:|---:|---|
+| 1 | **BE25_LOCK10_TP100_SL30_NZ_S40** | $118 | 100 | 48% | ❌ |
+| 2 | **TP300_SL50_4H_NZ_S40** | $81 | 84 | 31% | ❌ |
+| 3 | **TP200_SL40_2H_NZ_S40** | $78 | 85 | 39% | ex-deck live |
+| 4 | **FAST_TP40_SL30_S40** | $67 | 96 | 39% | ❌ |
+| 5 | TP200_SL40_4H_MCAP_S40 | $57 | 59 | 34% | ✅ tier A |
+| 6 | BE25_LOCK10_TP100_SL30_S40 | $42 | 85 | 46% | ❌ |
+| 7 | FAST_TP200_SL40_60M_MCAP_S40 | $42 | 71 | 35% | ❌ |
+| 8 | BE50_LOCK25_TP200_SL40_4H_NZ_S40 | $40 | 84 | 37% | ✅ tier A |
+| 9 | BE15_LOCK5_TP50_SL30 | $38 | 118 | 46% | partiellement |
+| 10 | FAST_TP40_SL30_NOLAZY | $38 | 161 | 38% | ❌ |
+| 11 | FAST_TP100_SL20_S35 | $35 | 109 | 43% | tier A |
+| 12 | FAST60_TP100_SL50_NZ_S40 | $34 | 85 | 37% | ❌ |
+
+**Pattern critique** : le nouveau top est **dominé par `_NZ_S40` et `_MCAP_S40`** (filter combos). Ça confirme le finding May 7 §E (filter NZ_S40/MCAP_S40 sauve la family TP200_SL40_4H). **À envisager** : standardiser les variants `_NZ_S40` ou `_MCAP_S40` sur les bases performantes.
+
+#### D. 🧪 Les 5 picks v14e.57 — N modéré, verdict mitigé
+
+| Strat (pick May 7) | N (5j) | $/d 5j | Verdict |
+|---|---|---|---|
+| BE25_LOCK10_TP200_SL40_4H_MCAP_S40 | 42 | **+$15** | 🟡 sim said +$19/d ✓ |
+| BE25_LOCK10_TP200_SL40_4H_NZ_S40 | 51 | +$10 | 🟡 mild winner |
+| BE25_LOCK10_TP200_SL40_4H_A1to3 | 24 | −$25 | ❌ losing |
+| BE25_LOCK15_TP200_SL40_4H_NZ_S40_A24to48 | 9 | −$16 | ❌ N too small |
+| BE50_LOCK25_TP200_SL40_4H_A24to48 | 13 | −$18 | ❌ N too small |
+
+**Leçon** : 2/5 picks sim-aligned, 3/5 perdent. L'hypothèse "age-band sweet spot 1-3h / 24-48h appliqué transversalement" ne tient pas pour ces variants. Continuer N gathering puis ré-évaluer à N≥30.
+
+#### E. 🔬 Dedup-différencié par strat — analyse + verdict
+
+**Investigation** : sur 12 top SOL shadow 7d, split first_call (= ce que main avec dedup fait) vs re-entry (= shadow only, bypass cooldown) :
+
+| Profil | Strats | Verdict dedup |
+|---|---|---|
+| **FIRST-ONLY** (re-entries perdent) | TP300_SL50_4H_NZ_S40, TP200_SL40_2H_NZ_S40, BE50_LOCK25_TP200_SL40_4H_NZ_S40, FAST60_TP100_SL50_NZ_S40 | 🔒 garder dedup 24h |
+| **BOTH+** (re-entries marginales) | TP200_SL40_4H_MCAP_S40, FAST_TP40_SL30_S40, FAST_TP200_SL40_60M_MCAP_S40, FAST_TP40_SL30_NOLAZY | 🟡 dedup ne hurt pas mais helps pas non plus |
+| **RE-ENTRY DRIVEN** (re-entries dominent le profit) | **BE25_LOCK10_TP100_SL30_NZ_S40** (+$761 re), **FAST_TP100_SL20_S35** (+$394 re), BE25_LOCK10_TP100_SL30_S40 (+$303 re), BE15_LOCK5_TP50_SL30 (+$266 re) | 🔓 candidate dedup-off, MAIS variance massive |
+
+**Variance critique** : sur BE25_LOCK10_TP100_SL30_NZ_S40 +$827 total dont +$761 re-entry, **~$500 vient d'un seul token $RKC** (May 11). Donc 1 moonshot = 66% du résultat. N=64 re-entries mais effective N (distinct tokens) bien plus petit.
+
+**Decision** : ❌ **PAS implémenter dedup-diff maintenant**. Le 7d signal "BE_LOCK loves re-entries" est probablement regime-dépendant. Attendre 14j post-v14e.58 (donnée propre) pour ré-évaluer.
+
+#### F. 🆕 Action items déduits
+
+- [ ] **DEMOTE** les 8 Tier S/A May 7 collapsed du registry actif (BE25_LOCK10_TP60_SL30, FAST_TP40_SL30_DS, FAST_TP50_SL30_BOTH, TP50_SL15_NOLAZY, TP50_SL15_BOTH, FAST_TP50_SL30_S40, FAST60_TP50_SL50_S30, BE25_TP80_SL30_LAZYSLOW)
+- [ ] **PROMOTE candidates Tier A (12 mai)** : BE25_LOCK10_TP100_SL30_NZ_S40 (top), TP300_SL50_4H_NZ_S40, TP200_SL40_2H_NZ_S40, FAST_TP40_SL30_S40, BE25_LOCK10_TP100_SL30_S40 — N≥85 each, $/d > $40 stable filter-rich
+- [ ] **Re-audit dans 7-14j** : valider que les nouveaux Tier A tiennent post-bug-fix avec données propres (companion shadow correct).
+- [ ] **Dedup-diff** parqué — re-examiner après 14j de data post-v14e.58.
+- [ ] **Bug RT KOL matching** (post-restart 13:36) — `0/98 KOL groups matched`. Bloque actuellement la vérif du fix. À investiguer.
 
 ### 2026-05-07 (v14e.57 day)
 - ✅ Paired-test apples-to-apples 14j top : winner `_S40` filter family ($755/14j paired diff)
