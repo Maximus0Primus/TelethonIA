@@ -216,12 +216,18 @@ venom_gambles
 
 Bloque paper main + shadow par chain. Permet split fin (e.g. ban SOL / allow ETH).
 
-**Solana — 17 KOLs** (added venom_gambles 2026-05-07)
+**Solana — 17 KOLs** (audit 2026-05-12 : 3 unban + 3 ban catastrophiques)
 ```
-mad_apes_gambles, papicall, markdegens, ramcalls, leoclub69, ChairmanDN1,
-chiggajogambles, bounty_journal, DegenSeals, aliensalphacalls, LevisAlpha,
-jadendegens, bagcalls, ryoshikdegen, TheReaperGems, zcallz, venom_gambles
+mad_apes_gambles, papicall, markdegens, leoclub69, ChairmanDN1,
+DegenSeals, aliensalphacalls, LevisAlpha, jadendegens, bagcalls,
+ryoshikdegen, TheReaperGems, zcallz, venom_gambles,
+robo_gambles, certifiedprintor, CSCalls
 ```
+
+> **Historique audit blacklist** :
+> - 2026-04-30 (v14e.49b) : `CarnagecallsGambles` UNBANNED (was +$596/d 7d at the time)
+> - 2026-05-07 (v14e.57) : `venom_gambles` ADDED (paper SOL toxic -$575/d, split allow ETH)
+> - 2026-05-12 audit : UNBAN `bounty_journal` (+$2578/d 7d, +$497/d 30d, WR 58.8%, N=4528 — top performer caché), UNBAN `chiggajogambles` (+$1019/d 7d récent flip), UNBAN `ramcalls` (14d +$459/d WR 96.3% watchful). BAN `robo_gambles` (WR 0%, med −57.6%), `certifiedprintor` (WR 1.6%, med −48.3%), `CSCalls` (WR 1.0%, med −22.5%). Backup table `_backup_blacklist_audit_20260512`.
 
 **Ethereum — 3 KOLs**
 ```
@@ -809,6 +815,80 @@ Re-analyse avec `kol_group NOT IN (blacklist_17)` :
 - [ ] Décision live $50 : commencer par BE50_LOCK25_TP200_SL40_4H_NZ_S40 (premier choix) avec test $0.50 d'abord
 - [ ] **Méthodo critique apprise** : TOUJOURS filtrer la blacklist actuelle (`paper_trade_config.kol_chain_blacklist.solana`) lors du ranking shadow. Sans ce filtre, les strats qui captent beaucoup de toxic KOLs (38% events des SCALP/DECAY/TP50_SL50) sont **systématiquement sous-évaluées**.
 - [ ] Re-faire un audit blacklist counter-factual sur les Tier S (BE50_LOCK25_NZ_S40, DECAY_TP50_SL50_E15, TP50_SL50) — l'edge tient-il **sans blacklist** ? Si oui = strat intrinsèquement bonne. Si non = dépend de la blacklist (cf. recette §7 dans Méthodologie).
+
+#### J. 🚫 Audit blacklist 12 mai — 3 unban + 3 ban catastrophiques
+
+**Contexte** : suite à §I (impact massif blacklist sur ranking), re-audit complet des 17 SOL bannis + scan KOLs allowed loosing.
+
+##### Findings audit 14d-30d shadow
+
+**Faux positifs détectés (3 UNBAN)** — paper shadow montre que ces 3 KOLs sont profitables, ban actuelle leur fait perdre du revenu :
+
+| KOL | n30 | $/d 30d | $/d 14d | $/d 7d | WR 14d | Décision |
+|---|---|---|---|---|---|---|
+| **bounty_journal** | 4528 | **+$497** | **+$1732** | **+$2578** | **58.8%** | 🔥 UNBAN URGENT (déjà flag May 7) |
+| **chiggajogambles** | 5150 | +$70 | +$296 | **+$1019** | 44.7% | UNBAN (flip massif récent) |
+| ramcalls | 959 | −$157 | **+$459** | n/a inactive | 96.3% | UNBAN watchful (small recent N) |
+
+**Catastrophiques détectés (3 BAN)** — KOLs allowed avec WR < 2% (cash-zero) :
+
+| KOL | n30 | $/d 30d | WR 30d | med pp | Décision |
+|---|---|---|---|---|---|
+| **certifiedprintor** | 554 | −$288 | **1.6%** | −48.3 | 🚫 BAN |
+| **robo_gambles** | 285 | −$250 | **0.0%** | −57.6 | 🚫 BAN |
+| **CSCalls** | 386 | −$137 | **1.0%** | −22.5 | 🚫 BAN |
+
+##### À investiguer (next iteration) — défense rééditer pour ces 4 :
+
+| KOL | n30 | $/d 30d | WR 30d | Note |
+|---|---|---|---|---|
+| **CarnagecallsGambles** | **10217** | **−$1746** | 29.4% | **Top $ damage panel**. Unbanned Apr 30 (+$596/d at the time) puis a explosé en toxic. Re-ban probable mais N immense — investiguer si comeback signal. |
+| sadcatgamble | 3796 | −$704 | 32.8% | High volume, med −27.5 |
+| Luca_Apes | 2667 | −$698 | 30.4% | |
+| MaybachGambleCalls | 7256 | −$465 | 39.0% | |
+
+##### Confirmés keep ban — les 14 restants
+
+| KOL | $/d 30d | $/d 14d | Verdict |
+|---|---|---|---|
+| leoclub69 | −$2371 | −$4657 | 🔴 WORST |
+| papicall | −$2326 | −$3260 | 🔴 |
+| zcallz | −$1182 | −$1930 | 🔴 |
+| ChairmanDN1 | −$963 | −$1304 | 🔴 |
+| jadendegens | −$918 | −$616 | 🔴 (déjà ban triple) |
+| markdegens | −$683 | −$327 | 🔴 |
+| DegenSeals | −$460 | −$742 | 🔴 |
+| aliensalphacalls | −$334 | −$386 | 🔴 (déjà ban triple) |
+| venom_gambles | −$263 | −$563 | 🔴 SOL ban only |
+| LevisAlpha | −$252 | −$334 | 🔴 |
+| mad_apes_gambles | −$202 | +$479 | 🟡 oscille, keep ban |
+| TheReaperGems | −$169 | −$1060 | 🔴 |
+| bagcalls | −$88 | −$188 | 🔴 |
+| ryoshikdegen | −$106 | n/a | 🟡 inactive, keep ban |
+
+##### Migration SQL appliquée
+
+```sql
+UPDATE scoring_config SET paper_trade_config = jsonb_set(
+  paper_trade_config, '{kol_chain_blacklist,solana}',
+  '[ ... 17 KOLs ... ]'::jsonb
+) WHERE id = 1;
+-- Backup: _backup_blacklist_audit_20260512
+```
+
+##### Impact attendu
+
+- **bounty_journal** unbanned : ajoute potentiellement +$1700/d shadow → +X% paper main (selon le ratio active strats / total shadow ≈ 5-10%, soit ~$85-170/d paper main attendu).
+- **Strats du top tier** (BE50_LOCK25_TP200_SL40_4H_NZ_S40, FAST_TP40_SL30_S40, DECAY_TP50_SL50_E15, TP50_SL50) vont voir leur perf paper main **augmenter** car ils captent bounty_journal/chiggajogambles qui sont maintenant allowed.
+- **Re-run ranking** après 7j de nouvelles données pour confirmer nouveau top.
+
+##### Action items §J
+
+- [x] Apply blacklist update Supabase (3 unban + 3 ban)
+- [x] Backup `_backup_blacklist_audit_20260512` créée
+- [ ] **Re-audit dans 7j (~Mai 19)** : confirmer que les 3 unban tiennent positif post-companion-shadow propre (post-v14e.58)
+- [ ] **Décision CarnagecallsGambles** : −$1746/d = top toxic en damage absolu. Investiguer pourquoi unbanned Apr 30 (était +$596/d) → maintenant −$1746/d. Re-ban probable mais valider counter-factual.
+- [ ] **DROP `_backup_blacklist_audit_20260512`** vers Mai 19 si rollback non-nécessaire.
 
 #### 📚 Note méthodologique consolidée (à appliquer désormais)
 
