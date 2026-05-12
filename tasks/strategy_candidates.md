@@ -464,7 +464,34 @@ Restore le comportement pre-v14e.57 pour main (dedup sur ses propres fermetures 
 
 **Impact sur les bankrolls** : 5 jours frozen → 14 strats SOL avec 0 main fires. Backfill appliqué le 12 mai (first-call dedup-aware) — net −$771 sur 945 trades = signal réel de regime shift, pas artefact (cf. §B iteration log).
 
-### D. Verify queries
+### D. First-call only vs no-dedup — méthodologie d'analyse
+
+**Le problème central** : quand on regarde le PnL shadow brut sur 7d, certaines strats apparaissent en haut du ranking parce que **shadow companion (v14e.57)** fire à chaque appel KOL sans dedup. Mais paper main avec **dedup 24h** ne fire qu'une fois par token par jour. Donc le shadow brut **n'est pas un proxy fidèle de ce que main ferait en live**.
+
+**4 angles d'analyse selon dedup window** :
+
+| Mode | Définition SQL | Sens |
+|---|---|---|
+| `no_dedup` | `SUM(pnl_usd)` (tous trades) | $/d théorique sans dedup = limite supérieure |
+| `dedup_1h` | `rank=1 per (strat, token, FLOOR(epoch/3600))` | dedup window 1h |
+| `dedup_6h` | `rank=1 per (strat, token, FLOOR(epoch/21600))` | dedup window 6h |
+| `dedup_24h` | `rank=1 per (strat, token, DATE(cycle_ts))` | dedup 24h (= configuration actuelle) |
+| `dedup_inf` | `rank=1 per (strat, token)` sur tout le window | 1 trade par token total = très conservateur |
+
+**Interprétation des 3 profils typiques** observés (cf. iteration log §H pour data) :
+
+1. **Dedup-INDÉPENDANT** : `no_dedup` ≈ `dedup_24h` ≈ `dedup_inf`. Les events de cette strat ne se chevauchent pas naturellement parce que les filtres (chain, NZ, MCAP, score≥35/40 sélectifs) écartent la plupart des re-calls. Exemple : `TD2_BE5_TP120_SL44_T25` (38.3 / 38.3 / 38.5). **Verdict** : dedup setting non-significatif, shadow brut = main avec dedup OK.
+
+2. **Dedup-DÉPENDANT POSITIF** (re-entries gonflent) : `no_dedup` >> `dedup_24h`. La perf brute est dominée par les re-entries du companion shadow. Exemple : `BE25_LOCK10_TP100_SL30_NZ_S40` (59.1 → 5.3, drop 91%). **Verdict** : ne PAS promote en live tel quel — shadow brut est trompeur, main avec dedup 24h ferait $5/d pas $59/d.
+
+3. **Dedup-DÉPENDANT NÉGATIF** (re-entries hurt) : `no_dedup` < `dedup_short`. Les re-entries perdent net. Exemple : `BE50_LOCK25_TP200_SL40_4H_MCAP` (24.1 no_dedup → 32.3 dedup_1h). **Verdict** : dedup HELP ici, garder dedup 24h actuel ou tester dedup 6h pour capturer le mid-pump.
+
+**Quand utiliser quelle métrique** :
+- Décision promote → live : utiliser `dedup_24h` (= ce que main fera en vrai)
+- Brainstorm strat tweaks : `no_dedup` et `dedup_inf` bornent l'enveloppe possible
+- Audit régresseur post-fix : comparer `dedup_24h` pre-fix vs post-fix pour valider le débuggage
+
+### E. Verify queries
 
 ```sql
 -- Vérifier que main fire post-fix v14e.58
@@ -651,6 +678,89 @@ Top 7d "fancy" qui étaient mes premiers picks — moonshot pur (med catastrophi
 - [ ] Promote SCALP_TP15_SL15 + BE25_LOCK15_TP200_SL40_4H_NZ_S40 en paper main (allocations) → générer companion shadow data sur 7j
 - [ ] À J+7 (~Mai 19) : mesurer companion-shadow paired-drift sur ces 2 strats. Si <5pp → green light live test $0.50.
 - [ ] Garder l'ancienne reco FAST_TP40_SL30_S40 en historique (sert d'exemple de "piège 7d signal").
+
+#### H. 🔬 Simulation multi-dedup window — ranking ultra-critique
+
+**Contexte** : §G's first-call analysis traitait dedup=24h comme baseline mais user a poussé pour comprendre l'impact dedup variable. Re-analyse avec **5 dedup windows simulés** (no_dedup, 1h, 6h, 24h, inf) sur 14d. Cf. §🔨 Mechanism reference §D pour méthodologie.
+
+**Findings critiques sur 26 top strats SOL shadow N≥80** :
+
+##### 🟢 Tier S — Stable money makers (dedup-indépendant, med ≥ −3, multi-window cohérent)
+
+| # | Strat | 30d ded24 | 14d ded24 | 7d ded24 | med 14d | N 30d | Note |
+|---|---|---|---|---|---|---|---|
+| 🥇 | **TD2_BE5_TP120_SL44_T25** | **$18** | **$38** | $15 | −2.8 | **496** | Plus solide tous windows + gros sample |
+| 🥈 | **BE25_LOCK15_TP200_SL40_4H_NZ_S40** | $14 | $26 | $9 | **+3.7** | 159 | Med positif, BE+LOCK design |
+| 🥉 | **SCALP_TP15_SL15** | $13 | $34 | $14 | **+10.2** | **605** | Best median panel, NON PROMOTED |
+
+##### 🟡 Tier A — Plus de $/d mais variance moonshot (med 14d négatif fort)
+
+| Strat | 30d | 14d | 7d | med 14d | Risque |
+|---|---|---|---|---|---|
+| TP300_SL50_4H_NZ_S40 | **$39** | $58 | **$81** | **−27** | ❌ drawdown brutal |
+| TP200_SL40_2H_NZ_S40 | $26 | $52 | $78 | −14 | ❌ moonshot pur |
+| TP200_SL40_4H_MCAP_S40 | $19 | $43 | $40 | −28 | ❌ |
+| TP300_SL40_6H_MCAP_S40 | $23 | $49 | $18 | −41 | ❌ + cooling 7d |
+| **FAST_TP40_SL30_S40** (1er pick rejeté §G) | $18 | $47 | $67 | −5.5 | 🟡 day-dep |
+| FAST_TP200_SL40_60M_MCAP_S40 | $18 | $41 | $42 | −9.4 | 🟡 |
+| BE50_LOCK25_TP200_SL40_4H_NZ_S40 | $16 | $35 | $40 | −9.5 | 🟡 |
+
+##### 💀 Tier D — Crash 7d ou trompe-l'œil dedup-inflated
+
+| Strat | 30d | 14d | **7d** | Verdict |
+|---|---|---|---|---|
+| FAST_TP50_SL30_BOTH | $13 | $33 | **−$13** | collapsed |
+| FAST_TP40_SL30_DS | $13 | $30 | **−$13** | collapsed |
+| BE25_LOCK10_TP60_SL30 | $12 | $27 | **−$13** | collapsed (= Tier S May 7) |
+| BE25_LOCK10_TP80_SL30_S40 | $7 | $15 | **−$8** | crashing |
+| FAST_TP50_SL30_JUPITER | $9 | $28 | **−$18** | collapsed |
+| **BE25_LOCK10_TP100_SL30_NZ_S40** | **$6** | **$5** | $10 | 💀 dedup24h reveal — first-call only $5/d (vs $118/d shadow brut 7d) |
+
+##### Comportement dedup-sensitivity sur 7 strats clés (14d)
+
+| Strat | no_dedup | dedup_1h | dedup_24h | dedup_inf | Profil |
+|---|---|---|---|---|---|
+| TP300_SL50_4H_NZ_S40 | $58.1 | $58.1 | $58.1 | $60.1 | DEDUP-INDÉPENDANT (events naturels distincts) |
+| TD2_BE5_TP120 | $38.3 | $38.3 | $38.3 | $38.5 | DEDUP-INDÉPENDANT |
+| SCALP_TP15_SL15 | $34.4 | $34.4 | $34.4 | $35.9 | DEDUP-INDÉPENDANT |
+| BE25_LOCK15_TP200_4H_NZ_S40 | $35.0 | $22.3 | $26.0 | $24.4 | re-entries +$11 sur dedup_24h |
+| BE25_LOCK10_TP100_SL30_NZ_S40 | **$59.1** | $7.8 | $5.3 | $5.3 | 💀 91% drop = trompe-l'œil |
+| BE15_LOCK5_TP50_SL30 | $39.4 | $18.2 | $20.6 | $21.0 | re-entries +$19 |
+| **BE50_LOCK25_TP200_SL40_4H_MCAP** | $24.1 | **$32.3** | $28.0 | $32.6 | **dedup HELP** (re-entries net negative) |
+
+**Insight critique** : la majorité des "winners" filter-rich (`_NZ_S40`, `_MCAP_S40`) ont des events naturellement distincts (chain + filter score=40 = peu de re-calls éligibles) → ils sont **dedup-indépendants**. Le bug v14e.57 cooldown a affecté **seulement** les strats BE_LOCK générales (sans filter score serré) qui captent les re-calls naturellement. C'est pour ces strats que mon ranking §C était biaisé.
+
+##### Recommandations finales live $50/trade (ordre par risque/$/d) :
+
+| Profil objectif | Strat | $/mois ($50/trade) | Caveat |
+|---|---|---|---|
+| **MAX stable** | TD2_BE5_TP120_SL44_T25 | ~$540 | N=496 solide, med −2.8 acceptable, dedup-indep |
+| **Conservateur** | BE25_LOCK15_TP200_SL40_4H_NZ_S40 | ~$420 | Med +3.7, BE+LOCK safety, mais 7d cooling ($9) |
+| **Best WR psy comfort** | SCALP_TP15_SL15 | ~$390 | WR 55%, med +10.2, N=605, NON PROMOTED data propre |
+| **High risk variance** | TP300_SL50_4H_NZ_S40 | ~$1170 | Med −27 = drawdowns brutaux. Buffer 50x bankroll obligatoire. Non recommandé pour $50 direct |
+| **Diversifié multi-strat** | 3× $50 sur tier S | ~$1350/mo | Sharpe optimal, mais 3× max_open_positions |
+
+**Recommandation user-facing** : **TD2_BE5_TP120_SL44_T25** comme premier live $50/trade.
+- 30d / 14d / 7d cohérent
+- N=496 = statistiquement solide
+- Dedup-indépendant → perf prévisible
+- Median proche 0 → pas portage moonshot
+- Aucun signe de regime shift
+
+**Action items §H** :
+- [ ] Promote TD2_BE5_TP120_SL44_T25 en paper main (vérifier qu'il est dans `hybrid_strategy.allocations`)
+- [ ] Lancer live test $0.50/trade sur cette strat (modifier `live_trading.allocations` + enable=true)
+- [ ] Mesurer paired-drift sur 7j (companion shadow vs live)
+- [ ] Si drift <5pp et N≥30 → scale à $50/trade
+- [ ] En parallèle : monitor SCALP_TP15_SL15 + BE25_LOCK15_TP200_4H_NZ_S40 pour diversification phase 2
+- [x] Vérifier le nom complet de TD2_BE5_TP120_SL44_T25 dans `strategies.py` — confirmé `scraper/strategies.py:1797-1807` :
+  - **TD2** = TIME_DECAY_V2 fine winner
+  - **BE5** = SL move to entry à t=5min, peu importe le peak
+  - **TP schedule adaptatif** : `[(0, 2.20), (5, 1.40), (15, 1.00), (25, 1.00)]` = +120% TP à t=0 → +40% à t=5min → take any profit à t=15-25min
+  - **SL** = −44% (sl_mult 0.55), horizon 25min
+  - **Status** : SHADOW ONLY (in SHADOW_STRATEGIES, NOT in active_strategies / hybrid_strategy.allocations)
+  - **Bénéfice du status** : 30d data **propre** = non-affectée par bug v14e.57 (pas de companion shadow créé), signal $18/d 30d genuine
+  - **Caveat** : son design "take profit early at TP120% but accept TP40% after 5min" capture les fast moonshots ; à valider en live pour vérifier le timing du sell vs slippage Jupiter
 
 ### 2026-05-07 (v14e.57 day)
 - ✅ Paired-test apples-to-apples 14j top : winner `_S40` filter family ($755/14j paired diff)
