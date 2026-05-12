@@ -1250,27 +1250,35 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
         logger.error("paper_trader: failed to check open trades: %s", e)
         open_combos = set()
 
-    # Cooldown dedup: check recently closed trades (main + shadow)
+    # Cooldown dedup: check recently closed trades.
     # v105: Apply cooldown to ALL trades (not just main). Shadow re-entries on the same
     # token pollute data — a KOL re-calling a dead token generates 47 losing shadow trades.
     # v144.2: exclude rt_live closures from paper cooldown (live and paper are distinct
     # universes — a live close on (token, FAST_TP50) shouldn't block paper from re-entry).
-    cooldown_combos = set()
+    # v14e.58: split into two sets. Companion shadow (v14e.57) opens shadow rows for
+    # PROMOTED strats that bypass shadow-side cooldown but still write exit_at on close.
+    # Those shadow closures were poisoning the unified `cooldown_combos` and froze the
+    # MAIN re-entry on every promoted strat (SCALP/SLOW4H/BE15_LOCK/...). Fix: main loop
+    # blocks only on MAIN closures; shadow loop keeps v105 anti-spam behavior (any close).
+    cooldown_combos_main: set = set()  # main closures only — gates MAIN re-entry
+    cooldown_combos: set = set()       # all closures (main + shadow) — gates SHADOW re-entry
     if dedup_cooldown_h > 0:
         cooldown_since = (cycle_ts - timedelta(hours=dedup_cooldown_h)).isoformat()
         try:
             recent = (
                 client.table("paper_trades")
-                .select("token_address, strategy")
+                .select("token_address, strategy, is_shadow")
                 .neq("status", "open")
                 .neq("source", "rt_live")
                 .gte("exit_at", cooldown_since)
                 .in_("token_address", addrs)
                 .execute()
             )
-            cooldown_combos = {
-                (r["token_address"], r["strategy"]) for r in (recent.data or [])
-            }
+            for r in (recent.data or []):
+                key = (r["token_address"], r["strategy"])
+                cooldown_combos.add(key)
+                if not r.get("is_shadow"):
+                    cooldown_combos_main.add(key)
         except Exception as e:
             logger.warning("paper_trader: cooldown dedup query failed: %s", e)
 
@@ -1456,7 +1464,8 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
 
             if (addr, strat_name) in open_combos:
                 continue
-            if (addr, strat_name) in cooldown_combos:
+            # v14e.58: gate MAIN re-entry on MAIN closures only (not shadow companions).
+            if (addr, strat_name) in cooldown_combos_main:
                 continue
 
             # v108: Defensive re-check right before insert to catch race conditions
