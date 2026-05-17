@@ -515,21 +515,85 @@ def set_sim_chain(chain: str) -> None:
 
 
 def sb_get(table: str, params: list[tuple]) -> list[dict]:
-    all_rows = []
+    """Paginate Supabase REST GET. Auto-selects keyset pagination on
+    `created_at` when SELECT includes `id` + `created_at` and ORDER targets
+    `created_at`; otherwise falls back to OFFSET pagination.
+
+    v14e.59: keyset switch. The mega-sweep extended query pulls paper_trades
+    grouped per shard; the SOL universe crossed ~240k rows and OFFSET 238000
+    on Supabase (60s statement_timeout, sequential scan from row 0) returns
+    HTTP 500 (code 57014). Keyset on the indexed `created_at` is O(log N) per
+    page and survives unbounded growth. Dedup by `id` because consecutive
+    pages overlap on identical timestamps (millisecond precision; rare but
+    happens with batch inserts).
+    """
+    select_str = next((v for k, v in params if k == "select"), "")
+    select_cols = {c.strip() for c in select_str.split(",")}
+    order_vals = [v for k, v in params if k == "order"]
+    uses_created_at_order = any("created_at" in o for o in order_vals)
+    use_keyset = (
+        uses_created_at_order
+        and "id" in select_cols
+        and "created_at" in select_cols
+    )
+
+    if not use_keyset:
+        all_rows = []
+        limit = 1000
+        offset = 0
+        while True:
+            p = params + [("limit", str(limit)), ("offset", str(offset))]
+            r = requests.get(f"{SUPABASE_URL}/rest/v1/{table}", headers=SB_HEADERS,
+                             params=p, timeout=30)
+            if r.status_code != 200:
+                print(f"  Supabase error {r.status_code}: {r.text[:300]}")
+                r.raise_for_status()
+            rows = r.json()
+            all_rows.extend(rows)
+            if len(rows) < limit:
+                break
+            offset += len(rows)
+        return all_rows
+
+    # Keyset pagination on created_at. Preserve all caller-supplied filters
+    # on first request, then on every subsequent request replace any
+    # `created_at` lower-bound filter (gte./gt.) with a fresh cursor.
+    all_rows: list[dict] = []
+    seen_ids: set = set()
     limit = 1000
-    offset = 0
+    cursor: str | None = None
+    base_no_cursor = [
+        (k, v) for k, v in params
+        if not (k == "created_at" and isinstance(v, str)
+                and (v.startswith("gte.") or v.startswith("gt.")))
+    ]
     while True:
-        p = params + [("limit", str(limit)), ("offset", str(offset))]
+        if cursor is None:
+            p = list(params) + [("limit", str(limit))]
+        else:
+            p = base_no_cursor + [("created_at", f"gte.{cursor}"), ("limit", str(limit))]
         r = requests.get(f"{SUPABASE_URL}/rest/v1/{table}", headers=SB_HEADERS,
                          params=p, timeout=30)
         if r.status_code != 200:
             print(f"  Supabase error {r.status_code}: {r.text[:300]}")
             r.raise_for_status()
         rows = r.json()
-        all_rows.extend(rows)
+        if not rows:
+            break
+        new_rows = [row for row in rows if row.get("id") not in seen_ids]
+        for row in new_rows:
+            seen_ids.add(row.get("id"))
+        all_rows.extend(new_rows)
         if len(rows) < limit:
             break
-        offset += len(rows)
+        next_cursor = rows[-1].get("created_at")
+        if next_cursor is None or next_cursor == cursor:
+            # Safety: tie on the entire last page (every row has cursor's ts)
+            # would loop forever. Break and let caller see what we have.
+            print(f"  WARN: keyset stalled at created_at={cursor}; "
+                  f"returning {len(all_rows)} rows so far")
+            break
+        cursor = next_cursor
     return all_rows
 
 

@@ -1235,10 +1235,17 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
     # zero paper rows created, breaking 14d of paired A/B analysis.
     addrs = [t["token_address"] for t in candidates]
     try:
+        # v14e.59: filter out shadow opens. v14e.57 companion-shadow opens a
+        # shadow row for promoted strats; without this filter, that open
+        # shadow row blocks MAIN re-entry on the same (addr, strat) for as
+        # long as it stays open. Same asymmetry the v14e.58 cooldown split
+        # addressed, but on the OPEN side. Shadow loop still gates its own
+        # re-entry via open_combos.add() of shadow inserts within this call.
         existing = (
             client.table("paper_trades")
             .select("token_address, strategy")
             .eq("status", "open")
+            .eq("is_shadow", False)
             .neq("source", "rt_live")
             .in_("token_address", addrs)
             .execute()
@@ -1471,12 +1478,16 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
             # v108: Defensive re-check right before insert to catch race conditions
             # (e.g. batch + RT overlap, or two RT calls that slipped past in-flight lock)
             # v144.2: exclude rt_live so a sibling live row doesn't block paper.
+            # v14e.59: exclude shadow rows — same asymmetry as the open_combos
+            # query above; a shadow companion sitting at status=open must not
+            # block MAIN re-entry.
             try:
                 recheck = (
                     client.table("paper_trades")
                     .select("id", count="exact")
                     .eq("token_address", addr)
                     .eq("strategy", strat_name)
+                    .eq("is_shadow", False)
                     .neq("source", "rt_live")
                     .eq("status", "open")
                     .execute()

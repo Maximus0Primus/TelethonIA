@@ -36,12 +36,21 @@ jobs:
           export ALIGN_SINCE="$(date -u -d '48 hours ago' +'%Y-%m-%d %H:%M:%S+00:00')"
           echo "window: $ALIGN_SINCE"
           python scripts/verify_sim_live_alignment.py 2>&1 | tee align.out
+          PY_EXIT=${PIPESTATUS[0]}
+          echo "python exit code: $PY_EXIT"
 
           # v14e.5: parse fix — previous awk summed N across LOGIC + ECONOMIC
           # breakdown blocks (each reports the same per-strat N once, so the
           # total was doubled). Same issue with within_10pp pre-v14e.5.
           # Take N from the single summary line and sum within_10pp from the
           # LOGIC breakdown section only (between its header and next header).
+          # v14e.59: wrap parsing in set +e so grep no-match (exit 1) doesn't
+          # kill `bash -e` before the N==0 skip path runs. Previous failure
+          # mode: ALIGN_SINCE window has zero closed live trades, script
+          # exits 0 with "No live trades..." message, but the first grep
+          # `Avg diff =` finds no match and bash aborted the step → empty
+          # outputs → bogus Telegram alert with "Avg diff: pp / Within 10pp: /".
+          set +e
           AVG=$(grep -oE 'Avg diff = [+-]?[0-9.]+pp' align.out | head -1 | grep -oE '[+-]?[0-9.]+')
           MAX=$(grep -oE 'Max \|diff\| = [0-9.]+' align.out | head -1 | grep -oE '[0-9.]+')
           # LOGIC-only sections, delimited by their === header lines.
@@ -49,8 +58,13 @@ jobs:
           WITHIN_COUNT=$(echo "$LOGIC_BLOCK" | grep -oE 'within_10pp=[0-9]+' | awk -F= '{s+=$2} END{print s+0}')
           # N = count of gate-eligible rows (post MEV-pump skip) from summary line.
           N_COUNT=$(grep -oE 'Replay vs paper_sim on [0-9]+ trades' align.out | grep -oE '[0-9]+' | head -1)
+          set -e
+
           N_COUNT=${N_COUNT:-0}
-          echo "avg=$AVG max=$MAX within=$WITHIN_COUNT/$N_COUNT"
+          AVG=${AVG:-0}
+          MAX=${MAX:-0}
+          WITHIN_COUNT=${WITHIN_COUNT:-0}
+          echo "avg=$AVG max=$MAX within=$WITHIN_COUNT/$N_COUNT py_exit=$PY_EXIT"
           echo "avg=$AVG" >> "$GITHUB_OUTPUT"
           echo "max=$MAX" >> "$GITHUB_OUTPUT"
           echo "within=$WITHIN_COUNT" >> "$GITHUB_OUTPUT"
@@ -59,9 +73,17 @@ jobs:
           # Skip cleanly when no eligible trades in window (e.g. live deck
           # paused or thin). Avoids spurious 0% ratio failures + empty Telegram
           # alerts. Re-arms automatically once live closes trades again.
-          if [ "${N_COUNT:-0}" -eq 0 ]; then
-            echo "No live trades to gate — skipping alignment check."
+          if [ "$N_COUNT" -eq 0 ]; then
+            echo "No live trades to gate — skipping alignment check (clean)."
             exit 0
+          fi
+
+          # v14e.59: surface unexpected script crash (exit 0 = ok, 2 = drift
+          # alert intended). Anything else means verify_sim_live_alignment.py
+          # itself raised — alert with clear context, not "alignment drift".
+          if [ "$PY_EXIT" -ne 0 ] && [ "$PY_EXIT" -ne 2 ]; then
+            echo "::error::verify_sim_live_alignment.py crashed (exit=$PY_EXIT)"
+            exit 1
           fi
 
           # Gate in a single python script so the logic stays readable.
