@@ -151,7 +151,8 @@ GROUPS_DATA = {
     "dylansdirtydiary": {"conviction": 7, "tier": "A"},
     "invacooksclub": {"conviction": 7, "tier": "A"},
     "leoclub168c": {"conviction": 7, "tier": "A"},
-    "caniscooks": {"conviction": 7, "tier": "A"},
+    # v14e.61: removed `caniscooks` 2026-05-17 — group closed by KOL. Telegram
+    # re-resolve was joining a squatter channel with same username every cycle.
     "maritocalls": {"conviction": 7, "tier": "A"},
     "PowsGemCalls": {"conviction": 7, "tier": "A"},
     "waldosalpha": {"conviction": 7, "tier": "A"},
