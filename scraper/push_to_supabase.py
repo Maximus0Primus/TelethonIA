@@ -1164,6 +1164,15 @@ def insert_kol_mentions(mentions: list[dict]) -> None:
         if key in seen:
             continue
         seen.add(key)
+        # v14e.63: shape-based chain inference from resolved_ca. No network
+        # call (write hot path) — only SOL vs EVM granularity needed for
+        # analytics partition. BSC/Base disambiguation lives in enrich.py
+        # which writes tokens.chain + token_snapshots.chain accurately.
+        # Without this, the DB default 'solana' mislabels every 0x mention
+        # (3,484 such rows over 30d audited 2026-05-17).
+        from chain_detect import detect_chain
+        _resolved_ca = m.get("resolved_ca")
+        _chain = detect_chain(_resolved_ca) if _resolved_ca else None
         unique_rows.append(_sanitize_row({
             "symbol": m["symbol"],
             "kol_group": m["kol_group"],
@@ -1182,6 +1191,8 @@ def insert_kol_mentions(mentions: list[dict]) -> None:
             "resolved_ca": m.get("resolved_ca"),
             # v109: Telegram message ID for dedup
             "message_id": m.get("message_id"),
+            # v14e.63: chain tag (was silently defaulting to 'solana' in DB)
+            "chain": _chain or "solana",
         }))
 
     # Upsert in chunks of 500 — ON CONFLICT (kol_group, message_date, symbol) DO NOTHING

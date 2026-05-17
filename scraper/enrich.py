@@ -45,6 +45,14 @@ BIRDEYE_TOKEN_SECURITY_URL = "https://public-api.birdeye.so/defi/token_security"
 # TTL (1h) means most calls are cache hits. Effective new calls ≈ 5 × 30 × 24 = 3.6K/day.
 BIRDEYE_TOP_N = 5
 
+# v14e.63: process-lifetime cache for EVM chain disambiguation (ETH/BSC/Base
+# all share the 0x+40hex shape). Populated on first encounter via
+# chain_detect.resolve_evm_chain (DexScreener lookup, ~200ms). Same-address-
+# on-multiple-chains is rare; resolver picks the chain with highest liquidity.
+# Memory cost trivial (~50B per CA), no eviction needed at expected volumes
+# (~500 new EVM CAs/month).
+_EVM_CHAIN_CACHE: dict[str, str] = {}
+
 
 def load_enrichment_config(client) -> None:
     """v58: Load enrichment config from scoring_config.pipeline_config.enrichment.
@@ -790,9 +798,22 @@ def enrich_token(symbol: str, cache: dict, birdeye_key: str | None = None, known
     if now - entry.get("_dex_at", 0) > TTL_DEXSCREENER or ca_changed:
         # v40: Use exact CA lookup when available to prevent symbol collision.
         # v14: detect chain from CA shape — ETH 0x vs Solana base58.
+        # v14e.63: 0x shape is ambiguous (ETH/BSC/Base same shape). Without
+        # disambiguation a BSC/Base CA would be queried as ETH and DS would
+        # return no matching pairs → silent enrichment skip → token never
+        # snapshotted. resolve_evm_chain() does a one-off multi-chain DS
+        # lookup, cached per-process via _EVM_CHAIN_CACHE.
         if known_ca:
-            from chain_detect import detect_chain
-            _chain = detect_chain(known_ca) or "solana"
+            from chain_detect import detect_chain, resolve_evm_chain
+            shape = detect_chain(known_ca)
+            if shape == "ethereum":
+                ca_lower = known_ca.lower()
+                _chain = _EVM_CHAIN_CACHE.get(ca_lower)
+                if _chain is None:
+                    _chain = resolve_evm_chain(known_ca) or "ethereum"
+                    _EVM_CHAIN_CACHE[ca_lower] = _chain
+            else:
+                _chain = shape or "solana"
             dex_data = _fetch_dexscreener_by_address(known_ca, chain=_chain)
         else:
             # Symbol-only lookup is Solana-specific (legacy path, no ETH support).

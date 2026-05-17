@@ -50,6 +50,85 @@ Backup config pre-live : `data/live_trading_pre_enable_20260517T154500Z.json`
 
 ## 🔧 Operational backlog
 
+### 🆕 v14e.63 — Fix chain detection bugs Base/BSC (CODED, awaiting deploy 2026-05-17)
+
+**Status** : code done, 137/137 tests pass + pre-deploy gate green.
+- [x] Commit 1 — `enrich.py` : `_EVM_CHAIN_CACHE` + `resolve_evm_chain` pour 0x batch path (lines 47-54, 793-810)
+- [x] Commit 2 — `push_to_supabase.py:1167` : propager `chain` dans le dict kol_mentions (inferred from resolved_ca shape, no network)
+- [x] Commit 3 — `scraper/tests/test_chain_propagation_v14e63.py` : 13 tests (6 kol_mentions + 7 enrich), tous pass
+- [ ] Commit + deploy VPS
+- [ ] Verify J+1 : `chain='bsc'` ou `chain='base'` apparaît dans `token_snapshots` 24h post-deploy
+- [ ] Verify J+1 : `chain='ethereum'` apparaît dans `kol_mentions` (était toujours 'solana' avant)
+- [ ] Verify J+1 : Telegram alerts BSC/BASE commencent à apparaître (BSC_/BASE_ strategy allocations enfin firing)
+- [ ] Verify J+7 : aucune régression sur SOL/ETH paper main perf
+
+
+
+**Problem** : 3 bugs concomitants empêchent toute trace de calls Base/BSC en DB, alors que :
+- L'infra est complète : `BSC_*` + `BASE_*` strats déclarées (`strategies.py:2861-2902`), filters `chain` posés, slip/gas constants, 6 allocations existantes en `rt_trade_config.hybrid_strategy.allocations`
+- `chain_detect.resolve_evm_chain()` sait disambiguer ETH/BSC/Base via DexScreener
+- RT path (`safe_scraper.py:2129-2137`) appelle déjà `resolve_evm_chain` correctement
+
+**Mais** : 0 row `chain='bsc'` ou `chain='base'` dans `token_snapshots`, `tokens`, `paper_trades`, `kol_mentions` sur 30 jours. Le pipeline batch + le writer kol_mentions n'utilisent pas la résolution.
+
+#### Bugs identifiés (audit 2026-05-17)
+1. **`push_to_supabase.py:1148` `insert_kol_mentions`** : le dict d'upsert n'inclut pas `chain` → DB default `'solana'` pour tous les rows. 3,484 mentions avec `resolved_ca='0x…'` étiquetées solana sur 30j.
+2. **`enrich.py:795`** : `_chain = detect_chain(known_ca) or "solana"` retourne "ethereum" par shape pour tout 0x, **n'appelle jamais `resolve_evm_chain`** → tous les BSC/Base finissent `chain='ethereum'` dans `tokens` et `token_snapshots`.
+3. **Cascade** : exemple MOONPEPE `0xb701…1110` (postée par reapergamble avec `@ Four.meme` = BSC) :
+   - 8 kol_mentions tagged solana
+   - 34 snapshots + 1 token tagged ethereum
+   - **81 paper_trades ouverts via l'adapter ethereum** alors que le token vit sur BSC (slip/gas/pool tous wrong)
+
+#### Risk model (zero-regression)
+- Bug 1 fix = pure analytique. Ajoute une colonne au write. ON CONFLICT DO NOTHING → existing rows untouched. Aucun downstream ne lit `kol_mentions.chain` pour des décisions (vérifié via grep, c'est query-only).
+- Bug 2 fix = comportement nouveau pour les 0x CAs **nouvellement vus**. Ajoute 1 call DexScreener par nouveau 0x (cache 5min via TTL_DEXSCREENER déjà en place).
+  - Conséquence intended : un 0x qui résout vers `bsc` ou `base` part sur les strats BSC/BASE existantes au lieu d'être (mal) traité comme ETH. C'est précisément l'effet voulu.
+  - Conséquence sur ETH existant : **zéro impact**. Les true-ETH continuent de résoudre vers `ethereum` via DS (les snapshots ETH actuels passent tous par DS `chainId='ethereum'`).
+  - Conséquence sur les trades ouverts misroutés (ex MOONPEPE 81 trades) : aucun impact, paper_trader lit `chain` depuis la row paper_trade existante, pas depuis le snapshot live. Les trades en cours closent normalement avec leur chain d'origine.
+- **NO backfill historique** : on ne touche pas aux ~12k snapshots ETH déjà écrits (les vrais ETH restent ETH ; les BSC/Base misroutés gardent leur tag `ethereum` historique). Backfill corrompt l'analyse historique paper_trades.
+- **NO touch live trading** : `eth_live_enabled=false`, BSC/Base n'ont pas d'adapter live (cf. `safe_scraper.py:1737`). Le fix ouvre seulement le paper trading BSC/Base.
+
+#### Fix plan (3 commits atomiques)
+
+**Commit 1 — `enrich.py` resolve_evm_chain pour 0x batch path**
+- `enrich.py:793-796` : remplacer `_chain = detect_chain(known_ca) or "solana"` par :
+  ```python
+  shape = detect_chain(known_ca)
+  if shape == "ethereum":
+      from chain_detect import resolve_evm_chain
+      _chain = resolve_evm_chain(known_ca) or "ethereum"
+  else:
+      _chain = shape or "solana"
+  ```
+- Réutiliser le cache `_rt_evm_chain_cache` existant ? Non — il est session-scoped dans safe_scraper. Mieux : ajouter un cache module-level dans enrich.py (clé = ca.lower(), valeur = chain string, TTL pas critique car immuable).
+- Latence ajoutée : ~200ms par nouveau 0x CA. Acceptable (1× par CA puis cache hit).
+
+**Commit 2 — `push_to_supabase.py` propager chain dans kol_mentions**
+- `pipeline.py:3567` (call site) : ajouter `"chain": _infer_chain_for_mention(resolved)` où helper retourne :
+  - `'solana'` si resolved est base58
+  - `'ethereum'` si 0x (sans network call — le batch enrich.py downstream va trancher la vraie chain pour le snapshot)
+  - `'solana'` (default) si resolved est None
+- **Rationale** : kol_mentions ne devrait pas faire de network call (write hot path). Le shape suffit pour 99% des analytics (split SOL vs EVM). La granularité bsc/base reste utile dans `tokens` + `token_snapshots` (qui passent par enrich avec DS lookup).
+- `push_to_supabase.py:1167-1185` : ajouter `"chain": m.get("chain") or "solana"` au dict.
+
+**Commit 3 — Tests**
+- `scraper/tests/test_chain_detect.py` : ajouter test que `resolve_evm_chain` est mocké correctement (déjà couvert ?)
+- `scraper/tests/test_pipeline_eth.py` : ajouter test que kol_mentions dict inclut chain inferred depuis resolved_ca
+- `scraper/tests/test_integration_recent_changes.py` : test BSC CA `0xb701…1110` mocké → enrich retourne chain='bsc', snapshot.chain='bsc'
+
+#### Hors scope (non touché)
+- ❌ Pas de backfill historique (corromprait analytics paper_trades historiques)
+- ❌ Pas de nouveau live adapter BSC/Base
+- ❌ Pas d'allocation changée — les 6 BSC/BASE strats déjà allouées vont juste commencer à firer en paper main
+- ❌ Pas de modif `safe_scraper.py:2129-2137` (RT path déjà OK)
+
+#### Verification post-deploy
+- Wait 24h après push
+- Check `SELECT chain, COUNT(*) FROM token_snapshots WHERE snapshot_at >= NOW() - INTERVAL '24h' GROUP BY chain` → doit montrer `bsc` et/ou `base` >0
+- Check `SELECT chain, COUNT(*) FROM kol_mentions WHERE message_date >= NOW() - INTERVAL '24h' GROUP BY chain` → doit montrer >0 `ethereum`
+- Check qu'aucun paper_trade SOL n'a régressé (`chain` distribution stable)
+- Telegram alerts BSC/BASE doivent commencer à apparaître (`alert_kol_trade` reçoit `chain=ca_chain` déjà)
+
 ### 🆕 KOL groups en observation (v14e.62, 2026-05-17)
 
 - [ ] **`unemployedDegen` + `UnemployedPlays`** — ajoutés au scraping mais **blacklist paper + live** SOL (force shadow-only). **MÊME PERSONNE** : `unemployedDegen` = channel principal, `UnemployedPlays` = channel degen low-cap plays. Vérifier J+30 (~2026-06-16) si N≥100 shadow trades par channel → analyser perf séparément (le main vs le degen channel peuvent avoir des profils très différents). Critère unban : WR>40% sur 30d shadow ET med14 ≥ 0. Sinon keep ban (cf. règle §J `strategy_candidates.md`).
