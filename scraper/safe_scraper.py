@@ -246,6 +246,11 @@ GROUPS_DATA = {
     "bat_gamble": {"conviction": 7, "tier": "A", "chains": ["ethereum"]},
     "reapergamble": {"conviction": 7, "tier": "A"},
     "bagcalls": {"conviction": 7, "tier": "A"},
+    # v14e.62 (2026-05-17): unemployedDegen + UnemployedPlays added — SAME PERSON.
+    # Main channel + degen low-cap plays channel. Force-blacklisted SOL paper+live
+    # to gather shadow data only. Re-audit J+30 (~2026-06-16) to decide promote.
+    "unemployedDegen": {"conviction": 7, "tier": "A"},
+    "UnemployedPlays": {"conviction": 7, "tier": "A"},
 }
 
 GROUPS_CONVICTION = {k: v["conviction"] for k, v in GROUPS_DATA.items()}
