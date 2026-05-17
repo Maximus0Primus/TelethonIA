@@ -2745,6 +2745,11 @@ STRATEGIES["ETH_TP80_SL40_T2H"] = [
     {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.60, "horizon_min": 120, "label": "main"},
 ]
 STRATEGY_FILTERS["ETH_TP80_SL40_T2H"] = {"chain": "ethereum"}
+# v14e.60: missing SHADOW_STRATEGIES append (paper main allocated since v14e.21 Apr 25
+# but never had shadow firing — companion shadow (v14e.57) was blocked by MAIN via
+# open_combos). Without shadow, no apples-to-apples paired-drift measurable.
+# Sync to SOL convention: every paper main allocated strat must also be in SHADOW.
+SHADOW_STRATEGIES.append("ETH_TP80_SL40_T2H")
 
 # Higher-trigger BE shadow — tests whether BE@+50% (plausibly reached on
 # real ETH runners) plus tight SL40 outperforms the pure TP100/TP80 parents.
@@ -2824,6 +2829,9 @@ STRATEGIES["ETH_FAST_TP100_SL20"] = [
     {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.80, "horizon_min": 30, "label": "main"},
 ]
 STRATEGY_FILTERS["ETH_FAST_TP100_SL20"] = {"chain": "ethereum"}
+# v14e.60: missing SHADOW_STRATEGIES append (paper main only since v14e.21 Apr 25).
+# Sync to SOL convention — see ETH_TP80_SL40_T2H comment above for rationale.
+SHADOW_STRATEGIES.append("ETH_FAST_TP100_SL20")
 
 STRATEGIES["ETH_FAST60_TP100_SL50"] = [
     {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.50, "horizon_min": 60, "label": "main"},

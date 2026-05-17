@@ -1038,6 +1038,12 @@ def _rt_update_bankroll(pnl_usd: float, n_trades: int, strategy: str = "",
             entry["balance"] = round(float(entry.get("balance", 500)) + pnl_usd, 2)
             entry["pnl"] = round(float(entry.get("pnl", 0)) + pnl_usd, 2)
             entry["trades"] = int(entry.get("trades", 0)) + n_trades
+            # v14e.60: bump per-entry last_updated_at on every trade close. Pre-fix
+            # this field was only written by manual rebuild/seed scripts, making
+            # the Telegram bot's "last activity" display permanently stuck at the
+            # last rebuild date (e.g. ETH frozen at Apr 26 for 3 weeks despite
+            # daily organic trade closes). Affects all chains (sol/eth/bsc/base).
+            entry["last_updated_at"] = datetime.now(timezone.utc).isoformat()
             chain_bucket[strategy] = entry
             per_chain[c] = chain_bucket
             update_data["strategy_bankrolls_per_chain"] = per_chain
