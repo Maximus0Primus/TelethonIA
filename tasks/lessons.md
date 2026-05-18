@@ -45,9 +45,7 @@
 **Rule:** Before committing, verify that every import in modified files either (a) exists in the repo, (b) is in requirements.txt, or (c) is guarded by try/except. Run `python -c "import <module>"` as a smoke test when uncertain.
 
 ## 2026-02-14: ML training data must be deduplicated to one snapshot per token
-**Mistake:** `train_model.py` loaded ALL snapshots (470 for 12h horizon) but many were the same token appearing 3-7x across cycles. Same token = same outcome = correlated observations. 470 snapshots were actually only 69 unique tokens. The 6.2% winner rate was really 11.6%. Feature correlations were inflated by duplicates.
-**Fix:** Added `deduplicate_snapshots()` — sorts by `snapshot_at`, keeps first snapshot per `token_address` (fallback `symbol`), filters zombies >48h. Called at both `auto_train()` and CLI entry points.
-**Rule:** ML training data MUST be one observation per token. Multiple snapshots of the same token are not independent samples — they have identical outcomes and correlated features. Always deduplicate before computing correlations or training.
+→ See `tasks/dedup_rules.md` (Rule 1)
 
 ## 2026-02-14: SOL price leaks persist across ALL horizons
 **Mistake:** outcome_tracker.py had a known SOL price leak bug (OHLCV APIs returning SOL price ~$78-87 instead of token price). A sanity check was added, but only AFTER $YEE, $ZEREBRO, $LUCE were already labeled. Found 17 corrupted rows: 1 in 12h, 11 in 6h, 5 in 1h. Max prices of $79-87 for micro-cap tokens are SOL's price.
@@ -55,9 +53,7 @@
 **Rule:** When cleaning data corruption, always scan ALL related columns/horizons. A bug that corrupted 12h labels almost certainly also corrupted 6h and 1h labels if they existed at the time.
 
 ## 2026-02-14: Feature correlations computed on duplicated data are unreliable
-**Mistake:** price_action_score showed +0.252 correlation with did_2x_12h on raw data (470 snapshots). After deduplication (69 unique tokens), it collapsed to +0.041 — practically noise. Yet it had 55% weight in scoring. The duplicate tokens amplified PA's apparent correlation because similar tokens had similar PA scores.
-**Fix:** All correlation analysis must be done on deduplicated data. Post-dedup rankings: risk_count +0.335 (#1), entry_premium -0.180, age -0.149, mentions -0.131, PA +0.041 (noise).
-**Rule:** Never trust feature correlations computed on data with duplicate observations. Deduplication can completely change which features appear predictive. This is the most dangerous form of data leakage — it doesn't just inflate metrics, it points you at the wrong features.
+→ See `tasks/dedup_rules.md` (Rule 2)
 
 ## 2026-02-14: Tuning Lab backtester must use per-cycle evaluation, not global ranking
 **Mistake:** Tuning Lab showed 80% top5 hit rate at 12h — wildly inflated. Root causes: (1) No deduplication — same winning token ($WORDSLOP with 6 snapshots) filled multiple top-5 slots across cycles. (2) `consensus_val IS NOT NULL` filter in backtest API dropped 9 out of 13 unique winners (from before component values were saved). (3) Global ranking treated all snapshots as one pool, ignoring that the scoring system produces rankings per 15-min cycle.
@@ -65,9 +61,13 @@
 **Rule:** A real-time ranking system must be backtested PER DECISION POINT (cycle), not as one big pool. Per-pool evaluation lets duplicate winners inflate top-K and hides that the system makes independent decisions every 15 minutes. Always ask: "at each decision point, did we rank the winner in the top K?"
 
 ## 2026-02-15: NEVER dedup by symbol — always use token_address
-**Mistake:** Across 7 files, deduplication used `symbol` (ticker like $LUNA) instead of `token_address` (contract address). The same ticker can map to 3+ different contracts — $LUNA had 3, $ROCK had 3, $WIF had 3. This caused: (1) auto_backtest.py merged different tokens' outcomes (12 functions x 13 instances), (2) kol_scorer.py collapsed 45 real token-KOL pairs into 32, (3) backtester.ts inflated hit rates by losing unique tokens, (4) snapshots route dropped tokens from API responses.
-**Fix:** Replaced all `drop_duplicates(subset=["symbol"])` with `subset=["token_address"]`, all `seen_symbols` sets with address-keyed sets, all `DISTINCT ON (kol, symbol)` with `DISTINCT ON (kol, token_address)` in RPC. Always fall back to symbol when token_address is null.
-**Rule:** NEVER use `symbol` as a dedup key. Symbols are display names, NOT unique identifiers. Always use `token_address` for deduplication, grouping, and lookups. When writing new code that touches token identity, grep for "symbol" in dedup/groupby/set contexts and flag it.
+→ See `tasks/dedup_rules.md` (Rule 3)
+
+## 2026-05-18: Shadow data MUST be deduped before combo/ranking
+→ See `tasks/dedup_rules.md` (Rule 4)
+
+## 2026-05-18: Dedup MUST be rolling 24h on timestamps, not calendar day
+→ See `tasks/dedup_rules.md` (Rule 5)
 
 ## 2026-02-14: unique_kols must be materialized in snapshots, not left NULL
 **Mistake:** 41% of token_snapshots had `unique_kols = NULL` because the column was added after many snapshots were already created. `top_kols` JSON was always populated but `unique_kols` numeric was not extracted from it.

@@ -20,6 +20,16 @@ Config courante :
 
 Backup config pre-live : `data/live_trading_pre_enable_20260517T154500Z.json`
 
+## ✅ Recently shipped (May 18, 2026)
+
+### v14e.64 — Skills refactor + dedup safety net (2026-05-18)
+- [x] Skill `live-perf-snapshot` créé — replace 4 one-off scripts ad-hoc
+- [x] GH cron `live-perf-daily.yml` — alert auto if drift/streak anormal
+- [x] `tasks/dedup_rules.md` consolidé — 5 lessons en 1 doc canonique
+- [x] `scripts/_reconcile_bankrolls.py` créé — du backlog
+- [x] Audit `verify_shadow_main_parity.py` — rolling-24h validated
+- [x] Cleanup 12 scripts `_*_20260518.py` one-off
+
 ## ✅ Recently shipped (May 17, 2026)
 
 ### v14e.59 — SOL paper main unblock + mega-sweep keyset + align-gate (commit `20cc32b`)
@@ -160,7 +170,7 @@ Backup config pre-live : `data/live_trading_pre_enable_20260517T154500Z.json`
 
 ### Scripts à créer
 
-- [ ] **`scripts/_reconcile_bankrolls.py`** — automatise le rebuild from paper_trades ground truth (cron weekly). Évite la drift cumulative dans le temps. Approche : la même SQL qu'aujourd'hui mais wrappée + alerting si drift >$100 détectée.
+- [x] **`scripts/_reconcile_bankrolls.py`** — shipped v14e.64 (2026-05-18). Dry-run par défaut, `--apply` pour write, `--alert` pour Telegram si drift >$100. Backup auto avant tout write.
 - [ ] **`scripts/_audit_shadow_strategies_coverage.py`** — détecte les strats allouées en `hybrid_strategy.allocations` qui ne sont PAS dans `SHADOW_STRATEGIES`. Évite la rechute du bug v14e.60. Sortie : liste des strats à fixer + warning si companion shadow seul (blocked by MAIN).
 - [ ] `scripts/_kol_blacklist_audit.py` — paired-test KOL-allowed vs banned trades (script auto pour l'audit hebdo).
 - [ ] `scripts/_kol_per_strat_breakdown.py` — matrice KOL × strat ($/d, WR) — répond à "blacklist optimale per-famille ?" et confirme le pattern KOL-conditioning (cf. batman_gem positif sur TP50_SL40_S35).

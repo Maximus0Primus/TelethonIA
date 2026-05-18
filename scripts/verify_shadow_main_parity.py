@@ -1,5 +1,18 @@
 """Verify v144.3 shadow ↔ main parity in production.
 
+NOTE (audit 2026-05-18): this script does NOT perform strategy ranking or PnL
+aggregation across rows, so the rolling-24h dedup rule (`tasks/dedup_rules.md`
+Rule 5) does not directly apply here. It audits per-row invariants on shadow
+trades opened post-v144.3 deploy:
+  - position_usd > 0
+  - entry_source IN {ultra, dexscreener, live_sync}
+  - dex_spot_price_at_entry == entry_price
+  - high_price_seen >= entry_price
+  - sol_price_at_entry NOT NULL
+  - pnl_usd not stuck on legacy $10 fallback
+If a future refactor adds per-day or per-strategy aggregation here, apply the
+rolling-24h dedup pattern from `tasks/dedup_rules.md` Rule 5.
+
 Since the code SKIPS shadow creation when a strategy is in `real_strats`
 (safe_scraper.py routes mains separately), there are no naturally occurring
 (token, strat, source=rt) pairs with both is_shadow=True AND is_shadow=False

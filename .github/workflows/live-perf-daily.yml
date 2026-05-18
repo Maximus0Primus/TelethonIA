@@ -1,0 +1,55 @@
+name: Live Perf Daily Snapshot
+
+# Runs 06:00 UTC daily — pull live trades, paper main equivalent, shadow projection
+# with rolling-24h dedup, compute drift / streak / concentration. Telegram alert if:
+#   - drift live↔paper main > 15pp average (today's trades)
+#   - 3 red days in a row (record streak)
+#   - daily loss limit > 50% reached
+#   - concentration KOL > 50% on 1 day
+
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch: {}
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install deps
+        run: |
+          pip install --upgrade pip
+          pip install supabase requests python-dotenv
+
+      - name: Run live perf snapshot
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.MONITOR_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.MONITOR_CHAT_ID }}
+        run: python scripts/_live_perf_daily.py
+
+      - name: Alert on failure
+        if: failure()
+        env:
+          MONITOR_BOT_TOKEN: ${{ secrets.MONITOR_BOT_TOKEN }}
+          MONITOR_CHAT_ID: ${{ secrets.MONITOR_CHAT_ID }}
+        run: |
+          if [ -n "$MONITOR_BOT_TOKEN" ] && [ -n "$MONITOR_CHAT_ID" ]; then
+            MSG="<b>GH ACTIONS FAILURE</b>%0AWorkflow: live-perf-daily.yml%0ALive perf snapshot crashed"
+            curl -s -X POST "https://api.telegram.org/bot${MONITOR_BOT_TOKEN}/sendMessage" \
+              -d chat_id="${MONITOR_CHAT_ID}" \
+              -d text="${MSG}" \
+              -d parse_mode=HTML \
+              -d disable_web_page_preview=true || true
+          fi
