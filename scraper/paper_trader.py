@@ -76,7 +76,7 @@ CA_FILTER = True
 # v125: Strategy definitions, fee constants, trail config, LAZY mode centralized in strategies.py
 from strategies import (
     _DEFAULT_DEPRECATED, SHADOW_STRATEGIES,
-    BUY_SLIPPAGE_BPS, SELL_SLIPPAGE_BPS, BUY_FEE_BPS, SELL_FEE_BPS,
+    BUY_SLIPPAGE_BPS, SELL_SLIPPAGE_BPS, BUY_FEE_BPS, SELL_FEE_BPS, SOL_FIXED_COST_USD,
     # v14: ETH fee model constants
     ETH_GAS_COST_USD_PER_SIDE, ETH_BUY_SLIPPAGE_BPS, ETH_SELL_SLIPPAGE_BPS,
     ETH_MIN_POSITION_USD,
@@ -1930,7 +1930,10 @@ def _override_exit_with_ultra_quote(client, trade: dict, ev: dict) -> dict:
         if ultra_exit and ultra_exit > 0:
             ev["exit_price"] = ultra_exit
             ev["pnl_pct"] = round((ultra_exit / entry_price) - 1, 4)
-            ev["pnl_usd"] = round(pos_usd * ev["pnl_pct"], 2)
+            # v14e.65: keep the Solana fixed-cost subtraction (this Ultra refine
+            # path is Solana-only and overwrites pnl_usd, so it must mirror
+            # _evaluate_trade_exit or it would silently restore the gross figure).
+            ev["pnl_usd"] = round(pos_usd * ev["pnl_pct"] - SOL_FIXED_COST_USD, 2)
     except Exception as e:
         logger.debug("paper ultra exit quote failed for %s: %s", addr[:8], e)
 
@@ -2184,7 +2187,16 @@ def _evaluate_trade_exit(trade: dict, current_price: float | None,
     pnl_pct = round((exit_price / entry_price) - 1, 4) if exit_price and entry_price else 0
     # v99: Shadow trades (pos_usd=0) get simulated $10 pnl_usd so stats aren't NULL
     effective_usd = pos_usd if pos_usd else 10.0
-    pnl_usd = round(effective_usd * pnl_pct, 2)
+    # v14e.65: subtract Solana FIXED round-trip cost (network+priority fees) from
+    # the $ PnL. It does NOT scale with position size, so its % bite is huge at
+    # small live positions ($0.04/$1 = 4%) and negligible at $50 paper (0.08%) —
+    # this is exactly the friction the bps slippage model missed (wallet showed
+    # -$4.22 while DB pnl_usd said -$0.21 over 29 live trades). EVM chains already
+    # bake gas into fill prices via _evm_slip_bps_with_gas, so SOL only here.
+    # pnl_pct stays GROSS (preserves historical/ML comparability + dedup logic).
+    _chain = (trade.get("chain") or "solana") if isinstance(trade, dict) else "solana"
+    _fixed_cost = SOL_FIXED_COST_USD if _chain == "solana" else 0.0
+    pnl_usd = round(effective_usd * pnl_pct - _fixed_cost, 2)
 
     result.update({
         "status": new_status,

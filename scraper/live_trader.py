@@ -494,10 +494,17 @@ def _close_token_account(ca: str) -> bool:
             data=bytes([9]),  # CloseAccount instruction
         )
 
-        # Get recent blockhash
+        # v14e.65: use Helius RPC (reliable) not the flaky public mainnet-beta.
+        # Prior code hit api.mainnet-beta.solana.com with skipPreflight=True and
+        # logged "recovered rent" off the returned signature WITHOUT confirming —
+        # so ~all closes silently failed and ~$0.17/trade ATA rent stayed locked
+        # (measured: $3.15 stuck over 18 ATAs). Now: Helius blockhash + preflight
+        # on + getSignatureStatuses confirmation before claiming recovery.
+        rpc_url = _solana_rpc_url()
         rpc_resp = requests.post(
-            "https://api.mainnet-beta.solana.com",
-            json={"jsonrpc": "2.0", "id": 1, "method": "getLatestBlockhash"},
+            rpc_url,
+            json={"jsonrpc": "2.0", "id": 1, "method": "getLatestBlockhash",
+                  "params": [{"commitment": "finalized"}]},
             timeout=10,
         )
         blockhash_str = rpc_resp.json()["result"]["value"]["blockhash"]
@@ -512,22 +519,50 @@ def _close_token_account(ca: str) -> bool:
         import base64
         tx_b64 = base64.b64encode(tx_bytes).decode()
         send_resp = requests.post(
-            "https://api.mainnet-beta.solana.com",
+            rpc_url,
             json={
                 "jsonrpc": "2.0", "id": 1,
                 "method": "sendTransaction",
-                "params": [tx_b64, {"encoding": "base64", "skipPreflight": True}],
+                # preflight ON: catches non-empty account / bad blockhash before
+                # burning a fee, and surfaces a real error instead of a fake success.
+                "params": [tx_b64, {"encoding": "base64", "skipPreflight": False}],
             },
             timeout=15,
         )
         result = send_resp.json()
-        if "result" in result:
-            logger.info("close_ata: closed %s ATA, recovered rent (tx: %s...)",
-                        ca[:12], result["result"][:16])
-            return True
-        else:
-            logger.warning("close_ata: failed for %s: %s", ca[:12], result.get("error", {}).get("message", ""))
+        if "result" not in result:
+            logger.warning("close_ata: send failed for %s: %s", ca[:12],
+                           result.get("error", {}).get("message", result.get("error", "")))
             return False
+
+        sig = result["result"]
+        # Confirm the close actually landed before claiming the rent back.
+        confirmed = False
+        for _ in range(6):  # ~9s max
+            time.sleep(1.5)
+            st = requests.post(
+                rpc_url,
+                json={"jsonrpc": "2.0", "id": 1, "method": "getSignatureStatuses",
+                      "params": [[sig], {"searchTransactionHistory": True}]},
+                timeout=10,
+            ).json()
+            val = (st.get("result", {}) or {}).get("value", [None])[0]
+            if val is None:
+                continue
+            if val.get("err") is not None:
+                logger.warning("close_ata: tx reverted for %s (sig: %s...): %s",
+                               ca[:12], sig[:16], val["err"])
+                return False
+            if val.get("confirmationStatus") in ("confirmed", "finalized"):
+                confirmed = True
+                break
+        if confirmed:
+            logger.info("close_ata: closed %s ATA, recovered ~0.002 SOL rent (tx: %s...)",
+                        ca[:12], sig[:16])
+            return True
+        logger.warning("close_ata: %s send accepted but not confirmed in time (sig: %s...)",
+                       ca[:12], sig[:16])
+        return False
     except Exception as e:
         logger.debug("close_ata: error for %s: %s", ca[:12], e)
         return False

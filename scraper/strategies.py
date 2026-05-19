@@ -34,6 +34,15 @@ SELL_SLIPPAGE_BPS = 10   # 0.1% — base; dynamic adjuster applies liq_mult + ty
 BUY_FEE_BPS = 0          # 0% — folded into slippage
 SELL_FEE_BPS = 0          # 0% — folded into slippage
 
+# v14e.65: Solana FIXED per-round-trip cost in USD (NOT bps — it does not scale
+# with position size). On-chain reconciliation of N=29 live trades (May 17-19):
+# base+priority fees ≈ $0.031/round-trip; ATA rent ($0.17/new token) is recovered
+# via close_ata (fixed same version) so only fees + a small residual remain.
+# This is the cost the bps-based slippage model MISSED — invisible at $50 paper
+# (0.08%) but lethal at $1 live (~4%). pnl_pct stays GROSS; this is subtracted
+# from the $ PnL only. Re-measure with scripts/_friction_model.py if fees spike.
+SOL_FIXED_COST_USD = 0.04
+
 # ---------------------------------------------------------------------------
 # Fee constants — Ethereum L1 (v14e.28: empirical recalibration Apr 26)
 #
