@@ -448,8 +448,30 @@ def execute_sell(ca: str, amount_tokens: int | None = None, slippage_bps: int = 
         return {"success": False, "signature": "", "error": str(e)}
 
 
+def _find_owned_token_account(owner_str: str, mint: str) -> tuple:
+    """v14e.66: Return (account_pubkey, token_program, amount) for the wallet's account
+    of `mint`, or (None, None, 0). Robust to BOTH legacy SPL Token and Token-2022 —
+    queries by mint and reads the real account + its owning program straight from RPC,
+    instead of deriving the ATA against a hardcoded legacy program (which targeted a
+    non-existent address for Token-2022 mints and reverted CloseAccount with
+    'invalid account data for instruction')."""
+    rpc_url = _solana_rpc_url()
+    try:
+        r = requests.post(rpc_url, json={
+            "jsonrpc": "2.0", "id": 1, "method": "getTokenAccountsByOwner",
+            "params": [owner_str, {"mint": mint}, {"encoding": "jsonParsed"}],
+        }, timeout=10).json()
+        for a in (r.get("result", {}) or {}).get("value", []):
+            amt = int(a["account"]["data"]["parsed"]["info"]["tokenAmount"]["amount"])
+            return a["pubkey"], a["account"]["owner"], amt
+    except Exception as e:
+        logger.debug("close_ata: account lookup failed for %s: %s", mint[:12], e)
+    return None, None, 0
+
+
 def _close_token_account(ca: str) -> bool:
-    """v117: Close the ATA for a token after selling all of it. Recovers ~0.002 SOL rent."""
+    """v117: Close the token account after selling all of it. Recovers ~0.002 SOL rent.
+    v14e.66: Token-program-aware (handles legacy SPL Token AND Token-2022)."""
     client = _get_ultra_client()
     if not client:
         return False
@@ -465,27 +487,22 @@ def _close_token_account(ca: str) -> bool:
         pk_str = os.environ.get("SOLANA_PRIVATE_KEY", "")
         kp = _Keypair.from_bytes(_b58.b58decode(pk_str))
         owner = kp.pubkey()
-        token_mint = _Pubkey.from_string(ca)
 
-        # Derive ATA address
-        TOKEN_PROGRAM = _Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
-        ATA_PROGRAM = _Pubkey.from_string("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
-        ata, _bump = _Pubkey.find_program_address(
-            [bytes(owner), bytes(TOKEN_PROGRAM), bytes(token_mint)],
-            ATA_PROGRAM,
-        )
+        # v14e.66: read the REAL token account + its owning program (legacy or 2022).
+        acct_str, token_prog_str, remaining = _find_owned_token_account(str(owner), ca)
+        if acct_str is None:
+            logger.debug("close_ata: no token account for %s (already closed)", ca[:12])
+            return False
+        if remaining > 0:
+            logger.debug("close_ata: %s still has %d tokens, skipping", ca[:12], remaining)
+            return False
 
-        # Check if ATA has 0 balance before closing
-        balances = get_wallet_balance()
-        if balances and ca in balances.get("token_balances", {}):
-            remaining = balances["token_balances"][ca].get("amount", 0)
-            if remaining > 0:
-                logger.debug("close_ata: %s still has %d tokens, skipping", ca[:12], remaining)
-                return False
+        ata = _Pubkey.from_string(acct_str)
+        token_program = _Pubkey.from_string(token_prog_str)
 
-        # Build CloseAccount instruction (SPL Token instruction index 9)
+        # Build CloseAccount instruction (index 9 — same layout for legacy + Token-2022)
         close_ix = _Ix(
-            program_id=TOKEN_PROGRAM,
+            program_id=token_program,
             accounts=[
                 _AM(ata, is_signer=False, is_writable=True),      # account to close
                 _AM(owner, is_signer=False, is_writable=True),    # destination for rent
