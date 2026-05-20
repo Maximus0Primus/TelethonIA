@@ -1683,9 +1683,19 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
                 if bot_ml_mult <= 0.0:
                     continue
                 tranches = STRATEGIES[strat_name]
+                # v14e.67: per-strategy live-fill sync. If THIS shadow strat traded
+                # live, anchor its entry to the actual Jupiter fill (same as the main +
+                # live rows) instead of the per-token snapshot. The per-token snapshot
+                # was a fresh Ultra tick taken seconds after the live fill, which on
+                # volatile tokens diverged hard (e.g. $MONEY shadow +81% vs main -52%)
+                # and was optimistically biased (~-0.8% lower entry on avg).
+                _strat_entry = entry_price
+                _lfp = token.get("_rt_live_fill_prices") or {}
+                if strat_name in _lfp and float(_lfp[strat_name] or 0) > 0:
+                    _strat_entry = float(_lfp[strat_name])
                 for tranche in tranches:
-                    tp_price = entry_price * tranche["tp_mult"] if tranche.get("tp_mult") else None
-                    sl_price = entry_price * tranche["sl_mult"]
+                    tp_price = _strat_entry * tranche["tp_mult"] if tranche.get("tp_mult") else None
+                    sl_price = _strat_entry * tranche["sl_mult"]
                     # v144.3: real position_usd so Ultra exit + slip model match mains.
                     # v14/v14e: EVM shadows force position_usd to the chain's
                     # min_position so the fee model stays coherent (gas as % of
@@ -1699,6 +1709,10 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
                     shadow_rows.append({
                         **shadow_base,
                         "strategy": strat_name,
+                        # v14e.67: per-strategy entry overrides the per-token snapshot
+                        "entry_price": _strat_entry,
+                        "dex_spot_price_at_entry": _strat_entry,
+                        "high_price_seen": _strat_entry,
                         "tp_price": tp_price,
                         "sl_price": sl_price,
                         "horizon_minutes": tranche["horizon_min"],

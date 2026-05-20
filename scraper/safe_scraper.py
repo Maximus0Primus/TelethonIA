@@ -1862,6 +1862,12 @@ def _rt_open_trades(ca: str, symbol: str, price: float, mcap: float,
             strat_token["_rt_variant_id"] = "hybrid_default"
             if strat_name in live_fill_prices:
                 strat_token["_rt_force_entry_price"] = live_fill_prices[strat_name]
+            # v14e.67: pass the FULL per-strat live-fill map so the shadow loop can
+            # anchor EACH shadow strat to its own live fill (not just strat[0]'s).
+            # Fixes shadow↔main entry_price divergence on volatile tokens
+            # (e.g. $MONEY: shadow +81% via a fresh Ultra tick vs main/live -52% sl_hit).
+            if live_fill_prices:
+                strat_token["_rt_live_fill_prices"] = dict(live_fill_prices)
 
             opened = open_paper_trades(sb, [strat_token], cycle_ts=now, config=strat_config)
             total_opened += opened
@@ -1937,6 +1943,9 @@ def _rt_open_trades(ca: str, symbol: str, price: float, mcap: float,
             strat_token = dict(token_entry)
             if strat_name in live_fill_prices:
                 strat_token["_rt_force_entry_price"] = live_fill_prices[strat_name]
+            # v14e.67: full per-strat live-fill map for shadow sync (see hybrid path).
+            if live_fill_prices:
+                strat_token["_rt_live_fill_prices"] = dict(live_fill_prices)
             total_opened += open_paper_trades(sb, [strat_token], cycle_ts=now, config=strat_config)
     else:
         explore_config = dict(pt_config)
