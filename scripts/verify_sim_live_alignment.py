@@ -174,6 +174,11 @@ def main():
         ]
         sim_path = next((p for p in sim_csv_candidates if os.path.exists(p)), None)
         sim_drifted = []
+        # Define unconditionally: the [ALERT] summary line below references MAX_DRIFT
+        # even when the CSV is absent (CI runner has no _mega_sweep_extended.csv), and
+        # an ECONOMIC drift with no CSV used to crash here with UnboundLocalError →
+        # the gate misread exit 1 as "script crashed" and false-failed nightly.
+        MAX_DRIFT = 0.30
         if not sim_path:
             print("  (skipped — _mega_sweep_extended.csv not found)")
         else:
@@ -198,7 +203,6 @@ def main():
             for r in paper_rows:
                 day = str(r["created_at"])[:10]
                 paper_by_strat[r["strategy"]].append((day, float(r["pnl_usd"])))
-            MAX_DRIFT = 0.30
             # v144.12b-fix: iterate all paper strategies (not only those present in
             # live eval_history) so FAST/DTRAIL without paper_sim_pnl_pct still appear.
             print(f"  {'Strategy':<25}{'paper $/d':>12}{'sim median $/d':>16}{'diff':>10}{'verdict':>18}")
