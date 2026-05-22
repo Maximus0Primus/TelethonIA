@@ -1,13 +1,11 @@
 # Operational Backlog
 
-## 🔧 IN PROGRESS — Faithful sim layer (close shadow↔paper↔live gate gap)
-Goal: shadow/paper must faithfully predict live. Logic already exists in `scripts/_ground_truth_strat.py`
-(rolling-24h dedup + blacklist filter + paper-main reconciliation) but isn't the default lens → raw
-shadow aggregates fool us (FAST60: shadow +16% / paper −2% / live −11%).
-- [ ] Phase B (zero risk): migration add `live_eligible`,`is_companion_shadow`; view `v_strategy_faithful_perf` baking the ground-truth logic; validate vs `_ground_truth_strat.py`.
-- [ ] Phase A (guarded hot-path): tag at insert in paper_trader.py (is_companion=is_promoted, live_eligible=kol not blacklisted), try/except-safe; unit tests; deploy+verify.
-- [ ] Phase C: backfill (companion via self-join, eligible via current BL); point /best-combo, /strategy, /ground-truth at the view by default.
-Divergences (code-explorer): strat-set funnel (intentional); promoted companion bypasses dedup (`paper_trader.py:1671-1678`, keep+tag); paper chain BL `safe_scraper.py:1752` skips shadow; caps + live-only gates.
+## ✅ DONE — Faithful sim layer (shadow↔paper↔live gate gap)
+Raw shadow aggregates lie (different token sets via gates): FAST60 raw-shadow +5.19% but live −10.87% / faithful −2.12%.
+- [x] Phase B (shipped): views `v_strategy_faithful_perf` + `v_strategy_faithful_trades` (DDL `scripts/sql/faithful_sim_views.sql`, live in Supabase). Prefer paper_main for promoted strats + rolling-24h dedup + blacklist filter (= `_ground_truth_strat.py` logic). Validated: FAST60 −2.12%, FAST_MCAP +4.28%, TP50 +3.92%. **Default lens now: `SELECT * FROM v_strategy_faithful_perf WHERE strategy=X`.**
+- [~] Phase A (DEFERRED — user chose view-only): persisted per-row tags at insert would add point-in-time blacklist accuracy + protect naive raw-shadow queries, but touches the live hot path for marginal gain. Columns were added then dropped. Revisit only if naive raw-shadow queries keep causing traps.
+- [ ] Phase C (optional next): point /best-combo, /strategy, /ground-truth-strat-perf at the view by default.
+Divergences (code-explorer): strat-set funnel (intentional); promoted companion bypasses dedup (`paper_trader.py:1671-1678`); paper chain BL `safe_scraper.py:1752` skips shadow; caps + live-only gates.
 
 > 🎯 **Strategy decisions live in `tasks/strategy_candidates.md`** + récap dual-pick `tasks/live_top5_2026-05-17.md` (SOL) et `tasks/live_top_eth_2026-05-17.md` (ETH).
 
