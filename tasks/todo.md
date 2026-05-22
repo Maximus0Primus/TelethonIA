@@ -1,5 +1,14 @@
 # Operational Backlog
 
+## 🔧 IN PROGRESS — Faithful sim layer (close shadow↔paper↔live gate gap)
+Goal: shadow/paper must faithfully predict live. Logic already exists in `scripts/_ground_truth_strat.py`
+(rolling-24h dedup + blacklist filter + paper-main reconciliation) but isn't the default lens → raw
+shadow aggregates fool us (FAST60: shadow +16% / paper −2% / live −11%).
+- [ ] Phase B (zero risk): migration add `live_eligible`,`is_companion_shadow`; view `v_strategy_faithful_perf` baking the ground-truth logic; validate vs `_ground_truth_strat.py`.
+- [ ] Phase A (guarded hot-path): tag at insert in paper_trader.py (is_companion=is_promoted, live_eligible=kol not blacklisted), try/except-safe; unit tests; deploy+verify.
+- [ ] Phase C: backfill (companion via self-join, eligible via current BL); point /best-combo, /strategy, /ground-truth at the view by default.
+Divergences (code-explorer): strat-set funnel (intentional); promoted companion bypasses dedup (`paper_trader.py:1671-1678`, keep+tag); paper chain BL `safe_scraper.py:1752` skips shadow; caps + live-only gates.
+
 > 🎯 **Strategy decisions live in `tasks/strategy_candidates.md`** + récap dual-pick `tasks/live_top5_2026-05-17.md` (SOL) et `tasks/live_top_eth_2026-05-17.md` (ETH).
 
 ## 🟢 Live status
