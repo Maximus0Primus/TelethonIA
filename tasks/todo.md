@@ -11,28 +11,20 @@
 - Rent ATA : auto-récupéré (v14e.68, retry-read + sweep périodique). Wallet 0 ATA vide.
 - Lentille d'analyse par défaut : **`v_strategy_faithful_perf`** (jamais le shadow brut).
 
-## 🔥 Open — réellement actionnable
-- [ ] **DÉCISION : drop les 6 allocations BSC/BASE** — 0 trade fermé jamais, absentes de SHADOW_STRATEGIES (confirmé par `scripts/_audit_shadow_strategies_coverage.py`). Elles polluent les listes sans rien produire. Drop = config-only. (Sinon : les laisser dormantes.)
-- [ ] **FAST_MCAP : bumper la position $1 → $3-5** — seul strat live, ~breakeven à $1 car le gas fixe (~$0.036) = 3.6%/trade. À $5 le gas tombe à ~0.7% → nettement positif. La mémoire (v14e.49d) suggère aussi moins de slip à position plus grosse. Besoin : valider le wallet SOL a la marge.
-- [ ] **Re-audit live continu** — surveiller FAST_MCAP réel (flux on-chain, pas pnl_usd) sur 7j ; surveiller l'effet du slip 500→1000 (fill rate + slip réalisé). Décider scale $50/trade si net positif.
-
-## 🔒 Bloqué (data / temps / funding)
-- [ ] **ETH live activation** — besoin wallet ETH $4-5k (gas ~$200/trade) + pilot SOL OK. Les 4 ETH paper main sont positifs en vue fidèle (FAST_TP100_SL20 +11%, FAST60 +14%, TP80_SL40_T2H +8%, TP100_SL50 +6%) mais c'est du brut/sim ; viabilité live ETH ≠ garantie au gas actuel.
-- [ ] **Recalibration slip ETH** (`scripts/_calibrate_eth_slip.py` existe déjà) — bloqué : exige N≥30 trades live ETH, or eth_live=false. Trigger : après activation ETH live.
 - [ ] **unemployedDegen / UnemployedPlays** — shadow-only, re-évaluer ~2026-06-16 (N≥100 shadow). Critère unban : WR>40% 30d ET med14≥0.
-- [ ] **BSC/BASE chain pipeline (v14e.63)** — Bug 1 (kol_mentions chain) déployé (ethereum apparaît). Mais 0 row bsc/base en 48h : soit aucun call BSC/Base, soit Bug 2 (enrich resolve_evm_chain) non déployé. Faible priorité — à investiguer seulement si on veut vraiment trader BSC/Base.
+- [x] **BSC/BASE chain pipeline (v14e.63) — INVESTIGUÉ, pas de bug.** `resolve_evm_chain` testé OK (USDT→bsc, USDC→base ; les tokens 0x labellisés ethereum SONT de vrais ETH). 0 row bsc/base = simplement aucun call BSC/Base des KOLs actuels, pas un mis-capture. Allocations BSC/BASE dormantes faute de calls. **DÉCISION en attente : drop les 6 allocations BSC/BASE (0 activité, hors SHADOW_STRATEGIES) ou garder dormantes.**
 
-## 🛠️ Tooling optionnel (faible ROI — la vue fidèle + /best-combo couvrent déjà l'essentiel)
-- [ ] `scripts/_kol_blacklist_audit.py` — paired-test KOL allowed vs banned (audit hebdo auto).
-- [ ] `scripts/_kol_per_strat_breakdown.py` — matrice KOL × strat ($/d, WR).
-- [ ] `scripts/_blacklist_counterfactual.py` — Tier S avec/sans blacklist (sensitivity).
-- [ ] `scripts/_score_v3_walk_forward.py` — valider rt_score_v3 vs v1 (AUC). Data dispo (May 9-23). Recherche, pas urgent.
+## 🛠️ Tooling (fait le 22/05 — testés, déployés)
+- [x] `scripts/_kol_blacklist_audit.py` — KOL vs ban status, flag mismatches. (Blacklist SOL globalement saine, 1 mismatch mineur.)
+- [x] `scripts/_kol_per_strat_breakdown.py` — matrice KOL × strat $/d. (batman_gem dominant SOL, +21.7$/d sur FAST_MCAP live.)
+- [x] `scripts/_blacklist_counterfactual.py` — $/d avec/sans blacklist par strat (sensitivity).
+- [x] `scripts/_score_v3_walk_forward.py` — AUC v3 vs v1. **Verdict : garder v1** (v3 lift +0.0007 = bruit ; v2=0.520 meilleur mais tous ~random 0.51).
 
 ## 📦 Tech/perf parqués
-- [ ] RT KOL matching post-restart (`0/98 matched` log — probable artifact marked/unmarked IDs).
-- [ ] Verb-proximity ticker filter #2 (`safe_scraper.py` `_FLEX_PATTERNS`) — N≥30 messages requis.
-- [ ] R2 profiler `process_and_push` si lag >30s. / T3 ETH round-trip smoke si base_fee>5gwei.
-- [ ] Root cause du counter drift cumulé (reconcile auto évite la rechute ; root cause non fixée).
+- [x] **RT KOL matching — résolu (v14e.69).** `0/99 matched` était cosmétique (unmarked vs marked id) → corrigé, confirmé `99/99` en prod. ⚠️ Reste : `unmatched chat_id=-1001255304592` en runtime = un channel PAS dans GROUPS_DATA → besoin de l'identifier (KOL à ajouter, ou bruit à ignorer).
+- [x] **Counter drift cumulé — ROOT CAUSE fixé (v14e.69).** Race read-modify-write sur `rt_bankroll` (3 boucles concurrentes) → `_BANKROLL_LOCK` (threading.Lock). Reconcile cron reste en filet de sécurité.
+- [ ] Verb-proximity ticker filter #2 (`safe_scraper.py` `_FLEX_PATTERNS`) — bloqué : N≥30 messages requis pour calibrer le pattern. Pas implémentable à l'aveugle.
+- [ ] R2 profiler `process_and_push` (si lag >30s) / T3 ETH round-trip smoke (si base_fee>5gwei) — conditionnels, non actionnables maintenant.
 
 ## ✅ Fait récemment (archive — détail en git + mémoire)
 - **22/05** : v14e.68 (rent leak close_ata fix, $2.96 récupérés) ; FAST60 killé live ; couche sim fidèle (vues `v_strategy_faithful_perf` + skills câblés) ; slip buy 500→1000 ; sim-align-gate crash fix (MAX_DRIFT) ; `_audit_shadow_strategies_coverage.py` créé.
