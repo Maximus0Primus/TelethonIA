@@ -1,5 +1,9 @@
 # Lessons Learned
 
+## 2026-05-20: Never assert a cause without verifying — and report drift as MEDIAN not mean
+**Mistake (two in one session):** (1) Told the user ETH live is off "because gas = $200/trade" — I lifted that from an old `tasks/live_top_eth_2026-05-17.md` note and stated it as the reason. User corrected me: gas was reconsidered, that's not why. (2) Headlined a "−17pp systemic live↔shadow drift" from a **mean** on N=10. The user pushed back ("hier on disait que ça allait, peut-être juste les dernières 24h, regarde vs paper"). Re-running with median + by-exit-type + paper-main twin: median drift ≈ **−1pp** (normal Jupiter slip, exactly what memory `v14e_49_drift_acted_no_divergence` already said). The −17pp mean was dragged by rug sl_hit fills + one freak case ($MONEY −144pp, likely a re-entry matching artifact).
+**Rule:** Before stating WHY something is the way it is, verify it (config history / git / data) or say "I don't have a verified reason." For execution drift on memecoins, ALWAYS lead with the **median** — the mean is structurally dragged by the fat rug tail (sl_hit live fills −18pp worse than paper's clean simulated SL). And check existing MEMORY.md before claiming a regression — I contradicted my own memory.
+
 ## 2026-02-14: size_mult must scale aggressively for large-cap memecoins
 **Mistake:** `size_mult` capped at 0.7x for ALL tokens >$20M. Pippin at $718M got only -16% penalty (0.84x with freshness boost) — scored 48/100 when it should be ~14. A $700M memecoin needs $700M NEW capital to 2x — near impossible.
 **Fix:** Progressive tiers: $50M→0.70x, $200M→0.50x, $500M→0.35x, >$500M→0.25x. No freshness boost for >$50M. Floor lowered from 0.6 to 0.25.

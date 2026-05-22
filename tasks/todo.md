@@ -179,9 +179,9 @@ Backup config pre-live : `data/live_trading_pre_enable_20260517T154500Z.json`
 
 ### Cleanup différé
 
-- [ ] **DROP `_backup_bankroll_v14e58_backfill_20260512`** (vers Mai 19) si bankrolls SOL stables post-fix.
+- [x] **DROP `_backup_bankroll_v14e58_backfill_20260512`** — fait Mai 20. Condition remplie : reconcile montre SOL aligné (~$0 drift, sauf artefact baseline reset/live connu), aucune corruption backfill. Résout aussi l'avertissement advisor "RLS not enabled". (était : vers Mai 19 si bankrolls SOL stables post-fix)
 - [ ] **Considérer drop allocations BSC/BASE (6 strats)** — actuellement 0 activité (jamais firé depuis seed). Garder en allocations consume rien mais pollue les listes. À décider quand BSC/BASE seront prêts à activer ou jamais.
-- [ ] **DROP `_backup_blacklist_audit_20260512`** vers Mai 19 si rollback blacklist non nécessaire.
+- [x] **DROP `_backup_blacklist_audit_20260512`** — fait Mai 20. Condition remplie : rollback non nécessaire (et serait nuisible — re-bannirait `bounty_journal` +$4898/j et ré-admettrait CSCalls/Carnage). Intégrité blacklist OK (bans présents, unbans absents). Résout l'avertissement advisor "RLS not enabled". ⚠️ Forward-fix séparé identifié : `chiggajogambles` flippé à −$1221/j depuis l'unban → à re-bannir SOL. (était : vers Mai 19 si rollback non nécessaire)
 
 ### Sub-finding non urgent
 

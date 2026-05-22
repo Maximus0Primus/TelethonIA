@@ -894,8 +894,8 @@ UPDATE scoring_config SET paper_trade_config = jsonb_set(
 - [x] Backup `_backup_blacklist_audit_20260512` créée
 - [x] **CarnagecallsGambles BANNED** (12 mai PM) — top $ damage 30d −$1746/d N=10217. Sa flip Apr 30 → May 12 (+$596 → −$1746) montre que les unban-sur-7d-signal sont risqués. SOL blacklist 17 → 18.
 - [x] **ETH blacklist audit** — BAN dddegens (−$199/d 7d worsening + med −37), CryptoChefCooks (WR 0%), degenncabal (WR 0%, med −42). ETH blacklist 3 → 6. aliensalphacalls ETH kept ban watchful (N=14 30d trop petit pour validation unban malgré WR 78.6%).
-- [ ] **Re-audit dans 7j (~Mai 19)** : confirmer que les 3 unban SOL (bounty_journal, chiggajogambles, ramcalls) tiennent positif post-companion-shadow propre. Re-évaluer aliensalphacalls ETH si N>30 atteint.
-- [ ] **DROP `_backup_blacklist_audit_20260512`** vers Mai 19 si rollback non-nécessaire.
+- [x] **Re-audit (Mai 20)** : sur SOL paper depuis le 12 mai — `bounty_journal` TIENT massivement (N=737 WR 82.8% med +34.86% **+$4898/d**, la star du panel), `ramcalls` ~flat (N=22 WR 63.6% med +11.56% total −$17, garder watchful). **`chiggajogambles` a FLIPPÉ négatif** (N=869 WR 19.9% med −8.62% **−$1221/d**) → RE-BANNI SOL (`kol_chain_blacklist.solana` 20 → 21, Mai 20). Bans confirmés toujours négatifs (CSCalls −$1003/d, Carnage −$899/d). Backup `data/scoring_config_pre_chigga_reban_20260520T074606Z.json`. aliensalphacalls ETH : pas re-évalué (hors scope ce run).
+- [x] **DROP `_backup_blacklist_audit_20260512`** — fait Mai 20 (rollback non-nécessaire et nuisible : perdrait bounty_journal, ré-admettrait CSCalls/Carnage). Aussi droppé `_backup_blacklist_audit_20260507` (lifecycle). 0 table `_backup_*` restante, advisor RLS clean (que des INFO ZERO-POLICY intentionnels).
 
 #### 📚 Note méthodologique consolidée (à appliquer désormais)
 
