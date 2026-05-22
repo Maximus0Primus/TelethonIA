@@ -3,7 +3,20 @@
 **Goal** : déployer **$50/trade live** avec confiance haute. Construction itérative du shortlist final.
 
 > Living document — mettre à jour après chaque audit, paired-test, ou run mega-sweep.
-> Dernière itération : **2026-05-12** (collapse Tier S + bug v14e.57 cooldown fix + nouveau ranking filter-rich).
+
+---
+
+## 📍 ÉTAT ACTUEL (2026-05-23) — lire en premier
+
+> ⚠️ Les sections datées 2026-05-07 / 05-12 plus bas sont de l'**analyse historique conservée** (bonnes strats, méthodo, audits) — PAS la config courante. Source de vérité config = `scoring_config` en DB.
+
+- **Live SOL = `FAST_TP50_SL30_MCAP_S40` SEUL** ($1/trade, slip buy 1000). FAST60 killé le 22/05 (live −$3.07/N=20). `TP50_SL40_S35` = **paper-only** (faiblesse médiane 7d confirmée, jamais passé en live).
+- **Live PAS rentable à $1** : FAST_MCAP ~breakeven (gas fixe ~3.6%/trade le mange ; edge réel +4.28% en vue fidèle). Piste : bump position $1→$3-5.
+- **Live blacklists UNIFIÉES au paper** (19/05) : `live_trading.kol_blacklist` + `kol_chain_blacklist` VIDES → le live mirror le paper via gate #2 (`safe_scraper.py:1752`). Plus de liste live séparée.
+- **Paper blacklist actuelle** : SOL **21 KOLs**, ETH **6 KOLs** (snapshot 05-07 plus bas = 18 SOL, périmé).
+- **ETH = paper-only** (`eth_live_enabled=false`). 4 strats paper positives en vue fidèle (2026-05-23) : ETH_FAST_TP100_SL20 +11%, ETH_FAST60 +14%, ETH_TP80_SL40_T2H +8%, ETH_TP100_SL50 +6% (brut/sim ; live gated sur funding $4-5k + gas ~$200/trade).
+- **🔑 LENTILLE CANONIQUE = `v_strategy_faithful_perf`** (prefer-main + dedup-24h + blacklist). Les `$/d` shadow bruts des sections historiques ci-dessous **sur-estiment** — toujours valider via la vue. `python scripts/_kol_blacklist_audit.py` / `_blacklist_counterfactual.py` pour les KOLs.
+- Backlog courant : `tasks/todo.md`.
 
 ---
 
@@ -193,7 +206,7 @@ Pour qu'une strat passe en **live $50/trade**, elle doit valider :
 
 ---
 
-## 🚫 KOL blacklists état actuel (snapshot 2026-05-07 post-audit Option B)
+## 🚫 KOL blacklists — snapshot 2026-05-07 (⚠️ PÉRIMÉ — voir « ÉTAT ACTUEL » en haut ; live BL unifiées au paper le 19/05, paper SOL = 21 KOLs)
 
 Source : `scoring_config` table, JSONB.
 

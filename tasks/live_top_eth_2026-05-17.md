@@ -1,5 +1,15 @@
 # 🎯 Live ETH Dual Pick — Snapshot 2026-05-17
 
+> 🗄️ **SNAPSHOT HISTORIQUE (2026-05-17) — analyse conservée pour référence, plan DÉPASSÉ.**
+> État courant → `tasks/strategy_candidates.md` (§ ÉTAT ACTUEL) + `tasks/todo.md`.
+>
+> **Ce qui a changé / reste vrai depuis :**
+> - ETH reste **paper-only** (`eth_live_enabled = false`). Pas de live ETH (gated : wallet $4-5k + gas ~$200/trade).
+> - Re-audit 2026-05-23 (vue fidèle) : les 4 strats ETH paper main sont **positives** — ETH_FAST_TP100_SL20 +11%, ETH_FAST60_TP100_SL50_NZ_S40 +14%, ETH_TP80_SL40_T2H +8%, ETH_TP100_SL50 +6% (brut/sim).
+> - Fix `SHADOW_STRATEGIES` gap (v14e.60) déployé ✅.
+> - ⚠️ Les `$/d` fused ci-dessous sur-estiment — lentille canonique = **`v_strategy_faithful_perf`**.
+> - La méthodologie ETH (fused main+shadow, bug SHADOW gap, BL robustness) reste une **référence valide**.
+
 > **Objectif** : choisir les meilleures stratégies ETH pour aller en live. Optimise consistance long-terme (30d) ET trajectoire récente (5-7d). Méthodologie identique au SOL `live_top5_2026-05-17.md` mais avec **data fused (main + shadow)** car ETH a une particularité structurelle (cf. §🐛).
 >
 > **Décision finale** : 2 strats à mettre en paper main (TP100_SL50 à ajouter + FAST60_NZ_S40 déjà alloué). Pour live `eth_live_enabled = false` actuellement — réflexion live ETH séparée (gas Ethereum = $200/trade min vs SOL $1).
