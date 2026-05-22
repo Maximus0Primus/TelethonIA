@@ -12,6 +12,7 @@ import sys
 import json
 import time
 import random
+import threading
 import asyncio
 import logging
 import argparse
@@ -994,16 +995,28 @@ def _rt_strategy_bankrolls_for_chain(bankroll_row: dict, chain: str) -> dict:
     return {k: v for k, v in flat.items() if k.startswith(prefix)}
 
 
+# v14e.69: serializes the bankroll read-modify-write across the 3 concurrent
+# close loops (see _rt_update_bankroll docstring). Single-process, so a plain
+# threading.Lock is sufficient.
+_BANKROLL_LOCK = threading.Lock()
+
+
 def _rt_update_bankroll(pnl_usd: float, n_trades: int, strategy: str = "",
                         chain: str = "solana") -> None:
     """v71: Update bankroll after trades close. Read-modify-write with peak/drawdown tracking.
     v115: Also tracks per-strategy bankroll in strategy_bankrolls JSONB.
     v14e: Per-chain bankroll in strategy_bankrolls_per_chain — each chain has
     its own isolated pot. Legacy flat strategy_bankrolls kept in sync for one
-    release cycle (read-only mirror, easy rollback)."""
+    release cycle (read-only mirror, easy rollback).
+    v14e.69: serialize the read-modify-write under _BANKROLL_LOCK. Three loops
+    (price_refresh 3min, unified_check 30s, run_one_cycle 30min) call this from
+    thread-pool executors in the same process; without the lock two concurrent
+    closes could SELECT the same stale row and the second UPDATE clobbered the
+    first → lost-update drift (root cause behind the periodic reconcile)."""
     global _rt_bankroll, _rt_bankroll_loaded_at
     if pnl_usd == 0 and n_trades == 0:
         return
+    _BANKROLL_LOCK.acquire()
     try:
         sb = _get_supabase()
         if not sb:
@@ -1084,6 +1097,8 @@ def _rt_update_bankroll(pnl_usd: float, n_trades: int, strategy: str = "",
         # hint which strat/chain was failing.
         logger.error("RT bankroll update failed for [%s/%s] pnl=$%+.2f: %r",
                      chain, strategy, pnl_usd, e)
+    finally:
+        _BANKROLL_LOCK.release()
 
 
 def _rt_load_kol_scores() -> dict:
@@ -2561,7 +2576,12 @@ async def main():
         try:
             dialogs = await client.get_dialogs(limit=200)
             dialog_ids = {d.id for d in dialogs}
-            matched = sum(1 for gid in rt_groups if gid in dialog_ids)
+            # v14e.69: rt_groups holds UNMARKED ids (entity.id), but Telethon's
+            # dialog.id is the MARKED form (-100<id>). The old check compared
+            # unmarked vs marked → always 0/99 matched (cosmetic false alarm; the
+            # subscription still works and runtime event matching is unaffected).
+            matched = sum(1 for gid in rt_groups
+                          if gid in dialog_ids or int(f"-100{gid}") in dialog_ids)
             logger.info(
                 "RT: get_dialogs() fetched %d dialogs (%d/%d KOL groups matched)",
                 len(dialogs), matched, len(rt_groups),
