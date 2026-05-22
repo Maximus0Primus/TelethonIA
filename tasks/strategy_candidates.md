@@ -266,6 +266,14 @@ dddegens, CryptoChefCooks, degenncabal
 
 Last audit complet : v14e.49g/h/i (2026-04-30) sur jadendegens, aliensalphacalls, ryoshigamble (unban), ryoshikdegen (split), bagcalls, batman_gem.
 
+### 👁️ KOL en observation — unemployedDegen / UnemployedPlays (ajoutés v14e.62, 2026-05-17)
+
+Même personne (channel principal + channel degen low-cap). Shadow-only (banni paper+live). Capture OK (ids en cache, pas de bug — vérifié 2026-05-23).
+- **Ancien critère N≥100 d'ici 16/06 ABANDONNÉ** — inatteignable : ~2 tokens tradables / 6j → ~10 mois.
+- **Nouveau critère event-gated (pas de date)** : re-éval CHAQUE KOL quand il atteint **N≥15 tokens tradables** en shadow. Unban si **WR>45% ET médiane pnl ≥ 0**.
+- État 2026-05-23 : moitié des calls = junk sous-gate (unemployedDegen 2 tradables / 7 calls ; UnemployedPlays 2 / 5). Échantillon tradable : unemployedDegen 2/2 win +20% ; UnemployedPlays WR 50% / −13.5%. N=2 chacun → **non significatif, garder banni**.
+- Outil de re-check : `python scripts/_kol_blacklist_audit.py` (flag auto si banni-mais-bon).
+
 ### Audit live blacklist 2026-05-07 (paper data 14j, source kol_group)
 
 > ⚠️ Pour les KOLs aussi en `paper_chain_blacklist`, les trades observés sont **shadow telemetry uniquement** (paper main bloqué, mais shadow continue). Quantifie ce que coûterait un unban.
