@@ -31,6 +31,11 @@ logger = logging.getLogger(__name__)
 WSOL_MINT = "So11111111111111111111111111111111111111112"
 LAMPORTS_PER_SOL = 1_000_000_000
 
+# v14e.68: throttle for the empty-ATA rent-recovery sweep (catch-all for the
+# post-sell read race that makes the immediate close skip — see _close_token_account).
+_LAST_ATA_SWEEP_TS = 0.0
+_ATA_SWEEP_INTERVAL_SEC = 600  # 10 min
+
 
 def _solana_rpc_url() -> str:
     """Helius RPC if HELIUS_API_KEY env is set, else mainnet-beta public."""
@@ -469,14 +474,23 @@ def _find_owned_token_account(owner_str: str, mint: str) -> tuple:
     return None, None, 0
 
 
-def _close_token_account(ca: str) -> bool:
-    """v117: Close the token account after selling all of it. Recovers ~0.002 SOL rent.
-    v14e.66: Token-program-aware (handles legacy SPL Token AND Token-2022)."""
-    client = _get_ultra_client()
-    if not client:
+def _send_close_account(acct_str: str, token_prog_str: str, label: str = "") -> bool:
+    """v14e.68: Build, sign, send and confirm a CloseAccount ix for an EMPTY token
+    account. Returns True only after on-chain confirmation. Caller MUST ensure the
+    account holds 0 tokens (CloseAccount reverts otherwise). Shared by the immediate
+    post-sell close and the periodic sweep. `label` is a short id for logs (mint/ata).
+
+    v14e.65: use Helius RPC (reliable) not the flaky public mainnet-beta. Prior code
+    hit api.mainnet-beta.solana.com with skipPreflight=True and logged "recovered rent"
+    off the returned signature WITHOUT confirming — so ~all closes silently failed and
+    ~$0.17/trade ATA rent stayed locked. Now: Helius blockhash + preflight on +
+    getSignatureStatuses confirmation before claiming recovery."""
+    if not os.environ.get("SOLANA_PRIVATE_KEY", ""):
         return False
+    label = label or acct_str[:12]
     try:
         import base58 as _b58
+        import base64
         from solders.keypair import Keypair as _Keypair
         from solders.pubkey import Pubkey as _Pubkey
         from solders.transaction import Transaction as _Tx
@@ -484,23 +498,12 @@ def _close_token_account(ca: str) -> bool:
         from solders.instruction import Instruction as _Ix, AccountMeta as _AM
         from solders.hash import Hash as _Hash
 
-        pk_str = os.environ.get("SOLANA_PRIVATE_KEY", "")
-        kp = _Keypair.from_bytes(_b58.b58decode(pk_str))
+        kp = _Keypair.from_bytes(_b58.b58decode(os.environ["SOLANA_PRIVATE_KEY"]))
         owner = kp.pubkey()
-
-        # v14e.66: read the REAL token account + its owning program (legacy or 2022).
-        acct_str, token_prog_str, remaining = _find_owned_token_account(str(owner), ca)
-        if acct_str is None:
-            logger.debug("close_ata: no token account for %s (already closed)", ca[:12])
-            return False
-        if remaining > 0:
-            logger.debug("close_ata: %s still has %d tokens, skipping", ca[:12], remaining)
-            return False
-
         ata = _Pubkey.from_string(acct_str)
         token_program = _Pubkey.from_string(token_prog_str)
 
-        # Build CloseAccount instruction (index 9 — same layout for legacy + Token-2022)
+        # CloseAccount instruction (index 9 — same layout for legacy + Token-2022)
         close_ix = _Ix(
             program_id=token_program,
             accounts=[
@@ -511,12 +514,6 @@ def _close_token_account(ca: str) -> bool:
             data=bytes([9]),  # CloseAccount instruction
         )
 
-        # v14e.65: use Helius RPC (reliable) not the flaky public mainnet-beta.
-        # Prior code hit api.mainnet-beta.solana.com with skipPreflight=True and
-        # logged "recovered rent" off the returned signature WITHOUT confirming —
-        # so ~all closes silently failed and ~$0.17/trade ATA rent stayed locked
-        # (measured: $3.15 stuck over 18 ATAs). Now: Helius blockhash + preflight
-        # on + getSignatureStatuses confirmation before claiming recovery.
         rpc_url = _solana_rpc_url()
         rpc_resp = requests.post(
             rpc_url,
@@ -524,17 +521,12 @@ def _close_token_account(ca: str) -> bool:
                   "params": [{"commitment": "finalized"}]},
             timeout=10,
         )
-        blockhash_str = rpc_resp.json()["result"]["value"]["blockhash"]
-        blockhash = _Hash.from_string(blockhash_str)
+        blockhash = _Hash.from_string(rpc_resp.json()["result"]["value"]["blockhash"])
 
-        # Build, sign, send
         msg = _Msg.new_with_blockhash([close_ix], owner, blockhash)
         tx = _Tx.new_unsigned(msg)
         tx.sign([kp], blockhash)
-        tx_bytes = bytes(tx)
-
-        import base64
-        tx_b64 = base64.b64encode(tx_bytes).decode()
+        tx_b64 = base64.b64encode(bytes(tx)).decode()
         send_resp = requests.post(
             rpc_url,
             json={
@@ -548,13 +540,12 @@ def _close_token_account(ca: str) -> bool:
         )
         result = send_resp.json()
         if "result" not in result:
-            logger.warning("close_ata: send failed for %s: %s", ca[:12],
+            logger.warning("close_ata: send failed for %s: %s", label,
                            result.get("error", {}).get("message", result.get("error", "")))
             return False
 
         sig = result["result"]
         # Confirm the close actually landed before claiming the rent back.
-        confirmed = False
         for _ in range(6):  # ~9s max
             time.sleep(1.5)
             st = requests.post(
@@ -568,21 +559,116 @@ def _close_token_account(ca: str) -> bool:
                 continue
             if val.get("err") is not None:
                 logger.warning("close_ata: tx reverted for %s (sig: %s...): %s",
-                               ca[:12], sig[:16], val["err"])
+                               label, sig[:16], val["err"])
                 return False
             if val.get("confirmationStatus") in ("confirmed", "finalized"):
-                confirmed = True
-                break
-        if confirmed:
-            logger.info("close_ata: closed %s ATA, recovered ~0.002 SOL rent (tx: %s...)",
-                        ca[:12], sig[:16])
-            return True
+                logger.info("close_ata: closed %s ATA, recovered ~0.002 SOL rent (tx: %s...)",
+                            label, sig[:16])
+                return True
         logger.warning("close_ata: %s send accepted but not confirmed in time (sig: %s...)",
-                       ca[:12], sig[:16])
+                       label, sig[:16])
         return False
+    except Exception as e:
+        logger.debug("close_ata: send error for %s: %s", label, e)
+        return False
+
+
+def _close_token_account(ca: str) -> bool:
+    """v117: Close the token account after selling all of it. Recovers ~0.002 SOL rent.
+    v14e.66: Token-program-aware (handles legacy SPL Token AND Token-2022).
+    v14e.68: retry the post-sell balance read. Jupiter's sell can land before the
+    read-RPC reflects it, so the single immediate read saw a stale non-zero balance and
+    skipped the close on EVERY live sell (measured 0/24 closed, ~$3 rent leaked over 2d).
+    With two strategies sharing one ATA, a non-zero read is also LEGITIMATE (the other
+    strategy still holds) — so we re-read a few times: if it drops to 0 we are the last
+    seller and close; if it stays >0 another holder remains and we correctly skip. The
+    periodic _sweep_empty_token_accounts() is the catch-all safety net."""
+    if not os.environ.get("SOLANA_PRIVATE_KEY", ""):
+        return False
+    try:
+        import base58 as _b58
+        from solders.keypair import Keypair as _Keypair
+        owner = str(_Keypair.from_bytes(_b58.b58decode(os.environ["SOLANA_PRIVATE_KEY"])).pubkey())
+
+        acct_str = token_prog_str = None
+        remaining = 0
+        for _attempt in range(4):  # ~4.5s max to absorb post-sell read lag
+            acct_str, token_prog_str, remaining = _find_owned_token_account(owner, ca)
+            if acct_str is None:
+                logger.debug("close_ata: no token account for %s (already closed)", ca[:12])
+                return False
+            if remaining == 0:
+                break
+            time.sleep(1.5)
+        if remaining > 0:
+            logger.debug("close_ata: %s still has %d tokens after retries (other holder), skipping",
+                         ca[:12], remaining)
+            return False
+        return _send_close_account(acct_str, token_prog_str, label=ca[:12])
     except Exception as e:
         logger.debug("close_ata: error for %s: %s", ca[:12], e)
         return False
+
+
+# Token program ids — empty token accounts of either kind hold closeable rent.
+_TOKEN_PROGRAMS = (
+    "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",   # legacy SPL Token
+    "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",   # Token-2022
+)
+
+
+def _sweep_empty_token_accounts(max_close: int = 25, return_rent: bool = False):
+    """v14e.68: Catch-all rent recovery. Enumerate ALL token accounts owned by the live
+    wallet across BOTH token programs (legacy SPL + Token-2022) and close every one that
+    holds 0 tokens. Robust to the post-sell read race in _close_token_account: by the
+    time this runs the balances have settled to 0, so closes succeed (the manual sweep
+    proved 353/353 this way). Returns count closed, or (count, rent_sol) if return_rent.
+    No-op when SOLANA_PRIVATE_KEY is unset."""
+    pk_str = os.environ.get("SOLANA_PRIVATE_KEY", "")
+    if not pk_str:
+        return (0, 0.0) if return_rent else 0
+    try:
+        import base58 as _b58
+        from solders.keypair import Keypair as _Keypair
+        owner = str(_Keypair.from_bytes(_b58.b58decode(pk_str)).pubkey())
+    except Exception as e:
+        logger.debug("close_ata sweep: keypair error: %s", e)
+        return (0, 0.0) if return_rent else 0
+
+    rpc_url = _solana_rpc_url()
+    closed = 0
+    rent = 0.0
+    for prog in _TOKEN_PROGRAMS:
+        if closed >= max_close:
+            break
+        try:
+            r = requests.post(rpc_url, json={
+                "jsonrpc": "2.0", "id": 1, "method": "getTokenAccountsByOwner",
+                "params": [owner, {"programId": prog}, {"encoding": "jsonParsed"}],
+            }, timeout=15).json()
+            accts = (r.get("result", {}) or {}).get("value", [])
+        except Exception as e:
+            logger.debug("close_ata sweep: list failed for %s: %s", prog[:8], e)
+            continue
+        for a in accts:
+            if closed >= max_close:
+                break
+            try:
+                info = a["account"]["data"]["parsed"]["info"]
+                if int(info["tokenAmount"]["amount"]) != 0:
+                    continue
+                lam = a["account"]["lamports"] / LAMPORTS_PER_SOL
+                # a["account"]["owner"] is the token program that owns this account.
+                if _send_close_account(a["pubkey"], a["account"]["owner"],
+                                       label=info.get("mint", a["pubkey"])[:12]):
+                    closed += 1
+                    rent += lam
+            except Exception as e:
+                logger.debug("close_ata sweep: close error: %s", e)
+    if closed:
+        logger.info("close_ata sweep: closed %d empty ATA(s), recovered ~%.5f SOL rent",
+                    closed, rent)
+    return (closed, rent) if return_rent else closed
 
 
 _SOL_PRICE_CACHE: dict = {"ts": 0.0, "value": 0.0}
@@ -1233,6 +1319,18 @@ def check_live_trades(client_sb) -> dict:
         "checked": 0, "closed": 0, "tp": 0, "sl": 0, "timeout": 0,
         "pnl_usd": 0.0, "rt_pnl_usd": 0.0,
     }
+
+    # v14e.68: throttled empty-ATA sweep — catch-all rent recovery. Runs every cycle
+    # regardless of open trades (empty ATAs accumulate precisely when positions close),
+    # but no more than once per _ATA_SWEEP_INTERVAL_SEC. The immediate post-sell close
+    # races the read-RPC and skips; this guarantees the rent is recovered.
+    global _LAST_ATA_SWEEP_TS
+    if (time.time() - _LAST_ATA_SWEEP_TS) >= _ATA_SWEEP_INTERVAL_SEC:
+        _LAST_ATA_SWEEP_TS = time.time()
+        try:
+            _sweep_empty_token_accounts(max_close=25)
+        except Exception as _e:
+            logger.debug("live_trader: ATA sweep error: %s", _e)
 
     try:
         # v121: Also pick up 'closing' trades (claimed but sell failed/crashed — need retry)
