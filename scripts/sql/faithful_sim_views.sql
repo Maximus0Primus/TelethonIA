@@ -18,7 +18,10 @@
 -- Caveat: blacklist is applied with the CURRENT config (not point-in-time). Phase A adds
 -- per-row persisted tags (live_eligible, is_companion_shadow) for point-in-time accuracy.
 
-CREATE OR REPLACE VIEW v_strategy_faithful_trades AS
+-- security_invoker=true: run with the querying role's privileges (service_role bypasses RLS),
+-- not the view owner's — avoids the SECURITY DEFINER advisor without changing query results.
+CREATE OR REPLACE VIEW v_strategy_faithful_trades
+  WITH (security_invoker = true) AS
 WITH base AS (
   SELECT pt.id, pt.strategy, pt.chain, pt.token_address, pt.kol_group,
          pt.is_shadow, pt.source, pt.status, pt.pnl_pct, pt.pnl_usd, pt.created_at,
@@ -55,7 +58,8 @@ dedup AS (
 )
 SELECT * FROM dedup WHERE gap IS NULL OR gap > interval '24 hours';
 
-CREATE OR REPLACE VIEW v_strategy_faithful_perf AS
+CREATE OR REPLACE VIEW v_strategy_faithful_perf
+  WITH (security_invoker = true) AS
 SELECT strategy, chain,
   bool_or(strat_has_main) AS uses_main_book,
   count(*) AS n,
