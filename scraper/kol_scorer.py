@@ -16,7 +16,7 @@ import math
 import time
 import logging
 import argparse
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from supabase import create_client
@@ -24,7 +24,19 @@ from supabase import create_client
 logger = logging.getLogger(__name__)
 
 CACHE_FILE = Path(__file__).parent / "kol_scores.json"
-CACHE_TTL = 6 * 3600  # Refresh every 6h — faster iteration on algo changes
+CACHE_TTL = 12 * 3600  # Refresh every 12h — halves full token_snapshots scans vs 6h
+                       # (KOL scores move slowly: 10-day half-life decay). Use
+                       # `kol_scorer.py --force` to recompute immediately after algo changes.
+
+# Rolling read window for token_snapshots. Scoring applies a 10-day half-life
+# decay (HALF_LIFE_DAYS), so a snapshot older than 90d weighs 2^-9 ≈ 0.2% —
+# reading it is pure disk-IO waste. A token's snapshots cluster within ~7d of
+# its first call, so a 90d window drops no relevant first-calls. This also caps
+# read volume permanently (the old fixed floor grew unbounded → disk-IO blowup).
+SNAPSHOT_LOOKBACK_DAYS = 90
+# Never read before this: pre-v34 snapshots are poisoned. The rolling window is
+# always more recent than this today, but max() keeps the guard if it's widened.
+POISON_FLOOR = datetime(2026, 2, 14, tzinfo=timezone.utc)
 
 
 def _get_client():
@@ -33,8 +45,17 @@ def _get_client():
     return create_client(url, key)
 
 
-def load_cached_scores() -> dict[str, float]:
-    """Load cached KOL scores from disk. Returns { "kol_username": hit_rate }."""
+def load_cached_scores() -> dict[str, float] | None:
+    """Load cached KOL scores from disk if fresh.
+
+    Returns the score dict (possibly EMPTY, when a fresh recompute legitimately
+    scored zero KOLs) whenever a non-stale cache file exists, or None when there
+    is no usable fresh cache (missing / stale / corrupt).
+
+    Callers MUST treat None — not an empty dict — as the cache-miss signal.
+    An empty dict is a valid fresh result; treating it as a miss triggers a
+    full-history token_snapshots recompute on every cycle (disk-IO blowup).
+    """
     if CACHE_FILE.exists():
         try:
             with open(CACHE_FILE, "r") as f:
@@ -45,7 +66,7 @@ def load_cached_scores() -> dict[str, float]:
                 return {k: v for k, v in data.items() if not k.startswith("_")}
         except (json.JSONDecodeError, OSError):
             pass
-    return {}
+    return None
 
 
 def compute_kol_scores(min_calls: int = 3) -> dict[str, float]:
@@ -74,6 +95,11 @@ def compute_kol_scores(min_calls: int = 3) -> dict[str, float]:
     page_size = 1000
     offset = 0
 
+    # Rolling window (capped below the poison floor) instead of a fixed floor
+    # that re-reads the entire growing history every recompute.
+    window_start = datetime.now(timezone.utc) - timedelta(days=SNAPSHOT_LOOKBACK_DAYS)
+    snapshot_floor = max(window_start, POISON_FLOOR).isoformat()
+
     while True:
         result = (
             client.table("token_snapshots")
@@ -81,7 +107,16 @@ def compute_kol_scores(min_calls: int = 3) -> dict[str, float]:
             .not_.is_("top_kols", "null")
             # Accept rows where ANY horizon has outcome data
             .or_("did_2x_12h.not.is.null,did_2x_24h.not.is.null,did_2x_48h.not.is.null,did_2x_72h.not.is.null,did_2x_7d.not.is.null")
-            .gte("snapshot_at", "2026-02-14T00:00:00Z")  # skip pre-v34 poisoned data
+            .gte("snapshot_at", snapshot_floor)
+            # Stable TOTAL order is REQUIRED for correct OFFSET pagination:
+            # without it, PostgREST returns rows arbitrarily and concurrent
+            # inserts make pages skip/duplicate rows → non-deterministic scores.
+            # snapshot_at alone is NOT enough — a whole batch cycle shares one
+            # timestamp, so a page boundary inside that group would reshuffle;
+            # id (monotonic pkey) breaks ties. New rows land at the tail, never
+            # shifting already-read pages. snapshot_at uses idx_snapshots_at.
+            .order("snapshot_at")
+            .order("id")
             .range(offset, offset + page_size - 1)
             .execute()
         )
@@ -270,7 +305,7 @@ def compute_kol_scores(min_calls: int = 3) -> dict[str, float]:
 def get_kol_scores() -> dict[str, float]:
     """Get KOL scores (from cache if fresh, recompute otherwise)."""
     scores = load_cached_scores()
-    if scores:
+    if scores is not None:  # empty dict = valid fresh result, not a cache miss
         return scores
     try:
         return compute_kol_scores()
