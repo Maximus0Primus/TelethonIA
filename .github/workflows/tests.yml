@@ -19,4 +19,11 @@ jobs:
         run: pip install -r scraper/requirements.txt
       - name: Run tests
         working-directory: scraper
+        # Placeholder creds: several modules (e.g. sim.py) read SUPABASE_URL /
+        # SUPABASE_SERVICE_ROLE_KEY at import time via os.environ[...]. Tests are
+        # fully mocked and never hit the network, so dummy values are enough to
+        # let those imports succeed. Do NOT use real secrets here.
+        env:
+          SUPABASE_URL: https://placeholder.supabase.co
+          SUPABASE_SERVICE_ROLE_KEY: placeholder-test-key
         run: pytest tests/ -v --tb=short --cov=. --cov-report=term-missing -x
