@@ -160,3 +160,43 @@ gap valide par dose-response sur 600k lignes, INDEPENDAMMENT, avant combinaison.
 
 - [ ] Cabler `slingoorioyaps + gap>=24h` en shadow dedie pour accumuler du N propre
 - [ ] Envisager un filtre global "gap KOL >= 24h" (reduction de risque sur tout le deck)
+
+### [Aug 5] DEPLOYE — v14e.70 (commit c252943)
+
+- [x] **olympeqg banni** (`kol_chain_blacklist.solana`, 21 -> 22 KOLs).
+      Backup `data/paper_trade_config_pre_olympeqg_ban_20260805.json`.
+      Blacklist = skip MAIN uniquement, le shadow continue d'enregistrer
+      (paper_trader.py:1189-1192) donc olympeqg reste re-evaluable.
+- [x] **Nouveaux filtres opt-in** `kol_whitelist` + `min_kol_gap_hours`
+      (absent = pas de gate => zero impact sur les strategies existantes).
+      Gap lu en DB via nouvel index `idx_paper_trades_kol_created` (23ms,
+      puis 0.004ms en cache), token courant exclu, fail-closed si inconnu.
+- [x] **A/B 2x2 en shadow**: TP90_SL40 (base) / KOLW / GAP24 / KOLW_GAP24
+- [x] 9/9 tests unitaires du gate + pre_deploy_check PASSED (141 tests)
+- [x] Deploye VPS, service actif, zero erreur
+
+### [Aug 5] Validation mois par mois — 1 confirme, 1 corrige, 0 nouveau
+
+Donnee RT commence avril 2026 => 120j EST la fenetre maximale disponible.
+Critere le plus dur possible: performance par mois civil.
+
+| KOL | mois + | moy | pire mois | n |
+|---|---|---|---|---|
+| **slingoorioyaps** | **4/4** | +20.2% | **+13.4%** | 231 |
+| dddegens | 3/4 | +20.8% | -0.4% | 120 |
+| ALSTEIN_GEMCLUB | 3/3 | +16.3% | +11.2% | 45 |
+| bounty_journal | **2/4** | **-1.4%** | -17.9% | 249 |
+| olympeqg | **0/3** | -7.7% | -15.5% | 1335 |
+
+- [x] slingoorioyaps CONFIRME: 4/4 mois, tient a travers le collapse de mai ET
+      le regime de juin. Ecart vs reste du flux +18 a +40pp chaque mois.
+- [x] **bounty_journal RETROGRADE** — je le proposais au deban, le prisme mensuel
+      dit 2/4 mois et moyenne NEGATIVE. Ne pas debannir. (Son score au scan
+      precedent venait de strategies TRAIL, deja suspectes.)
+- [x] **dddegens = piege parfait**: moyenne +24.6% en test MAIS 230 survivants
+      reels contre **208 sous permutation** => zero signal. Moyenne elevee,
+      edge nul. A comparer a slingoorioyaps: 104 reels contre **2** au hasard.
+      => La moyenne seule ne prouve rien, meme validee train/test.
+- [x] ALSTEIN_GEMCLUB / letswinallgems: n insuffisant (echouent le seuil 15/15)
+
+VERDICT: aucun nouveau KOL validable. slingoorioyaps reste le seul.
