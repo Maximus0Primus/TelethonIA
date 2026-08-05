@@ -82,11 +82,11 @@
 
 | # | Piste | Pourquoi ça n'a pas été fait | Coût |
 |---|---|---|---|
-| E20 | Sortie dynamique sur les ticks (pas TP/SL fixe) | `sim_engines` a les moteurs ; jamais croisé avec les axes validés | élevé |
+| E20b | Sortie dynamique **tick par tick** (moteurs `sim_engines`, pas la grille) | seule la version "sorties partielles de la grille" a été testée (E27, morte) | élevé |
 
-> **Le registre est désormais épuisé pour tout ce qui coûte peu ou moyen.** E20 est le seul
-> reste, et c'est le plus cher. Après 20 hypothèses, 2 axes tiennent (E01 KOL, E02 sentiment)
-> et le levier principal est le sizing (E22).
+> **Registre épuisé pour tout ce qui coûte peu ou moyen.** 24 hypothèses testées.
+> 2 axes tiennent (E01 KOL, E02 sentiment), le levier principal est le sizing (E22),
+> et **6 résultats spectaculaires sont morts à leur contrôle**.
 | ~~E21~~ | ~~Sizing conditionnel selon la proba de survie~~ | **→ devenu E22, voir ci-dessous** | — |
 
 ---
@@ -238,6 +238,47 @@
   du signal mais du modèle — le filtre en bande capture le U correctement.
 - **Fausse alerte au passage** : les 3 AUC affichaient « 0.572 » identiques, ce qui m'a fait
   soupçonner un bug. Vérification à 6 décimales : 0.571594 / 0.572034 / 0.571573. Pas de bug.
+
+---
+
+## ❌ E25 · Détecter le régime à l'avance
+
+- **Hypothèse** : le régime est bimodal (88 % de stratégies positives certaines semaines,
+  8 % d'autres). S'il est prévisible, on allume/éteint la stratégie — levier plus gros que
+  n'importe quel filtre.
+- **Méthode** : 15 semaines. Métriques de la semaine **précédente** (volume, % 2x, % dump,
+  upside) vs EV de la stratégie la semaine courante.
+- **Contrôle** : permutation des semaines, 5 000 tirages, en prenant le **max sur les
+  métriques testées** (correction implicite pour tests multiples).
+- **Résultat** : corr. volume précédent **0.524** vs p95 du hasard **0.576** → bruit.
+  corr. dump précédent 0.472 vs 0.572 → bruit. Split opérationnel +13.0 % (après forte
+  semaine) vs +3.2 % : c'est exactement ce que le test qualifie de bruit à n=7/8.
+- **Verdict** : ❌ à n=15 semaines. À revoir vers 40+ semaines de données.
+- **Acquis annexe** : corrélation de l'EV avec **sa propre EV précédente = 0.073** ⇒ aucune
+  persistance semaine à semaine, donc pas de momentum exploitable non plus.
+- **Chiffre à garder** : sur ces 15 semaines, **EV moyenne +7.8 %, 12 semaines positives**.
+
+## ⚠️ E26 · Balayage du TP sur l'univers filtré
+
+- **Hypothèse** : j'utilise TP50 depuis le début sans l'avoir remis en question.
+- **Méthode** : TP40→TP100 à SL30 constant (7 candidats seulement ⇒ risque de sélection
+  faible), univers bande de sentiment, croissance à f=0.10 sur la séquence réelle.
+- **Résultat** : TP50 **+123 %**, TP70 +105 %, TP60 +79 %, TP80 +43 %, TP40 +31 %,
+  TP90 −2 %, TP100 −26 %. Courbe lisse, sommet large entre TP50 et TP70.
+- **Verdict** : ⚠️ **confirme le choix existant sans l'améliorer**. Utile comme robustesse :
+  ce n'est pas un optimum en pointe d'aiguille, les voisins tiennent.
+
+## ❌ E27 · Sorties partielles (SCALE_OUT / MOONBAG)
+
+- **Hypothèse** : sortir en plusieurs fois lisse les résultats et améliore la composition.
+- **Résultat** à f=0.10 sur l'univers filtré : **SCALE_OUT −81 %**, **MOONBAG −95 %**,
+  contre +213 % pour la config validée. SCALE_OUT a pourtant +2 791 en somme brute
+  juin-juillet — la composition le tue quand même (distribution des pertes).
+- **Verdict** : ❌ — et c'est un rappel : **la somme brute et le rendement composé peuvent
+  pointer en sens opposés.**
+- **Annexe** : `BE15_TP50_SL30` + bande donne **2.3× le volume** (447 trades, 25/sem) pour
+  +179 % contre +213 %. Mais il perd en mai (3/4 mois au lieu de 4/4) et fait 12/17 semaines
+  positives contre 12/15. **Le volume seul ne compense pas la qualité.**
 
 ---
 
