@@ -354,6 +354,62 @@
 
 ---
 
+## ✅ E30 · PORTEFEUILLE 3 STRATÉGIES — la bonne fonction objectif
+
+- **Erreur corrigée (user)** : j'ai classé par **EV** toute la session. Avec une mise
+  plafonnée (~$100, contrainte de liquidité memecoin), ce qui compte est **N × EV**.
+  Classer par EV privilégie mécaniquement les filtres serrés ⇒ j'optimisais la mauvaise chose.
+- **La config** — 3 stratégies en parallèle, chacune avec sa bande :
+
+| stratégie | bande sentiment |
+|---|---|
+| `BE25_TP80_SL30` | 0.25 – 0.75 |
+| `FAST_TP50_SL30_MCAP_S40` | 0.30 – 0.70 |
+| `TP50_SL40_S35` | 0.35 – 0.70 |
+
+  **796 trades, 51/semaine, EV +6.7 %, 14/16 semaines positives, 4 mois positifs sur 4**
+  (+871, +1106, +1950, +1111). Net à $100/trade : **$5 038** sur 3,5 mois (~$1 439/mois),
+  contre $1 324 **au total** pour la config précédente.
+- **Pourquoi ça marche** : profils mensuels **complémentaires**. `BE25` seul fait −434 en mai,
+  `FAST` fait +788 le même mois ; en juin c'est l'inverse (+1416 vs +56). Séparément chacune
+  a un mois faible, ensemble aucun.
+- `TD2_BE5_TP120_SL44_T25` sortait premier ($2 449) mais **écarté** : préfixe `TD2_` dans les
+  familles d'artefacts auto-dépréciées.
+
+### ⚠️ La contrainte de capital change tout (`scripts/_portfolio_sim.py`)
+
+**2.82 positions simultanées en moyenne, p95 = 6, pic = 20.** Simulation avec refus de trade
+quand le capital libre est insuffisant, coût fixe en $ (pas en %) :
+
+**Capital $100, mise $20 (f=0.20) :**
+
+| | final | DD | trades ratés |
+|---|---|---|---|
+| paper | **$4 791** | 49.8 % | 1 % |
+| **avec dérive −3.5 pp** | **$24** | **92.5 %** | 6 % |
+
+**Effet du capital de départ (avec dérive) :**
+
+| capital | final | × | DD | ratés |
+|---|---|---|---|---|
+| **$100** | **$24** | **0.2×** | 92.5 % | 6 % |
+| **$200** | **$1 630** | **8.1×** | 85.4 % | 2 % |
+| $500 | $2 967 | 5.9× | 50.7 % | 0 % |
+| $1 000 | $3 467 | 3.5× | 39.5 % | 0 % |
+| $5 000 | $7 467 | 1.5× | 14.2 % | 0 % |
+
+**À $100, AUCUN f ne fonctionne** avec la dérive : f=0.10 → $86, f=0.15 → $31,
+f=0.20 → $24, f=0.30 → $9. Et f≥0.15 fait rater 54 à 83 % des trades faute de capital libre.
+
+- **Verdict** : ✅ la config est **la meilleure connue**, ⚠️ mais **$100 est sous le seuil de
+  viabilité**. Entre la ruine et ×8, il n'y a que **$100 de capital de départ** de différence.
+  Seuil praticable : **$500** (0 % de trades ratés, DD 50.7 %).
+- **⚠️ JAMAIS TESTÉ EN LIVE.** Le live est coupé depuis le 5 juin et tournait sur
+  `FAST_TP50_SL30_MCAP_S40` **sans** filtre sentiment. La dérive de cette config est
+  **inconnue** — et c'est le facteur qui domine tout ($4 791 contre $24).
+
+---
+
 ## Journal des sessions
 
 ### 2026-08-05 — session fondatrice du registre
