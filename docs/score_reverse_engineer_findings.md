@@ -1,5 +1,21 @@
 # Score Reverse-Engineer — Findings
 
+> ⚠️ **2026-08-05 — LA VALIDATION ATTENDUE ICI N'A JAMAIS PU AVOIR LIEU.**
+> Ce doc dit *« validate at next sweep »* pour les lifts BSR / `kol_win_rate`.
+> Or les arms `BSR52`, `BSR55`, `KW34`, `KW26`, `NOZEROLIQ_BSR*`, `BSR_MCAP` du mega
+> sweep lisaient `rt_buy_sell_ratio` et `kol_win_rate` — **deux colonnes absentes du
+> `select`** depuis v14e.43. `(None or 0) >= seuil` était donc toujours faux : **7 arms
+> sur 21 n'ont matché AUCUN trade pendant 4 mois**, en silence.
+> Corrigé en v14e.72 (BSR52 passe de 0 % à 82.2 % de match).
+> ⇒ Les lifts ci-dessous restent **NON VALIDÉS out-of-sample**. Le premier sweep qui
+> peut réellement les tester est celui du 05/08. Ne rien promouvoir d'ici là.
+> Détail : `tasks/experiments.md` + mémoire `mega_sweep_dead_filter_arms_aug5`.
+>
+> ⚠️ Second point : `kol_win_rate` est un **agrégat de forme récente du KOL**. Le
+> 05/08 la forme récente est mesurée **ANTI-prédictive** (forme>0 → −4.35 % en test,
+> E08). Les lifts `kol_win_rate >= 0.34` de ce doc sont donc à re-tester avec un null
+> de permutation, pas seulement avec plus de N.
+
 **Generated:** 2026-04-29 (v14e.43)
 **Tool:** `scripts/_score_reverse_engineer.py`
 **Window:** 30 days

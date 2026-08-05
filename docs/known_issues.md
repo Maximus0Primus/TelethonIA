@@ -258,3 +258,62 @@ déjà le best-fit. Effet réel <1pp, probablement structurellement insignifiant
 **Re-tester quand**: N>150 events apples-to-apples (~3 semaines plus de data).
 Ne PAS implémenter de table `kol_optimal_family` avant confirmation N≥150.
 
+
+---
+
+## §12. Pièges découverts le 2026-08-05 (7 faux positifs en une session)
+
+> Sept résultats spectaculaires sont morts à leur contrôle ce jour-là. Sans contrôle
+> systématique, sept fausses stratégies auraient été livrées. Registre complet et
+> méthode : `tasks/experiments.md`.
+
+### 12.1 `price_ticks` est un LOG MULTI-SOURCES, pas une série de prix
+`jupiter` / `fast` / `full` s'entrelacent **toutes les 11-20 s**, avec un désaccord
+p1 = **−85.8 %** et p99 = **+640 %** sur des transitions de ≤30 s. Rejouer la table sans
+filtrer `source` fabrique un edge : un faux "dip-buy −50 %" à **+12.6 %/trade, 5/5 semaines
+positives**. Mono-source, il disparaît (meilleur = −0.0 %).
+**Règle** : tout backtest touchant `price_ticks` filtre UNE source d'abord. Et tester le
+fill **un tick plus tard** (`fill_lag=1`) — une oscillation lag0/lag1/lag2 (au lieu d'une
+dégradation monotone) est la signature d'un artefact d'échantillonnage.
+`sim.py::_filter_ticks_by_source` et `paper_trader::_decision_price` sont déjà corrects.
+
+### 12.2 Classer par EV est FAUX quand la mise est plafonnée
+La liquidité memecoin plafonne la mise (~$100/token). L'argent gagné vaut donc **n × EV**,
+pas EV. Une config à 449 trades × 3.3 % rapporte autant qu'une à 195 × 7.2 %. Classer par EV
+privilégie mécaniquement les filtres serrés et **rate les portefeuilles** : le meilleur
+assemblage trouvé fait ×3.8 la meilleure config seule. Corrigé v14e.74 (`total_at_cap`).
+
+### 12.3 Le mega sweep ne peut PAS désigner un gagnant
+15,1 M cellules, ~371 k tests éligibles, et le gate **FDR est désactivé** (il ramenait
+`top_robust` à zéro). Le top-30 est donc **le maximum de 371 k tests non corrigés**.
+✅ Valide pour : rejeter une dimension, tester une hypothèse **pré-spécifiée**, et les gates
+`cross_regime_robust` / `fragile_recent`. ❌ Jamais promouvoir depuis le classement.
+Un **plancher de bruit de sélection** est calculé depuis v14e.73 — le lire avant tout le reste.
+
+### 12.4 Un seul tirage de permutation ne suffit pas
+Sur une métrique de type top-k avec des queues épaisses, le plancher de bruit fait **~10
+points de large**. Un premier null isolé donnait +8.77 % et rendait le résultat illisible ;
+c'est en passant à 12 tirages que la dispersion est apparue. **Toujours reporter la
+fourchette p10-p90 du null** — si elle est large, aucun verdict n'est possible.
+
+### 12.5 Toute feature agrégée sur un token doit être recalculée À LA DATE D'ENTRÉE
+La co-occurrence de KOLs donnait une dose-response magnifique (1 KOL −7.5 % → 5+ KOLs
+**+11.3 %**). Le compte incluait les mentions arrivées **après** l'ouverture du trade : un
+token callé par 5 KOLs l'est *parce qu'il a déjà pompé*. Recompté causalement, le gradient
+disparaît et le meilleur cas devient **UN SEUL KOL**.
+
+### 12.6 `exit_price` peut être corrompu — filtrer `pnl_pct <= 20` avant tout classement
+3 tokens ($BOPCAT, $R.O.W., $ARLO) écrits avec un `exit_price` 100 à 5 000× au-dessus de
+`high_price_seen`. Ils faisaient afficher **+1 048 %/trade** à `BE30_TP50_SL30` sur 30 j.
+Détection : `exit_price > 3 × high_price_seen`.
+
+### 12.7 La géométrique à f=1 n'est PAS le chiffre d'exploitation
+Reporter `exp(avg(ln(1+r)))−1` revient à supposer 100 % du capital sur chaque trade —
+absurde. La même stratégie fait **−99 % à f=1** et **+313 % à f=0.10**.
+**Avant de chercher un nouvel edge, vérifier que celui qu'on a est correctement dimensionné.**
+
+### 12.8 ⚠️ Plafond de capacité — à lire avant toute optimisation
+Le gain **sature à +$23/jour dès $1 000 de capital** ($5 k et $50 k donnent le même montant).
+Contrainte = 7.4 trades/jour × $100 max/token, c'est-à-dire **la classe d'actifs**, pas la
+stratégie. Fenêtre utilisable **$500–$2 000**. Un edge 20 % meilleur déplace le plafond de
+20 %, il ne le supprime pas.

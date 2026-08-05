@@ -1,5 +1,14 @@
 # Dedup Rules — Canonical Reference
 
+> ✅ **Vérifié le 2026-08-05.** L'approximation `lag(created_at) > 24h` (utilisée par
+> `v_strategy_faithful_trades` et par tous les scripts d'analyse) a été comparée à un
+> vrai dédup rolling récursif — celui qui compare au dernier trade *conservé*, pas au
+> précédent. **Résultats identiques au centième** : 2 024 lignes, −2.49 %, médiane 18.7
+> sur SCALP_TP20_NOSL/120j. Les ré-entrées sont trop rares et trop groupées pour que
+> les deux méthodes divergent. **L'approximation est sûre, continuer à l'utiliser.**
+> Sans dédup du tout : −3.18 % au lieu de −2.49 % ⇒ le dédup compte bien.
+
+
 ## Why this doc exists
 
 Over multiple sessions (Feb 14, Feb 15, May 18 2026), we kept re-discovering the same five mistakes
