@@ -562,3 +562,59 @@ signal, mais une whitelist l'exploite mieux qu'un modele.
 - [ ] ~~(B) ajouter kol_group/gap/sentiment au pipeline~~ ANNULE par (A)
 - [ ] ~~(C) retirer les features de forme KOL~~ sans objet
 - [ ] ~~(D) gate qualite sur le modele final~~ sans objet
+
+## 🔬 [Aug 5] REFORMULATION ML — l'asymetrie downside/upside
+
+Critique acceptee: mon 1er test ML etait la formulation la plus FAIBLE possible
+(regression sur pnl_pct, cible continue a queues epaisses). Son resultat negatif
+ne condamnait que ce cadrage, pas le ML. Reformule en CLASSIFICATION sur des
+cibles binaires au niveau TOKEN (`scripts/_ml_reformulation.py`).
+
+### Le resultat: on ne peut PAS predire les gagnants, on PEUT predire les survivants
+
+| cible | prec@top20% | base | AUC | plafond hasard | verdict |
+|---|---|---|---|---|---|
+| 2x | 24-28% | 29.1% | 0.48-0.54 | 35.0% | bruit |
+| 2x propre (sans dump -40%) | 10-14% | 11.3% | ~0.50 | 17.1% | bruit |
+| **pas de dump -50%** (token+KOL) | **65.8%** | 36.1% | **0.72** | 44.4% | **SIGNAL** |
+
+21 points au-dessus du plafond de bruit. C'est une vraie asymetrie, et elle est
+COHERENTE avec la decouverte de regime du jour (74-82% des runners plongent -50%
+avant de monter): le dump est structurel donc predictible, le pump ne l'est pas.
+
+### Traduction trading (test = 262 tokens)
+
+| selection | n | EV reelle | % survivants | best moyen |
+|---|---|---|---|---|
+| aucun filtre | 262 | -2.42% | 32.4% | 109.3% |
+| top 50% proba survie | 131 | +3.32% | 45.0% | 100.1% |
+| **top 20% proba survie** | 52 | **+5.60%** | 57.7% | 73.5% |
+| **bas 20% (a eviter)** | 52 | **-10.29%** | 13.5% | **154.7%** |
+
+Monotone. Et le detail qui valide tout: **le bas 20% a le PLUS gros potentiel**
+(best moyen 154.7%) et c'est la qu'on perd le plus. Les plus gros runners sont
+ceux qui flushent le plus fort — on se fait sortir avant la montee.
+
+### MAIS: largement redondant avec la bande de sentiment
+
+Croisement 2x2 (le modele a `sentiment` en feature, il la re-apprend en partie):
+
+| | bande NON | bande OUI |
+|---|---|---|
+| survie basse | **-14.95%** (n=96) | +10.44% (n=35) |
+| survie haute | -2.55% (n=79) | **+12.23%** (n=52) |
+
+La bande DOMINE: elle fait passer de -14.95% a +10.44% a elle seule. Le modele
+n'ajoute que **+1.8pp** a l'interieur de la bande (n=52, dans le bruit).
+Hors bande il aide beaucoup (-14.95 -> -2.55) mais ca reste negatif: on ne
+traderait pas ces tokens de toute facon.
+
+=> **Operationnellement: garder la bande de sentiment, le modele n'ajoute pas
+   assez pour justifier un pipeline ML en production.**
+=> **Methodologiquement: le cadrage "predire la survie" est le BON, et c'est un
+   acquis reutilisable.** AUC 0.72 contre 0.48-0.54 pour l'upside.
+
+- [ ] Piste ouverte que cette asymetrie suggere: si le downside est predictible
+      et pas l'upside, la forme optimale n'est pas "mieux choisir les entrees"
+      mais "adapter le SL a la proba de dump" — SL large sur les survivants
+      predits, pas de trade sur les autres. JAMAIS teste.
