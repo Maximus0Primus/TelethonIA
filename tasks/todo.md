@@ -387,9 +387,13 @@ Verifie par EXPLAIN ANALYZE: Index Scan Backward, **169ms** au lieu du timeout.
 Reparti sur sources x smoothings x polling x filters x strategies, chaque cellule
 aura une poignee de trades. Le workflow passera au vert mais la sortie ne sera pas
 exploitable tant que le flux ETH ne remonte pas.
-=> Le vrai probleme ETH n'est pas le sweep, c'est **le flux qui s'est tari**
-   (74 tokens/sem fin avril -> 2-9 depuis juillet). A investiguer separement:
-   pourquoi le scraper ne detecte plus de tokens ETH ?
+=> **PAS un bug** (precision user 05/08): le support ETH a ete construit PENDANT
+   l'ETH season. Elle est finie, et ETH est structurellement bien moins utilise
+   que SOL pour les memecoins. La chute 74 tokens/sem (fin avril) -> 2-9 (juillet)
+   est le MARCHE, pas la pipeline. Rien a reparer cote scraper.
+   Consequence operationnelle: le sweep ETH brule 3 runners toutes les 48h pour
+   ~30 tokens. Ne pas le supprimer (l'ETH season peut revenir) mais le rendre
+   conditionnel au volume.
 
 **2. Mon sharding v14e.72 etait sous-dimensionne.** Le commentaire du code
 annoncait "~1.5-2h/shard" — PERIME. Mesure reelle (run 30977642076 du 05/08):
@@ -399,4 +403,7 @@ cap GH 6h. Corrige 2 -> **4 tiers = 12 shards**, pire shard ~233min, 33% de marg
 Lecon: ne jamais faire confiance a un commentaire de perf, mesurer le run reel.
 
 - [ ] Verifier au prochain cron que le sweep ETH passe au vert
-- [ ] Investiguer le tarissement du flux ETH (chain_detect ? KOLs ETH inactifs ?)
+- [ ] ~~Investiguer le tarissement du flux ETH~~ ANNULE: c'est le marche (fin de
+      l'ETH season), pas un bug. Voir precision ci-dessus.
+- [ ] Proposer: garde de volume sur le sweep ETH (skip si < N tokens sur la
+      fenetre) => auto-reprise quand une ETH season revient, zero CI brule entre-temps
