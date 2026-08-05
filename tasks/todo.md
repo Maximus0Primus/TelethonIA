@@ -200,3 +200,34 @@ Critere le plus dur possible: performance par mois civil.
 - [x] ALSTEIN_GEMCLUB / letswinallgems: n insuffisant (echouent le seuil 15/15)
 
 VERDICT: aucun nouveau KOL validable. slingoorioyaps reste le seul.
+
+### [Aug 5] Filtre sentiment — test HORS SELECTION sur le deck pre-existant
+
+Le balayage des sorties m'avait sorti FAST_TP50_SL30_S40 a geom +4.0% => $100 devient
+$457 en 4 mois a 20% du capital. **C'ETAIT DE LA SELECTION.** Null en rebattant le
+sentiment: la meilleure geometrique atteint 5.1% et 4.2% par HASARD contre 5.5% en reel.
+Choisir le sommet d'un balayage de 239 strategies n'est pas justifie.
+
+Ce qui EST valide par ce meme null: le filtre lui-meme. Moyenne de tout le lot
++7.19% reel contre -3.63 / +2.59 / +1.15 au hasard, p90 des geometriques +0.5
+contre -6.3 / -1.2 / -3.7. **Toute la distribution est decalee**, pas juste le sommet.
+
+Test propre = appliquer le filtre aux 3 strategies deja dans le deck (choisies il y a
+des mois, zero selection possible), blacklist a jour (olympeqg deja banni):
+
+| strategie | sans filtre | AVEC filtre | train | test | $ a taille fixe $10 |
+|---|---|---|---|---|---|
+| FAST_TP50_SL30_MCAP_S40 | +2.0% (n=621) | **+17.8%** (n=55) | +18.2 | +16.9 | **+$98** |
+| FAST60_TP70_SL50_NZ_S40 | +3.8% (n=732) | **+13.7%** (n=58) | +15.6 | +10.4 | +$80 |
+| TP50_SL40_S35 | +3.0% (n=927) | **+13.0%** (n=64) | +16.3 | +6.7 | +$83 |
+
+Les 3 montent de +10 a +16 points. Les 3 positives dans les DEUX moities.
+Cadence ~3.2 trades/semaine (55-64 trades sur 120j).
+
+=> L'edge par trade est maintenant assez gros pour que **la TAILLE soit le levier**,
+   plus la frequence. A $10 c'est +$25/mois; a $100 c'est +$250/mois.
+   Le facteur limitant devient le slippage live, pas le signal.
+
+- [ ] `/simulate-live` sur FAST_TP50_SL30_MCAP_S40 + filtre sentiment, a $50 et $100
+      => c'est LA question ouverte: l'edge de +17.8% survit-il au slip reel?
+- [ ] Cabler le filtre sentiment en shadow (meme mecanique que min_kol_gap_hours)
