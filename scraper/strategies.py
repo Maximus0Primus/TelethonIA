@@ -4020,6 +4020,44 @@ for name, tp, sl, h, extra in _BSR_MCAP_SOL_CLONES:
     SHADOW_STRATEGIES.append(name)
 
 # ---------------------------------------------------------------------------
+# v14e.70 — KOL identity + call-cadence A/B (2026-08-05)
+# ---------------------------------------------------------------------------
+# Two effects were validated INDEPENDENTLY on 120d of shadow data with a
+# TRAIN/TEST split and a permutation null (labels reshuffled inside each
+# strategy, so the filters carry no information — that null is what sizes the
+# false-positive floor and it is the reason the token-feature axis was dropped:
+# 3 real survivors vs 6 under pure chance).
+#
+#   1. KOL identity — `slingoorioyaps` survived on 90 of 244 strategies vs 12
+#      under the null (7.5x the floor), mean +5.9% train / +5.8% test.
+#   2. Call cadence — hours since the same KOL's previous call is a monotone
+#      dose-response: burst <1h = -5.43%/trade -> 24-72h = +2.22%, and it holds
+#      after removing olympeqg (57% of the burst bucket).
+#
+# Stacked, on TP70/90/100_SL40: n=96, train +37.4% / test +37.7%, WR 64%.
+# On TP90_SL40 alone: n=33 over 32 unique tokens, mean +31.6%, GEOMETRIC +12.2%
+# (the only positive geometric mean found in that whole audit), sum-minus-best
+# = +894pp so it is not one runner. Cadence is only ~1.9 trades/week — these
+# shadows exist to accumulate clean N before anything is promoted.
+#
+# Registered as a full 2x2 against the existing bare `TP90_SL40` so each factor
+# stays separable: base / +KOL / +GAP / +both. Do NOT read the combined arm
+# alone — the point is the contrast.
+_KOL_EDGE_WHITELIST = ["slingoorioyaps"]
+_KOL_EDGE_BASE = {"pct": 1.0, "tp_mult": 1.90, "sl_mult": 0.60,
+                  "horizon_min": 120, "label": "main"}
+_KOL_EDGE_ARMS = {
+    "KOLW_TP90_SL40":       {"kol_whitelist": _KOL_EDGE_WHITELIST},
+    "GAP24_TP90_SL40":      {"min_kol_gap_hours": 24},
+    "KOLW_GAP24_TP90_SL40": {"kol_whitelist": _KOL_EDGE_WHITELIST,
+                             "min_kol_gap_hours": 24},
+}
+for _ke_name, _ke_filter in _KOL_EDGE_ARMS.items():
+    STRATEGIES[_ke_name] = [dict(_KOL_EDGE_BASE)]
+    STRATEGY_FILTERS[_ke_name] = {"chain": "solana", **_ke_filter}
+    SHADOW_STRATEGIES.append(_ke_name)
+
+# ---------------------------------------------------------------------------
 # v14e.36 — auto-deprecate every artifact-family strategy registered above.
 # Trail/dip/split/bond shadows pollute analytics (sim ranks them top via
 # 47x slip miscalibration) and cannot be promoted to live. This finalization

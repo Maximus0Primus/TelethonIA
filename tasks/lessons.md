@@ -185,3 +185,37 @@ Mais **HYST + filtre qualité** marche très bien : `BE25_TP80_SL30_S30_HYST` (H
 
 **Mistake potentiel :** appliquer un offset global −87 bps casserait `sl_hit` qui est calibré.
 **Rule :** Ne jamais appliquer un offset slip global quand les cellules pump × exit_type divergent. Schéma futur : `_dynamic_sell_slip_factor` doit accepter `{exit_type: bps_offset}` dict, pas un scalaire. Calibration par cellule à N≥15. Script `scripts/slip_per_exit_type.py` rejoue le diagnostic.
+
+## 2026-08-05 — Leçons de la session "chercher ce qui marche"
+
+### L1. Classer sur la MOYENNE, jamais la médiane
+Corrigé par l'user. `SCALP_TP20_NOSL` sur 120j : médiane **+18.7%**, moyenne arith
+**−2.40%**, moyenne géom **−19.65%**. Mêmes lignes, trois conclusions opposées.
+À taille fixe `PnL = N × taille × moyenne_arith` — la médiane n'entre pas dans la formule.
+La médiane ne sert qu'au diagnostic de forme (moy >> méd = dépend de la queue droite).
+Toujours reporter les trois.
+
+### L2. Jamais de conclusion sans null de permutation
+Un scan de 4778 candidats stratégie×filtre a sorti 3 "gagnants" validés train/test.
+Le même scan sur pnl mélangé en sort **6**. Moins de gagnants que le bruit.
+=> Tout scan multi-candidats DOIT être accompagné du même scan sur labels permutés.
+Sans ça on livre du dredging. C'est ce qui a tué l'axe features et légitimé l'axe KOL
+(161 réels vs 91-99 au hasard).
+
+### L3. `price_ticks` est un LOG multi-sources, pas une série de prix
+jupiter/fast/full s'entrelacent toutes les 11-20s, désaccord p1 −85.8% / p99 +640%.
+Rejouer sans filtrer `source` fabrique un faux edge (+12.6%/trade, 5/5 semaines).
+Test qui l'a attrapé : refaire le fill 1 tick plus tard (`fill_lag=1`) => 0/5 semaines
+sur 21 configs, puis lag2 repositif. **Oscillation lag0/lag1/lag2 = signature d'artefact**
+(une vraie dégradation serait monotone). Prod et sim.py filtraient déjà correctement.
+
+### L4. Valider les composants séparément AVANT de les combiner
+Le combo final (slingoorioyaps × gap≥24h) n'a pas été trouvé par recherche de combo.
+Le KOL a été validé par permutation, le gap par dose-response sur 600k lignes,
+indépendamment. Puis empilés. C'est la défense contre le surapprentissage :
+on ne cherche pas la combinaison, on empile des effets déjà prouvés.
+
+### L5. Vérifier le taux de remplissage AVANT de bâtir sur une feature
+`whale_new_entries` = "seul signal robuste confirmé" du research_log, mais rempli à
+**0%** sur les trades RT. `ml_pred` 0%. `unique_kols` toujours = 1. Trois pistes du
+backlog mortes en une requête de fill-rate.

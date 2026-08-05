@@ -197,6 +197,67 @@ def _bot_ml_gate(token: dict, strategy_name: str, config: dict | None = None) ->
     return raw  # normal mode
 
 
+# ---------------------------------------------------------------------------
+# v14e.70: per-KOL call cadence gate
+# ---------------------------------------------------------------------------
+# Validated 2026-08-05 over ~600k shadow rows, TRAIN/TEST split: the time since
+# the SAME KOL's previous call is a monotone dose-response on outcome —
+# burst <1h = -5.43%/trade, 1-6h = -3.12%, 6-24h = -1.31%, 24-72h = +2.22%
+# (all figures EXCLUDING olympeqg, which was 57% of the burst bucket, so the
+# effect is not one KOL's artefact). Read: a KOL firing several calls inside an
+# hour is shotgunning; one that waited a day is being selective.
+#
+# Strategies opt in via `min_kol_gap_hours`. Absent = no gate, so every
+# pre-existing strategy keeps bit-for-bit identical behavior.
+_kol_gap_cache: dict[str, float | None] = {}
+_kol_gap_client = None
+
+
+def _kol_gap_hours(kol: str, token_addr: str, now: datetime) -> float | None:
+    """Hours between now and the same KOL's previous RT call on ANOTHER token.
+
+    Read straight from the DB (index `idx_paper_trades_kol_created`) rather than
+    from in-process state: the RT filter short-circuits on chain/score/liq before
+    ever reaching this gate, so an in-memory "last call" map would silently miss
+    the calls that were filtered out earlier and report gaps that are too long.
+
+    `token_addr` is excluded explicitly — sibling strategies of the same token
+    insert their rows while we are still filtering, which would otherwise read
+    back as a ~0h gap. The per-(kol, token) cache also makes this one query per
+    token, not one per strategy.
+
+    Returns None when no previous call is known. Callers treat None as "gate not
+    satisfied" so the shadow only records rows whose gap is actually established.
+    """
+    key = f"{kol}|{token_addr}"
+    if key in _kol_gap_cache:
+        return _kol_gap_cache[key]
+
+    gap = None
+    try:
+        global _kol_gap_client
+        if _kol_gap_client is None:
+            import os
+            from supabase import create_client
+            _kol_gap_client = create_client(
+                os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_ROLE_KEY"])
+        rows = (_kol_gap_client.table("paper_trades").select("created_at")
+                .eq("kol_group", kol).eq("source", "rt")
+                .neq("token_address", token_addr)
+                .lt("created_at", now.isoformat())
+                .order("created_at", desc=True).limit(1).execute().data)
+        if rows:
+            last = datetime.fromisoformat(rows[0]["created_at"].replace("Z", "+00:00"))
+            gap = (now - last).total_seconds() / 3600.0
+    except Exception as e:
+        logger.debug("kol gap lookup failed for %s/%s: %s", kol, token_addr, e)
+
+    if len(_kol_gap_cache) > 5000:
+        _kol_gap_cache.clear()
+    _kol_gap_cache[key] = gap
+    return gap
+
+
 def _passes_strategy_filter(token: dict, strategy_name: str) -> bool:
     """Check if a token passes the entry filter for a given strategy."""
     # v14: chain gate — cheapest check, short-circuit first.
@@ -291,6 +352,23 @@ def _passes_strategy_filter(token: dict, strategy_name: str) -> bool:
             return False
         if min_age is not None and token_age_h < float(min_age):
             return False
+
+    # v14e.70: KOL identity + call-cadence gates. Both are opt-in (absent = no
+    # gate). Whitelist first — it is free and short-circuits before the gap
+    # lookup hits the DB.
+    _kol_wl = filt.get("kol_whitelist")
+    _min_gap = filt.get("min_kol_gap_hours")
+    if _kol_wl is not None or _min_gap is not None:
+        _kol = token.get("_rt_kol_group") or token.get("kol_group")
+        if not _kol:
+            return False
+        if _kol_wl is not None and _kol not in _kol_wl:
+            return False
+        if _min_gap is not None:
+            _gap = _kol_gap_hours(_kol, token.get("token_address") or "",
+                                  datetime.now(timezone.utc))
+            if _gap is None or _gap < float(_min_gap):
+                return False
 
     # v14e.40 / v14e.41: RECALL filters. Strategies opt in via require_recall=True.
     # Two drift modes — each strat picks ONE via filter key:
