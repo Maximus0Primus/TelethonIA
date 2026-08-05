@@ -15,10 +15,84 @@ name: Mega Sweep Extended ETH (48h)
 on:
   schedule:
     - cron: '0 22 */2 * *'
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Lancer meme si la garde de fraicheur dit non"
+        type: boolean
+        default: false
 
 jobs:
+  # v14e.72b — garde de fraicheur.
+  #
+  # Le support ETH a ete construit pendant une ETH season. Elle est finie et ETH
+  # est structurellement bien moins utilise que SOL en memecoins, donc le flux
+  # est passe de ~74 tokens/semaine (fin avril) a 2-15 (depuis juin). Ce n'est
+  # PAS un bug de pipeline, c'est la demande — rien a reparer cote scraper.
+  #
+  # L'univers du sweep (--mega-since 2026-04-13) compte encore 313 tokens, donc
+  # le probleme n'est pas sa taille : c'est que 236 d'entre eux sont anterieurs a
+  # juin. On rejouait 3 runners toutes les 48h sur un univers fige a 75% pour y
+  # ajouter ~1.4 token. La garde porte donc sur la FRAICHEUR, pas sur le volume
+  # total : sans donnee neuve, un re-run ne peut pas produire de conclusion neuve.
+  #
+  # Seuil 20 tokens / 14j. Au rythme actuel (~0.7/jour) la garde bloque et le
+  # sweep se declenchera ~1x/mois. Si une ETH season revient (74/semaine = ~148
+  # par 14j) elle passe des le run suivant, sans intervention.
+  gate:
+    name: garde-fraicheur-eth
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      run: ${{ steps.check.outputs.run }}
+      fresh: ${{ steps.check.outputs.fresh }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install --quiet requests
+      - name: Compter les tokens ETH recents
+        id: check
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          FORCE: ${{ github.event.inputs.force }}
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import os, requests
+          from datetime import datetime, timedelta, timezone
+
+          WINDOW_DAYS, MIN_FRESH = 14, 20
+          since = (datetime.now(timezone.utc) - timedelta(days=WINDOW_DAYS)).isoformat()
+          key = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
+          try:
+              r = requests.get(
+                  f"{os.environ['SUPABASE_URL']}/rest/v1/paper_trades",
+                  params={"select": "token_address", "chain": "eq.ethereum",
+                          "source": "eq.rt", "created_at": f"gte.{since}"},
+                  headers={"apikey": key, "Authorization": f"Bearer {key}"},
+                  timeout=60)
+              r.raise_for_status()
+              fresh = len({row["token_address"] for row in r.json()})
+          except Exception as e:
+              # Fail OPEN: une garde qui casse ne doit pas masquer le sweep.
+              print(f"run=true\nfresh=-1")
+              print(f"::warning::garde en echec ({e}) — on lance le sweep par defaut")
+              raise SystemExit(0)
+
+          forced = os.environ.get("FORCE", "").lower() == "true"
+          go = fresh >= MIN_FRESH or forced
+          print(f"run={'true' if go else 'false'}")
+          print(f"fresh={fresh}")
+          msg = (f"{fresh} tokens ETH distincts sur {WINDOW_DAYS}j (seuil {MIN_FRESH})"
+                 + (" — FORCE" if forced else ""))
+          print(f"::notice::{'LANCE' if go else 'SKIP'} — {msg}")
+          PY
+
   sweep:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
     strategy:
       # Continue les autres shards même si un fail. Le merge skip les
       # CSVs manquants (concat tolère les absents).
@@ -79,8 +153,10 @@ jobs:
           retention-days: 7
 
   merge_and_analyze:
-    needs: sweep
-    if: always()  # run merge even if 1 shard failed — partial > nothing
+    needs: [gate, sweep]
+    # always() garde le merge quand 1 shard a echoue (partiel > rien), mais il ne
+    # doit pas tourner quand la garde a skip le sweep : il n'y aurait aucun CSV.
+    if: always() && needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
 

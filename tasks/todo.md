@@ -405,5 +405,14 @@ Lecon: ne jamais faire confiance a un commentaire de perf, mesurer le run reel.
 - [ ] Verifier au prochain cron que le sweep ETH passe au vert
 - [ ] ~~Investiguer le tarissement du flux ETH~~ ANNULE: c'est le marche (fin de
       l'ETH season), pas un bug. Voir precision ci-dessus.
-- [ ] Proposer: garde de volume sur le sweep ETH (skip si < N tokens sur la
-      fenetre) => auto-reprise quand une ETH season revient, zero CI brule entre-temps
+- [x] **Garde de FRAICHEUR posee sur le sweep ETH** (v14e.72b). Pas une garde de
+      volume total: l'univers du sweep compte encore 313 tokens, mais 236 sont
+      anterieurs a juin. On rejouait 3 runners toutes les 48h sur un univers fige
+      a 75% pour y ajouter ~1.4 token. Sans donnee neuve, un re-run ne peut pas
+      produire de conclusion neuve.
+      Regle: skip si < 20 tokens ETH distincts sur 14j. Actuellement **16 => SKIP**.
+      Au rythme actuel (~0.7/jour) le sweep se declenchera ~1x/mois.
+      Si une ETH season revient (74/sem = ~148 par 14j) il repart tout seul.
+      `workflow_dispatch` a un input `force` pour outrepasser.
+      La garde FAIL OPEN: si la requete casse, le sweep tourne quand meme
+      (une garde en panne ne doit jamais masquer le job qu'elle protege).
