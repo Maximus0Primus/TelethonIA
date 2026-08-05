@@ -618,3 +618,34 @@ traderait pas ces tokens de toute facon.
       et pas l'upside, la forme optimale n'est pas "mieux choisir les entrees"
       mais "adapter le SL a la proba de dump" — SL large sur les survivants
       predits, pas de trade sur les autres. JAMAIS teste.
+
+### [Aug 5] SL conditionnel — HYPOTHESE MORTE (bien testee)
+
+Idee: si le dump est predictible (AUC 0.72) et pas le pump, alors le SL optimal
+devrait dependre du risque de dump — SL large sur les survivants predits pour
+encaisser le flush, pas de trade sur les autres. Toutes les strats ont un SL FIXE.
+
+Test sans simulation nouvelle: la grille shadow contient deja TP50 a 6 niveaux de
+SL sur les MEMES 2816 tokens. On croise avec p_survie du modele (`scripts/_conditional_sl.py`).
+
+| bucket | SL30 | SL40 | SL50 | SL60 | SL70 | NOSL | meilleur |
+|---|---|---|---|---|---|---|---|
+| risque ELEVE | -5.61 | -5.73 | -5.07 | -5.53 | **-3.46** | -5.23 | SL 70% |
+| moyen | 3.44 | 3.31 | 3.92 | 4.05 | 3.96 | **4.21** | NOSL |
+| SURVIE probable | 4.76 | 5.93 | 5.95 | 5.83 | **6.00** | 5.79 | SL 70% |
+
+**Meme SL optimal aux deux extremes.** Ecart entre niveaux de SL dans un bucket
+~1pp seulement. Politique conditionnelle vs meilleur SL fixe: **+0.08pp**, et
+c'est une BORNE HAUTE (le meilleur SL par bucket est choisi SUR le test).
+
+⚠️ **Le controle est le vrai enseignement**: avec p_survie MELANGEE, le bucket
+"survie" sort un gradient parfaitement monotone 3.58 -> 9.97 (SL30 -> NOSL).
+PLUS PROPRE que le reel. Sans le controle j'aurais "decouvert" une loi du SL
+conditionnel qui n'existe pas. C'est la 3e fois aujourd'hui qu'un controle tue
+un resultat qui avait l'air bon.
+
+Pourquoi ca ne marche pas: le label "n'a pas dumpe sous -50%" conditionne DEJA
+sur le chemin. A l'interieur du groupe survivant il reste peu d'excursions entre
+-30% et -70%, donc rien pour differencier les niveaux de SL.
+
+=> **Le SL n'est pas le levier. Le filtre d'entree l'est.** Ce qu'on a deja.
