@@ -4091,6 +4091,48 @@ for _s_name, _s_filter in _SENT_ARMS.items():
     SHADOW_STRATEGIES.append(_s_name)
 
 # ---------------------------------------------------------------------------
+# v14e.75 — LE PORTEFEUILLE (E30) — 2026-08-05
+# ---------------------------------------------------------------------------
+# Trois exits DIFFERENTS, chacun avec sa bande de sentiment, tournant EN
+# PARALLELE. C'est la meilleure config trouvee, et son interet ne vient pas de
+# la qualite individuelle mais de la COMPLEMENTARITE :
+#
+#   BE25_TP80_SL30           perd -434 en mai, gagne +1416 en juin
+#   FAST_TP50_SL30_MCAP_S40  gagne  +788 en mai, plat     +56 en juin
+#
+# Separement chacune a un mois faible ; ensemble les 4 mois sont positifs.
+# 796 trades, 51/semaine, EV +6.7%, 14/16 semaines positives.
+#
+# ⚠️ Le classement par EV ne pouvait PAS trouver ca : la mise etant plafonnee
+# (~$100, liquidite memecoin), l'argent vaut n x EV, pas EV. Une config a
+# 449 trades x 3.3% rapporte autant qu'une a 195 x 7.2%. Voir E30 dans
+# tasks/experiments.md et la correction v14e.74 de analyze_mega_sweep.py.
+#
+# Les bornes de bande different par exit — elles sortent d'un balayage, il y a
+# donc de la selection. BE25 a le meilleur profil hors echantillon (train 5.3 /
+# test 6.1, le test AU-DESSUS du train).
+_PF_MEMBRES = {
+    "PF_BE25_TP80_SL30": (
+        {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.70, "horizon_min": 30,
+         "be_activation": 0.25, "label": "main"},
+        {"max_age_hours": 12, "min_sentiment": 0.25, "max_sentiment": 0.75},
+    ),
+    "PF_FAST_TP50_SL30_MCAP_S40": (
+        {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.70, "horizon_min": 30, "label": "main"},
+        {"min_mcap": 30_000, "max_mcap": 500_000, "min_rt_score": 40,
+         "min_sentiment": 0.30, "max_sentiment": 0.70},
+    ),
+    "PF_TP50_SL40_S35": (
+        {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.60, "horizon_min": 120, "label": "main"},
+        {"min_rt_score": 35, "min_sentiment": 0.35, "max_sentiment": 0.70},
+    ),
+}
+for _pf_name, (_pf_spec, _pf_filter) in _PF_MEMBRES.items():
+    STRATEGIES[_pf_name] = [dict(_pf_spec)]
+    STRATEGY_FILTERS[_pf_name] = {"chain": "solana", **_pf_filter}
+    SHADOW_STRATEGIES.append(_pf_name)
+
+# ---------------------------------------------------------------------------
 # v14e.36 — auto-deprecate every artifact-family strategy registered above.
 # Trail/dip/split/bond shadows pollute analytics (sim ranks them top via
 # 47x slip miscalibration) and cannot be promoted to live. This finalization
