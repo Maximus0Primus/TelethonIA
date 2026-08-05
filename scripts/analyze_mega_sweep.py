@@ -83,6 +83,92 @@ def t_test_pvalue(mean: float, n: int, std: float = None) -> float:
     return min(1.0, max(0.0, p))
 
 
+def portefeuille(df, csv_path, top_k=40, taille=4, seuil_corr=0.55):
+    """v14e.74 — construit un PORTEFEUILLE de configs complementaires.
+
+    Le sweep classe des configs isolees. Mais deux configs qui gagnent les memes
+    jours n'apportent rien ensemble, alors que deux configs decorrelees lissent
+    le resultat et augmentent le total a mise plafonnee. On selectionne donc en
+    glouton: on part de la meilleure par `total_at_cap`, puis on ajoute a chaque
+    tour celle qui maximise le total AJOUTE tout en restant sous `seuil_corr`
+    de correlation journaliere avec TOUTES les deja retenues.
+
+    Sans `daily_pnl_json` on ne peut pas mesurer la correlation: on sort sans
+    rien produire plutot que de fabriquer un portefeuille au hasard.
+    """
+    if "daily_pnl_json" not in df.columns:
+        print("  [portefeuille] daily_pnl_json absent — etape sautee")
+        return
+
+    cand = (df[df["family_realism"] >= 0.5]
+            .sort_values("total_at_cap", ascending=False)
+            .drop_duplicates(subset=["strategy", "filter"], keep="first")
+            .head(top_k))
+
+    series, meta = {}, {}
+    for _, r in cand.iterrows():
+        try:
+            dd = json.loads(r["daily_pnl_json"]) if isinstance(r["daily_pnl_json"], str) else {}
+        except Exception:
+            continue
+        if len(dd) < 8:                    # trop peu de jours pour une correlation
+            continue
+        key = f"{r['strategy']}|{r.get('filter','')}"
+        series[key] = {d: float(p) for d, p in dd.items()}
+        meta[key] = (float(r["total_at_cap"]), int(r["n"]), float(r["avg_pnl_pct"]))
+    if len(series) < 2:
+        print(f"  [portefeuille] seulement {len(series)} configs avec assez de jours — saute")
+        return
+
+    jours = sorted(set().union(*[set(s) for s in series.values()]))
+    vec = {k: np.array([s.get(d, 0.0) for d in jours]) for k, s in series.items()}
+
+    def corr(a, b):
+        va, vb = vec[a], vec[b]
+        if va.std() == 0 or vb.std() == 0:
+            return 0.0
+        return float(np.corrcoef(va, vb)[0, 1])
+
+    retenus = [max(meta, key=lambda k: meta[k][0])]
+    while len(retenus) < taille:
+        best, best_gain = None, 0.0
+        for k in meta:
+            if k in retenus:
+                continue
+            # On rejette la REDONDANCE (correlation positive forte), PAS
+            # l'anti-correlation: une config qui gagne quand l'autre perd est
+            # precisement le meilleur diversifiant. Un `abs()` ici rejetterait
+            # le cas BE25_TP80_SL30 / FAST_TP50_SL30_MCAP_S40, dont les profils
+            # mensuels sont opposes et dont la combinaison fait x3.8 (05/08).
+            if any(corr(k, r) > seuil_corr for r in retenus):
+                continue
+            if meta[k][0] > best_gain:
+                best, best_gain = k, meta[k][0]
+        if best is None:
+            break
+        retenus.append(best)
+
+    total = sum(meta[k][0] for k in retenus)
+    seul = meta[retenus[0]][0]
+    print(f"\n  [portefeuille] {len(retenus)} configs decorrelees (|r| <= {seuil_corr})")
+    for k in retenus:
+        t, n, ev = meta[k]
+        print(f"     {k:<52} n={n:>5} EV={ev:>6.2f}% total={t:>8.0f}")
+    print(f"     TOTAL portefeuille {total:>8.0f}  vs meilleure seule {seul:>8.0f}"
+          f"  ({total/seul:.2f}x)")
+    if len(retenus) > 1:
+        print("     correlations journalieres:")
+        for i, a in enumerate(retenus):
+            for b in retenus[i + 1:]:
+                print(f"       {corr(a,b):+.2f}  {a.split('|')[0]} <-> {b.split('|')[0]}")
+
+    out = csv_path.parent / f"{csv_path.stem.replace('extended','portefeuille')}.csv"
+    pd.DataFrame([{"rang": i + 1, "config": k, "total_at_cap": meta[k][0],
+                   "n": meta[k][1], "avg_pnl_pct": meta[k][2]}
+                  for i, k in enumerate(retenus)]).to_csv(out, index=False)
+    print(f"  -> {out}")
+
+
 def benjamini_hochberg(pvals: list[float]) -> list[float]:
     """BH FDR-controlled q-values."""
     n = len(pvals)
@@ -111,6 +197,10 @@ def main():
                     help="Path to mega_sweep CSV (default: scraper/_mega_sweep_extended.csv)")
     ap.add_argument("--alpha", type=float, default=0.05,
                     help="Significance threshold for FDR + Bonferroni (default 0.05)")
+    ap.add_argument("--portfolio-pool", type=int, default=40,
+                    help="v14e.74: nb de configs candidates pour la selection de portefeuille")
+    ap.add_argument("--portfolio-size", type=int, default=4,
+                    help="v14e.74: nb max de configs retenues dans le portefeuille")
     ap.add_argument("--top", type=int, default=30,
                     help="Number of robust top configs to extract (default 30)")
     ap.add_argument("--persist", action="store_true",
@@ -378,6 +468,42 @@ def main():
     )
     out_top = csv_path.parent / f"{csv_path.stem.replace('extended','top_robust')}.csv"
     robust.to_csv(out_top, index=False)
+
+    # ------------------------------------------------------------------
+    # v14e.74 — DEUX CORRECTIONS DE FOND (session 2026-08-05)
+    # ------------------------------------------------------------------
+    # 1) Le sweep classait uniquement par `avg_pnl_pct`, l'EV pure. Or la mise
+    #    est PLAFONNEE (~$100, contrainte de liquidite memecoin), donc l'argent
+    #    gagne vaut n x EV, pas EV. Une config a 449 trades x 3.3% rapporte
+    #    autant qu'une a 195 x 7.2%, mais l'ancien classement mettait la seconde
+    #    loin devant. Empiriquement le portefeuille trouve a la main le 05/08
+    #    faisait x3.8 la meilleure config seule -- invisible a l'ancien tri.
+    #
+    # 2) Le sweep evaluait chaque config ISOLEMENT et ne combinait jamais. Or
+    #    tout le gain venait de la COMPLEMENTARITE: BE25_TP80_SL30 perd -434 en
+    #    mai quand FAST_TP50_SL30_MCAP_S40 fait +788, et l'inverse en juin.
+    #    Un classement par cellule ne peut pas voir ca par construction.
+    #    On ajoute une selection gloutonne sur les series journalieres.
+    df_eligible["total_at_cap"] = df_eligible["n"] * df_eligible["avg_pnl_pct"]
+    par_total = (df_eligible[df_eligible["family_realism"] >= 0.5]
+                 .sort_values("total_at_cap", ascending=False)
+                 .drop_duplicates(subset=["strategy", "filter"], keep="first")
+                 .head(args.top))
+    out_cap = csv_path.parent / f"{csv_path.stem.replace('extended','top_at_cap')}.csv"
+    par_total.to_csv(out_cap, index=False)
+    print(f"  -> {out_cap} (classement par n x EV = argent a mise plafonnee)")
+    if len(par_total):
+        b = par_total.iloc[0]
+        print(f"     meilleur par argent : {b['strategy']} / {b.get('filter','')} "
+              f"n={int(b['n'])} EV={b['avg_pnl_pct']:.2f} total={b['total_at_cap']:.0f}")
+        b2 = robust.iloc[0] if len(robust) else None
+        if b2 is not None:
+            print(f"     meilleur par EV     : {b2['strategy']} / {b2.get('filter','')} "
+                  f"n={int(b2['n'])} EV={b2['avg_pnl_pct']:.2f} "
+                  f"total={b2['n']*b2['avg_pnl_pct']:.0f}")
+
+    portefeuille(df_eligible, csv_path, top_k=args.portfolio_pool,
+                 taille=args.portfolio_size)
 
     # v14e.45: bi-ranking — second top-N optimisé pour les déploiements récents.
     # Gates relâchés: pas de cross_regime_robust, n_recent>=min_n_recent (15 par

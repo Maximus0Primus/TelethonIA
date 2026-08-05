@@ -31,6 +31,31 @@ Règle : un résultat sans **contrôle** n'est pas un résultat.
 
 ---
 
+## ✅ [Aug 5] Mega sweep corrigé sur le fond (v14e.74)
+
+Deux défauts structurels qui expliquent pourquoi le sweep n'aurait **jamais** pu
+trouver le portefeuille E30 :
+
+1. **Il triait par `avg_pnl_pct`** (EV pure). La mise étant PLAFONNÉE (~$100,
+   liquidité memecoin), l'argent gagné vaut **n × EV**. Une config 449×3.3%
+   rapporte autant qu'une 195×7.2%, mais l'ancien tri mettait la 2e loin devant.
+   ⇒ nouvelle colonne `total_at_cap` + classement `_mega_sweep_top_at_cap.csv`.
+2. **Il évaluait chaque config ISOLÉMENT**, jamais en combinaison. Or tout le gain
+   d'E30 vient de la complémentarité (BE25 perd en mai quand FAST gagne).
+   ⇒ nouvelle étape `portefeuille()` : sélection gloutonne sur les séries
+   journalières (`daily_pnl_json`), sortie `_mega_sweep_portefeuille.csv`.
+
+**Bug attrapé par le test synthétique** : je filtrais sur `abs(corr) > seuil`, ce qui
+**rejetait les configs anti-corrélées** — précisément les meilleurs diversifiants.
+Mon propre code aurait rejeté ma propre trouvaille (BE25/FAST sont anti-corrélées).
+Corrigé : on ne rejette que la redondance (corrélation positive forte).
+
+Validation synthétique : la config gros-n/EV-moyenne gagne le classement argent (elle
+perdait au classement EV), l'anti-corrélée à −0.96 est **retenue**, le clone redondant
+est **rejeté**, portefeuille à 3.02× la meilleure seule.
+
+---
+
 ## ⏳ À REPRENDRE À LA PROCHAINE SESSION
 
 - [ ] **Mega sweep run `31040338036`** lancé le 05/08 19:38, pas terminé en fin de session.
