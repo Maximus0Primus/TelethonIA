@@ -82,10 +82,11 @@
 
 | # | Piste | Pourquoi ça n'a pas été fait | Coût |
 |---|---|---|---|
-| E17 | Contenu textuel au-delà du sentiment (embeddings du message) | jamais tenté ; `message_text` rempli à 100 %, 51 k messages | moyen |
-| E18 | Co-occurrence de KOLs (mêmes 2 KOLs qui callent ensemble) | `n_kol_confirmations` mort, mais la co-occurrence se reconstruit depuis `kol_mentions` | faible |
-| E19 | Construction de portefeuille (quels N tokens tenir simultanément) | tout a été mesuré trade par trade, jamais en portefeuille | moyen |
 | E20 | Sortie dynamique sur les ticks (pas TP/SL fixe) | `sim_engines` a les moteurs ; jamais croisé avec les axes validés | élevé |
+
+> **Le registre est désormais épuisé pour tout ce qui coûte peu ou moyen.** E20 est le seul
+> reste, et c'est le plus cher. Après 20 hypothèses, 2 axes tiennent (E01 KOL, E02 sentiment)
+> et le levier principal est le sizing (E22).
 | ~~E21~~ | ~~Sizing conditionnel selon la proba de survie~~ | **→ devenu E22, voir ci-dessous** | — |
 
 ---
@@ -121,6 +122,122 @@
   30 %** que le projet s'est fixé (skill `simulate-live`). f=0.20 dépasse ce seuil.
 - **Suppose** des trades séquentiels non chevauchants — vrai à 11 trades/semaine sur un
   horizon de 30 min.
+
+---
+
+## ❌ E23 · Taille variable selon la proba de survie
+
+- **Hypothèse** : E22 a montré que le sizing est le levier, E05 que la survie est prédictible
+  (AUC 0.72). Faire varier f **par trade** selon cette proba devrait battre un f constant.
+  (E14 a tué le SL conditionnel, mais SL ≠ taille : l'un change la forme du trade, l'autre
+  l'allocation de capital.)
+- **Méthode** : hors échantillon (modèle entraîné sur les 60 % anciens), 86 trades de la bande.
+  Chaque règle **renormalisée pour que `mean(f_i) == 0.10`** — sinon on comparerait "plus de
+  capital" à "mieux réparti".
+- **Contrôle** : même règle sur des `p_survie` **mélangées**, 5 tirages.
+- **Résultat** :
+
+| règle | capital | DD max | fourchette du hasard |
+|---|---|---|---|
+| **constant (E22)** | **+112 %** | **14.3 %** | invariant |
+| proportionnel à p | +50 % | 22.2 % | +8 % à +203 % |
+| proportionnel à p² | −18 % | 46.3 % | −47 % à +173 % |
+| binaire 1.5×/0.5× | +113 % | 16.0 % | +60 % à +194 % |
+| binaire 2×/0× (skip) | +104 % | 26.1 % | +30 % à +341 % |
+| top 30 % seulement | +39 % | 41.6 % | −15 % à +154 % |
+
+- **Verdict** : ❌ — le constant gagne ou égale, avec **toujours moins de drawdown**. Chaque
+  règle variable tombe dans sa propre fourchette de contrôle ⇒ elle n'exploite rien, elle
+  ajoute de la variance. Les `p_survie` sont très asymétriques (méd 0.18) donc "proportionnel
+  à p" concentre le capital sur peu de trades, d'où le DD.
+- **Note** : n=86 hors échantillon, petit. Mais le sens du résultat (DD systématiquement pire)
+  est cohérent sur les 5 règles.
+
+---
+
+## ❌ E18 · Co-occurrence de KOLs — look-ahead pur
+
+- **Hypothèse** : un token callé par plusieurs KOLs est un meilleur signal.
+- **1er résultat (FAUX)** : dose-response magnifique — 1 KOL −7.5 %, 2 KOLs +1.2 %,
+  3-4 KOLs +5.6 %, **5+ KOLs +11.3 %**. Et ça semblait s'empiler avec la bande (+12.8 %).
+- **Le piège** : le compte de KOLs portait sur **toutes** les mentions du token, y compris
+  celles arrivées **après** l'ouverture du trade. Un token callé par 5 KOLs l'est *parce
+  qu'il a déjà pompé*. Circulaire.
+- **Contrôle** : recompter en ne gardant que les KOLs ayant mentionné le token **avant**
+  `created_at`.
+- **Résultat causal** :
+
+| co-occurrence causale | n | EV tous | EV dans bande |
+|---|---|---|---|
+| **1 seul KOL avant** | 292 | +2.5 % | **+10.7 %** |
+| 2 KOLs avant | 169 | +3.0 % | +6.0 % |
+| 3-4 KOLs avant | 102 | +1.0 % | −2.8 % |
+| 5+ KOLs avant | 20 | −3.7 % | +6.7 % |
+
+- **Verdict** : ❌ — le gradient disparaît, et dans la bande le **meilleur cas est UN SEUL
+  KOL**, l'inverse de la lecture naïve. 5ᵉ résultat de la journée tué par son contrôle.
+- **Règle générale qui en sort** : toute feature agrégée sur un token doit être recalculée
+  **à la date d'entrée**. `n_kol_confirmations` étant mort (0 partout), la tentation de le
+  reconstruire depuis `kol_mentions` est forte — c'est exactement là qu'est le piège.
+
+---
+
+## ❌ E19 · Construction de portefeuille — sans objet
+
+- **Mesure** : sur les 195 trades de la config validée, **0.12 position simultanée en
+  moyenne**, **max 2**. Durée moyenne 23 min, p90 32 min.
+- **Verdict** : ❌ sans objet — la stratégie est quasi toujours à plat, il n'y a pas de
+  portefeuille à construire. **Valide au passage l'hypothèse séquentielle d'E22** : les
+  chiffres Kelly n'ont pas besoin de correction de concurrence.
+
+## ❌ E24 · Élargir l'univers (tokens mentionnés mais jamais tradés)
+
+- **Hypothèse** : 8 272 tokens mentionnés, 2 817 tradés. Le gate d'admission RT jette
+  peut-être de l'argent — ce serait la source de volume qui manque.
+- **Méthode** : 2 896 tokens exclus ayant ≥3 snapshots prix, comparés aux 2 141 tradés
+  avec **la même mesure** (upside depuis le 1er snapshot, pas le PnL des trades — sinon
+  pas comparable).
+- **Résultat** :
+
+| groupe | tokens | % +50 % | % 2x | % 4x | upside moyen |
+|---|---|---|---|---|---|
+| **tradé** | 2 141 | **30.8 %** | **21.1 %** | **9.6 %** | **+102.1 %** |
+| exclu | 2 896 | 19.8 % | 12.3 % | 4.3 % | +53.1 % |
+
+- **Verdict** : ❌ pour le volume, ✅ **pour le système** — le gate admet des tokens avec
+  ~2× l'upside du pool rejeté, sur les 4 métriques simultanément. Il mérite sa place.
+  Élargir l'univers dégraderait.
+- **Réserve** : les exclus ont moins de snapshots (31 vs 43), donc leur max est peut-être
+  sous-estimé. Mais l'écart est trop large et trop cohérent pour s'expliquer par ça.
+
+---
+
+## ❌ E17 · Le texte au-delà du sentiment
+
+- **Hypothèse** : `message_text` (100 % rempli) porte du sens que le `sentiment` scalaire perd.
+- **Méthode** : TF-IDF mots+bigrammes (4 000 features, min_df=5), régression logistique,
+  cible = survie (la seule cible avec du signal, E05). Split **temporel** — le vocabulaire
+  memecoin tourne vite, les tickers de mai n'existent plus en juillet, d'où le risque.
+  Nettoyage des URLs, adresses base58 et `$TICKERS` pour empêcher la mémorisation de tokens
+  précis (17.5 % des messages sont une adresse nue et deviennent vides — c'est correct,
+  ils ne portent aucun texte).
+- **Contrôle** : 8 tirages à labels mélangés.
+- **Résultat** :
+
+| modèle | AUC | prec@top20 % | fourchette hasard |
+|---|---|---|---|
+| sentiment seul | 0.5716 | 44.6 % | 0.428 à 0.572 |
+| texte seul | 0.5720 | 42.0 % | 0.469 à 0.515 |
+| **les deux** | **0.5716** | 42.9 % | 0.470 à 0.531 |
+
+- **Verdict** : ❌ — **les trois atteignent le même AUC ~0.572**, et les combiner n'améliore
+  rien. Si le texte portait une information indépendante du sentiment, « les deux »
+  dépasserait. C'est le même signal, et 0.572 est faible (le modèle de survie fait 0.72).
+- **Note** : l'AUC faible du sentiment seul vient de la régression logistique, qui ne peut
+  ajuster que du monotone alors que la relation est un **U inversé**. Ce n'est pas une limite
+  du signal mais du modèle — le filtre en bande capture le U correctement.
+- **Fausse alerte au passage** : les 3 AUC affichaient « 0.572 » identiques, ce qui m'a fait
+  soupçonner un bug. Vérification à 6 décimales : 0.571594 / 0.572034 / 0.571573. Pas de bug.
 
 ---
 
