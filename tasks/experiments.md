@@ -9,6 +9,44 @@
 > (dip-buy +12.6 %, balayage de sorties $457, SL conditionnel). Un quatrième
 > serait passé sans lui.
 
+## 🔄 MÉTHODE — ce qui a réellement produit les résultats
+
+> **Constat du 5 août, à ne pas perdre.** 31 hypothèses testées. **21 mortes.** Les
+> trouvailles qui ont compté ne sont PAS venues de la recherche à l'intérieur d'un
+> cadre — elles sont venues du fait de **remettre le cadre en question**. Et à chaque
+> fois, c'est l'user qui a poussé, pas la recherche qui a abouti.
+
+| ce qui a payé | le cadre qui était faux | gain |
+|---|---|---|
+| **E30 portefeuille** | « une stratégie à la fois » + « classer par EV » — or la mise est plafonnée, donc l'argent vaut **n × EV** | **×3.8** |
+| **E22 sizing Kelly** | « la géométrique à f=1 dit si ça compose » — absurde, personne ne mise 100 % | **×4.1** |
+| **E29 union** | « les filtres s'empilent » — l'intersection réduit le volume, l'union l'augmente | +48 pp |
+
+Chercher une variante de plus a produit **21 échecs**. Questionner une hypothèse implicite
+a produit les 3 seuls multiplicateurs. **Le rendement de la remise en cause du cadre est
+d'un ordre de grandeur supérieur à celui de la recherche.**
+
+### Les cadres ENCORE non questionnés (par ordre de coût croissant)
+
+| # | Hypothèse implicite jamais testée | Pourquoi ça pourrait tomber |
+|---|---|---|
+| C1 | **Le sentiment vient du 1er message** | et celui du message qui DÉCLENCHE l'entrée ? Ou l'évolution entre les deux ? Données déjà là. |
+| C2 | **On trade tout ce qui passe le filtre** | et si la RARETÉ était un signal ? Jour à 3 opportunités vs jour à 15. Jamais mesuré. |
+| C3 | **Un trade par token** | scaling-in sur re-test du prix d'entrée. E27 a tué les sorties partielles de la grille, PAS les entrées échelonnées. |
+| C4 | **Horizon intraday (30 min – 2 h)** | toute la grille est intraday. Le multi-jour n'a jamais été le sujet. |
+| C5 | **L'objectif est le \$/jour** | avec un plafond à +23 \$/jour (E31), l'efficience du capital ou le risk-adjusted comptent peut-être plus. |
+| C6 | **L'univers = tokens callés sur Telegram** | le seul vrai axe neuf serait externe : activité on-chain, flux de liquidité, suivi de wallets. |
+
+### Règle de travail
+
+1. **Avant de tester** : lire ce fichier. Ne pas rechercher ce qui est déjà mort.
+2. **Avant de chercher une variante** : demander *quelle hypothèse implicite je n'ai pas
+   remise en cause ?* Prendre C1→C6 dans l'ordre.
+3. **Après chaque test** : consigner ici, réussite ou échec, avec le **contrôle** utilisé.
+4. **Un résultat sans contrôle n'est pas un résultat.** 7 faux positifs le 5 août.
+
+---
+
 ## Schéma
 
 | champ | sens |
