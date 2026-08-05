@@ -169,6 +169,46 @@ def main():
     # BH FDR q-values
     df_eligible["fdr_q"] = benjamini_hochberg(df_eligible["p_value"].tolist())
 
+    # ------------------------------------------------------------------
+    # v14e.73 — PLANCHER DE BRUIT DE SÉLECTION
+    # ------------------------------------------------------------------
+    # Le problème que ce bloc résout : `top_robust` est le MAXIMUM de ~371k
+    # tests, et le gate FDR est désactivé par défaut (il ramenait la liste à
+    # zéro). Sans repère, on lit le sommet d'un balayage géant comme s'il
+    # s'agissait d'une découverte — exactement le piège démontré le 5 août à
+    # plus petite échelle : sur 239 stratégies seulement, une permutation
+    # atteignait 5.1 % de géométrique contre 5.5 % en réel.
+    #
+    # On ne peut pas permuter les labels ici (le CSV ne contient que des
+    # agrégats), mais on peut calculer ce que le MAXIMUM d'un tirage de même
+    # taille vaudrait sous H0. Chaque config a une moyenne d'écart-type estimé
+    # sigma/sqrt(n) ; sous H0 (vraie moyenne = 0) la config i tire donc dans
+    # N(0, se_i). Le maximum de N tirages indépendants est le plancher au-dessus
+    # duquel un sommet doit passer pour signifier quoi que ce soit.
+    #
+    # Lecture : si `avg_pnl_pct` du top est SOUS `selection_floor`, le
+    # classement ne contient aucune information — c'est de la sélection pure.
+    # Même hypothèse de sigma que t_test_pvalue (std ~30 pts de pnl_pct par trade),
+    # sinon le plancher et les p-values raconteraient deux histoires différentes.
+    # `avg_pnl_pct` est en POINTS de %, pas en fraction.
+    _std_col = df_eligible["std_pnl_pct"] if "std_pnl_pct" in df_eligible.columns else None
+    _sigma = (_std_col.fillna(30.0).clip(lower=1.0).values if _std_col is not None
+              else np.full(len(df_eligible), 30.0))
+    _se = _sigma / np.sqrt(df_eligible["n"].clip(lower=1).values)
+    _rng = np.random.default_rng(7)
+    _max_draws = [float(np.max(_rng.normal(0.0, _se))) for _ in range(400)]
+    selection_floor = float(np.percentile(_max_draws, 95))
+    df_eligible["selection_floor"] = selection_floor
+    df_eligible["beats_selection_floor"] = df_eligible["avg_pnl_pct"] > selection_floor
+    _n_above = int(df_eligible["beats_selection_floor"].sum())
+    _top = float(df_eligible["avg_pnl_pct"].max())
+    print(f"  plancher de bruit de selection (p95 du max sous H0): {selection_floor:.2f} pts")
+    print(f"    meilleure config du CSV: {_top:.2f} pts  —  "
+          f"{_n_above:,}/{n_total:,} configs depassent le plancher")
+    if _n_above == 0:
+        print("    !! AUCUNE config ne depasse le plancher: le classement du sweep est")
+        print("       du bruit de selection pur. Ne rien promouvoir depuis ce run.")
+
     # Family realism flag
     df_eligible["family_realism"] = df_eligible.apply(
         lambda r: family_realism(str(r["strategy"]), str(r.get("filter", ""))),

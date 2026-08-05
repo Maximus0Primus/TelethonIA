@@ -649,3 +649,47 @@ sur le chemin. A l'interieur du groupe survivant il reste peu d'excursions entre
 -30% et -70%, donc rien pour differencier les niveaux de SL.
 
 => **Le SL n'est pas le levier. Le filtre d'entree l'est.** Ce qu'on a deja.
+
+### [Aug 5] Batch: NE PAS ACTIVER — on sait maintenant pourquoi il etait coupe
+
+Desactive le 13 mars (v104 `b8a4122`, "batch RT-only"), sans raison ecrite.
+Archeologie + mesure:
+
+1. **Zero donnee historique**: `paper_trades` ne remonte qu'au 06/04 et ne contient
+   que `rt` et `rt_live`. Les trades batch d'avant mars sont purges. Impossible de
+   verifier empiriquement qu'il etait bon.
+2. **Son mecanisme de selection ne porte AUCUNE information.** Le batch prend le
+   top_n=3 par SCORE toutes les 30 min. Mesure sur 120j:
+
+| selection | n | score moyen | % 2x | % survivants |
+|---|---|---|---|---|
+| top-3 par score (= le batch) | 4 539 | **55.4** | 34.7% | **49.5%** |
+| rang 4-10 | 7 032 | 31.2 | 37.0% | 52.8% |
+| reste | 52 509 | **7.6** | 33.6% | **52.8%** |
+
+   Score 7x plus eleve, survie legerement PIRE. Coherent avec E06 (features token
+   = zero edge) et avec la note historique "score anti-predictif".
+3. **Entree jusqu'a 30 min en retard.** Le drift entree vs prix au message est deja
+   p90 +30.6% a 6 SECONDES de latence RT.
+4. Il ecrirait des lignes MAIN qui pollueraient les stats du deck.
+
+=> Decision: **on n'active pas**. Ce n'est pas de la prudence, c'est mesure.
+
+### [Aug 5] Mega sweep MODIFIE — plancher de bruit de selection (v14e.73)
+
+Probleme identifie puis longtemps laisse tel quel: `top_robust` est le MAXIMUM de
+~371k tests avec le gate FDR desactive. Sans repere on lit un sommet de balayage
+comme une decouverte.
+
+Ajout dans `analyze_mega_sweep.py`: calcul du **plancher de bruit de selection** =
+p95 du MAXIMUM qu'un tirage de meme taille produirait sous H0, avec la MEME
+hypothese de sigma que le t-test existant (std 30 pts). Nouvelles colonnes
+`selection_floor` + `beats_selection_floor` dans le CSV annote, et un avertissement
+explicite quand aucune config ne passe.
+
+Calibration verifiee sur donnees synthetiques:
+- H0 pur (aucun edge): **0/5000** passent, avertissement affiche
+- edge reel +25 pts injecte sur 5 configs: **exactement 5/5000** passent
+
+=> Le sweep sait maintenant dire "mon classement est du bruit" au lieu de le
+   presenter comme un top 30.
