@@ -410,6 +410,51 @@ f=0.20 → $24, f=0.30 → $9. Et f≥0.15 fait rater 54 à 83 % des trades faut
 
 ---
 
+## ⚠️ E31 · LIMITE STRUCTURELLE — la méthode a un plafond de capacité
+
+> Observation user (5 août) : *« ce n'est vraiment pas une méthode optimale, elle
+> n'est bien que si on a beaucoup d'argent au départ »*. Vérifié, et c'est pire :
+> **il y a aussi un plafond par le haut.**
+
+La capacité est fixée par **7.4 trades/jour × 100 $ max par token** (liquidité
+memecoin). Au-delà, le capital n'achète plus rien.
+
+| capital | gain/jour | gain 3,5 mois | rendement | annualisé | DD |
+|---|---|---|---|---|---|
+| 100 $ | +1.4 $ | +154 $ | 154 % | 2 290 % | 47.4 % |
+| 300 $ | +6.2 $ | +668 $ | 223 % | 5 331 % | 41.3 % |
+| **500 $** | +11.0 $ | +1 182 $ | 236 % | 6 166 % | 40.2 % |
+| **1 000 $** | **+23.1 $** | **+2 467 $** | **247 %** | **6 848 %** | 39.5 % |
+| 2 000 $ | +23.1 $ | +2 467 $ | 123 % | 1 450 % | 27.3 % |
+| 5 000 $ | +23.1 $ | +2 467 $ | 49 % | 293 % | 14.2 % |
+| 50 000 $ | +23.1 $ | +2 467 $ | **5 %** | 18 % | 1.8 % |
+
+**Le gain absolu SATURE à +23 $/jour dès 1 000 $.** Ajouter du capital ne fait que
+diluer le rendement et réduire le drawdown — ça n'augmente jamais le gain.
+
+### Les deux murs
+
+- **En bas** : sous ~500 $, les frais fixes (0.13 $/trade, soit 1.3 % sur une mise
+  de 10 $) et un drawdown de 40-47 % rendent la chose fragile. À 100 $ le gain
+  n'est que de +1.4 $/jour.
+- **En haut** : au-delà de ~1 000-2 000 $, le capital est inutile. La liquidité
+  memecoin plafonne la mise, et le nombre de tokens plafonne la fréquence.
+
+**Fenêtre utilisable : 500 $ – 2 000 $.** C'est une contrainte de la classe d'actifs,
+pas de la stratégie — aucune optimisation de signal ne la déplacera. Seuls
+compteraient plus de tokens/jour (E11 : relâcher les filtres coûte plus d'edge
+qu'il n'apporte de volume) ou une mise plus grosse (impossible, c'est la liquidité).
+
+### Ce que ça implique
+
+La question n'est pas « comment gagner plus » mais « ce plafond justifie-t-il
+l'effort ». À 1 000 $ : ~700 $/mois en paper, ~350 $/mois après dérive attendue.
+C'est un rendement remarquable en %, un montant modeste en absolu, et **ça ne
+grandira pas** avec le capital. À enregistrer avant toute future optimisation :
+gagner 20 % d'EV en plus ne déplace pas le plafond, ça le déplace de 20 %.
+
+---
+
 ## Journal des sessions
 
 ### 2026-08-05 — session fondatrice du registre
