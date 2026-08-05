@@ -86,7 +86,41 @@
 | E18 | Co-occurrence de KOLs (mêmes 2 KOLs qui callent ensemble) | `n_kol_confirmations` mort, mais la co-occurrence se reconstruit depuis `kol_mentions` | faible |
 | E19 | Construction de portefeuille (quels N tokens tenir simultanément) | tout a été mesuré trade par trade, jamais en portefeuille | moyen |
 | E20 | Sortie dynamique sur les ticks (pas TP/SL fixe) | `sim_engines` a les moteurs ; jamais croisé avec les axes validés | élevé |
-| E21 | Taille de position variable selon la proba de survie (E05) | E14 a tué le SL conditionnel, mais **pas** le sizing conditionnel | faible |
+| ~~E21~~ | ~~Sizing conditionnel selon la proba de survie~~ | **→ devenu E22, voir ci-dessous** | — |
+
+---
+
+## ✅ E22 · SIZING KELLY — le levier qu'on cherchait n'était pas un signal
+
+- **Hypothèse** : je reportais la moyenne géométrique à **f=1** (tout le capital sur chaque
+  trade) et j'en concluais « ça ne compose pas ». C'est un chiffre opérationnellement absurde.
+  À une fraction f plus faible, le taux de croissance peut être positif alors qu'il est
+  négatif à f=1.
+- **Méthode** : `FAST_TP50_SL30_MCAP_S40` + bande 0.30-0.70, 195 trades sur 4 mois,
+  séquence chronologique réelle, coût live **−0.4 pp/trade inclus**, courbe de capital
+  complète pour mesurer le drawdown (pas seulement le point final).
+- **Contrôle** : aucun nécessaire — ce n'est pas une découverte de signal mais une
+  ré-expression du même signal. Le seul biais est le Kelly **in-sample** (voir réserve).
+- **Résultat** :
+
+| fraction | capital final (4 mois) | drawdown max | plus bas |
+|---|---|---|---|
+| 0.05 | +185 % | 10.8 % | 96 % |
+| **0.10** (quart-Kelly) | **+313 %** | **20.8 %** | 92 % |
+| 0.15 | +486 % | 30.3 % | 88 % |
+| **0.20** (demi-Kelly) | **+694 %** | 39.0 % | 83 % |
+| 0.30 | +1 108 % | 54.5 % | 74 % |
+| 0.40 (optimum brut) | +1 285 % | 67.3 % | 64 % |
+| **1.00** | **−99 %** | — | — |
+
+- **Verdict** : ✅ — **c'est le meilleur résultat de la session, et l'edge n'a pas bougé.**
+  Ce qui change, c'est la taille. À f=1 on perd 99 % ; à f=0.10 on fait ×4.1 en 4 mois.
+- **Réserve** : le f optimal est estimé **sur les mêmes données** que l'évaluation. Remède
+  standard : prendre la moitié ou le quart de l'optimum estimé. Optimum brut 0.40
+  ⇒ **retenir f=0.10 (quart)**, qui donne +313 % avec un DD de 20.8 %, **sous le seuil de
+  30 %** que le projet s'est fixé (skill `simulate-live`). f=0.20 dépasse ce seuil.
+- **Suppose** des trades séquentiels non chevauchants — vrai à 11 trades/semaine sur un
+  horizon de 30 min.
 
 ---
 
