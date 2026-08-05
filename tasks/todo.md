@@ -452,3 +452,42 @@ encore sous le seuil de 2% ou le fill partiel commence).
 
 - [ ] Si le sweep manuel ne sort rien: envisager d'activer le batch en SHADOW
       seulement, pour mesurer sans risque si c'est du volume additionnel utile
+
+### [Aug 5] ⚠️ Ce que le mega sweep peut et NE PEUT PAS faire
+
+Question user: "le sweep va vraiment permettre de trouver la meilleure strategie ?"
+Reponse verifiee dans le code: **NON, pas pour designer un gagnant.**
+
+Taille de la matrice: 3 sources x 9 smoothings x 10 polling x 28 filters x 4 age_bands
+x ~500 strategies = **15 120 000 cellules**. Le code lui-meme parle de **371k tests
+eligibles** sur le run du 26 avril.
+
+Et le gate FDR est **DESACTIVE**. Commentaire dans analyze_mega_sweep.py:
+  "--require-fdr ... default OFF — Bonferroni-corrected FDR on 371k tests was
+   nuking the entire top_robust list to zero on the Apr 26 run"
+Le workflow ne passe PAS --require-fdr. Donc `_mega_sweep_top_robust.csv` est le
+**maximum de ~371 000 tests sans correction pour tests multiples**.
+
+C'est exactement le piege que j'ai demontre aujourd'hui a plus petite echelle:
+sur 239 strategies seulement, le null de permutation atteignait 5.1% et 4.2% de
+geometrique contre 5.5% en reel. A 371k candidats, le sommet est du bruit par
+construction. Le top-30 ne peut PAS se lire comme "les meilleures strategies".
+
+**Ce pour quoi le sweep est valide:**
+1. **Rejeter des dimensions.** Un negatif uniforme sur 371k tests est solide —
+   l'asymetrie joue dans ce sens (facile de rejeter, impossible de selectionner).
+2. **Tester une hypothese PRE-SPECIFIEE.** La bande de sentiment a ete formee et
+   validee HORS sweep. Verifier `SENT30_70 vs NONE` est UNE comparaison prevue
+   d'avance, pas un max sur 371k.
+3. Les gates `cross_regime_robust` + `fragile_recent` sont de la robustesse
+   TEMPORELLE, ca c'est reel et ca ne depend pas du FDR.
+
+**Comment lire le run en cours (a faire, pas "regarder le top 30"):**
+- [ ] Test APPARIE `filter=SENT30_70` vs `filter=NONE` sur les memes
+      (strategy, source, smoothing, polling, age_band). Une seule hypothese.
+- [ ] Idem `SENT50_60 vs NONE`, `GAP24 vs NONE`, et les 7 arms BSR/KW ressuscites.
+- [ ] Verifier n>0 sur chaque nouvel arm (garde-fou contre le bug v14e.72)
+- [ ] NE PAS promouvoir une strategie parce qu'elle sort en tete du CSV
+
+- [ ] Envisager: relancer avec --require-fdr en parallele pour voir ce qui survit
+      a la correction. Si rien ne survit, c'est l'information la plus utile du run.
