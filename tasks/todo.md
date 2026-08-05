@@ -416,3 +416,39 @@ Lecon: ne jamais faire confiance a un commentaire de perf, mesurer le run reel.
       `workflow_dispatch` a un input `force` pour outrepasser.
       La garde FAIL OPEN: si la requete casse, le sweep tourne quand meme
       (une garde en panne ne doit jamais masquer le job qu'elle protege).
+
+### [Aug 5] Chasse au VOLUME — 3 pistes testees, 2 mortes, 1 inexploree
+
+Constat: la strat filtree ne fait que 11 trades/sem (195 sur 4 mois). Entonnoir:
+8 278 tokens mentionnes -> 2 818 tradés en RT (165/sem) -> 585 passent les gardes
+de la strat (score40 + mcap 30-500k) -> 195 passent la bande de sentiment.
+
+**1. Relacher les gardes de la strat => NON.** Sur le MEME exit, la progression
+est monotone dans le mauvais sens quand on relache:
+  sans garde $450 (n=336) -> +score40 $1 230 (n=250) -> +mcap $1 402 (n=195).
+Les versions a fort volume (FAST60_TP50_SL30, TP50_SL30: 25/sem) font un peu plus
+de dollars bruts mais perdent toutes en mai (3/4 mois au lieu de 4/4) et leur
+geometrique s'effondre a -10 a -19%. **Les gardes achetent de l'edge.**
+
+**2. Prendre les re-entrees (que le dedup 24h jette) => NON.**
+Ca semblait etre $649 gratuits (231 trades, EV +2.8%). Decompose par rang dans la
+bande: 1ere +7.0%, 2eme +4.4%, 3eme +3.7%, 4-5eme -1.6%, 6eme+ +3.0%.
+MAIS verification sur les 7 strategies HORS bande, n=2098 sur la 2eme entree:
+**EV -1.91% contre -0.80% pour la 1ere**, coherent sur les deux moities.
+La population dit que la re-entree est PIRE. Mon +4.4% repose sur n=130 dont 67%
+viennent du seul mois de juillet. A priori de population contraire + petit N
+concentre => NON RETENU.
+
+**3. Chemin batch => INEXPLORE.** `batch_trading_enabled=false`. Zero trade batch
+sur 120j (les 439 tokens "non-rt" sont du `rt_live`, arrete le 5 juin). C'est la
+seule source de volume additionnelle non testee. Necessiterait de l'activer en
+shadow pour savoir. Prudence: il a ete desactive, probablement pour une raison.
+
+**Conclusion honnete**: on ne peut pas avoir volume ET edge avec ce signal. Chaque
+relachement echange de l'edge contre du volume a mauvais prix. Le vrai levier
+reste la TAILLE: a +7.2%/trade et 11 trades/sem, passer de $10 a $100 puis $500
+la position. Contrainte = liquidite (pool median $27.6k, donc $500 = 1.8% du pool,
+encore sous le seuil de 2% ou le fill partiel commence).
+
+- [ ] Si le sweep manuel ne sort rien: envisager d'activer le batch en SHADOW
+      seulement, pour mesurer sans risque si c'est du volume additionnel utile
