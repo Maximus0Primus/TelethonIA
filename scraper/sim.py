@@ -4305,7 +4305,12 @@ _MEGA_EXT_FILTERS = ["NONE", "NOZEROLIQ", "SCORE30", "SCORE35", "SCORE40",
                      "KW34", "KW26", "NOZEROLIQ_KW34", "NOZEROLIQ_KW26",
                      # v14e.43b — BSR_MCAP combo: BSR>=0.53 AND mcap>=$45K
                      # est le top combo per-strat sur SOL losers (+$20-26/d)
-                     "BSR_MCAP"]
+                     "BSR_MCAP",
+                     # v14e.72 — sentiment band (inverted U, so a BAND not a
+                     # threshold) + KOL call cadence. Both permutation-validated.
+                     "SENT30_70", "SENT45_65", "SENT50_60", "SENT_NOHYPE",
+                     "GAP24", "NOBURST", "SENT30_70_GAP24",
+                     ]
 
 # v14e.27 — token-age dimension. Default scrape gate is 12h (safe_scraper +
 # pipeline). The age sweep tests whether relaxing to 24h or 48h opens an edge:
@@ -4572,6 +4577,89 @@ def _mega_apply_filter(u, fname):
         return (u.get("rt_liquidity_usd") or 0) > 0 and (u.get("kol_win_rate") or 0) >= 0.26
     if fname == "BSR_MCAP":
         return (u.get("rt_buy_sell_ratio") or 0) >= 0.53 and (u.get("entry_mcap") or 0) >= 45000
+    # --- v14e.72: message-sentiment bands + KOL call cadence -----------------
+    # Both validated 2026-08-05 against a permutation null on 120d of shadow.
+    # sentiment vs outcome is an INVERTED U (<0.3 = -0.57%/trade, 0.5-0.6 =
+    # +7.97%, >=0.7 = -11.71%), so the axis is a BAND, not a threshold — a
+    # `>= x` gate cannot express it, which is why these are new names.
+    # Band WIDTH is the open question: excluding both tails (SENT30_70) keeps
+    # 4x the volume of SENT50_60 for nearly the same total $. The sweep is
+    # exactly the right place to settle that across every exit.
+    # `sentiment` is None when no mention joins (2.8% of rows, avg -28.3%/trade)
+    # → excluded rather than passed through.
+    if fname.startswith("SENT"):
+        s = u.get("sentiment")
+        if s is None:
+            return False
+        if fname == "SENT30_70": return 0.30 <= s < 0.70
+        if fname == "SENT45_65": return 0.45 <= s < 0.65
+        if fname == "SENT50_60": return 0.50 <= s < 0.60
+        if fname == "SENT_NOHYPE": return s < 0.70          # drop the hype tail only
+        if fname == "SENT30_70_GAP24":
+            return 0.30 <= s < 0.70 and (u.get("kol_gap_h") or 0) >= 24
+    # Hours since the SAME KOL's previous call. Monotone dose-response on ~600k
+    # rows: burst <1h = -5.43%/trade → 24-72h = +2.22%, holds after removing
+    # olympeqg (57% of the burst bucket). None = first ever call for that KOL.
+    if fname == "GAP24":
+        return (u.get("kol_gap_h") or 0) >= 24
+    if fname == "NOBURST":
+        return (u.get("kol_gap_h") or 0) >= 1
+
+
+def _mega_enrich_universe(universe, since):
+    """v14e.72: attach `kol_gap_h` and `sentiment` to every universe row.
+
+    Both feed filter arms added in v14e.72. Called once per sweep run, before
+    the config matrix fans out, so the cost is one pass + one paginated fetch
+    rather than anything per-config.
+
+    `kol_gap_h` is derived from the universe itself — it is already one row per
+    token carrying kol_group + created_at, so the KOL's previous call is just
+    the previous row once sorted per KOL. No extra query.
+
+    `sentiment` needs kol_mentions, which paper_trades does not carry. Matched
+    on (kol_group, resolved_ca) taking the FIRST message, mirroring the RT path
+    which fires on the first call.
+    """
+    by_kol = {}
+    for u in universe:
+        by_kol.setdefault(u.get("kol_group") or "", []).append(u)
+    for rows in by_kol.values():
+        rows.sort(key=lambda r: r["created_at"])
+        prev = None
+        for r in rows:
+            if prev is None:
+                r["kol_gap_h"] = None
+            else:
+                r["kol_gap_h"] = (
+                    datetime.fromisoformat(r["created_at"].replace("Z", "+00:00"))
+                    - datetime.fromisoformat(prev.replace("Z", "+00:00"))
+                ).total_seconds() / 3600.0
+            prev = r["created_at"]
+
+    sent = {}
+    try:
+        rows = sb_get("kol_mentions", [
+            ("select", "kol_group,resolved_ca,sentiment,message_date"),
+            ("resolved_ca", "not.is.null"),
+            ("message_date", f"gte.{since}"),
+            ("order", "message_date"),
+        ] + _chain_params())
+        for r in rows:
+            k = (r.get("kol_group"), r.get("resolved_ca"))
+            if k not in sent and r.get("sentiment") is not None:
+                sent[k] = float(r["sentiment"])
+    except Exception as e:
+        print(f"[mega-enrich] sentiment fetch failed ({e}) — SENT* arms will match nothing")
+
+    hit = 0
+    for u in universe:
+        v = sent.get((u.get("kol_group"), u.get("token_address")))
+        u["sentiment"] = v
+        hit += v is not None
+    print(f"[mega-enrich] kol_gap_h on {len(universe)} rows | "
+          f"sentiment matched {hit}/{len(universe)} ({100*hit/max(len(universe),1):.1f}%)")
+    return universe
 
 
 def _mega_apply_age_band(u, age_band):
@@ -5010,7 +5098,8 @@ def _mega_sweep_run_eh(args):
     # count the same token via its live copy.
     params = [
         ("select", "id,token_address,created_at,entry_price,rt_liquidity_usd,"
-                   "rt_score,kol_group,entry_mcap,source,eval_history,chain"),
+                   "rt_score,kol_group,entry_mcap,source,eval_history,chain,"
+                   "rt_buy_sell_ratio,kol_win_rate,rt_token_age_hours"),
         ("created_at", f"gte.{since}"),
         ("status", "in.(tp_hit,sl_hit,be_stop,trail_stop,timeout)"),
         ("eval_history", "not.is.null"),
@@ -5028,6 +5117,7 @@ def _mega_sweep_run_eh(args):
         if tok not in by_token or r["created_at"] < by_token[tok]["created_at"]:
             by_token[tok] = r
     universe = list(by_token.values())
+    universe = _mega_enrich_universe(universe, since)
     print(f"Universe: {len(universe)} unique tokens (dedup'd, ≥3 polls each)")
 
     # Build fake "ticks" dict — eval_history's exec field maps to Jupiter ticks.
@@ -5235,8 +5325,14 @@ def _mega_sweep_run(args):
     # range_lo/range_hi loop called it with kwargs that don't exist -> TypeError.
     # v14e.27: rt_token_age_hours included for age-band sweep dimension.
     params = [
+        # v14e.72: rt_buy_sell_ratio + kol_win_rate were referenced by
+        # _mega_apply_filter since v14e.43 but never selected, so BSR52/BSR55/
+        # KW34/KW26/NOZEROLIQ_BSR*/BSR_MCAP evaluated `(None or 0) >= thr` =
+        # always False. 7 of 21 filter arms matched zero trades and burned
+        # sweep compute for nothing. Selecting them makes those arms real.
         ("select", "id,token_address,created_at,entry_price,rt_liquidity_usd,"
-                   "rt_score,kol_group,entry_mcap,rt_token_age_hours,chain"),
+                   "rt_score,kol_group,entry_mcap,rt_token_age_hours,chain,"
+                   "rt_buy_sell_ratio,kol_win_rate"),
         ("source", "eq.rt"),
         ("created_at", f"gte.{since}"),
         ("order", "created_at"),
@@ -5247,6 +5343,7 @@ def _mega_sweep_run(args):
         if r["token_address"] not in by_token:
             by_token[r["token_address"]] = r
     universe = list(by_token.values())
+    universe = _mega_enrich_universe(universe, since)
     print(f"Universe: {len(universe)} unique tokens since {since}")
 
     print("Fetching ticks...")

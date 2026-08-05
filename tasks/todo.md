@@ -333,3 +333,35 @@ croise systematiquement. Fait maintenant, sur 6 strategies, bande 0.30-0.70:
 
 Lecon: une interaction vue en poolant des strategies ne survit pas forcement a
 une strategie donnee. Toujours reverifier sur l'exit cible avant d'ajouter un bras.
+
+### [Aug 5] v14e.72 — nouveaux axes dans le mega sweep + BUG 33% de calcul mort
+
+**BUG TROUVE**: `_mega_apply_filter` lit `rt_buy_sell_ratio` et `kol_win_rate`
+depuis v14e.43, mais AUCUN des deux n'etait dans le `select` des deux
+constructeurs d'univers. Donc `(None or 0) >= seuil` = toujours False.
+**7 arms sur 21 (33% de la dimension filtre) matchaient ZERO trade** et bruaient
+du calcul CI depuis avril: BSR52, BSR55, NOZEROLIQ_BSR52, NOZEROLIQ_BSR55,
+KW34, KW26, BSR_MCAP. Silencieux: pas d'erreur, juste "aucun resultat".
+Verifie apres fix sur 8j reels: BSR52 passe de 0% a 82.2% de match, BSR_MCAP 24.8%.
+⚠️ Toute conclusion passee "BSR/KW ne marchent pas au sweep" est donc SANS VALEUR
+— ces arms n'ont jamais tourne. A rejuger au prochain sweep.
+
+**Ajout des axes de cette session** (7 nouveaux arms):
+SENT30_70, SENT45_65, SENT50_60, SENT_NOHYPE, GAP24, NOBURST, SENT30_70_GAP24.
+Le sentiment est un U INVERSE donc c'est une BANDE, pas un seuil — aucun arm
+`>= x` existant ne pouvait l'exprimer, d'ou de nouveaux noms.
+
+**Enrichissement** `_mega_enrich_universe()`, appele une fois par run:
+- `kol_gap_h` derive de l'univers lui-meme (deja 1 ligne/token avec kol_group +
+  created_at) => zero requete supplementaire
+- `sentiment` via une fetch paginee de kol_mentions, matche sur
+  (kol_group, resolved_ca) premier message. **97.9% de match verifie sur 8j reels**
+
+**Cout**: dimension filtre effective 14 -> 28 (x2). Shards passeraient de ~2h a
+~4h, trop pres du cap GH 6h => strat-shard 2 -> 3 tiers, soit **9 shards** au lieu
+de 6, ~2-2.7h chacun. Le merge agrege par pattern, il encaisse n shards.
+
+- [ ] Prochain cron (tous les 2j a 02:00 UTC) => premier sweep avec les 28 arms.
+      Verifier dans le CSV que les colonnes filter=SENT*/GAP24/BSR*/KW* ont bien
+      des lignes avec n>0 (si n=0 sur un arm, l'enrichissement a echoue).
+- [ ] Rejuger BSR/KW une fois qu'ils auront VRAIMENT tourne
