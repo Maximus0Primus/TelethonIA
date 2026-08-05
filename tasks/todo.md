@@ -527,3 +527,38 @@ etroite (0.5-0.6), ce lissage peut suffire a effacer le signal.
       kol_gap_h, et le sentiment message-level dans le pipeline
 - [ ] (C) Tester le RETRAIT des features de forme KOL (anti-predictives)
 - [ ] (D) Gate qualite habituel + null de permutation sur le resultat final
+
+### [Aug 5] RESULTAT ML — NON, ce n'est pas la piste. Et ce n'est pas une question de features.
+
+Test decisif fait (`scripts/_ml_axis_test.py`, HistGradientBoosting, split TEMPOREL
+train 940 / test 628, cible = pnl_pct, jugement en termes de trading = EV realisee
+sur le top-20% des picks). **12 tirages de permutation** par modele, pas un seul.
+
+| modele | EV top20% | hasard median | fourchette hasard p10-p90 |
+|---|---|---|---|
+| A. axe KOL seul (gap+sentiment+identite) | -5.14% | -1.03% | -8.23% a +2.01% |
+| B. features token (~ le modele actuel) | +3.64% | -0.31% | -6.95% a **+3.63%** |
+| C. token + axe KOL | +1.98% | -1.09% | -5.33% a +5.57% |
+| D. identite KOL seule | +1.81% | -0.39% | -2.27% a +1.28% |
+
+**Le plancher de bruit fait ~10 POINTS de large.** B est a +3.64% contre un p90 de
++3.63% — a la virgule pres, c'est un pile ou face. Aucun modele ne bat de facon
+convaincante son propre hasard, et AUCUN n'approche les **+7.2%** que la simple
+bande de sentiment donne deja.
+
+**Pourquoi le filtre bat le ML**: la bande de sentiment est un enonce CONDITIONNEL
+valide sur l'agregat ("dans cette bande, EV = +7.2%", n=195, valide par permutation).
+Le ML essaie de CLASSER des trades un par un. Sur une cible a queues epaisses avec
+940 lignes d'entrainement, le classement par trade est hors de portee — il faudrait
+des ordres de grandeur plus de donnees.
+
+=> **La structure du signal est un FILTRE, pas un CLASSEMENT.** Ajouter kol_group et
+le gap au pipeline ne changerait rien: le modele A, qui ne contient QUE ces axes,
+est le PIRE des quatre. Refonte du pipeline ML: ANNULEE.
+Note coherente: D (identite seule) passe de justesse — l'identite KOL porte bien du
+signal, mais une whitelist l'exploite mieux qu'un modele.
+
+- [x] (A) test cheap — FAIT, negatif
+- [ ] ~~(B) ajouter kol_group/gap/sentiment au pipeline~~ ANNULE par (A)
+- [ ] ~~(C) retirer les features de forme KOL~~ sans objet
+- [ ] ~~(D) gate qualite sur le modele final~~ sans objet
