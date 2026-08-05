@@ -231,3 +231,42 @@ Cadence ~3.2 trades/semaine (55-64 trades sur 120j).
 - [ ] `/simulate-live` sur FAST_TP50_SL30_MCAP_S40 + filtre sentiment, a $50 et $100
       => c'est LA question ouverte: l'edge de +17.8% survit-il au slip reel?
 - [ ] Cabler le filtre sentiment en shadow (meme mecanique que min_kol_gap_hours)
+
+### [Aug 5] /simulate-live — FAST_TP50_SL30_MCAP_S40 + sentiment 0.5-0.6 => GO CONDITIONNEL
+
+Pool: n=69 dedup 24h, blacklist a jour, 20/04 -> 05/08 (107j), 4.5 trades/sem.
+Liquidite mediane $27 580 => $100 = 0.36% du pool (marge jusqu'a ~$500).
+
+**Phase 0**: shadow_dedup n=68 vs paper_main-sans-olympeqg n=69 => structure OK
+(aucune inflation par re-entrees). Ecart de moyenne 0.85pp = bruit a ce N.
+Bonus: olympeqg faisait -13.86% sur 9 trades main cette semaine => ban valide a chaud.
+
+**EV**: brut +12.38% -> net **+11.98%** apres couts live (-0.4pp). Le cout est
+negligeable face a un edge de 12%. WR 46%, PF 2.19, gain median +44.1% vs perte
+mediane -14.6% (R:R 3:1). Sharpe/trade 0.27 => annualise ~4.1.
+
+**Walk-forward** (69 trades dans l'ordre reel, depuis $1000):
+fixe $50 -> $1 413 | fixe $100 -> $1 827 (DD 25%) | 20% du capital -> $4 021 (DD 23%)
+
+**Monte Carlo** 10k tirages, 100 trades (~7 mois), depuis $1000:
+fixe $100 -> median $2 184, P10 $1 641, DD median 11%, **ruine 0.0%**
+20% capital -> median $7 297, P10 $2 611, DD median 31%, ruine 0.0%
+
+**Stress**: 4/5 PASS (slippage double, MEV, crise de liquidite, volume -50%).
+Le "cold streak P20-P40" du skill echoue mais il est DEGENERE ici: a WR 46% cette
+bande ne contient que des perdants (0/14), il simule 100 pertes d'affilee.
+Remplace par un cold streak realiste = rejouer le pire tiers chronologique
+(EV +2.58%): median $1 212, P10 $768, ruine 0.1% => survit.
+Pire serie de pertes consecutives REELLE: 5.
+
+**Marge de securite**: l'edge tient jusqu'a 8pp de cout additionnel (+4.38% EV).
+La derive historique live<->paper twin mesuree sur SL=30% est -2 a -5pp
+=> attendre **+7 a +10%/trade en live**, pas +12%.
+
+**Confiance**: apres 30 trades, 6.1% de chances d'etre sous le capital initial;
+apres 50 trades, 2.1%.
+
+- [ ] Demarrer a $50 fixe sur 20-30 trades, mesurer la derive appariee vs le
+      shadow compagnon. Si < 5pp, passer a $100 puis envisager le % du capital.
+- [ ] Cabler le filtre sentiment en shadow AVANT (le filtre n'existe pas encore
+      dans le code — la simulation est faite sur le pool historique reconstitue)
