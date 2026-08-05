@@ -491,3 +491,39 @@ construction. Le top-30 ne peut PAS se lire comme "les meilleures strategies".
 
 - [ ] Envisager: relancer avec --require-fdr en parallele pour voir ce qui survit
       a la correction. Si rien ne survit, c'est l'information la plus utile du run.
+
+## 🎯 [Aug 5] PISTE ML — diagnostic: le modele n'a JAMAIS vu les 2 axes qui marchent
+
+User: "on a desactive le ML car ca ne s'ameliorait pas, mais on a 2 mois de data
+en plus". Verification faite sur les 143 features de train_model.py:
+
+| axe | prouve aujourd'hui | dans le modele ? |
+|---|---|---|
+| **Identite du KOL** (`kol_group`) | slingoorioyaps 90 survivants vs 12 au hasard (7.5x) | **ABSENT** |
+| **Cadence des calls** (gap meme KOL) | dose-response -5.43% -> +2.22% sur 600k lignes | **ABSENT** |
+| Sentiment 1er message | U inverse, bande 0.5-0.6 = +7.97% | present mais AGREGE (voir plus bas) |
+| Features token (score/liq/age/mcap/bsr) | **3 survivants vs 6 au HASARD = zero edge** | ~120 features dessus |
+| Forme recente du KOL | **ANTI-predictive** (forme>0 => -4.35% en test) | `kol_avg_prior_return`, `kol_historical_hit_rate` presents |
+
+=> Le ML a ete entraine massivement sur l'axe que j'ai prouve MORT, il lui manque
+totalement l'axe que j'ai prouve VIVANT, et il contient des features dont j'ai
+montre qu'elles sont anti-predictives. **Ce n'est pas un probleme de volume de
+donnees, c'est un probleme de features.** Ca explique proprement l'echec passe.
+
+⚠️ Correction du postulat "2 mois de data en plus": `token_snapshots` ne contient
+**0 ligne au-dela de 120 jours** (330 831 snapshots sur 120j, rien avant). La
+fenetre d'entrainement est GLISSANTE, pas croissante. Re-entrainer tel quel sur
+"plus de data" ne donnera rien de plus.
+
+⚠️ Le `sentiment` du snapshot n'est PAS celui du 1er message: corr 0.820,
+ecart absolu moyen 0.071, seulement 63.1% identiques. Sur un U inverse a bande
+etroite (0.5-0.6), ce lissage peut suffire a effacer le signal.
+
+### Plan — test decisif PAS CHER d'abord, refonte ensuite
+- [ ] **(A) Test cheap**: pouvoir predictif de (kol_group, kol_gap_h, sentiment 1er
+      message) SEULS vs les ~120 features token, meme cible, meme split temporel.
+      Ne touche pas train_model.py. Decide si la refonte vaut le coup.
+- [ ] (B) Si (A) confirme: ajouter kol_group (categoriel, ~72 KOLs actifs),
+      kol_gap_h, et le sentiment message-level dans le pipeline
+- [ ] (C) Tester le RETRAIT des features de forme KOL (anti-predictives)
+- [ ] (D) Gate qualite habituel + null de permutation sur le resultat final
