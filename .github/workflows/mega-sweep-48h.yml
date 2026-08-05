@@ -29,14 +29,22 @@ jobs:
         # qui s'était mis a hit le cap 6h GH). Strat split deterministe par index
         # sorted % 2 dans sim.py — meme strat toujours dans meme shard.
         #
-        # v14e.72: 2 -> 3 tiers. La dimension filtre EFFECTIVE a double (14 -> 28):
+        # v14e.72: 2 -> 4 tiers. La dimension filtre EFFECTIVE a ~double (14 -> 28):
         # +7 nouveaux arms (bandes de sentiment + cadence KOL) ET +7 ressuscites
         # (BSR*/KW* lisaient des colonnes absentes du select depuis v14e.43, donc
         # `(None or 0) >= seuil` = toujours False, zero trade matche, 33% du calcul
-        # brule pour rien). A 2 tiers les shards passeraient de ~2h a ~4h, trop
-        # pres du cap GH 6h. 3 tiers ramene chaque shard vers ~2-2.7h.
+        # brule pour rien).
+        #
+        # ⚠️ Le commentaire v14e.56 ci-dessus ("~1.5-2h/shard") etait PERIME.
+        # Mesure reelle du run 30977642076 (2026-08-05): les 6 shards ont pris
+        # 197 / 219 / 235 / 253 / 254 / 273 min. Le pire etait deja a 78% du
+        # timeout de 350min. Charge additionnelle estimee par taux de match des
+        # nouveaux arms (~+71%, pas +100%: les bandes sont etroites, ex SENT50_60
+        # ne matche que 3.3% des tokens) => a 2 tiers le pire shard irait a
+        # ~467min, bien au-dela du cap GH 6h. 4 tiers ramene a ~233min, soit 33%
+        # de marge sous le timeout.
         # Le merge agrege par pattern `mega-sweep-shard-*`, il encaisse n shards.
-        strat: ['1/3', '2/3', '3/3']
+        strat: ['1/4', '2/4', '3/4', '4/4']
     name: sweep-${{ matrix.source }}-s${{ matrix.strat }}
     runs-on: ubuntu-latest
     # Marge sous le hard cap GH 6h. v14e.56: ~1.5-2h/shard (moitie du job v14e.43

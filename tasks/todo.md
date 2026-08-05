@@ -365,3 +365,38 @@ de 6, ~2-2.7h chacun. Le merge agrege par pattern, il encaisse n shards.
       Verifier dans le CSV que les colonnes filter=SENT*/GAP24/BSR*/KW* ont bien
       des lignes avec n>0 (si n=0 sur un arm, l'enrichissement a echoue).
 - [ ] Rejuger BSR/KW une fois qu'ils auront VRAIMENT tourne
+
+### [Aug 5] ETH: mega sweep casse depuis >2 semaines + correction sharding SOL
+
+**1. ETH sweep KO a chaque run** (8 echecs consecutifs verifies, depuis au moins
+le 21/07). Cause reelle (le log d'echec pointait le merge, pas la source):
+
+```
+chain=eq.ethereum & source=eq.rt & created_at>=... & order=created_at & limit=1000
+=> 500 {"code":"57014","message":"canceling statement due to statement timeout"}
+```
+
+**Aucun index sur `(chain, created_at)`.** Sur SOL la requete passe car les lignes
+sont denses. ETH est tombe a ~0.5% du volume => Postgres balaie tout l'index
+`created_at` sans jamais remplir sa page de 1000 lignes => timeout.
+Fix: `idx_paper_trades_chain_created (chain, created_at DESC)`.
+Verifie par EXPLAIN ANALYZE: Index Scan Backward, **169ms** au lieu du timeout.
+
+⚠️ **Mais ca ne rend pas le sweep ETH utile pour autant.** Volume ETH par semaine:
+3, 9, 5, 15, 13, 3, 2, 2, 9, 6 tokens. Soit ~30 tokens sur la fenetre du sweep.
+Reparti sur sources x smoothings x polling x filters x strategies, chaque cellule
+aura une poignee de trades. Le workflow passera au vert mais la sortie ne sera pas
+exploitable tant que le flux ETH ne remonte pas.
+=> Le vrai probleme ETH n'est pas le sweep, c'est **le flux qui s'est tari**
+   (74 tokens/sem fin avril -> 2-9 depuis juillet). A investiguer separement:
+   pourquoi le scraper ne detecte plus de tokens ETH ?
+
+**2. Mon sharding v14e.72 etait sous-dimensionne.** Le commentaire du code
+annoncait "~1.5-2h/shard" — PERIME. Mesure reelle (run 30977642076 du 05/08):
+197 / 219 / 235 / 253 / 254 / **273** min. Le pire etait deja a 78% du timeout.
+Avec +71% de charge estimee par taux de match, 2 tiers => ~467min = au-dela du
+cap GH 6h. Corrige 2 -> **4 tiers = 12 shards**, pire shard ~233min, 33% de marge.
+Lecon: ne jamais faire confiance a un commentaire de perf, mesurer le run reel.
+
+- [ ] Verifier au prochain cron que le sweep ETH passe au vert
+- [ ] Investiguer le tarissement du flux ETH (chain_detect ? KOLs ETH inactifs ?)
