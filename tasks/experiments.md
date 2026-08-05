@@ -317,6 +317,43 @@
 
 ---
 
+## ⚠️ E29 · UNION de filtres au lieu d'intersection
+
+- **Erreur de raisonnement corrigée** : toute la session j'ai empilé les filtres
+  (intersection), ce qui réduit le volume. Les deux axes validés sélectionnent des tokens
+  **différents** (slingoorioyaps ne pèse que 4.4 % de la bande) ⇒ l'**union** augmente le
+  volume sans diluer la qualité. Jamais calculée avant.
+- **Résultat sur la période complète** :
+
+| variante | n | /sem | EV | capital f=0.10 |
+|---|---|---|---|---|
+| bande seule | 195 | 12.6 | 7.2 % | +213 % |
+| **UNION (bande OU slingoorioyaps)** | **217** | **14.0** | 7.2 % | **+261 %** |
+| intersection *(ce que je testais)* | 10 | 0.6 | 10.0 % | +9 % |
+
+  +48 pp de rendement composé pour 22 trades de même qualité (+7.6 %).
+
+- **MAIS l'extension est morte.** Ajouter d'autres KOLs classés par EV de la moitié train,
+  évalué sur la moitié test :
+
+| variante | n | EV test | capital |
+|---|---|---|---|
+| bande seule | 83 | **+7.4 %** | **+67 %** |
+| + top 3 KOLs | 89 | 5.4 % | +45 % |
+| + top 5 KOLs | 118 | 4.3 % | +41 % |
+| + top 8 KOLs | 126 | 3.5 % | +32 % |
+| **top 5 KOLs SEULS** | 48 | **−5.0 %** | **−27 %** |
+
+- **Verdict** : ⚠️ le **principe** de l'union est bon et corrige une erreur de méthode, mais
+  il n'y a **qu'un seul KOL validé** avec qui faire l'union. Sélectionner d'autres KOLs par
+  classement d'EV dégrade monotonement et les 5 meilleurs sont **négatifs en test**.
+  `slingoorioyaps` tenait parce qu'il battait son null de **7.5×**, pas parce qu'il était
+  bien classé. Le gain de +48 pp est lui-même partiellement in-sample.
+- **Règle** : pour élargir l'union il faut un KOL qui passe le **null de permutation**, pas
+  un KOL bien classé. Aujourd'hui il n'y en a qu'un.
+
+---
+
 ## Journal des sessions
 
 ### 2026-08-05 — session fondatrice du registre
