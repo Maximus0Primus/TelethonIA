@@ -82,9 +82,13 @@
 
 | # | Piste | Pourquoi ça n'a pas été fait | Coût |
 |---|---|---|---|
-| E20b | Sortie dynamique **tick par tick** (moteurs `sim_engines`, pas la grille) | seule la version "sorties partielles de la grille" a été testée (E27, morte) | élevé |
+> **REGISTRE ÉPUISÉ.** 25 hypothèses testées, plus une seule piste non explorée
+> (ci-dessous). 2 axes tiennent (E01 KOL, E02 sentiment), le levier principal est
+> le sizing (E22), et **7 résultats spectaculaires sont morts à leur contrôle**.
 
-> **Registre épuisé pour tout ce qui coûte peu ou moyen.** 24 hypothèses testées.
+| # | Piste | Pourquoi pas fait | Coût |
+|---|---|---|---|
+| E28 | Refaire E20b quand `price_ticks` aura 90 j au lieu de 30 | n=60 tokens aujourd'hui, insuffisant pour départager 10 règles | attendre |
 > 2 axes tiennent (E01 KOL, E02 sentiment), le levier principal est le sizing (E22),
 > et **6 résultats spectaculaires sont morts à leur contrôle**.
 | ~~E21~~ | ~~Sizing conditionnel selon la proba de survie~~ | **→ devenu E22, voir ci-dessous** | — |
@@ -279,6 +283,37 @@
 - **Annexe** : `BE15_TP50_SL30` + bande donne **2.3× le volume** (447 trades, 25/sem) pour
   +179 % contre +213 %. Mais il perd en mai (3/4 mois au lieu de 4/4) et fait 12/17 semaines
   positives contre 12/15. **Le volume seul ne compense pas la qualité.**
+
+---
+
+## ❌ E20b · Sorties dynamiques rejouées tick par tick
+
+- **Hypothèse** : toutes les stratégies ont un TP/SL **fixé à l'entrée**. Laisser la sortie
+  dépendre de ce que le prix a fait devrait faire mieux.
+- **Méthode** : rejeu tick par tick, **mono-source** (leçon E07), slippage de **production**
+  via `sim_engines._exit`, univers = bande de sentiment, jugement en **composition à f=0.10**.
+  10 règles : TP/SL fixes, 3 trailings, 2 TP décroissants, 2 sorties sur ticks baissiers.
+- **Contrôle** : rejouer **la même chose sur la seconde source**. Si le classement s'inverse,
+  c'est de la sélection (10 règles sur n=60).
+- **Résultat** :
+
+| règle | Jupiter | DexScreener |
+|---|---|---|
+| trailing arm+20 **give15** | −6 pp | **+58 pp** ← meilleur sur DS, négatif sur Jupiter |
+| **trailing arm+20 give25** | **+11 pp** | **+21 pp** ← seule positive sur les deux |
+| TP décroissant 200→120 | +15 pp | +7 pp |
+| sortie 3 ticks baissiers | −35 pp | −42 pp |
+| sortie 5 ticks baissiers | −31 pp | −71 pp |
+
+- **Verdict** : ❌ **non actionnable.** Le meilleur sur une source est négatif sur l'autre.
+  La seule règle qui tient sur les deux appartient à la famille **TRAIL, indépendamment
+  confirmée mauvaise EN LIVE** (DTRAIL10_ACT15_SL70 = −$45 réel). Et les niveaux absolus
+  diffèrent d'un **facteur 5** entre sources (référence +15 % vs +83 %), ce qui disqualifie
+  la précision de tout classement à n=60.
+- **Acquis robuste (négatif)** : les sorties sur **N ticks baissiers consécutifs** sont
+  mauvaises sur les DEUX sources (−31 à −71 pp). Ça, c'est solide.
+- **Limite dure** : `price_ticks` ne retient que 30 j, et la bande ne garde que ~9 % du flux
+  ⇒ 60 tokens. Il faut ~90 j de rétention pour trancher. → **E28**
 
 ---
 
