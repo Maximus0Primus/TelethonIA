@@ -1,5 +1,15 @@
 # Strategy Candidate Tracker
 
+> 🗄️ **PERIME AU 2026-08-05 — NE PAS UTILISER POUR DECIDER.**
+> Derniere iteration reelle : 12 mai 2026. Tout ce fichier vise un deploiement
+> "$50/trade live" qui n'a plus de sens : le live est OFF depuis le 5 juin, et le
+> classement ci-dessous a ete construit AVANT trois corrections methodologiques
+> qui l'invalident :
+>   1. classement a la moyenne, jamais a la mediane (`tasks/lessons.md` L1)
+>   2. tout scan multi-candidats exige un null de permutation (L2)
+>   3. 3 tokens a `exit_price` corrompu faussaient les moyennes 30j
+> Conserve comme archive historique. Etat courant : `tasks/todo.md` + `tasks/research_log.md`.
+
 **Goal** : déployer **$50/trade live** avec confiance haute. Construction itérative du shortlist final.
 
 > Living document — mettre à jour après chaque audit, paired-test, ou run mega-sweep.

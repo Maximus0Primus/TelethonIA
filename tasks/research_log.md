@@ -160,13 +160,59 @@ WR multipliers dans le code :
 
 ## Idées à tester / backlog
 
-- [ ] **Monte Carlo avec path simulation** : Modéliser le chemin prix (GBM) pour avoir une vraie proba de SL avant TP
-- [ ] **A/B ML** : Comparer PnL trades ml_pred > 0 vs < 0 (besoin ~500 trades)
-- [ ] **Seuil KOL dynamique** : Recalculer seuil optimal chaque semaine automatiquement via Optuna
-- [ ] **TP100_SL50 backtesting** : Attendre 30+ trades pour valider la stratégie
-- [ ] **Heure optimale** : hour_of_day = feature ML #2. Analyser quelles heures UTC ont le meilleur WR
-- [ ] **KOL velocity** : KOL qui n'a pas callé depuis 3 jours = "froid", bonus si premier call après silence
-- [ ] **Multi-confirmation** : Token callé par 2 KOLs whitelist en < 30min = bonus de taille x1.5
+> ⚠️ **2026-08-05 — 5 items ci-dessous LIQUIDES.** Toute reprise doit s'accompagner
+> d'un null de permutation (voir `tasks/lessons.md` L2), sinon le résultat n'est pas
+> lisible : le scan des features token a sorti 3 "gagnants" contre 6 sous pur hasard.
+
+- [x] ~~**A/B ML**~~ — IMPOSSIBLE : `ml_pred` rempli à **0%** sur les 1.1M lignes RT (ML off).
+- [x] ~~**Heure optimale**~~ — **BRUIT**. Les 4 tranches UTC inversent leur signe entre
+      train et test (0-6h : +2.15 → −4.39 ; 6-12h : +2.57 → −2.60). Piste fermée.
+- [x] ~~**KOL velocity**~~ — **VALIDÉ mais inversé**. Ce n'est pas "bonus après silence",
+      c'est **malus en rafale** : dose-response monotone sur 600k lignes, rafale <1h
+      −5.43%/trade → 24-72h +2.22% (hors olympeqg, 57% du bucket rafale).
+      Déployé en `min_kol_gap_hours` (v14e.70).
+- [x] ~~**Seuil KOL dynamique**~~ — **À NE PAS FAIRE**. La forme récente d'un KOL est
+      ANTI-prédictive (forme>0 → −4.35% en test, forme<0 → −2.91%). Un seuil
+      auto-adaptatif dégraderait. L'edge KOL est une identité STABLE.
+- [x] ~~**Multi-confirmation**~~ — IMPOSSIBLE : `n_kol_confirmations` vaut **toujours 0**
+      et `unique_kols` **toujours 1** côté RT (le RT part du premier call, par design).
+- [ ] **Monte Carlo path simulation** (GBM) : toujours ouvert
+- [ ] **TP100_SL50 backtesting** : superseded — voir le combo sentiment+gap ci-dessous
+
+## 🆕 2026-08-05 — Sentiment du message : 2e edge validé (indépendant du KOL)
+
+`kol_mentions.sentiment` (rempli 100%, 51k messages) a une relation en **U INVERSÉ**
+avec le résultat, pas monotone :
+
+| bande sentiment | n | moy | train | test |
+|---|---|---|---|---|
+| < 0.3 | 5631 | −0.57% | −0.98 | +0.11 |
+| 0.3-0.5 | 1685 | +1.31% | −0.94 | +4.18 |
+| **0.5-0.6** | **663** | **+7.97%** | **+6.84** | **+11.04** |
+| 0.6-0.7 | 382 | −4.38% | −8.75 | +2.75 |
+| **≥ 0.7** | 212 | **−11.71%** | −13.31 | −7.55 |
+
+Lecture : zéro enthousiasme = pas de mouvement ; conviction mesurée = vrai signal ;
+hype extrême = le token est déjà soufflé. Cohérent avec le "score anti-prédictif".
+
+Validations passées :
+- **Permutation** (sentiment rebattu dans chaque mois×stratégie) : réel +7.97% contre
+  −3.39 / +1.71 / +0.14 sur 3 tirages. Et aucun tirage n'est positif dans les DEUX moitiés.
+- **Pas un proxy KOL** : sans slingoorioyaps le pic tient à l'identique (+7.81%,
+  train +5.57 / test +14.07). Il ne pèse que 4.4% du bucket. Réparti sur batman_gem (+10.5%),
+  spidersjournal (+6.9%), AnimeGems (+2.4%)… y compris des KOLs mauvais en moyenne.
+- **4 mois sur 4** le pic bat le reste du flux (+18.1 / +1.7 / +11.9 / +9.9 pp).
+
+Rendement sur TP90_SL40 :
+
+| variante | n | /semaine | moy | géom | WR | train | test |
+|---|---|---|---|---|---|---|---|
+| aucun filtre | 1500 | 88.2 | −0.1% | −18.3% | 36% | −0.6 | +0.6 |
+| **sentiment 0.5-0.6** | 117 | **6.9** | **+9.8%** | −10.5% | 47% | +10.1 | +8.9 |
+| **+ gap≥24h** | 44 | 2.6 | **+18.3%** | **+5.5%** | 55% | +18.5 | +18.0 |
+
+- [ ] Câbler un filtre `sentiment_band` en shadow (bande seule = meilleure cadence,
+      empilé = meilleure qualité + géométrique positive)
 
 ---
 
