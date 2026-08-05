@@ -258,6 +258,60 @@ def _kol_gap_hours(kol: str, token_addr: str, now: datetime) -> float | None:
     return gap
 
 
+# ---------------------------------------------------------------------------
+# v14e.71: message-sentiment band gate
+# ---------------------------------------------------------------------------
+# Validated 2026-08-05. `kol_mentions.sentiment` relates to outcome as an
+# INVERTED U, not monotonically: <0.3 = -0.57%/trade, 0.5-0.6 = +7.97%,
+# >=0.7 = -11.71%. Read: no enthusiasm = no move, measured conviction = real
+# signal, extreme hype = the token is already blown.
+#
+# Validated three ways: permutation on the sentiment values (real +7.97% vs
+# -3.39 / +1.71 / +0.14 across three seeds); not a KOL proxy (removing
+# slingoorioyaps leaves +7.81%, and the effect shows up on KOLs that lose money
+# on average); beats the rest of the flow in 4 months out of 4.
+#
+# Band WIDTH is the live trade-off, hence three A/B arms rather than one:
+# excluding the two tails (0.30-0.70) keeps 4x the volume for nearly the same
+# total $ as the narrow band, and is positive in both halves where the
+# unfiltered baseline is not.
+_sentiment_cache: dict[str, float | None] = {}
+_sentiment_client = None
+
+
+def _msg_sentiment(kol: str, token_addr: str) -> float | None:
+    """Sentiment of this KOL's first message about this token.
+
+    Returns None when no mention joins (2.8% of rows historically) — callers
+    treat that as "gate not satisfied" rather than letting it through, because
+    those unmatched rows average -28.3%/trade.
+    """
+    key = f"{kol}|{token_addr}"
+    if key in _sentiment_cache:
+        return _sentiment_cache[key]
+
+    val = None
+    try:
+        global _sentiment_client
+        if _sentiment_client is None:
+            import os
+            from supabase import create_client
+            _sentiment_client = create_client(
+                os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_ROLE_KEY"])
+        rows = (_sentiment_client.table("kol_mentions").select("sentiment")
+                .eq("kol_group", kol).eq("resolved_ca", token_addr)
+                .order("message_date").limit(1).execute().data)
+        if rows and rows[0].get("sentiment") is not None:
+            val = float(rows[0]["sentiment"])
+    except Exception as e:
+        logger.debug("sentiment lookup failed for %s/%s: %s", kol, token_addr, e)
+
+    if len(_sentiment_cache) > 5000:
+        _sentiment_cache.clear()
+    _sentiment_cache[key] = val
+    return val
+
+
 def _passes_strategy_filter(token: dict, strategy_name: str) -> bool:
     """Check if a token passes the entry filter for a given strategy."""
     # v14: chain gate — cheapest check, short-circuit first.
@@ -369,6 +423,21 @@ def _passes_strategy_filter(token: dict, strategy_name: str) -> bool:
                                   datetime.now(timezone.utc))
             if _gap is None or _gap < float(_min_gap):
                 return False
+
+    # v14e.71: message-sentiment band. Opt-in via min_sentiment / max_sentiment.
+    _s_lo = filt.get("min_sentiment")
+    _s_hi = filt.get("max_sentiment")
+    if _s_lo is not None or _s_hi is not None:
+        _kol_s = token.get("_rt_kol_group") or token.get("kol_group")
+        if not _kol_s:
+            return False
+        _sent = _msg_sentiment(_kol_s, token.get("token_address") or "")
+        if _sent is None:
+            return False
+        if _s_lo is not None and _sent < float(_s_lo):
+            return False
+        if _s_hi is not None and _sent >= float(_s_hi):
+            return False
 
     # v14e.40 / v14e.41: RECALL filters. Strategies opt in via require_recall=True.
     # Two drift modes — each strat picks ONE via filter key:

@@ -4058,6 +4058,39 @@ for _ke_name, _ke_filter in _KOL_EDGE_ARMS.items():
     SHADOW_STRATEGIES.append(_ke_name)
 
 # ---------------------------------------------------------------------------
+# v14e.71 — message-sentiment band A/B (2026-08-05)
+# ---------------------------------------------------------------------------
+# `kol_mentions.sentiment` vs outcome is an INVERTED U: <0.3 = -0.57%/trade,
+# 0.5-0.6 = +7.97%, >=0.7 = -11.71%. Permutation-validated (real +7.97% vs
+# -3.39/+1.71/+0.14 on three seeds), not a KOL proxy, and it beats the rest of
+# the flow 4 months out of 4. See tasks/research_log.md for the full table.
+#
+# Band WIDTH is the open question, so all three arms ride on the SAME exit
+# (FAST_TP50_SL30_MCAP_S40, already in the deck) to isolate the band:
+#
+#   band       n    /week   EV      train   test    total $ @ $100
+#   none      551   32.2    +3.4%   +6.9    -1.3    $1890   <- best total, but test NEGATIVE
+#   0.30-0.70 209   12.2    +8.6%   +7.2   +10.4    $1798   <- nearly as much, both halves +
+#   0.45-0.65 108    6.3   +12.4%  +14.1    +9.0    $1342
+#   0.50-0.60  55    3.2   +17.8%  +18.2   +16.9     $978   <- best per trade, thinnest
+#
+# The narrow band wins per-trade and loses on volume; excluding only the two
+# tails keeps 4x the cadence for nearly the same dollars. Live will decide.
+_SENT_BASE = {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.70,
+              "horizon_min": 30, "label": "main"}
+_SENT_FILTER_BASE = {"chain": "solana", "min_rt_score": 40,
+                     "min_mcap": 30_000, "max_mcap": 500_000}
+_SENT_ARMS = {
+    "SENT30_70_FAST_TP50_SL30_MCAP_S40": {"min_sentiment": 0.30, "max_sentiment": 0.70},
+    "SENT45_65_FAST_TP50_SL30_MCAP_S40": {"min_sentiment": 0.45, "max_sentiment": 0.65},
+    "SENT50_60_FAST_TP50_SL30_MCAP_S40": {"min_sentiment": 0.50, "max_sentiment": 0.60},
+}
+for _s_name, _s_filter in _SENT_ARMS.items():
+    STRATEGIES[_s_name] = [dict(_SENT_BASE)]
+    STRATEGY_FILTERS[_s_name] = {**_SENT_FILTER_BASE, **_s_filter}
+    SHADOW_STRATEGIES.append(_s_name)
+
+# ---------------------------------------------------------------------------
 # v14e.36 — auto-deprecate every artifact-family strategy registered above.
 # Trail/dip/split/bond shadows pollute analytics (sim ranks them top via
 # 47x slip miscalibration) and cannot be promoted to live. This finalization

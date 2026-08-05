@@ -270,3 +270,41 @@ apres 50 trades, 2.1%.
       shadow compagnon. Si < 5pp, passer a $100 puis envisager le % du capital.
 - [ ] Cabler le filtre sentiment en shadow AVANT (le filtre n'existe pas encore
       dans le code — la simulation est faite sur le pool historique reconstitue)
+
+## ⏳ EN ATTENTE D'ACCUMULATION — ne rien decider avant
+
+Deploye le 2026-08-05. **Ne pas toucher, ne pas promouvoir, ne pas passer en live
+avant d'avoir du N propre.** Les chiffres ci-dessous viennent d'un pool historique
+reconstitue par jointure SQL — RIEN n'a encore ete forward-teste.
+
+Bras shadow qui accumulent (tous sur l'exit FAST_TP50_SL30_MCAP_S40, deja au deck,
+donc le seul facteur qui varie est la bande) :
+
+| bras | bande sentiment | cadence attendue | EV historique |
+|---|---|---|---|
+| SENT30_70_FAST_TP50_SL30_MCAP_S40 | 0.30-0.70 | ~12/sem | +8.6% |
+| SENT45_65_FAST_TP50_SL30_MCAP_S40 | 0.45-0.65 | ~6/sem | +12.4% |
+| SENT50_60_FAST_TP50_SL30_MCAP_S40 | 0.50-0.60 | ~3/sem | +17.8% |
+
+Plus le 2x2 KOL/gap de v14e.70 (KOLW / GAP24 / KOLW_GAP24 vs TP90_SL40 nu).
+
+**Quand revenir dessus :**
+- [ ] **~1er septembre** (4 semaines) : premier point d'etape. A ~12/sem le bras
+      large aura ~48 trades, les deux autres ~24 et ~12. Trop peu pour trancher,
+      mais assez pour detecter une divergence grossiere vs l'historique.
+- [ ] **~1er octobre** (8 semaines) : bras large a ~96 trades => decision possible
+      sur la LARGEUR de bande. C'est la vraie question ouverte.
+- [ ] Le bras 0.50-0.60 a ~3/sem mettra ~5 mois a atteindre n=69. Ne pas
+      l'evaluer seul avant, il sera toujours dans le bruit.
+
+**Ce qu'il faudra verifier a chaque point d'etape :**
+- [ ] EV live du bras vs son EV historique (divergence > 5pp = alerte)
+- [ ] Comparer au bras nu FAST_TP50_SL30_MCAP_S40 sur les MEMES tokens (paire),
+      jamais en agrege sur des N differents
+- [ ] Classer a la moyenne + verifier semaines positives, JAMAIS a la mediane
+- [ ] Refaire tourner le null de permutation sur la nouvelle donnee
+
+**Ne pas faire en attendant :**
+- Ne pas re-balayer les features token (axe mort: 3 survivants vs 6 au hasard)
+- Ne pas re-tester l'entry-timing (mort sur source coherente)
+- Ne pas ajouter de bras: chaque bras en plus dilue la puissance statistique
