@@ -1,5 +1,58 @@
 # Operational Backlog
 
+## 🎯 LA MEILLEURE STRATÉGIE CONNUE (état au 2026-08-05)
+
+```
+exit    : FAST_TP50_SL30_MCAP_S40      (TP +50%, SL -30%, horizon 30 min)
+filtre  : sentiment du 1er message dans [0.30, 0.70[     <- kol_mentions.sentiment
+blacklist : à jour, olympeqg inclus (banni le 5 août)
+dédup   : 24 h roulantes
+SIZING  : f = 0.10 du capital par trade     <- LE LEVIER, cf E22
+```
+
+| métrique | valeur |
+|---|---|
+| EV par trade | **+7.2 %** |
+| cadence | 11 trades/semaine |
+| mois positifs | **4 / 4** (vs 2/4 sans le filtre) |
+| semaines positives | **12 / 15** |
+| capital sur 4 mois à f=0.10 | **+313 %** (coût live inclus) |
+| drawdown max | **20.8 %** — sous le plafond de 30 % du projet |
+| f=1 (pour mémoire) | **−99 %** |
+
+⚠️ **Rien de tout ça n'est forward-testé.** Chiffres issus d'un pool historique
+reconstitué par jointure SQL. Les 3 bras shadow tournent depuis le 5 août.
+⚠️ Dérive live↔paper mesurée sur SL=30 % : −2 à −5 pp ⇒ attendre **+2 à +5 %/trade
+en réel**, pas +7.2 %.
+⚠️ Le f optimal brut est 0.40 mais estimé **in-sample** ⇒ on retient le quart.
+
+📋 **Toute nouvelle hypothèse : lire `tasks/experiments.md` AVANT, le compléter APRÈS.**
+Règle : un résultat sans **contrôle** n'est pas un résultat.
+
+---
+
+## ⏳ À REPRENDRE À LA PROCHAINE SESSION
+
+- [ ] **Mega sweep run `31040338036`** lancé le 05/08 19:38, pas terminé en fin de session.
+      C'est le PREMIER run avec les 28 arms et le plancher de bruit (v14e.72/73).
+      Le lire ainsi, PAS en regardant le top-30 :
+      1. vérifier `n > 0` sur chaque nouvel arm (`SENT*`, `GAP24`, `NOBURST`, `BSR*`, `KW*`)
+         — garde-fou contre une répétition du bug des arms morts
+      2. lire la ligne `plancher de bruit de selection` dans `analyze.out`.
+         **Si aucune config ne le dépasse, le classement est du bruit : ne rien promouvoir.**
+      3. tests APPARIÉS `SENT30_70 vs NONE`, `GAP24 vs NONE` sur cellules appariées
+         (strategy, source, smoothing, polling, age_band)
+      4. rejuger BSR/KW : ils n'avaient JAMAIS tourné, toute conclusion passée est nulle
+- [ ] **~1er septembre** : 1er point d'étape des 3 bras shadow sentiment (~48 trades sur le
+      bras large). Trop peu pour trancher, assez pour détecter une divergence grossière.
+- [ ] **~1er octobre** : décision sur la LARGEUR de bande (~96 trades sur le bras large).
+- [ ] **E28** : refaire E20b (sorties dynamiques) quand `price_ticks` aura 90 j (30 j
+      aujourd'hui ⇒ seulement 60 tokens, insuffisant pour départager 10 règles).
+- [ ] Revoir **E25** (détection de régime) vers 40+ semaines de données (15 aujourd'hui).
+
+---
+
+
 > Reconcilié le 2026-05-22 contre l'état réel (l'ancienne version datait du 17-18 mai,
 > ~moitié déjà fait/périmé). Source de vérité pour les données volatiles (allocations,
 > blacklist, slippage) = `scoring_config` en DB, PAS ce fichier.

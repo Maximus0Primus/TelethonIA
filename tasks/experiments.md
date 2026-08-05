@@ -320,6 +320,30 @@
 ## Journal des sessions
 
 ### 2026-08-05 — session fondatrice du registre
-16 hypothèses testées, 5 validées, 11 tuées. **3 résultats spectaculaires tués par leur contrôle.**
-2 bugs silencieux trouvés dans le sweep (33 % des arms morts depuis avril ; ETH KO depuis 2 semaines).
-Appliqué en prod : ban olympeqg, filtres `kol_whitelist` / `min_kol_gap_hours` / bande de sentiment (shadow).
+
+**25 hypothèses testées : 2 axes validés, 21 morts, 1 confirmation, 1 en attente de données.**
+
+**7 résultats spectaculaires tués par leur contrôle** — sans contrôle systématique, 7 fausses
+stratégies auraient été livrées ce jour-là :
+
+| ce qui brillait | ce que le contrôle a montré |
+|---|---|
+| dip-buy −50 % à **+12.6 %/trade**, 5/5 semaines | artefact multi-sources ; mono-source = −0.0 % |
+| balayage de sorties → **$100 → $457** | le hasard atteint 5.1 % de géom. contre 5.5 % réel |
+| SL conditionnel au risque de dump | même SL optimal partout ; **le contrôle mélangé était PLUS PROPRE** |
+| sizing variable selon la survie | chaque règle dans sa propre fourchette de hasard, DD pire |
+| co-occurrence KOL **+11.3 %** | look-ahead : les KOLs comptés arrivaient **après** l'entrée |
+| régime prévisible (corr. 0.524) | p95 du hasard = 0.576 |
+| sorties dynamiques **+58 pp** | négatif sur l'autre source |
+
+**2 bugs silencieux trouvés dans le sweep** : 33 % des arms (BSR*/KW*) lisaient des colonnes
+absentes du `select` depuis avril et ne matchaient rien ; le sweep ETH échouait à chaque run
+depuis 2+ semaines faute d'index `(chain, created_at)`.
+
+**Appliqué en prod** : ban olympeqg (v14e.70), filtres `kol_whitelist` / `min_kol_gap_hours`
+(v14e.70), bande de sentiment en shadow 3 bras (v14e.71), nouveaux axes + plancher de bruit
+dans le sweep (v14e.72/73), garde de fraîcheur ETH (v14e.72b).
+
+**Le résultat le plus important n'est pas un signal** : c'est E22, le sizing. Reporter la
+moyenne géométrique à f=1 faisait conclure « ça ne compose pas » ; à f=0.10 la même stratégie
+fait ×4.1 en 4 mois.
