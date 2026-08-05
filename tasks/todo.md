@@ -308,3 +308,28 @@ Plus le 2x2 KOL/gap de v14e.70 (KOLW / GAP24 / KOLW_GAP24 vs TP90_SL40 nu).
 - Ne pas re-balayer les features token (axe mort: 3 survivants vs 6 au hasard)
 - Ne pas re-tester l'entry-timing (mort sur source coherente)
 - Ne pas ajouter de bras: chaque bras en plus dilue la puissance statistique
+
+### [Aug 5] Croisement du filtre sentiment (question: teste-t-il comme le mega sweep ?)
+
+Reponse honnete: NON, il ne l'etait pas. Teste seul et empile avec le gap, jamais
+croise systematiquement. Fait maintenant, sur 6 strategies, bande 0.30-0.70:
+
+| axe croise | ni l'un ni l'autre | axe seul | sentiment seul | LES DEUX | n |
+|---|---|---|---|---|---|
+| slingoorioyaps | -1.3 | +6.0 | +3.0 | **+12.4** | 106 |
+| gap KOL >= 24h | +0.2 | -2.2 | -0.4 | **+8.2** | 963 |
+| score >= 45 | -0.2 | -1.5 | +1.2 | +5.6 | 1105 |
+| age < 6h | -0.7 | -1.0 | -0.3 | +5.5 | 1405 |
+| mcap >= 100k | -0.5 | -1.4 | +3.1 | +4.0 | 932 |
+| liq >= 30k | -1.3 | 0.0 | +3.4 | +3.5 | 680 |
+
+- Les 4 features token mortes le restent croisees: leur colonne "axe seul" est
+  a -1.5/0.0 et "les deux" ne bat pas "sentiment seul". Confirmation.
+- slingoorioyaps x sentiment est SUR-additif (+12.4 vs +10.3 attendu si additif).
+- gap x sentiment semblait interactif en agrege (+8.2 sur n=963) MAIS ne se
+  reproduit PAS sur l'exit cible: 0.30-0.70 seul = EV +8.6% / $1798 total contre
+  0.30-0.70+gap = EV +6.4% / $505. Le gap DEGRADE ici.
+  => **Pas de 4e bras sentiment+gap.** Les 3 bras deployes sont le bon jeu.
+
+Lecon: une interaction vue en poolant des strategies ne survit pas forcement a
+une strategie donnee. Toujours reverifier sur l'exit cible avant d'ajouter un bras.
