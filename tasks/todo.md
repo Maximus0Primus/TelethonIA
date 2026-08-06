@@ -56,18 +56,73 @@ est **rejeté**, portefeuille à 3.02× la meilleure seule.
 
 ---
 
-## ⏳ À REPRENDRE À LA PROCHAINE SESSION
+## ✅ [Aug 6] Mega sweep `31040338036` dépouillé — un seul candidat : **SCORE45**
 
-- [ ] **Mega sweep run `31040338036`** lancé le 05/08 19:38, pas terminé en fin de session.
-      C'est le PREMIER run avec les 28 arms et le plancher de bruit (v14e.72/73).
-      Le lire ainsi, PAS en regardant le top-30 :
-      1. vérifier `n > 0` sur chaque nouvel arm (`SENT*`, `GAP24`, `NOBURST`, `BSR*`, `KW*`)
-         — garde-fou contre une répétition du bug des arms morts
-      2. lire la ligne `plancher de bruit de selection` dans `analyze.out`.
-         **Si aucune config ne le dépasse, le classement est du bruit : ne rien promouvoir.**
-      3. tests APPARIÉS `SENT30_70 vs NONE`, `GAP24 vs NONE` sur cellules appariées
-         (strategy, source, smoothing, polling, age_band)
-      4. rejuger BSR/KW : ils n'avaient JAMAIS tourné, toute conclusion passée est nulle
+> ⚠️ **Le run a analysé avec du code périmé.** `merge_and_analyze` a démarré à 00:46 le
+> 06/08 mais `actions/checkout` prend le SHA qui a **déclenché** le run (19:38 le 05/08),
+> donc AVANT les commits v14e.73 (plancher de bruit) et v14e.74 (classement argent +
+> portefeuille). Ni « plancher de bruit » ni « [portefeuille] » n'apparaissent dans
+> `analyze.out` : **ces étapes n'ont jamais tourné sur ces données.**
+> ⇒ Règle : un correctif au script d'analyse ne s'applique qu'aux runs **lancés après**.
+> Ré-analyse faite en local sur les 12 mêmes shards avec le script courant.
+
+**Fenêtre : 28/07 → 05/08, soit 9 jours. Un seul régime.** À ne jamais oublier en lisant
+ce qui suit — le pool historique d'E30 faisait 4 mois.
+
+**1. Les 28 arms sont VIVANTS.** `BSR52/55/BSR_MCAP`, `KW26`, `GAP24`, `NOBURST`, `SENT*`,
+`TOPKOL` : 251 160 cellules chacun, n médian 46 à 213. Le bug d'avril (arms lisant des
+colonnes absentes du `select`) est bien corrigé — c'est le premier run exploitable pour eux.
+
+**2. Le classement du sweep est INEXPLOITABLE, comme prévu.**
+- plancher de bruit de sélection : **23.87 pts** ; meilleure config du CSV : 49.61 pts ;
+  seulement **2 754 / 5 023 200** configs le dépassent — et ce sont toutes des `TP500_*`
+  à petit n (46-55), c'est-à-dire de la loterie fat-tail.
+- le n°1 du classement ARGENT (`TP500_SL50_4H|NOZEROLIQ`, n=120, EV +23.3 %, total 2 792)
+  est **sous le plancher en EV**. `cross_regime_robust` = **0 config** ⇒ top_robust vide.
+- portefeuille glouton : **2 configs seulement**, ×1.95, corrélation +0.54 (juste sous le
+  seuil de 0.55) ⇒ diversification marginale, rien à voir avec les ×3.8 d'E30.
+- **Ne rien promouvoir depuis le top-30.**
+
+**3. La lecture APPARIÉE, elle, donne un résultat.** Cellules identiques
+(strategy, source, smoothing, polling, age_band), bras vs `NONE`. Deux lectures : toutes
+cellules (251k, mais massivement non indépendantes — mêmes trades rejoués sous 3 sources ×
+lissages × pollings) et **une cellule de référence** `jupiter/raw/lazy_fast` (1 196
+comparaisons quasi indépendantes). Seule la seconde compte :
+
+| bras | Δ EV | Δ argent (n×EV) | cellules gagnées | volume conservé |
+|---|---|---|---|---|
+| **SCORE45** | **+6.71 pp** | **+341** | **70 %** | 36 % |
+| **SCORE40** | +5.31 pp | +316 | 74 % | 48 % |
+| NOZEROLIQ_BSR52 | +4.37 pp | +213 | 59 % | 47 % |
+| SCORE50 | +5.83 pp | +196 | 60 % | 28 % |
+| NOZEROLIQ | +2.46 pp | +190 | 63 % | 63 % |
+| SENT30_70 | +0.57 pp | **−97** | 42 % | 29 % |
+| GAP24 | **−3.42 pp** | **−327** | 37 % | 28 % |
+| TOPKOL | −2.80 pp | −269 | 37 % | 18 % |
+
+⚠️ `BSR_MCAP` est n°1 sur les 251k cellules (+941) et **n°11 sur les cellules
+indépendantes** (+15) : artefact de réplication. Toujours lire la colonne B.
+
+**Ce qu'il faut en retenir**
+- **SCORE45 est le seul candidat.** Il gagne sur les deux métriques à la fois (EV *et*
+  argent à mise plafonnée) et sur 70 % des cellules. C'est le prolongement direct du
+  `_S40` validé le 7 mai — le deck actuel est à S40 (PF_FAST) et S35 (PF_TP50_SL40).
+- 🔴 **`GAP24` PERD ici** (−3.42 pp, −327 en argent) alors que le silence du KOL était
+  validé le 05/08 sur 600k lignes / 120 j. Contradiction franche : soit l'effet dépend du
+  régime, soit l'un des deux résultats est faux. **À trancher avant tout usage de GAP24.**
+- 🟠 **`SENT30_70` n'apporte rien sur cette fenêtre** (+0.57 pp d'EV mais −97 en argent,
+  42 % de cellules gagnées). C'est le filtre du deck E30 en production. 9 jours ne
+  suffisent pas à l'invalider, mais ça affaiblit l'attente de +7 %/trade.
+
+**Next** : cloner les 3 PF_* en `_S45` **en shadow** (pas en promotion : 9 jours, une seule
+fenêtre, et le sweep rejoue des règles de sortie sans la bande de sentiment du deck réel).
+
+- [x] ~~vérifier `n > 0` sur chaque nouvel arm~~ — tous vivants
+- [x] ~~lire le plancher de bruit~~ — 23.87 pts, le top est dessous
+- [x] ~~tests appariés SENT30_70 / GAP24 vs NONE~~ — SENT ≈ 0, GAP24 négatif
+- [x] ~~rejuger BSR/KW~~ — BSR52 ≈ 0, BSR55 négatif, KW26 +2.77 pp, NOZEROLIQ_BSR52 +4.37 pp
+- [ ] **Décider** : cloner les PF_* en `_S45` en shadow ?
+- [ ] **Arbitrer la contradiction GAP24** (sweep 9 j négatif vs 120 j positif)
 - [ ] **~1er septembre** : 1er point d'étape des 3 bras shadow sentiment (~48 trades sur le
       bras large). Trop peu pour trancher, assez pour détecter une divergence grossière.
 - [ ] **~1er octobre** : décision sur la LARGEUR de bande (~96 trades sur le bras large).

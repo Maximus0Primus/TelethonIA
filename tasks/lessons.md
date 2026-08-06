@@ -1,5 +1,41 @@
 # Lessons Learned
 
+## 2026-08-06: Ne pas RECALCULER ce qui vient d'arriver — le relire
+**Mistake:** L'alerte KOL CALL affichait `$62934 bankroll | $300 déployé (4 pos) | $62634 dispo`
+alors que le deck tourne sur trois bankrolls de $1000 et une mise fixe de $100. Cause :
+`safe_scraper` reconstruisait un dict de 3 clés (chain / liquidité / rt_score) pour rejouer
+`_passes_strategy_filter` et *deviner* quelles stratégies venaient d'ouvrir. Les trois `PF_*`
+de v14e.75 filtrent sur `market_cap` + la bande de sentiment (qui a besoin de `kol_group` et
+`token_address`) : aucune de ces clés n'était dans le dict, donc les trois étaient rejetées,
+`strategy_positions` revenait vide, et l'alerte tombait sur sa branche de repli qui imprime le
+solde GLOBAL de `rt_bankroll` (cumul de toutes les strats et toutes les chaînes depuis avril).
+Le même compteur restait à 0 pour `total_pos`, d'où « 4 pos » pour « $300 ».
+**Rule:** Quand un effet a DÉJÀ eu lieu, lire son résultat (ici les lignes `paper_trades`
+ouvertes) plutôt que rejouer la logique qui l'a produit. Une re-dérivation partielle diverge
+silencieusement dès qu'on ajoute un filtre à une stratégie. Et un affichage qui ne sait pas
+ne doit **rien** afficher — jamais un nombre global à la place du nombre scopé.
+
+## 2026-08-06: Un workflow GH analyse avec le SHA qui l'a DÉCLENCHÉ, pas le code du moment
+**Mistake:** J'ai lu le run mega sweep `31040338036` en attendant d'y trouver le plancher de
+bruit (v14e.73) et le classement argent + portefeuille (v14e.74). Ces commits ont été poussés
+à 22:30 et 23:31 le 05/08 ; le run avait démarré à 19:38. Son job `merge_and_analyze` a beau
+avoir tourné à 00:46 le lendemain, `actions/checkout` reprend le SHA déclencheur : l'analyse a
+tourné sur l'ancien script. Les étapes attendues n'apparaissent nulle part dans `analyze.out`.
+**Rule:** Un correctif au script d'analyse ne s'applique qu'aux runs **lancés après** le push.
+Avant de conclure « la nouvelle métrique ne sort rien », vérifier qu'elle a **imprimé quelque
+chose** : une section absente du log n'est pas un résultat vide, c'est du code qui n'a pas
+tourné. En cas de doute, ré-analyser les artefacts en local avec le script courant.
+
+## 2026-08-06: `python ... >> "$GITHUB_OUTPUT"` casse le step dès qu'on imprime `::notice::`
+**Mistake:** La garde de fraîcheur ETH redirigeait tout son stdout vers `$GITHUB_OUTPUT`.
+Elle imprimait aussi `::notice::SKIP — 15 tokens…`, que le runner refuse de parser comme une
+paire `clé=valeur` → `Invalid format` → step en erreur → **workflow rouge alors que la garde
+avait correctement décidé de sauter**. Le workflow SOL, lui, ouvrait `$GITHUB_OUTPUT` depuis
+Python et n'a jamais eu le problème.
+**Rule:** Ne jamais rediriger le stdout d'un programme vers `$GITHUB_OUTPUT`. Écrire les
+sorties explicitement dans le fichier, laisser stdout aux humains. Test de non-régression :
+`scraper/tests/test_workflow_outputs_v14e76.py`.
+
 ## 2026-05-22: "Same code path as the sweep" ≠ proven in production — verify the live invocation, on-chain
 **Mistake:** Last session I declared live rent recovery good ("the next sell will recover its rent automatically — the code path is identical to the sweep that did 353/353") WITHOUT a single live `close_ata: closed` from the service. On re-audit it had recovered **0/24** sells: the manual sweep runs *after* settlement (balances read 0 → closes), but the live close runs *immediately post-sell* and the read-RPC lagged Jupiter's fill → `"still has tokens, skipping"` (DEBUG, silent) every time. Same function, different timing → opposite outcome. Also: I'd flagged `get_wallet_balance` as the "legacy-only residual" — wrong, it's Jupiter-holdings based; the real legacy-only blind spot was `_count_open_atas.py` (showed 6, hid 11 Token-2022).
 **Rule:** Never claim a feature works in production from "the code is the same as X". Verify the ACTUAL production path with its real timing, and confirm on-chain (count empty ATAs across BOTH token programs) — not from logs alone (failures were DEBUG-silent) and not from a delayed/standalone proxy. When a recovery op has a settlement dependency, the immediate path and the delayed path are different tests.

@@ -493,6 +493,40 @@ gagner 20 % d'EV en plus ne déplace pas le plafond, ça le déplace de 20 %.
 
 ---
 
+## ⚠️ E32 · MEGA SWEEP 28 ARMS — le classement est du bruit, l'apparié donne SCORE45
+
+- **Hypothèse** : le premier sweep où les 28 arms tournent vraiment (v14e.72, après le bug
+  des arms morts d'avril) va faire émerger une meilleure config que le deck E30.
+- **Méthode** : run `31040338036`, SOL, 28/07→05/08 (**9 jours**), 6 553 260 configs,
+  5 023 200 avec N≥30. Ré-analysé **en local** avec le script courant : le job
+  `merge_and_analyze` du run avait fait son checkout sur le SHA de 19:38 le 05/08, donc
+  **avant** v14e.73/74 — ni plancher de bruit ni portefeuille n'ont tourné sur ces données.
+- **Contrôle** : (a) plancher de bruit de sélection v14e.73 ; (b) test APPARIÉ par cellule
+  (strategy, source, smoothing, polling, age_band) contre `NONE` ; (c) le même apparié
+  restreint à **une** cellule de référence (`jupiter/raw/lazy_fast`, 1 196 comparaisons)
+  parce que les 251k cellules rejouent les mêmes trades et ne sont pas indépendantes ;
+  (d) chaque bras jugé en EV **et** en argent (n × EV), la correction v14e.74.
+- **Résultat** :
+  - plancher **23.87 pts** ; top du CSV 49.61 ; **2 754/5 023 200** au-dessus, tous des
+    `TP500_*` à n=46-55 (loterie). Le n°1 du classement argent est **sous le plancher**.
+    `cross_regime_robust` = 0 ⇒ top_robust **vide**. Portefeuille = 2 configs, ×1.95,
+    corr +0.54. ⇒ **le classement du sweep ne désigne rien.**
+  - apparié indépendant : **SCORE45 +6.71 pp d'EV, +341 d'argent, 70 % des cellules
+    gagnées, 36 % du volume conservé** ; SCORE40 +5.31/+316/74 % ; NOZEROLIQ_BSR52
+    +4.37/+213/59 % ; NOZEROLIQ +2.46/+190/63 %.
+  - **GAP24 −3.42 pp et −327 d'argent** (37 % de cellules gagnées) — contredit E?/silence
+    du KOL validé sur 120 j. **SENT30_70 +0.57 pp mais −97 d'argent** (42 %) — le filtre
+    du deck E30 n'apporte rien sur cette fenêtre.
+  - `BSR_MCAP` : n°1 sur 251k cellules (+941), n°11 sur les cellules indépendantes (+15).
+    **Artefact de réplication** — la lecture « toutes cellules » est trompeuse par
+    construction, ne jamais la citer seule.
+- **Verdict** : ⚠️ — un seul candidat, **SCORE45**, et seulement en shadow : 9 jours, un
+  seul régime, et le sweep rejoue des règles de sortie **sans** la bande de sentiment que
+  le deck applique réellement. Les 28 arms sont confirmés vivants (le bug d'avril est bien
+  mort). La contradiction GAP24 (9 j négatif vs 120 j positif) reste **ouverte**.
+
+---
+
 ## Journal des sessions
 
 ### 2026-08-05 — session fondatrice du registre
