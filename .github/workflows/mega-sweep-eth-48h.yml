@@ -59,9 +59,20 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           FORCE: ${{ github.event.inputs.force }}
         run: |
-          python - <<'PY' >> "$GITHUB_OUTPUT"
+          python - <<'PY'
           import os, requests
           from datetime import datetime, timedelta, timezone
+
+          # v14e.76: on ecrit dans $GITHUB_OUTPUT depuis Python, on ne redirige
+          # PLUS stdout vers ce fichier. L'ancienne forme (`python ... >>
+          # "$GITHUB_OUTPUT"`) y envoyait aussi les lignes `::notice::`, que le
+          # runner refuse de parser: "Invalid format '::notice::SKIP — ...'"
+          # => step en erreur => workflow ROUGE alors que la garde avait
+          # correctement decide de sauter (run 31054936700, 05/08).
+          def sortie(**kv):
+              with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+                  for k, v in kv.items():
+                      fh.write(f"{k}={v}\n")
 
           WINDOW_DAYS, MIN_FRESH = 14, 20
           since = (datetime.now(timezone.utc) - timedelta(days=WINDOW_DAYS)).isoformat()
@@ -77,14 +88,13 @@ jobs:
               fresh = len({row["token_address"] for row in r.json()})
           except Exception as e:
               # Fail OPEN: une garde qui casse ne doit pas masquer le sweep.
-              print(f"run=true\nfresh=-1")
+              sortie(run="true", fresh=-1)
               print(f"::warning::garde en echec ({e}) — on lance le sweep par defaut")
               raise SystemExit(0)
 
           forced = os.environ.get("FORCE", "").lower() == "true"
           go = fresh >= MIN_FRESH or forced
-          print(f"run={'true' if go else 'false'}")
-          print(f"fresh={fresh}")
+          sortie(run="true" if go else "false", fresh=fresh)
           msg = (f"{fresh} tokens ETH distincts sur {WINDOW_DAYS}j (seuil {MIN_FRESH})"
                  + (" — FORCE" if forced else ""))
           print(f"::notice::{'LANCE' if go else 'SKIP'} — {msg}")
