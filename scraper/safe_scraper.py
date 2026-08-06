@@ -2272,47 +2272,59 @@ async def _rt_on_new_message(event: events.NewMessage.Event):
                 # v109: Alert on KOL trade (for live monitoring)
                 try:
                     from alerter import alert_kol_trade
-                    from paper_trader import get_open_portfolio, _passes_strategy_filter
+                    from paper_trader import get_open_portfolio
+                    sb_alert = _get_supabase()
                     try:
-                        from paper_trader import STRATEGIES as _STRATS
                         _br = _rt_load_bankroll()
-                        bal = float(_br.get("current_balance", 0))
-                        # v14e: scope per-strat positions to THIS chain only.
-                        # Strats of other chains would fail _passes_strategy_filter
-                        # anyway; listing them in the alert was pure noise.
                         _strat_bals = _rt_strategy_bankrolls_for_chain(_br, ca_chain)
                         _hybrid_cfg = config.get("hybrid_strategy", {})
                         strat_positions = None
-                        if _hybrid_cfg.get("enabled"):
-                            _allocs = _hybrid_cfg.get("allocations", {})
-                            strat_positions = {}
-                            total_pos = 0
-                            # token_entry built above in _rt_open_trades carries
-                            # chain + rt_liquidity; rebuild a minimal dict here
-                            # for the filter check (we don't have the full one).
-                            _tok_for_filter = {
-                                "chain": ca_chain,
-                                "_rt_liquidity_usd": liq_usd,
-                                "_rt_score": rt_score,
-                            }
-                            for s, apct in _allocs.items():
-                                if s not in _STRATS:
-                                    continue
-                                # Filter: same chain + min_liq/rt_score pass.
-                                if not _passes_strategy_filter(_tok_for_filter, s):
-                                    continue
-                                s_pos = _rt_position_size(rt_score, kol_info, token_info, tier, config, strategy=s)
-                                s_pos = round(s_pos * float(apct), 2)
-                                s_bal = float((_strat_bals.get(s) or {}).get("balance", 500))
-                                strat_positions[s] = {"pos": s_pos, "balance": s_bal}
-                                total_pos += s_pos
-                        else:
-                            total_pos = pos_size
+                        total_pos = pos_size
+                        # v14e.76: report what was ACTUALLY opened, read back from
+                        # paper_trades, instead of re-deriving it.
+                        #
+                        # The previous version rebuilt a 3-key token dict
+                        # (chain / liquidity / rt_score) and re-ran
+                        # _passes_strategy_filter on it. Any strategy whose filter
+                        # reads a field absent from that dict was silently dropped
+                        # — market_cap, token_address, kol_group, token age. Since
+                        # v14e.75 that is ALL THREE portfolio strategies (PF_* gate
+                        # on market_cap + the sentiment band, which needs kol_group
+                        # + token_address), so strat_positions came back empty and
+                        # the alert fell through to the legacy global bankroll
+                        # ($62.9k) instead of the three $1000 seeds actually at
+                        # risk. Reading the rows back cannot drift from the deck.
+                        #
+                        # Rows are scoped to this token; the concentration gate
+                        # (max_positions_per_token) caps what can be listed.
+                        if _hybrid_cfg.get("enabled") and sb_alert:
+                            _rows = (sb_alert.table("paper_trades")
+                                     .select("strategy, position_usd")
+                                     .eq("token_address", ca)
+                                     .eq("status", "open")
+                                     .eq("is_shadow", False)
+                                     .execute().data) or []
+                            if _rows:
+                                strat_positions = {}
+                                total_pos = 0.0
+                                for _r in _rows:
+                                    _s = _r.get("strategy")
+                                    if not _s:
+                                        continue
+                                    _s_pos = float(_r.get("position_usd") or 0)
+                                    _s_bal = float((_strat_bals.get(_s) or {}).get("balance", 0))
+                                    strat_positions[_s] = {"pos": _s_pos, "balance": _s_bal}
+                                    total_pos += _s_pos
+                        # v14e.76: the global rt_bankroll balance aggregates every
+                        # strategy and every chain since April. With a per-strategy
+                        # $1000 deck it is not the money available for THIS trade,
+                        # so it is never shown in hybrid mode — better no number
+                        # than a wrong one. Non-hybrid mode keeps the old display.
+                        bal = 0.0 if _hybrid_cfg.get("enabled") else float(_br.get("current_balance", 0))
                     except Exception:
                         bal = 0
                         total_pos = pos_size
                         strat_positions = None
-                    sb_alert = _get_supabase()
                     portfolio = get_open_portfolio(sb_alert) if sb_alert else {"open_count": 0, "deployed_usd": 0}
                     # v112: Only tag as bonding if actually on bonding curve (liq < min_liq)
                     # Previously is_pump_dex tagged graduated tokens as bonding too
