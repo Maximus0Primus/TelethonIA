@@ -169,6 +169,37 @@ def portefeuille(df, csv_path, top_k=40, taille=4, seuil_corr=0.55):
     print(f"  -> {out}")
 
 
+def profil_temporel(daily_json):
+    """v14e.78 — sur QUELLE PERIODE une config a-t-elle gagne son argent ?
+
+    Tant que le sweep ne voyait que 9 jours, toutes les configs partageaient la
+    meme fenetre et un TOTAL (n x EV) etait comparable. Sur 4 mois ce n'est plus
+    vrai: deux configs a n=200 n'ont pas la meme valeur si l'une etale ses
+    trades sur 120 jours et l'autre les concentre sur trois semaines chanceuses.
+    Le total ne fait pas la difference; la duree couverte et le nombre de mois
+    positifs, si.
+
+    Renvoie (jours, mois, mois_positifs, part_du_meilleur_mois).
+    `daily_pnl_json` porte la MOYENNE journaliere, pas les n par jour: les
+    agregats mensuels sont donc des moyennes de moyennes, non ponderees. Assez
+    pour classer une regularite, pas pour chiffrer un PnL.
+    """
+    try:
+        dd = json.loads(daily_json) if isinstance(daily_json, str) else {}
+    except Exception:
+        return (0, 0, 0, 1.0)
+    if not dd:
+        return (0, 0, 0, 1.0)
+    par_mois = {}
+    for jour, pnl in dd.items():
+        par_mois.setdefault(str(jour)[:7], []).append(float(pnl))
+    moyennes = {m: sum(v) / len(v) for m, v in par_mois.items()}
+    positifs = sum(1 for v in moyennes.values() if v > 0)
+    gains = [v for v in moyennes.values() if v > 0]
+    part = (max(gains) / sum(gains)) if gains else 1.0
+    return (len(dd), len(moyennes), positifs, part)
+
+
 def verdict_par_bras(df, csv_path, cellule_ref=("jupiter", "raw", "lazy_fast")):
     """v14e.77 — le seul verdict que ce sweep sait produire honnetement.
 
@@ -209,6 +240,13 @@ def verdict_par_bras(df, csv_path, cellule_ref=("jupiter", "raw", "lazy_fast")):
         print("  [verdict] pas de bras NONE — impossible d'apparier")
         return
 
+    # v14e.78 — la duree n'est pas une constante entre bras. Un filtre peut
+    # etre correle au calendrier (une bande de mcap laisse passer beaucoup de
+    # tokens quand le marche est chaud, presque rien sinon), donc son n se
+    # concentre sur une periode. On mesure la duree effective de CHAQUE cote de
+    # la comparaison et on rend la difference visible au lieu de la moyenner.
+    a_du_temporel = "daily_pnl_json" in ref.columns
+
     lignes = []
     for arm in sorted(ref["filter"].unique()):
         if arm == "NONE":
@@ -219,13 +257,32 @@ def verdict_par_bras(df, csv_path, cellule_ref=("jupiter", "raw", "lazy_fast")):
             continue
         d_ev = (j["avg_pnl_pct_f"] - j["avg_pnl_pct_b"])
         d_ar = (j["argent_f"] - j["argent_b"])
-        lignes.append({
+        ligne = {
             "bras": arm, "paires": len(j),
             "d_ev_median": float(d_ev.median()),
             "d_argent_median": float(d_ar.median()),
             "cellules_gagnees": float((d_ar > 0).mean()),
             "volume_conserve": float((j["n_f"] / j["n_b"]).median()),
-        })
+        }
+        if a_du_temporel:
+            prof_f = [profil_temporel(v) for v in j["daily_pnl_json_f"]]
+            prof_b = [profil_temporel(v) for v in j["daily_pnl_json_b"]]
+            jours_f = np.median([p[0] for p in prof_f]) if prof_f else 0
+            jours_b = np.median([p[0] for p in prof_b]) if prof_b else 0
+            ligne["jours_bras"] = float(jours_f)
+            ligne["jours_none"] = float(jours_b)
+            # Duree conservee: <<1 = le filtre ne se declenche que par periodes.
+            # Son "argent total" n'est alors pas comparable a celui de NONE, qui
+            # court sur toute la fenetre — d'ou la colonne argent/jour.
+            ligne["duree_conservee"] = float(jours_f / jours_b) if jours_b else 0.0
+            ligne["d_argent_par_jour"] = (float(d_ar.median()) / jours_b) if jours_b else 0.0
+            ligne["mois_positifs"] = float(np.median([p[2] for p in prof_f])) if prof_f else 0
+            ligne["mois"] = float(np.median([p[1] for p in prof_f])) if prof_f else 0
+            # Part du meilleur mois dans les gains: proche de 1 = tout vient
+            # d'une seule fenetre favorable, exactement le cas que le total
+            # recompense a tort.
+            ligne["part_meilleur_mois"] = float(np.median([p[3] for p in prof_f])) if prof_f else 1.0
+        lignes.append(ligne)
     if not lignes:
         print("  [verdict] aucun bras avec assez de cellules appariees")
         return
@@ -233,22 +290,57 @@ def verdict_par_bras(df, csv_path, cellule_ref=("jupiter", "raw", "lazy_fast")):
     lignes.sort(key=lambda r: -r["d_argent_median"])
     print(f"\n  [verdict par bras] cellule {src}/{sm}/{poll}, "
           f"{len(base):,} cellules NONE de reference")
-    print(f"    {'bras':<18}{'paires':>7}{'d_argent':>10}{'d_EV':>8}"
-          f"{'gagne':>7}{'volume':>8}")
-    print("    " + "-" * 58)
+    if a_du_temporel:
+        print(f"    {'bras':<18}{'paires':>7}{'d_arg/j':>9}{'d_argent':>10}"
+              f"{'d_EV':>8}{'gagne':>7}{'volume':>7}{'duree':>7}{'mois+':>7}{'top_mois':>9}")
+    else:
+        print(f"    {'bras':<18}{'paires':>7}{'d_argent':>10}{'d_EV':>8}"
+              f"{'gagne':>7}{'volume':>8}")
+    print("    " + "-" * (92 if a_du_temporel else 58))
+    # Les criteres de REGULARITE n'ont de sens qu'avec assez de mois. Sur une
+    # fenetre de 9 jours (le cas d'avant v14e.77) « un seul mois fait le
+    # resultat » est vrai par construction et disqualifierait tout le monde:
+    # ce serait un faux negatif systematique, pas un controle.
+    _mois_max = max((r.get("mois", 0) for r in lignes), default=0) if a_du_temporel else 0
+    _regularite_jugeable = _mois_max >= 3
+    retenus = []
     for r in lignes:
         # Un bras n'est retenu que s'il gagne sur les DEUX metriques et sur la
         # majorite des cellules. Gagner en EV en perdant en argent = le filtre
         # coupe plus de volume qu'il n'ajoute de qualite.
         ok = (r["d_ev_median"] > 0 and r["d_argent_median"] > 0
               and r["cellules_gagnees"] > 0.5)
-        print(f"    {r['bras']:<18}{r['paires']:>7,}{r['d_argent_median']:>+10.0f}"
-              f"{r['d_ev_median']:>+8.2f}{r['cellules_gagnees']:>6.0%}"
-              f"{r['volume_conserve']:>7.0%}{'  <-- retenu' if ok else ''}")
-    retenus = [r["bras"] for r in lignes
-               if r["d_ev_median"] > 0 and r["d_argent_median"] > 0
-               and r["cellules_gagnees"] > 0.5]
+        note = ""
+        if a_du_temporel and _regularite_jugeable:
+            # Trois disqualifications qui n'existaient pas a 9 jours de fenetre.
+            if r.get("duree_conservee", 1) < 0.5:
+                ok, note = False, "  !! ne vit que sur la moitie de la fenetre"
+            elif r.get("mois_positifs", 0) < r.get("mois", 0) - 1:
+                ok, note = False, "  !! plus d'un mois negatif"
+            elif r.get("part_meilleur_mois", 0) > 0.6:
+                ok, note = False, "  !! un seul mois fait le resultat"
+        if ok:
+            retenus.append(r["bras"])
+        if a_du_temporel:
+            _mois = f"{int(r.get('mois_positifs',0))}/{int(r.get('mois',0))}"
+            print(f"    {r['bras']:<18}{r['paires']:>7,}{r['d_argent_par_jour']:>+9.1f}"
+                  f"{r['d_argent_median']:>+10.0f}{r['d_ev_median']:>+8.2f}"
+                  f"{r['cellules_gagnees']:>6.0%}{r['volume_conserve']:>7.0%}"
+                  f"{r['duree_conservee']:>7.0%}{_mois:>7}"
+                  f"{r['part_meilleur_mois']:>9.0%}"
+                  f"{'  <-- retenu' if ok else note}")
+        else:
+            print(f"    {r['bras']:<18}{r['paires']:>7,}{r['d_argent_median']:>+10.0f}"
+                  f"{r['d_ev_median']:>+8.2f}{r['cellules_gagnees']:>6.0%}"
+                  f"{r['volume_conserve']:>7.0%}{'  <-- retenu' if ok else ''}")
     print(f"    => {len(retenus)} bras retenus: {', '.join(retenus) if retenus else 'AUCUN'}")
+    if not a_du_temporel:
+        print("    (daily_pnl_json absent: duree et regularite non verifiees — "
+              "un bras concentre sur une periode favorable peut passer)")
+    elif not _regularite_jugeable:
+        print(f"    (fenetre de {_mois_max} mois: duree et regularite AFFICHEES mais pas "
+              f"opposables — il en faut 3+ pour distinguer un edge d'un bon mois. "
+              f"Les bras 'retenus' ci-dessus ne sont donc pas controles sur ce point.)")
 
     out = csv_path.parent / f"{csv_path.stem.replace('extended','verdict_bras')}.csv"
     pd.DataFrame(lignes).to_csv(out, index=False)
@@ -575,9 +667,36 @@ def main():
                  .sort_values("total_at_cap", ascending=False)
                  .drop_duplicates(subset=["strategy", "filter"], keep="first")
                  .head(args.top))
+    # v14e.78 — `total_at_cap` est un TOTAL. Tant que la fenetre faisait 9 jours
+    # toutes les configs la partageaient et le total etait comparable. Sur 4 mois
+    # ce n'est plus vrai: un filtre correle au calendrier concentre ses trades
+    # sur une periode et son total n'est pas de meme nature que celui d'une
+    # config active en continu. On expose donc la duree et la regularite a cote
+    # du total, pour qu'on ne puisse plus lire l'un sans les autres.
+    if "daily_pnl_json" in par_total.columns and len(par_total):
+        _prof = [profil_temporel(v) for v in par_total["daily_pnl_json"]]
+        par_total = par_total.copy()
+        par_total["jours_couverts"] = [p[0] for p in _prof]
+        par_total["mois_couverts"] = [p[1] for p in _prof]
+        par_total["mois_positifs"] = [p[2] for p in _prof]
+        par_total["part_meilleur_mois"] = [p[3] for p in _prof]
+        par_total["argent_par_jour"] = (
+            par_total["total_at_cap"] / par_total["jours_couverts"].clip(lower=1))
     out_cap = csv_path.parent / f"{csv_path.stem.replace('extended','top_at_cap')}.csv"
     par_total.to_csv(out_cap, index=False)
     print(f"  -> {out_cap} (classement par n x EV = argent a mise plafonnee)")
+    if "jours_couverts" in par_total.columns and len(par_total):
+        print(f"     {'config':<44}{'total':>8}{'arg/j':>8}{'jours':>7}{'mois+':>7}{'top_mois':>9}")
+        for _, r in par_total.head(10).iterrows():
+            _lib = f"{r['strategy'][:30]}|{str(r.get('filter',''))[:12]}"
+            print(f"     {_lib:<44}{r['total_at_cap']:>8.0f}{r['argent_par_jour']:>8.1f}"
+                  f"{int(r['jours_couverts']):>7}"
+                  f"{int(r['mois_positifs'])}/{int(r['mois_couverts']):<5}"
+                  f"{r['part_meilleur_mois']:>8.0%}")
+        _concentres = int((par_total.head(30)["part_meilleur_mois"] > 0.6).sum())
+        if _concentres:
+            print(f"     !! {_concentres}/30 du top tirent >60% de leurs gains d'UN SEUL mois "
+                  f"— le total les surevalue, lire argent_par_jour et mois+")
     if len(par_total):
         b = par_total.iloc[0]
         print(f"     meilleur par argent : {b['strategy']} / {b.get('filter','')} "
