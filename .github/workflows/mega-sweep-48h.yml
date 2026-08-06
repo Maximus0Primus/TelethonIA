@@ -43,8 +43,17 @@ jobs:
         # ne matche que 3.3% des tokens) => a 2 tiers le pire shard irait a
         # ~467min, bien au-dela du cap GH 6h. 4 tiers ramene a ~233min, soit 33%
         # de marge sous le timeout.
+        #
+        # v14e.77: 4 -> 6 tiers. Le replay lui-meme reste a charge constante
+        # (lean-grid rend 70/6 = 11.7x, la fenetre de ticks corrigee consomme
+        # 2734/240 = 11.4x ⇒ ratio 0.98), MAIS le cout FIXE de recuperation des
+        # ticks explose: 2717 requetes qui renvoyaient du vide renvoient
+        # maintenant ~90 lignes chacune, et le JSON intermediaire passe de 8 Mo a
+        # ~90 Mo. Sur le run 31040338036 le pire shard etait deja a 5h08 sur un
+        # timeout de 5h50. 6 tiers baissent le replay de 33% pour absorber ce
+        # cout fixe sans dependre de la justesse de l'estimation.
         # Le merge agrege par pattern `mega-sweep-shard-*`, il encaisse n shards.
-        strat: ['1/4', '2/4', '3/4', '4/4']
+        strat: ['1/6', '2/6', '3/6', '4/6', '5/6', '6/6']
     name: sweep-${{ matrix.source }}-s${{ matrix.strat }}
     runs-on: ubuntu-latest
     # Marge sous le hard cap GH 6h. v14e.56: ~1.5-2h/shard (moitie du job v14e.43
