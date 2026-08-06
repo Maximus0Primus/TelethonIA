@@ -29,6 +29,8 @@ rejouer un sweep de 5h en CI.
 import re
 from pathlib import Path
 
+import pytest
+
 SIM = Path(__file__).resolve().parents[1] / "sim.py"
 
 
@@ -72,19 +74,24 @@ class TestLeanGrid:
         assert '"--mega-lean-grid"' in src
         assert "mega_lean_grid" in src
 
-    def test_le_workflow_sol_utilise_le_flag(self):
+    # SOL et ETH partagent sim.py: les deux workflows doivent porter les memes
+    # garde-fous, sinon le correctif ne vaut que pour la chaine qu'on a regardee.
+    @pytest.mark.parametrize("nom", ["mega-sweep-48h.yml", "mega-sweep-eth-48h.yml"])
+    def test_les_deux_workflows_utilisent_le_flag(self, nom):
         wf = (SIM.resolve().parents[1] / ".github" / "workflows"
-              / "mega-sweep-48h.yml").read_text(encoding="utf-8")
+              / nom).read_text(encoding="utf-8")
         assert "--mega-lean-grid" in wf, (
-            "sans lean-grid, la fenetre de 4 mois ne tient pas sous le cap GH de 6h"
+            f"{nom}: sans lean-grid, la fenetre elargie ne tient pas sous le cap GH "
+            f"et les 70 quasi-doublons par config faussent les tests apparies"
         )
 
-    def test_l_analyse_suit_master(self):
+    @pytest.mark.parametrize("nom", ["mega-sweep-48h.yml", "mega-sweep-eth-48h.yml"])
+    def test_l_analyse_suit_master(self, nom):
         """Le merge doit analyser avec le script courant, pas celui du SHA declencheur."""
         wf = (SIM.resolve().parents[1] / ".github" / "workflows"
-              / "mega-sweep-48h.yml").read_text(encoding="utf-8")
+              / nom).read_text(encoding="utf-8")
         merge = wf[wf.index("merge_and_analyze:"):]
         assert "ref: master" in merge.split("Set up Python")[0], (
-            "merge_and_analyze doit checkout master pour utiliser la derniere "
-            "version du script d'analyse"
+            f"{nom}: merge_and_analyze doit checkout master pour utiliser la "
+            f"derniere version du script d'analyse"
         )

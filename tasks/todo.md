@@ -39,6 +39,35 @@ premier candidat sérieux à E30 depuis sa découverte manuelle. Le comparer à 
 ⚠️ Un shard qui dépasse 350 min est tué. `fail-fast: false` + le merge encaisse les CSV
 manquants, mais si plusieurs shards tombent, passer de 6 à 8 tiers avant de relancer.
 
+### 🔴 NON VÉRIFIÉ — la seule chose que la session du 06/08 n'a pas pu clore
+
+Le correctif de fenêtre de ticks est prouvé **en SQL** (242 → 2 734 tokens) et **en test**,
+mais **la ligne `~2700 with ticks` du run réel n'a jamais été vue** : le fetch prend 30-40 min
+et la session a été fermée avant. **C'est le tout premier point à contrôler**, avant toute
+lecture de résultat. Si le log affiche ~240, rien de ce run n'est exploitable.
+
+### Reste du backlog ouvert (inchangé)
+
+- [ ] **~1er septembre** : 1er point d'étape des 3 bras shadow sentiment (~48 trades sur le
+      bras large). Trop peu pour trancher, assez pour détecter une divergence grossière.
+- [ ] **~1er octobre** : décision sur la LARGEUR de bande (~96 trades sur le bras large).
+- [ ] **E28** : refaire E20b (sorties dynamiques) quand `price_ticks` aura 90 j.
+- [ ] Revoir **E25** (détection de régime) vers 40+ semaines de données (15 aujourd'hui).
+- [ ] **`/simulate-live` sur `SCALP_TP20_NOSL`** — la piste du 05/07 (« on a testé les mauvais
+      chevaux en live »), jamais faite. Voir section dédiée plus bas.
+- [ ] 🔴 **Sweep ATA cassé** (quota Helius, 44 ATA / ~$13.65 bloqués) — en attente user.
+
+### Fait le 06/08, rien à reprendre
+
+- ✅ Alerte KOL : affichait le bankroll global ($62 934) au lieu des seeds $1 000 — corrigé
+      v14e.76, **déployé sur le VPS** (service actif, 99 groupes, 0 erreur).
+- ✅ Sweep ETH rouge : `::notice::` envoyé dans `$GITHUB_OUTPUT` — corrigé v14e.76.
+      ⚠️ Il **skippe toujours** volontairement (15 tokens ETH / 14 j, seuil 20) : c'est la
+      garde de fraîcheur qui fait son travail, pas une panne.
+- ✅ Workflow ETH aligné sur SOL le même jour : `--mega-lean-grid` + `ref: master` (il avait
+      été oublié dans la 1re passe). Les deux workflows sont maintenant testés ensemble.
+- ✅ `sim.py --help` était cassé (un `%` non échappé) — corrigé.
+
 ---
 
 ## 🎯 LA MEILLEURE STRATÉGIE CONNUE (état au 2026-08-05)

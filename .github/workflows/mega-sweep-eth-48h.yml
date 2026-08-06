@@ -137,9 +137,17 @@ jobs:
           # --chain ethereum + --mega-source-shard restreint la dim sources
           # à 1 valeur. Le reste du grid (filters × smoothings × polling ×
           # age_bands × strategies) tourne intégralement sous calibration ETH.
+          # v14e.77: meme traitement que SOL. La correction de la fenetre de
+          # ticks (sim.py, code partage) fait entrer TOUT l'univers ETH au lieu
+          # des seuls tokens des 8 derniers jours — sur ETH, ou le flux est
+          # tari depuis juin, c'est la difference entre ~2 tokens et les 313 de
+          # l'univers. --mega-lean-grid evite que le grid lissage x cadence
+          # ravale ce gain, et supprime les 70 quasi-doublons par config qui
+          # faussaient les tests apparies.
           cd scraper
           python sim.py --mega-sweep-extended \
             --chain ethereum \
+            --mega-lean-grid \
             --mega-source-shard ${{ matrix.source }} \
             --mega-workers 4 \
             --mega-csv-out _mega_sweep_eth_extended_${{ matrix.source }}.csv \
@@ -171,7 +179,13 @@ jobs:
     timeout-minutes: 60
 
     steps:
+      # v14e.77: comme SOL — l'ANALYSE suit master, pas le SHA declencheur.
+      # Sinon un correctif au script d'analyse pousse pendant les heures de
+      # sweep n'est pas applique, et sa section manquante se lit "rien trouve"
+      # au lieu de "pas execute".
       - uses: actions/checkout@v4
+        with:
+          ref: master
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
