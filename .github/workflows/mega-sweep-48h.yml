@@ -82,8 +82,15 @@ jobs:
           # v14e.43: --mega-source-shard restreint la dim 'sources'.
           # v14e.56: --mega-strat-shard X/N split additionnel sur strategies.
           # Resultat: source x strat_half = 6 shards parallel sous cap GH 6h.
+          # v14e.77: --mega-lean-grid ramene lissage x cadence de 70 a 6
+          # combinaisons. Ce sont des hypotheses sur la FACON DE LIRE le prix,
+          # pas des choix de strategie: elles mangeaient 98.6% du budget et
+          # empechaient d'elargir la fenetre de ticks a 4 mois sous le cap 6h.
+          # Le calcul rendu (~11x) finance exactement le x11.3 de tokens que la
+          # correction de la fenetre fait entrer (242 -> 2734).
           cd scraper
           python sim.py --mega-sweep-extended \
+            --mega-lean-grid \
             --mega-source-shard ${{ matrix.source }} \
             --mega-strat-shard ${{ matrix.strat }} \
             --mega-workers 4 \
@@ -114,7 +121,16 @@ jobs:
     timeout-minutes: 60
 
     steps:
+      # v14e.77: on prend la DERNIERE version du script d'analyse, pas celle du
+      # SHA qui a declenche le run. Le sweep dure 5h; sur le run 31040338036 les
+      # correctifs v14e.73 (plancher de bruit) et v14e.74 (classement argent +
+      # portefeuille) ont ete pousses PENDANT, et le merge a analyse sans eux.
+      # Leurs sections etaient juste ABSENTES du rapport — ca se lit comme
+      # "rien trouve" alors que c'est "pas execute". Les shards, eux, gardent le
+      # SHA de leur propre checkout: seule l'ANALYSE suit master.
       - uses: actions/checkout@v4
+        with:
+          ref: master
 
       - name: Set up Python 3.12
         uses: actions/setup-python@v5

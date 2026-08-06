@@ -1,5 +1,35 @@
 # Lessons Learned
 
+## 2026-08-06: "L'outil ne trouve rien" est une hypothèse à tester, pas un résultat
+**Mistake:** Pendant trois runs et plusieurs sessions, le mega sweep n'a jamais rien produit
+d'exploitable, et à chaque fois je l'ai lu comme un résultat sur les stratégies : classement
+sous le plancher de bruit, `cross_regime_robust = 0`, portefeuille réduit à 2 configs. J'ai
+même écrit « le classement est du bruit » comme une conclusion. La vraie cause était dans le
+log, en clair, à 130 lignes d'écart : `Universe: 2717 unique tokens` puis `240 with ticks`.
+La fenêtre de récupération des ticks était ancrée sur l'horloge (`now − 8 jours`) au lieu de
+l'entrée de chaque token, donc 91 % de l'univers ressortait vide et le replay le sautait en
+silence. Le sweep voyait 9 jours là où il annonçait 4 mois — et sur 9 jours il n'y a qu'un
+régime, donc un portefeuille multi-régimes est invisible **par construction**. Ce n'est pas
+la recherche qui l'a trouvé : c'est l'user qui a demandé pourquoi le run servait à rien.
+**Rule:** Quand un instrument ne produit jamais rien, suspecter l'instrument avant les
+données. Concrètement : vérifier que la taille de l'échantillon ANNONCÉE est celle réellement
+utilisée à chaque étape, et rapprocher les compteurs successifs du log même quand ils sont
+loin les uns des autres (`N chargés` vs `N retenus` vs `N évalués`). Un filtre qui jette en
+silence est indétectable dans le résultat final. Tout étage qui peut vider l'échantillon doit
+imprimer son taux de survie et alerter sous un seuil.
+
+## 2026-08-06: Un budget de calcul dépensé sur des dimensions d'artefact
+**Mistake:** Le sweep balayait 7 lissages × 10 cadences de polling = 70 combinaisons par
+config réelle, soit 98.6 % du calcul. Ce ne sont pas des choix de stratégie : c'est
+l'hypothèse sur la façon dont on LIT le prix, et une seule correspond à la prod. Ce budget
+interdisait d'élargir la fenêtre à 4 mois sous le cap GH de 6 h — et en prime ces 70 quasi-
+doublons gonflaient les tests appariés (BSR_MCAP n°1 sur 251k cellules, n°11 sur les 1 196
+cellules indépendantes).
+**Rule:** Séparer les dimensions qui sont des DÉCISIONS (stratégie, filtre, seuil) de celles
+qui sont des hypothèses de MESURE (lissage, cadence, source). Les secondes se testent sur un
+petit sous-ensemble pour la robustesse, jamais en produit cartésien complet — et elles ne
+doivent jamais compter comme des observations indépendantes dans un test statistique.
+
 ## 2026-08-06: Ne pas RECALCULER ce qui vient d'arriver — le relire
 **Mistake:** L'alerte KOL CALL affichait `$62934 bankroll | $300 déployé (4 pos) | $62634 dispo`
 alors que le deck tourne sur trois bankrolls de $1000 et une mise fixe de $100. Cause :

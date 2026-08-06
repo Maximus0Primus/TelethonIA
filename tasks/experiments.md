@@ -523,7 +523,36 @@ gagner 20 % d'EV en plus ne déplace pas le plafond, ça le déplace de 20 %.
 - **Verdict** : ⚠️ — un seul candidat, **SCORE45**, et seulement en shadow : 9 jours, un
   seul régime, et le sweep rejoue des règles de sortie **sans** la bande de sentiment que
   le deck applique réellement. Les 28 arms sont confirmés vivants (le bug d'avril est bien
-  mort). La contradiction GAP24 (9 j négatif vs 120 j positif) reste **ouverte**.
+  mort).
+- **⚠️ REQUALIFIÉ le même jour (voir E33)** : ces chiffres portent sur **8.9 % de
+  l'univers**. La contradiction GAP24 n'était pas une contradiction, c'était un bug.
+
+---
+
+## 🐛 E33 · POURQUOI LE SWEEP NE POUVAIT RIEN TROUVER — il voyait 9 jours sur 4 mois
+
+- **Hypothèse** (posée par l'user, pas par la recherche) : si le sweep ne sort jamais rien
+  d'exploitable, le problème n'est peut-être pas la sévérité des contrôles mais l'instrument.
+- **Méthode** : relecture du log du run à la ligne près. `Universe: 2717 unique tokens since
+  2026-04-13` immédiatement suivi de `240 with ticks`. Ce rapprochement n'avait jamais été
+  fait — les deux lignes sont à 130 lignes d'écart dans le log, séparées par la barre de
+  progression `20/2717 … 2700/2717` qui donne l'illusion que tout a été traité.
+- **Cause** : `_mega_sweep_run_extended` allait chercher les ticks dans une fenêtre ancrée
+  sur l'horloge (`now − 8 jours`), identique pour tous les tokens, quel que soit
+  `--mega-since`. Tout token plus vieux que 8 jours ressortait sans ticks et le replay le
+  sautait **en silence**.
+- **Contrôle** : requête SQL comparant, mois par mois, la couverture avec la fenêtre 8 j
+  fixe et avec une fenêtre propre à chaque token. Avril/mai/juin : **0 token couvert**.
+  Total **242 / 2 734 (8.9 %)** contre **2 734 / 2 734 (100 %)** après correction. Les 242
+  reproduisent le « 240 with ticks » observé ⇒ la cause est établie, pas supposée.
+- **Résultat** : profondeur **9 jours → 4 mois**, univers **×11.3**. Financé par
+  `--mega-lean-grid` (lissage × cadence 70 → 6 : des hypothèses de lecture du prix, pas des
+  choix de stratégie, qui consommaient 98.6 % du budget).
+- **Verdict** : 🐛 corrigé v14e.77. **Conséquence méthodologique la plus chère** : sur 3 runs
+  et plusieurs sessions, « le sweep ne trouve rien » a été lu comme un résultat sur les
+  stratégies alors que c'était un défaut de l'instrument. Le garde-fou ajouté (alerte quand
+  <50 % de l'univers a des ticks) existe pour que ça ne puisse plus passer inaperçu.
+- **À faire** : relancer, puis rejuger SCORE45, GAP24 et SENT30_70 sur les 4 mois.
 
 ---
 

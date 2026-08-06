@@ -56,7 +56,68 @@ est **rejeté**, portefeuille à 3.02× la meilleure seule.
 
 ---
 
-## ✅ [Aug 6] Mega sweep `31040338036` dépouillé — un seul candidat : **SCORE45**
+## 🔴 [Aug 6, 2e passe] LE SWEEP ÉTAIT AVEUGLE À 91 % DE SES DONNÉES (corrigé v14e.77)
+
+> **Tout ce qui est écrit dans la section suivante a été mesuré sur 8.9 % de l'univers.**
+> À relire après le premier run corrigé.
+
+`sim.py` construisait bien l'univers sur `--mega-since` (4 mois, 2717 tokens) puis allait
+chercher les ticks dans une fenêtre **codée en dur sur l'horloge** :
+
+```python
+start = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat()   # AVANT
+```
+
+Un token appelé en juin n'a évidemment aucun tick dans `[now−8j, now+1h]` ⇒ absent de
+`ticks` ⇒ **sauté en silence** par le replay (`if addr in streams_by_token`). D'où le
+`Universe: 2717` suivi de `240 with ticks` dans le log, que personne n'avait rapproché.
+
+Mesure SQL sur la base réelle (fenêtre 8 j fixe vs fenêtre propre à chaque token) :
+
+| mois | tokens | avant | après |
+|---|---|---|---|
+| avril | 308 | **0** | 308 |
+| mai | 667 | **0** | 667 |
+| juin | 876 | **0** | 876 |
+| juillet | 730 | 89 | 730 |
+| août | 153 | 153 | 153 |
+| **total** | **2 734** | **242 (8.9 %)** | **2 734 (100 %)** |
+
+Les 242 reproduisent les « 240 with ticks » du run. **Profondeur : 9 jours → 4 mois.**
+
+**Pourquoi c'est LE bug qui rendait le sweep inutile** : un sweep qui ne voit que 9 jours ne
+peut pas trouver de portefeuille multi-régimes. Tout l'intérêt d'E30 est que BE25 porte juin
+pendant que FAST porte mai. Sur 9 jours il n'y a qu'un régime : la complémentarité est
+invisible **par construction**. Le classement n'était pas trop sévère, il était aveugle.
+
+**Ce que ça coûtait en calcul, et comment c'est financé** : élargir à 4 mois = ×11.3 de
+tokens, impossible sous le cap GH de 6 h. Le budget vient de `--mega-lean-grid` : `smoothing`
+× `polling_mode` passe de 70 à 6 combinaisons. Ce ne sont **pas des choix de stratégie** mais
+des hypothèses sur la façon de *lire* le prix — elles mangeaient **98.6 % du calcul** et
+dupliquaient chaque config réelle en 70 lignes quasi identiques (c'est ce qui faisait sortir
+`BSR_MCAP` n°1 sur 251k cellules et n°11 sur les cellules indépendantes). Net : ~×11 rendu,
+~×11.3 consommé ⇒ durée inchangée, sur 4 mois au lieu de 9 jours.
+
+**Trois autres correctifs du même run** :
+- `merge_and_analyze` checkout `ref: master` — il analysait avec le SHA **déclencheur**, donc
+  sans v14e.73/74 poussés pendant le run. Une section absente du rapport se lit « rien
+  trouvé » alors que c'est « pas exécuté ».
+- `verdict_par_bras()` intégré à `analyze_mega_sweep.py` : le test apparié sur cellule
+  indépendante, jugé en EV **et** en argent, est désormais imprimé à chaque run. C'est la
+  seule section lisible quand le plancher de bruit invalide le top-30.
+- `sim.py --help` était cassé (un `%` non échappé dans `--include-trail-families`).
+
+**⚠️ Conséquence sur les conclusions ci-dessous** :
+- 🔴 **La contradiction GAP24 est RÉSOLUE** — pas par un arbitrage, par le bug. Le verdict
+  « GAP24 perd » venait de 240 tokens sur 9 jours ; la validation du 5 août portait sur
+  600k lignes / 120 j. **La validation tient, le verdict du sweep ne vaut rien.**
+- 🟠 **SENT30_70 « n'apporte rien »** : même statut, mesuré sur 9 jours. Non concluant.
+- 🟠 **SCORE45** reste le meilleur candidat mais **sur 240 tokens** — à reconfirmer sur le
+  run corrigé avant tout shadow.
+
+---
+
+## ⚠️ [Aug 6, 1re passe] Dépouillement du run `31040338036` — À RELIRE (données à 8.9 %)
 
 > ⚠️ **Le run a analysé avec du code périmé.** `merge_and_analyze` a démarré à 00:46 le
 > 06/08 mais `actions/checkout` prend le SHA qui a **déclenché** le run (19:38 le 05/08),

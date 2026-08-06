@@ -5278,6 +5278,33 @@ def _mega_sweep_run(args):
             sources = [shard]
             print(f"[mega-source-shard] restricted to source='{shard}' (1/{len(_MEGA_EXT_SOURCES) if extended else len(_MEGA_SOURCES)} shards)")
     smoothings = _filter_smoothings_default(smoothings, getattr(args, "include_smoothing_artefacts", False))
+
+    # -----------------------------------------------------------------
+    # v14e.77 — OU PASSE LE CALCUL: 98.6 % sur des dimensions d'artefact
+    # -----------------------------------------------------------------
+    # `smoothing` et `polling_mode` ne sont pas des choix de strategie: ce sont
+    # des hypotheses sur la FACON DONT ON LIT le prix. 7 x 10 = 70 combinaisons
+    # par config reelle, soit 98.6 % du budget de calcul, pour une seule qui
+    # corresponde a la prod (raw / cadence 3 min).
+    #
+    # Elles coutent deux fois. En calcul: elles interdisaient d'elargir la
+    # fenetre de ticks a 4 mois sous le cap GH de 6h. En lecture: elles
+    # dupliquent chaque config reelle en 70 lignes quasi identiques, ce qui
+    # gonfle artificiellement les tests apparies — BSR_MCAP sortait n°1 sur
+    # 251k cellules "toutes sources" et n°11 sur les cellules independantes.
+    #
+    # --mega-lean-grid garde de quoi tester la robustesse (2 lissages, 3
+    # cadences) et rend le reste du budget a la PROFONDEUR D'HISTORIQUE, qui
+    # est la seule dimension ou un portefeuille type E30 peut apparaitre.
+    # Sans le flag, comportement d'avant a l'identique.
+    if getattr(args, "mega_lean_grid", False):
+        _av = len(smoothings) * len(polling_modes)
+        smoothings = [s for s in ("raw", "ema_fast") if s in smoothings] or smoothings[:1]
+        polling_modes = [p for p in ("fast", "lazy_fast", "lazy") if p in polling_modes] or polling_modes[:1]
+        _ap = len(smoothings) * len(polling_modes)
+        print(f"[mega-lean-grid] lissage x cadence: {_av} -> {_ap} combinaisons "
+              f"({_av/max(_ap,1):.1f}x de calcul rendu a la profondeur d'historique)")
+
     print(f"  sources={len(sources)} smoothings={len(smoothings)} polling={len(polling_modes)} "
           f"filters={len(filters)} age_bands={len(age_bands)} ({age_bands})")
     print(f"  per-strat configs: {len(sources)*len(smoothings)*len(polling_modes)*len(filters)*len(age_bands)}")
@@ -5346,17 +5373,45 @@ def _mega_sweep_run(args):
     universe = _mega_enrich_universe(universe, since)
     print(f"Universe: {len(universe)} unique tokens since {since}")
 
-    print("Fetching ticks...")
+    # -----------------------------------------------------------------
+    # v14e.77 — LA FENETRE DE TICKS SUIVAIT L'HORLOGE, PAS LES TRADES
+    # -----------------------------------------------------------------
+    # Avant: `start = now - 8 jours` en dur, `end = now + 1h`, pour TOUS les
+    # tokens. L'univers etait bien construit sur --mega-since (4 mois, 2717
+    # tokens) mais un token appele en juin n'avait aucun tick dans [now-8j,
+    # now+1h], donc `rs` etait vide, donc il etait absent de `ticks`, et le
+    # replay le sautait en silence (`if addr in streams_by_token`).
+    #
+    # Effet mesure sur le run 31040338036: "Universe: 2717" puis "240 with
+    # ticks" — 91 % de l'univers jete, et 9 jours de profondeur au lieu de 4
+    # mois. Un sweep qui ne voit que 9 jours ne peut PAS trouver un
+    # portefeuille type E30, dont tout l'interet est qu'une strategie porte
+    # mai pendant que l'autre porte juin. Le classement n'etait pas trop
+    # severe: il etait aveugle.
+    #
+    # Correctif: chaque token est interroge sur SA propre fenetre,
+    # [entree - 5 min, entree + horizon max + 30 min]. La requete est plus
+    # etroite qu'avant pour les tokens recents (donc plus rapide), et non vide
+    # pour les anciens.
+    # full_pool[name] = (tp_mult, sl_mult, horizon_min, be_activation)
+    _horizons = [float(v[2]) for v in full_pool.values()
+                 if isinstance(v, (tuple, list)) and len(v) > 2 and v[2]]
+    _max_h = max(_horizons) if _horizons else 240.0
+    print(f"Fetching ticks... (fenetre par token: entree -5min -> +{_max_h + 30:.0f}min)")
     ticks = {}
-    end = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
-    start = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat()
+    _sans_entree = 0
     for i, u in enumerate(universe):
         addr = u["token_address"]
+        try:
+            _e = datetime.fromisoformat(str(u["created_at"]).replace("Z", "+00:00"))
+        except Exception:
+            _sans_entree += 1
+            continue
         params = [
             ("select", "price_usd,fetched_at,source,chain"),
             ("token_address", f"eq.{addr}"),
-            ("fetched_at", f"gte.{start}"),
-            ("fetched_at", f"lte.{end}"),
+            ("fetched_at", f"gte.{(_e - timedelta(minutes=5)).isoformat()}"),
+            ("fetched_at", f"lte.{(_e + timedelta(minutes=_max_h + 30)).isoformat()}"),
             ("order", "fetched_at"),
         ] + _chain_params()
         rs = sb_get("price_ticks", params)
@@ -5366,6 +5421,15 @@ def _mega_sweep_run(args):
             ticks[addr] = {"jp": jp, "ds": ds}
         if (i+1) % 20 == 0: print(f"  {i+1}/{len(universe)}", flush=True)
     print(f"  {len(ticks)} with ticks ({_time.time()-t0:.0f}s)")
+    if _sans_entree:
+        print(f"  [WARN] {_sans_entree} tokens sans created_at exploitable")
+    # Garde-fou: si on reperd la profondeur, on veut le voir dans le log, pas
+    # le decouvrir trois runs plus tard en relisant daily_pnl_json.
+    _couverture = len(ticks) / max(len(universe), 1)
+    if _couverture < 0.5:
+        print(f"  [WARN] seulement {100*_couverture:.0f}% de l'univers a des ticks — "
+              f"le sweep tourne sur un sous-ensemble, ne pas lire son classement "
+              f"comme s'il portait sur {len(universe)} tokens")
 
     # v144.9: Jupiter coverage stats — warn when price_ticks is sparse on Jupiter.
     # price_ticks logs Jupiter at 3-min batch cadence vs live 30s polling; tokens
@@ -5632,12 +5696,23 @@ def main():
                              "shards) when source-only sharding hits the 6h cap. Default "
                              "'1/1' = no split (full pool, pre-v14e.56 behaviour). The "
                              "split is deterministic by sorted strat name index modulo N.")
+    parser.add_argument("--mega-lean-grid", action="store_true",
+                        help="v14e.77: reduit lissage x cadence de 70 a 6 combinaisons "
+                             "(raw/ema_fast x fast/lazy_fast/lazy). Ce sont des hypotheses "
+                             "de LECTURE du prix, pas des choix de strategie: elles "
+                             "consommaient 98.6%% du budget de calcul et dupliquaient chaque "
+                             "config reelle en 70 lignes quasi identiques. Le calcul rendu "
+                             "finance la profondeur d'historique (--mega-since), seule "
+                             "dimension ou un portefeuille multi-regimes peut apparaitre.")
     parser.add_argument("--include-trail-families", action="store_true",
                         help="v14e.19: opt-in to keep DTRAIL/TRAIL/DIP/PTRAIL/SPLIT/"
                              "SCALE_OUT/MOONBAG/WIDE_RUNNER families in mega-sweep. "
                              "Default excluded (documented sim artefact: live slip 47× "
-                             "paper, position_reconciler closes 50-65% before trail fires). "
-                             "Cuts sweep size by ~60% and cleans rankings.")
+                             # v14e.77: %% obligatoire — argparse applique `help % params`,
+                             # donc un '%' nu casse --help pour TOUT le parser
+                             # ("unsupported format character 'b'" sur "65% before").
+                             "paper, position_reconciler closes 50-65%% before trail fires). "
+                             "Cuts sweep size by ~60%% and cleans rankings.")
     parser.add_argument("--include-hyst", action="store_true",
                         help="v14e.20: opt-in to keep standalone `_HYST` strats. Default "
                              "excluded — paired-test on N>=55 paper main shows −8.9 to "

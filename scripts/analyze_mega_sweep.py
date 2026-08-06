@@ -169,6 +169,92 @@ def portefeuille(df, csv_path, top_k=40, taille=4, seuil_corr=0.55):
     print(f"  -> {out}")
 
 
+def verdict_par_bras(df, csv_path, cellule_ref=("jupiter", "raw", "lazy_fast")):
+    """v14e.77 — le seul verdict que ce sweep sait produire honnetement.
+
+    Le classement est le MAXIMUM de plusieurs millions de tests, et le plancher
+    de bruit montre regulierement que le sommet ne signifie rien. Mais la
+    question « ce filtre ameliore-t-il les strategies ? » se repond, elle, par
+    un test APPARIE: meme strategie, meme source, meme lissage, meme cadence,
+    meme bande d'age — seul le filtre change.
+
+    Deux precautions, apprises le 06/08:
+
+    1. Juger en EV **et** en ARGENT (n x EV). Un filtre qui gagne +8 pp d'EV en
+       ne gardant que 24 % du volume peut rapporter MOINS a mise plafonnee.
+    2. Ne pas compter les cellules « toutes sources » comme independantes. Les
+       memes trades y sont rejoues sous chaque lissage x cadence, ce qui gonfle
+       les effectifs sans ajouter d'information: BSR_MCAP sortait n°1 sur 251k
+       cellules et n°11 sur les 1 196 cellules d'une seule combinaison de
+       lecture. On affiche donc la cellule de reference, pas l'agregat.
+    """
+    besoin = {"strategy", "filter", "source", "smoothing", "polling_mode", "n", "avg_pnl_pct"}
+    if not besoin.issubset(df.columns):
+        print("  [verdict] colonnes manquantes — etape sautee")
+        return
+    cles = [c for c in ("strategy", "source", "smoothing", "polling_mode", "age_band")
+            if c in df.columns]
+
+    src, sm, poll = cellule_ref
+    ref = df[(df["source"] == src) & (df["smoothing"] == sm) & (df["polling_mode"] == poll)]
+    if len(ref) < 50:
+        print(f"  [verdict] cellule de reference {cellule_ref} absente de ce shard "
+              f"({len(ref)} lignes) — etape sautee")
+        return
+    ref = ref.copy()
+    ref["argent"] = ref["n"] * ref["avg_pnl_pct"]
+
+    base = ref[ref["filter"] == "NONE"].set_index(cles)
+    if base.empty:
+        print("  [verdict] pas de bras NONE — impossible d'apparier")
+        return
+
+    lignes = []
+    for arm in sorted(ref["filter"].unique()):
+        if arm == "NONE":
+            continue
+        j = ref[ref["filter"] == arm].set_index(cles).join(
+            base, how="inner", lsuffix="_f", rsuffix="_b")
+        if len(j) < 30:
+            continue
+        d_ev = (j["avg_pnl_pct_f"] - j["avg_pnl_pct_b"])
+        d_ar = (j["argent_f"] - j["argent_b"])
+        lignes.append({
+            "bras": arm, "paires": len(j),
+            "d_ev_median": float(d_ev.median()),
+            "d_argent_median": float(d_ar.median()),
+            "cellules_gagnees": float((d_ar > 0).mean()),
+            "volume_conserve": float((j["n_f"] / j["n_b"]).median()),
+        })
+    if not lignes:
+        print("  [verdict] aucun bras avec assez de cellules appariees")
+        return
+
+    lignes.sort(key=lambda r: -r["d_argent_median"])
+    print(f"\n  [verdict par bras] cellule {src}/{sm}/{poll}, "
+          f"{len(base):,} cellules NONE de reference")
+    print(f"    {'bras':<18}{'paires':>7}{'d_argent':>10}{'d_EV':>8}"
+          f"{'gagne':>7}{'volume':>8}")
+    print("    " + "-" * 58)
+    for r in lignes:
+        # Un bras n'est retenu que s'il gagne sur les DEUX metriques et sur la
+        # majorite des cellules. Gagner en EV en perdant en argent = le filtre
+        # coupe plus de volume qu'il n'ajoute de qualite.
+        ok = (r["d_ev_median"] > 0 and r["d_argent_median"] > 0
+              and r["cellules_gagnees"] > 0.5)
+        print(f"    {r['bras']:<18}{r['paires']:>7,}{r['d_argent_median']:>+10.0f}"
+              f"{r['d_ev_median']:>+8.2f}{r['cellules_gagnees']:>6.0%}"
+              f"{r['volume_conserve']:>7.0%}{'  <-- retenu' if ok else ''}")
+    retenus = [r["bras"] for r in lignes
+               if r["d_ev_median"] > 0 and r["d_argent_median"] > 0
+               and r["cellules_gagnees"] > 0.5]
+    print(f"    => {len(retenus)} bras retenus: {', '.join(retenus) if retenus else 'AUCUN'}")
+
+    out = csv_path.parent / f"{csv_path.stem.replace('extended','verdict_bras')}.csv"
+    pd.DataFrame(lignes).to_csv(out, index=False)
+    print(f"    -> {out}")
+
+
 def benjamini_hochberg(pvals: list[float]) -> list[float]:
     """BH FDR-controlled q-values."""
     n = len(pvals)
@@ -504,6 +590,11 @@ def main():
 
     portefeuille(df_eligible, csv_path, top_k=args.portfolio_pool,
                  taille=args.portfolio_size)
+
+    # v14e.77 — le verdict apparie passe APRES le classement volontairement:
+    # quand le plancher de bruit invalide le top-30 (cas du run 31040338036),
+    # c'est la seule section du rapport qui reste lisible.
+    verdict_par_bras(df_eligible, csv_path)
 
     # v14e.45: bi-ranking — second top-N optimisé pour les déploiements récents.
     # Gates relâchés: pas de cross_regime_robust, n_recent>=min_n_recent (15 par
