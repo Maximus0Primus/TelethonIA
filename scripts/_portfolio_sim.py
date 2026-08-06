@@ -124,3 +124,51 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# ---------------------------------------------------------------------------
+# Ajouts: quel est l'optimum a PETIT capital, et quel est le risque reel ?
+# ---------------------------------------------------------------------------
+def simuler_fixe(trades, cap0, mise_fixe, derive=0.0, cout=COUT_FIXE):
+    """Taille FIXE en $: pas de spirale de ruine, pas de composition."""
+    cap, libre, peak, mdd = cap0, cap0, cap0, 0.0
+    ouvertes, pris, saute = [], 0, 0
+    serie_perte = pire_serie = 0
+    for t0, t1, pnl in trades:
+        for o in [o for o in ouvertes if o[0] <= t0]:
+            g = o[1] * (o[2] - derive) - cout
+            cap += g; libre += o[1] + g
+            serie_perte = serie_perte + 1 if g < 0 else 0
+            pire_serie = max(pire_serie, serie_perte)
+            peak = max(peak, cap); mdd = max(mdd, (peak - cap) / peak) if peak > 0 else mdd
+            ouvertes.remove(o)
+        if libre < mise_fixe or cap < mise_fixe:
+            saute += 1; continue
+        libre -= mise_fixe; ouvertes.append((t1, mise_fixe, pnl)); pris += 1
+    for o in ouvertes:
+        cap += o[1] * (o[2] - derive) - cout
+    return cap, mdd, pris, saute, pire_serie
+
+
+if os.environ.get("EXTRA"):
+    tr = charger()
+    print("\n" + "=" * 78)
+    print("OPTIMUM A PETIT CAPITAL — taille FIXE (pas de composition, pas de ruine)")
+    print("=" * 78)
+    print(f"{'capital':<10}{'mise':<8}{'final paper':>13}{'final derive':>14}{'DD':>8}{'% rate':>8}")
+    print("-" * 62)
+    for cap0 in (100, 150, 200, 300, 500):
+        for mise in (5, 10, 20):
+            if mise * 3 > cap0:
+                continue
+            p, _, pr, sa, _ = simuler_fixe(tr, float(cap0), float(mise), 0.0)
+            d, mdd, pr2, sa2, _ = simuler_fixe(tr, float(cap0), float(mise), DERIVE)
+            pct = 100 * sa2 / max(pr2 + sa2, 1)
+            print(f"{cap0:<10,}{mise:<8}{p:>12,.0f}${d:>13,.0f}${100*mdd:>7.1f}%{pct:>7.0f}%")
+    print("\n" + "=" * 78)
+    print("RISQUE — pire serie de pertes consecutives et drawdown, capital 500$")
+    print("=" * 78)
+    for lab, der in [("paper", 0.0), ("avec derive -3.5pp", DERIVE)]:
+        c, mdd, pr, sa, ps = simuler_fixe(tr, 500.0, 20.0, der)
+        print(f"{lab:<22} final {c:>8,.0f}$   DD max {100*mdd:>5.1f}%   "
+              f"pire serie de pertes: {ps} trades d'affilee")
