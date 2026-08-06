@@ -1,5 +1,46 @@
 # Operational Backlog
 
+## ⏳ EN COURS — run `31089886117`, à dépouiller quand il finit
+
+> Lancé le **06/08 09:37 UTC**, ~5 h, 18 shards.
+> https://github.com/Maximus0Primus/TelethonIA/actions/runs/31089886117
+> **C'est le PREMIER sweep qui voit réellement 4 mois** (avant : 9 jours, cf. E33).
+
+**1. Vérifier d'abord que le correctif a bien mordu** — dans le log d'un shard :
+```
+[mega-lean-grid] lissage x cadence: 70 -> 6
+Universe: ~2700 unique tokens
+~2700 with ticks          <-- si c'est ~240, le correctif n'a PAS pris
+```
+Un `[WARN] seulement X% de l'univers a des ticks` = ne pas lire la suite, rouvrir E33.
+
+**2. Lire `analyze.out` dans CET ordre, jamais le top-30 en premier** :
+1. `plancher de bruit de selection` — si rien ne le dépasse, ne rien promouvoir.
+2. `[verdict par bras]` — **c'est la section qui décide.** Test apparié sur cellule
+   indépendante (`jupiter/raw/lazy_fast`), jugé en EV **et** en argent. Un bras n'est
+   retenu que s'il gagne sur les deux + majorité des cellules + les 3 critères temporels.
+3. Colonnes `duree` / `mois+` / `top_mois` : elles deviennent **opposables** à partir de
+   3 mois. Sur ce run elles le seront pour la 1re fois. Un bras à `top_mois > 60%` gagne
+   grâce à un seul mois, pas grâce à un edge.
+4. `[portefeuille]` — c'est maintenant qu'il peut enfin trouver quelque chose : la
+   complémentarité inter-mois était invisible sur 9 jours.
+
+**3. Rejuger les 3 verdicts requalifiés** (mesurés sur 8.9 % de l'univers, sans valeur) :
+- **SCORE45** — candidat n°1 à confirmer. Si confirmé sur 4 mois avec `mois+` ≥ 3/4 :
+  cloner les 3 `PF_*` en `_S45` **en shadow**, pas en promotion.
+- **GAP24** — le sweep le disait négatif, la validation 120 j le dit positif. Le sweep
+  avait tort **par construction**. Trancher sur les 4 mois.
+- **SENT30_70** — filtre du deck en prod, « n'apporte rien » était non concluant.
+
+**4. Si le portefeuille sort 3-4 configs décorrélées avec 4 mois positifs** : c'est le
+premier candidat sérieux à E30 depuis sa découverte manuelle. Le comparer à E30 en
+**apparié**, pas en absolu.
+
+⚠️ Un shard qui dépasse 350 min est tué. `fail-fast: false` + le merge encaisse les CSV
+manquants, mais si plusieurs shards tombent, passer de 6 à 8 tiers avant de relancer.
+
+---
+
 ## 🎯 LA MEILLEURE STRATÉGIE CONNUE (état au 2026-08-05)
 
 ```
