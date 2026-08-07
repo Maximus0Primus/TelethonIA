@@ -285,3 +285,36 @@ on ne cherche pas la combinaison, on empile des effets déjà prouvés.
 `whale_new_entries` = "seul signal robuste confirmé" du research_log, mais rempli à
 **0%** sur les trades RT. `ml_pred` 0%. `unique_kols` toujours = 1. Trois pistes du
 backlog mortes en une requête de fill-rate.
+
+### L6. Un filtre doit être satisfiable AU MOMENT où il est évalué
+Le portefeuille E30 (v14e.75) filtre sur la bande de sentiment. Le sentiment était lu
+dans `kol_mentions`, table écrite par le **batch** : sur 1724 mentions/7j, **zéro** ligne
+écrite en moins de 60 s après le message (médiane 29.3 min). Le RT décide en ~7 s.
+Le SELECT ne trouvait donc jamais rien, `_msg_sentiment` renvoyait `None`, et le contrat
+"None = gate non satisfait" rejetait **les 3 stratégies du deck à chaque call**.
+Résultat : 58 détections, 0 ouverture main, 0 alerte pendant 21 h — **sans une seule
+ligne d'erreur**, parce que l'alerte est gardée par `if opened > 0`.
+
+⇒ Quand une stratégie ajoute un filtre, se demander **qui écrit ce champ, et quand**,
+par rapport à l'instant où le filtre est évalué. Un champ rempli en aval du point de
+décision rend le gate insatisfiable, pas juste imprécis.
+⇒ Le test qui l'attrape en une requête : `percentile_cont` du lag `created_at − message_date`
+sur la table source. Même famille que L5 (fill-rate), mais sur l'axe **temps** et non
+sur l'axe **remplissage** : ici le champ est rempli à 100 %, juste trop tard.
+
+### L7. Une panne silencieuse se cherche par le compteur, pas par les logs d'erreur
+Aucune exception, aucun warning, bot Telegram joignable, identifiants présents, service
+`active` avec 0 restart : tout était vert. Le seul indice était un **compteur à zéro**
+dans une ligne INFO de routine — `opened 0 rows + 314 shadow`.
+⇒ Devant "ça ne marche plus" sans erreur, ne pas grep `ERROR` : **remonter le garde**
+qui décide de l'effet manquant (`if opened > 0`) et vérifier sa condition.
+⇒ Corollaire : `_send()` échoue en `logger.debug` quand token/chat_id manquent — une
+alerte peut mourir sans laisser de trace au niveau INFO. Vérifier l'env, pas les logs.
+
+### L8. Corriger le symptôme rapporté ne prouve pas qu'on a corrigé la cause
+v14e.76 (la veille) avait **déjà identifié** que les `PF_*` étaient rejetées faute de
+champs — mais uniquement dans le chemin d'**affichage** de l'alerte, qui était le symptôme
+rapporté. La même cause, dans le chemin d'**ouverture**, faisait un dégât bien plus grave
+et n'a pas été cherchée.
+⇒ Quand on trouve "ce filtre rejette tout", chercher **tous** les appelants de ce filtre
+avant de refermer, pas seulement celui qui a produit le ticket.
