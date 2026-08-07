@@ -193,6 +193,32 @@ jobs:
           print(f"\nConcatenated -> _mega_sweep_extended.csv ({len(out)} rows total)")
           if skipped:
               print(f"Skipped empty shards: {skipped}")
+
+          # v14e.81 — dire QUELS shards manquent, et si ca invalide les verdicts.
+          #
+          # Un shard dont le job meurt ne produit pas d'artefact: il disparait
+          # silencieusement de la liste, et GitHub passe le RUN ENTIER en rouge.
+          # Le rapport, lui, ne disait rien — il fallait fouiller les jobs pour
+          # savoir si le rouge etait grave. Or les deux verdicts apparies (par
+          # bras et par sortie) se lisent tous les deux sur la cellule
+          # canonique jupiter/raw/lazy_fast: perdre un shard `both` ne les
+          # touche pas, perdre un shard `jupiter` les ampute.
+          attendus = {f"{src}_s{i}-6" for src in ("jupiter", "dexscreener", "both")
+                      for i in range(1, 7)}
+          trouves = {p.replace('_mega_sweep_extended_', '').replace('.csv', '')
+                     for p in shards}
+          manquants = sorted(attendus - trouves)
+          print(f"\nShards: {len(trouves)}/{len(attendus)}")
+          if manquants:
+              print(f"  MANQUANTS: {', '.join(manquants)}")
+              jup = [m for m in manquants if m.startswith('jupiter')]
+              if jup:
+                  print(f"  ::warning::cellule canonique amputee ({', '.join(jup)}) — "
+                        f"les verdicts apparies portent sur un univers partiel")
+              else:
+                  print("  -> aucun shard jupiter perdu: les verdicts apparies "
+                        "(par bras ET par sortie) sont INTACTS. Le rouge du run "
+                        "ne concerne que le classement, deja du bruit.")
           # Surface to next step
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
               f.write(f"shards_found={len(shards)}\n")
