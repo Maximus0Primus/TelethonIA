@@ -347,6 +347,148 @@ def verdict_par_bras(df, csv_path, cellule_ref=("jupiter", "raw", "lazy_fast")):
     print(f"    -> {out}")
 
 
+def verdict_par_exit(df, csv_path, cellule_ref=("jupiter", "raw", "lazy_fast"),
+                     n_permutations=200, min_cellules=8, graine=12345):
+    """v14e.80 — le meme test apparie, mais sur l'axe STRATEGIE.
+
+    Constat du 07/08: le sweep possedait deja l'instrument qui marche, et ne
+    l'appliquait qu'a UN des deux axes. Les filtres avaient un verdict apparie
+    opposable ; les strategies n'avaient qu'un classement — et c'est le
+    classement qui est du bruit.
+
+    Le classement compare des configs mesurees sur des TOKENS DIFFERENTS
+    (filtre, bande d'age, hypothese de lecture du prix differents). Cette
+    variance inter-cellules est enorme devant l'ecart reel entre deux sorties,
+    et c'est elle que le maximum de ~1 M de tests va chercher. D'ou le resultat
+    du run 31089886117: meilleure config 23.90 pts pour un plancher de bruit a
+    24.88 — le sommet sous le plancher, malgre 4 mois de donnees.
+
+    Ici on differencie cette variance: DANS une cellule (meme filtre, meme
+    bande d'age, meme source/lissage/cadence), toutes les sorties voient les
+    MEMES tokens. On mesure l'ecart de chaque sortie a la MEDIANE de sa
+    cellule — pas a une sortie de reference arbitraire — puis on prend la
+    mediane de ces ecarts sur toutes les cellules.
+
+    Mesure sur ce meme run, cellule jupiter/raw/lazy_fast, 601 sorties:
+
+        classement de configs : meilleur  23.90  vs plancher  24.88   -> 0 survivant
+        apparie par sortie    : meilleur    732  vs plancher    106   -> 7x au-dessus
+
+    Le controle de permutation est indispensable et fait partie du test (regle
+    L2): on rebat les etiquettes de strategie A L'INTERIEUR de chaque cellule,
+    ce qui detruit le lien sortie -> resultat en conservant exactement la
+    structure des cellules et les effectifs. Le p95 du MAXIMUM sous H0 donne le
+    plancher, et absorbe la multiplicite des ~600 sorties testees.
+
+    Les clones ETH_* d'une sortie SOL rendent des chiffres identiques sur des
+    donnees Solana (seul le gate de chaine differe, et il ne mord pas ici). On
+    les regroupe pour ne pas faire croire a plusieurs decouvertes independantes.
+    """
+    besoin = {"strategy", "filter", "source", "smoothing", "polling_mode", "n", "avg_pnl_pct"}
+    if not besoin.issubset(df.columns):
+        print("  [verdict sortie] colonnes manquantes — etape sautee")
+        return
+
+    src, sm, poll = cellule_ref
+    ref = df[(df["source"] == src) & (df["smoothing"] == sm)
+             & (df["polling_mode"] == poll)].copy()
+    if len(ref) < 200:
+        print(f"  [verdict sortie] cellule {cellule_ref} trop petite "
+              f"({len(ref)} lignes) — etape sautee")
+        return
+    ref["argent"] = ref["n"] * ref["avg_pnl_pct"]
+
+    cellule = [c for c in ("filter", "age_band") if c in ref.columns]
+    if not cellule:
+        print("  [verdict sortie] pas de colonne de cellule — etape sautee")
+        return
+
+    def _ecarts(d):
+        g = d.groupby(cellule)
+        d = d.assign(
+            _d_arg=d["argent"] - g["argent"].transform("median"),
+            _d_ev=d["avg_pnl_pct"] - g["avg_pnl_pct"].transform("median"),
+        )
+        out = d.groupby("strategy").agg(
+            cellules=("_d_arg", "size"),
+            d_argent=("_d_arg", "median"),
+            d_ev=("_d_ev", "median"),
+            cellules_gagnees=("_d_arg", lambda s: float((s > 0).mean())),
+            n_median=("n", "median"),
+        )
+        return out[out["cellules"] >= min_cellules]
+
+    reel = _ecarts(ref)
+    if reel.empty:
+        print(f"  [verdict sortie] aucune sortie avec >= {min_cellules} cellules")
+        return
+
+    rng = np.random.default_rng(graine)
+    maxima = []
+    for _ in range(n_permutations):
+        perm = ref.copy()
+        perm["strategy"] = perm.groupby(cellule)["strategy"].transform(
+            lambda s: rng.permutation(s.values))
+        h0 = _ecarts(perm)
+        if not h0.empty:
+            maxima.append(float(h0["d_argent"].max()))
+    plancher = float(np.percentile(maxima, 95)) if maxima else float("inf")
+
+    # Regularite temporelle, memes disqualifications que le verdict par bras.
+    if "daily_pnl_json" in ref.columns:
+        prof = (ref.groupby("strategy")["daily_pnl_json"]
+                   .apply(lambda s: np.median([profil_temporel(v)[1] for v in s])))
+        reel["mois"] = prof
+        reel["mois_positifs"] = (ref.groupby("strategy")["daily_pnl_json"]
+                                    .apply(lambda s: np.median([profil_temporel(v)[2] for v in s])))
+        reel["part_meilleur_mois"] = (ref.groupby("strategy")["daily_pnl_json"]
+                                         .apply(lambda s: np.median([profil_temporel(v)[3] for v in s])))
+    _mois_max = float(reel["mois"].max()) if "mois" in reel.columns else 0
+    _regularite_jugeable = _mois_max >= 3
+
+    survit = (reel["d_argent"] > plancher) & (reel["d_ev"] > 0) & (reel["cellules_gagnees"] > 0.5)
+    if _regularite_jugeable:
+        survit &= (reel["mois_positifs"] >= reel["mois"] - 1) & (reel["part_meilleur_mois"] <= 0.6)
+    retenues = reel[survit].sort_values("d_argent", ascending=False)
+
+    print(f"\n  [verdict par sortie] cellule {src}/{sm}/{poll}, "
+          f"{ref.groupby(cellule).ngroups} cellules, {reel.shape[0]} sorties")
+    print(f"    plancher de bruit ({n_permutations} permutations intra-cellule, p95 du max): "
+          f"{plancher:+,.0f}")
+    print(f"    meilleure sortie reelle                                       : "
+          f"{reel['d_argent'].max():+,.0f}")
+    if reel["d_argent"].max() <= plancher:
+        print("    !! AUCUNE sortie ne depasse le plancher — l'axe sortie est du bruit "
+              "sur ce run. Ne rien promouvoir.")
+    else:
+        # Les clones ETH_* d'une sortie SOL donnent des chiffres identiques ici.
+        vus, familles = set(), []
+        for nom, r in retenues.iterrows():
+            cle = (round(r["d_argent"], 3), round(r["d_ev"], 3), int(r["cellules"]))
+            if cle in vus:
+                continue
+            vus.add(cle)
+            familles.append((nom, r))
+        print(f"    => {len(retenues)} sorties au-dessus du plancher "
+              f"({len(familles)} apres regroupement des clones)")
+        print(f"    {'sortie':<40}{'cell':>6}{'d_argent':>10}{'d_EV':>8}"
+              f"{'gagne':>7}{'n_med':>7}{'mois+':>7}{'top_mois':>9}")
+        print("    " + "-" * 94)
+        for nom, r in familles[:15]:
+            _m = (f"{int(r['mois_positifs'])}/{int(r['mois'])}"
+                  if "mois" in reel.columns else "-")
+            _tm = f"{r['part_meilleur_mois']:.0%}" if "part_meilleur_mois" in reel.columns else "-"
+            print(f"    {nom[:40]:<40}{int(r['cellules']):>6}{r['d_argent']:>+10.0f}"
+                  f"{r['d_ev']:>+8.2f}{r['cellules_gagnees']:>6.0%}"
+                  f"{r['n_median']:>7.0f}{_m:>7}{_tm:>9}")
+    if not _regularite_jugeable:
+        print(f"    (fenetre de {_mois_max:.0f} mois: regularite non opposable, il en faut 3+)")
+
+    out = csv_path.parent / f"{csv_path.stem.replace('extended', 'verdict_sortie')}.csv"
+    reel.assign(plancher=plancher, retenue=survit).to_csv(out)
+    print(f"    -> {out}")
+
+
 def benjamini_hochberg(pvals: list[float]) -> list[float]:
     """BH FDR-controlled q-values."""
     n = len(pvals)
@@ -714,6 +856,7 @@ def main():
     # quand le plancher de bruit invalide le top-30 (cas du run 31040338036),
     # c'est la seule section du rapport qui reste lisible.
     verdict_par_bras(df_eligible, csv_path)
+    verdict_par_exit(df_eligible, csv_path)
 
     # v14e.45: bi-ranking — second top-N optimisé pour les déploiements récents.
     # Gates relâchés: pas de cross_regime_robust, n_recent>=min_n_recent (15 par
