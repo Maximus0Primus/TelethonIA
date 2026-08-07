@@ -423,15 +423,42 @@ def verdict_par_exit(df, csv_path, cellule_ref=("jupiter", "raw", "lazy_fast"),
         print(f"  [verdict sortie] aucune sortie avec >= {min_cellules} cellules")
         return
 
+    # Permutations vectorisees. Deux observations rendent la boucle naive inutile:
+    #
+    #  1. `_d_arg` par ligne est INVARIANT sous permutation intra-cellule — la
+    #     mediane d'une cellule ne depend pas de l'etiquette portee par chaque
+    #     ligne. On le calcule donc UNE fois, et une permutation se reduit a
+    #     reaffecter les etiquettes.
+    #  2. Sous H0 on n'a besoin que du MAXIMUM des medianes par strategie, pas
+    #     des quatre colonnes de `_ecarts`.
+    #
+    # La version pandas (groupby().transform(lambda) x 200) depassait 2 min sur
+    # le CSV fusionne, pour un job dont le budget total est de 60 min.
+    g = ref.groupby(cellule)
+    d_arg = (ref["argent"] - g["argent"].transform("median")).to_numpy(dtype=float)
+    codes_cellule = g.ngroup().to_numpy()
+    codes_strat, _ = pd.factorize(ref["strategy"])
+    tri = np.argsort(codes_cellule, kind="stable")
+    d_arg_tri = d_arg[tri]
+    cell_tri = codes_cellule[tri]
+    strat_tri = codes_strat[tri]
+    n_strat = int(codes_strat.max()) + 1
+    # Une sortie n'est comparable que si elle apparait dans assez de cellules;
+    # le meme seuil doit s'appliquer sous H0, sinon le plancher est tire vers le
+    # haut par des strategies vues 2 fois.
+    assez = np.bincount(codes_strat, minlength=n_strat) >= min_cellules
+
     rng = np.random.default_rng(graine)
     maxima = []
     for _ in range(n_permutations):
-        perm = ref.copy()
-        perm["strategy"] = perm.groupby(cellule)["strategy"].transform(
-            lambda s: rng.permutation(s.values))
-        h0 = _ecarts(perm)
-        if not h0.empty:
-            maxima.append(float(h0["d_argent"].max()))
+        # lexsort par (cle aleatoire, cellule) => ordre aleatoire DANS chaque
+        # cellule; reindexer les etiquettes revient a les rebattre cellule par
+        # cellule, en conservant exactement les effectifs.
+        ordre = np.lexsort((rng.random(len(cell_tri)), cell_tri))
+        s = pd.Series(d_arg_tri).groupby(strat_tri[ordre]).median()
+        s = s[assez[s.index.to_numpy()]]
+        if len(s):
+            maxima.append(float(s.max()))
     plancher = float(np.percentile(maxima, 95)) if maxima else float("inf")
 
     # Regularite temporelle, memes disqualifications que le verdict par bras.
