@@ -58,11 +58,24 @@ E30 reste une découverte manuelle que le sweep ne reproduit pas.
       → Les passer **en shadow** et comparer en apparié. ⚠️ Path-dépendantes ⇒ exposees au
       piège d'E20b même après le contrôle multi-sources. **Pas de promotion directe.**
 
-### ⏳ Run `31147456647` en cours
+### ⏳ Run `31147456647` en cours — il aura `verdict_par_exit` SANS relance
 
-Lancé le **07/08 04:27 UTC**, SHA `24833b6` — inclut **v14e.78** (`total_at_cap` exposé au lieu
-d'être moyenné). Fin attendue ~09:30 UTC. Même protocole de lecture que ci-dessus.
-⚠️ Un run GH analyse avec le SHA qui l'a **déclenché** : v14e.79 n'y est pas.
+Lancé le **07/08 04:27 UTC**, SHA `24833b6`. Fin des shards attendue **~09:30 UTC**,
+résultats **~09:45 UTC**.
+
+✅ **Rien à arrêter ni à relancer.** Le workflow a deux politiques de checkout délibérément
+distinctes (v14e.77) : les shards gardent le SHA déclencheur, mais `merge_and_analyze` fait
+`checkout ref: master` **au moment où il démarre**. Comme v14e.80 est déjà sur master, l'analyse
+prendra `verdict_par_exit` toute seule. C'est exactement le scénario pour lequel ce mécanisme
+a été ajouté (des correctifs poussés *pendant* les 5 h avaient été ignorés par le merge).
+
+⚠️ `sweep-both-s6/6` est mort à 05:59 (runner interrompu, logs perdus). 1 shard sur 18 :
+`fail-fast: false` + `if: always()` sur le merge ⇒ toléré. La source `both` est en outre la
+moins utile (elle mélange les sources, cf. `price_ticks_multisource_backtest_trap`).
+Si **plusieurs** shards tombent au prochain run, passer de 6 à 8 tiers.
+
+Lecture : même protocole qu'en tête, **plus** la nouvelle section `[verdict par sortie]`
+(plancher de permutation + top des sorties appariées).
 
 ### Reste du backlog ouvert (inchangé)
 
