@@ -114,6 +114,26 @@ token** `SANSLOCK` vs `LOCK15`. Si l'écart reste ≤ 1 pp → **retirer le LOCK
 version simple. Si `LOCK15` décroche → pénalité d'exécution confirmée, et la famille BE+LOCK
 est à abandonner malgré son excellent sim.
 
+### ⏳ Run `31179027155` — le premier sweep avec les stops correctement bookés
+
+Lancé le **07/08 12:38 UTC** sur le SHA **`6643678`** (v14e.84). 18 shards démarrés.
+Fin des shards attendue **~17:40 UTC**, résultats **~18:00 UTC**.
+
+C'est le premier run où **les shards ET l'analyse** portent tous les correctifs :
+- **v14e.84** (`_mega_gap_through`) dans les shards — l'écart tombe de **+11.71 à −1.40 pp** ;
+- **v14e.80/82** (`verdict_par_exit` + exclusion des artefacts) dans le merge, qui suit master.
+
+**À lire dans cet ordre :**
+1. `2734 with ticks` — contrôle d'instrument, comme d'habitude.
+2. `[verdict par bras]` — `SENT_NOHYPE` tient-il toujours ? Il ne dépend pas des stops,
+   il devrait être stable. Si **lui** bouge, c'est qu'autre chose ne va pas.
+3. `[verdict par sortie]` — **c'est là que ça se joue.** Le biais n'était pas uniforme :
+   il flattait les stratégies à stops. `BE25_LOCK15_TP200_SL40` (SL −40 % + BE + LOCK,
+   trois mécanismes de stop) était la plus exposée. **Si elle reste en tête après
+   correction, l'edge est réel ; si elle décroche, E36 était un artefact de booking.**
+4. Comparer l'EV absolue au réel (`paper_trades`) **avant** tout chiffrage en euros —
+   c'est ce contrôle qui a tout révélé, il doit devenir systématique.
+
 ### 🚨 E37 · L'EV ABSOLUE DU SWEEP EST FAUSSE — aucun chiffrage en euros n'est possible
 
 Trouvé en voulant chiffrer un gain mensuel. Mêmes stratégies, même fenêtre (13/04 → 07/08),
