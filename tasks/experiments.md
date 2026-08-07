@@ -698,6 +698,72 @@ gagner 20 % d'EV en plus ne déplace pas le plafond, ça le déplace de 20 %.
 
 ---
 
+## ⚠️ E36 · QUELLE EST LA MEILLEURE SORTIE ? — `BE25_LOCK15_TP200_SL40_4H_NZ_S40`, avec une reserve d'execution
+
+- **Question** (user) : « c'est quoi la meilleure, il faut être sûr que ce n'est pas un artefact,
+  et la vérifier nous-mêmes en mode deck ».
+
+### 1. Ne pas prendre la ligne du haut
+Prendre le 1er d'un tableau de 542, c'est le piège de sélection lui-même. On décompose.
+À **TP et horizon fixés**, effet du LOCK (EV %, filtre NONE) :
+
+| TP / horizon | LOCK5 | LOCK10 | **LOCK15** | LOCK20 | LOCK25 |
+|---|---|---|---|---|---|
+| TP80 30m | 6.36 | 8.58 | **9.35** | | |
+| TP100 30m | | **8.84** | 7.88 | 8.63 | |
+| TP120 30m | | 8.35 | **8.88** | | |
+| TP150 30m | | | **9.39** | 7.12 | |
+| TP200 4H | | 8.08 | **9.10** | | 6.63 |
+
+**LOCK15 gagne 4 comparaisons sur 6.** ⇒ la note de `strategies.py:428` (« sweet spot LOCK10,
+LOCK15-20 increasingly hurt », avr. 26) n'était vraie **qu'au TP100** et a été généralisée à
+tort. L'**horizon ne compte quasi pas** (EV moyenne 7.48 / 7.55 / 7.53 pour 30m / 4H / T2H).
+
+### 2. Le meilleur, et pourquoi
+| | EV jup | EV dsc | **écart** | profil mensuel | corr. au deck |
+|---|---|---|---|---|---|
+| **`BE25_LOCK15_TP200_SL40_4H_NZ_S40`** | **10.16** | 10.21 | **−0.04** | +6.4/+4.9/+13.5/+9.7/**+15.5** | **0.56–0.65** |
+| `BE25_LOCK15_TP150_SL40_T2H` | 9.55 | 9.85 | −0.30 | +3.9/+6.4/+13.7/+8.2/+10.0 | 0.61–0.69 |
+| `BE25_TP80_SL30` *(deck)* | 6.46 | 6.73 | −0.28 | +4.8/+5.0/+9.5/+4.2/+8.3 | — |
+
+Il gagne sur **quatre** critères indépendants : EV la plus haute, **meilleur accord
+multi-sources de tout le tableau** (−0.04 — le test qui a tué E20b), **5/5 mois positifs** avec
+le meilleur pire-mois (+4.9), et la **plus faible corrélation au deck actuel**.
+⚠️ `BE25_LOCK15_TP150_SL40_T2H` est à **0.90** de corrélation avec lui : ce sont des quasi-doublons,
+on en prend **un seul**. Le deck actuel, lui, est très redondant (`BE25_TP80_SL30` ↔
+`BE25_LOCK10_TP100_SL30_S40` = **0.96**, ↔ `FAST` = 0.84).
+
+### 3. Artefact ? Non pour les données, OUI pour l'exécution
+Ce qui **innocente** : `BE`/`LOCK` ne sont pas dans `TRAIL_KEYS` (`family_realism` = 1.0) ;
+LOCK déplace un niveau de stop — **une seule vente**, pas le multi-sell qui vaut « 47x slip »
+aux familles trail ; accord multi-sources ρ = 0.987 sur la famille, −0.04 sur ce candidat.
+
+⚠️ Ce qui **charge** — le seul test qui touche l'exécution réelle, apparié sim↔live par token :
+
+| famille | stratégie | paires | sim | live | drift |
+|---|---|---|---|---|---|
+| **LOCK** | `BE15_LOCK5_TP50_SL30` | 32 | +2.91 % | **−1.98 %** | **−4.89 pp** |
+| **LOCK** | `BE25_LOCK10_TP100_SL30_NZ_S40` | 30 | +2.31 % | **−1.23 %** | **−3.54 pp** |
+| sans LOCK | `BE25_TP80_SL30` | 145 | −0.99 % | −2.89 % | −1.90 pp |
+| sans LOCK | `FAST_TP50_SL30` | 144 | +0.78 % | +0.69 % | −0.09 pp |
+
+**Les deux LOCK passées en live sont devenues négatives.** Le drift LOCK (−3.5 à −4.9 pp) est
+~3 pp pire que celui des sorties propres — cohérent avec le mécanisme : chaque déclencheur
+intra-trade supplémentaire paie un slippage que le sim sous-estime. **Le sweep ne modélise pas
+ce coût.**
+Réserves sur cette charge : N = 30-32 paires seulement ; c'est du LOCK5/LOCK10 à TP50/TP100,
+pas du LOCK15 à TP200 ; et cette période live tournait à des positions de $1 où la friction
+atteignait ~14 %.
+
+### Verdict
+✅ **Meilleure sortie connue : `BE25_LOCK15_TP200_SL40_4H_NZ_S40`.** Attente réaliste en live
+≈ **10.2 − 4 ≈ +6 %/trade**, contre ≈ 6.5 − 1.9 ≈ **+4.6 %** pour `BE25_TP80_SL30` du deck.
+Elle reste devant, mais l'écart fond de ~3.7 pp à ~1.5 pp une fois l'exécution payée.
+❌ **Ne pas promouvoir en live sur ces chiffres.** ▶️ **En shadow**, et mesurer le drift réel du
+LOCK15 — c'est la seule inconnue qui reste, et elle est décisive.
+
+---
+
 ## Journal des sessions
 
 ### 2026-08-05 — session fondatrice du registre
