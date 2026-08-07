@@ -1,50 +1,54 @@
 # Operational Backlog
 
-## ⏳ EN COURS — run `31089886117`, à dépouiller quand il finit
+## ✅ DÉPOUILLÉ — run `31089886117` (le premier sweep qui voit vraiment 4 mois)
 
-> Lancé le **06/08 09:37 UTC**, ~5 h, 18 shards.
-> https://github.com/Maximus0Primus/TelethonIA/actions/runs/31089886117
-> **C'est le PREMIER sweep qui voit réellement 4 mois** (avant : 9 jours, cf. E33).
+> Lancé le **06/08 09:37 UTC**, fini **14:33 UTC**, 18 shards + merge tous verts.
+> SHA `29c0100`. Dépouillé le **07/08**. Détail complet : **E34** dans `tasks/experiments.md`.
 
-**1. Vérifier d'abord que le correctif a bien mordu** — dans le log d'un shard :
+**1. Contrôle d'instrument — PASSÉ** (c'était le point bloquant de la session du 06/08) :
 ```
-[mega-lean-grid] lissage x cadence: 70 -> 6
-Universe: ~2700 unique tokens
-~2700 with ticks          <-- si c'est ~240, le correctif n'a PAS pris
+Universe: 2734 unique tokens since 2026-04-13T20:00:00Z
+  2734 with ticks (1135s)        <-- 100 %, contre 8.9 % au run precedent
 ```
-Un `[WARN] seulement X% de l'univers a des ticks` = ne pas lire la suite, rouvrir E33.
+Aucun `[WARN]`. Le correctif v14e.77 a mordu dans le run réel. **E33 est clos.**
 
-**2. Lire `analyze.out` dans CET ordre, jamais le top-30 en premier** :
-1. `plancher de bruit de selection` — si rien ne le dépasse, ne rien promouvoir.
-2. `[verdict par bras]` — **c'est la section qui décide.** Test apparié sur cellule
-   indépendante (`jupiter/raw/lazy_fast`), jugé en EV **et** en argent. Un bras n'est
-   retenu que s'il gagne sur les deux + majorité des cellules + les 3 critères temporels.
-3. Colonnes `duree` / `mois+` / `top_mois` : elles deviennent **opposables** à partir de
-   3 mois. Sur ce run elles le seront pour la 1re fois. Un bras à `top_mois > 60%` gagne
-   grâce à un seul mois, pas grâce à un edge.
-4. `[portefeuille]` — c'est maintenant qu'il peut enfin trouver quelque chose : la
-   complémentarité inter-mois était invisible sur 9 jours.
+**2. Le classement reste du bruit — et la question est tranchée pour de bon.**
+Plancher **24.88 pts**, meilleure config **23.90 pts**, **0/962 802** au-dessus. Avec 11× plus
+d'univers, le top-30 est *toujours* sous le plancher ⇒ ce n'était pas un manque de données,
+c'est le classement par max qui est structurellement du dredging. **Ne plus jamais lire le
+top-30 comme un résultat.** Ce qui, en revanche, s'est débloqué : `cross_regime_robust` passe
+de **0 à 59 138** configs, et `mois+`/`top_mois` sont enfin opposables.
 
-**3. Rejuger les 3 verdicts requalifiés** (mesurés sur 8.9 % de l'univers, sans valeur) :
-- **SCORE45** — candidat n°1 à confirmer. Si confirmé sur 4 mois avec `mois+` ≥ 3/4 :
-  cloner les 3 `PF_*` en `_S45` **en shadow**, pas en promotion.
-- **GAP24** — le sweep le disait négatif, la validation 120 j le dit positif. Le sweep
-  avait tort **par construction**. Trancher sur les 4 mois.
-- **SENT30_70** — filtre du deck en prod, « n'apporte rien » était non concluant.
+**3. `[verdict par bras]` (apparié, 2 404 cellules) : 1 bras retenu sur 24 → `SENT_NOHYPE`.**
 
-**4. Si le portefeuille sort 3-4 configs décorrélées avec 4 mois positifs** : c'est le
-premier candidat sérieux à E30 depuis sa découverte manuelle. Le comparer à E30 en
-**apparié**, pas en absolu.
+| bras | Δ$/j | ΔEV | volume | mois+ | |
+|---|---|---|---|---|---|
+| **SENT_NOHYPE** (`s < 0.70`) | **+1.8** | +0.51 | **96 %** | 4/5 | ✅ retenu |
+| SENT30_70 (`0.30 ≤ s < 0.70`) | −4.2 | +0.22 | 27 % | 3/5 | ❌ **en prod sur le deck** |
+| GAP24 | −2.9 | **+1.06** | 42 % | 3/5 | ❌ EV bonne, argent négatif |
+| SCORE45 | −4.0 | −0.69 | 34 % | 4/5 | ❌ `top_mois 66 %` |
 
-⚠️ Un shard qui dépasse 350 min est tué. `fail-fast: false` + le merge encaisse les CSV
-manquants, mais si plusieurs shards tombent, passer de 6 à 8 tiers avant de relancer.
+⇒ **C'est la borne HAUTE du sentiment qui paie, pas la bande.** `SENT_NOHYPE` domine
+`SENT30_70` sur l'EV *et* sur le volume. Le U inversé d'E28 n'est pas démenti (`SENT50_60` a
+la meilleure EV du tableau, +7.50, 5/5 mois) mais à mise plafonnée **argent = n × EV** :
+couper 95 % du volume coûte −$49/j. Même leçon qu'E30, sur un axe indépendant.
 
-### 🔴 NON VÉRIFIÉ — la seule chose que la session du 06/08 n'a pas pu clore
+**4. Portefeuille : rien.** 1 seule config décorrélée, TOTAL = meilleure seule (**1.00×**).
+E30 reste une découverte manuelle que le sweep ne reproduit pas.
 
-Le correctif de fenêtre de ticks est prouvé **en SQL** (242 → 2 734 tokens) et **en test**,
-mais **la ligne `~2700 with ticks` du run réel n'a jamais été vue** : le fetch prend 30-40 min
-et la session a été fermée avant. **C'est le tout premier point à contrôler**, avant toute
-lecture de résultat. Si le log affiche ~240, rien de ce run n'est exploitable.
+### ▶️ Prochaine action concrète (non faite)
+
+- [ ] Cloner les 3 `PF_*` en variantes **sans borne basse** (`max_sentiment` seul, `min_sentiment`
+      retiré) — **en shadow**, puis comparaison **appariée** au deck actuel.
+      ⚠️ **Pas de promotion directe** : un seul run, et ce changement multiplierait le volume de
+      trades du deck par ~3.5, ce qui le pousse vers le plafond de capacité d'E31.
+      ⚠️ Effet de bord souhaitable : le deck n'ouvre aujourd'hui que ~4 trades/jour (cf. v14e.79).
+
+### ⏳ Run `31147456647` en cours
+
+Lancé le **07/08 04:27 UTC**, SHA `24833b6` — inclut **v14e.78** (`total_at_cap` exposé au lieu
+d'être moyenné). Fin attendue ~09:30 UTC. Même protocole de lecture que ci-dessus.
+⚠️ Un run GH analyse avec le SHA qui l'a **déclenché** : v14e.79 n'y est pas.
 
 ### Reste du backlog ouvert (inchangé)
 
@@ -56,6 +60,29 @@ lecture de résultat. Si le log affiche ~240, rien de ce run n'est exploitable.
 - [ ] **`/simulate-live` sur `SCALP_TP20_NOSL`** — la piste du 05/07 (« on a testé les mauvais
       chevaux en live »), jamais faite. Voir section dédiée plus bas.
 - [ ] 🔴 **Sweep ATA cassé** (quota Helius, 44 ATA / ~$13.65 bloqués) — en attente user.
+- [ ] 🟠 **Timeouts SQL chroniques** (`57014`) à chaque cycle depuis au moins le 05/08 :
+      `compute KOL scores`, `paper_trader: summary`, `kol_attribution` échouent
+      systématiquement (~13/h). Conséquence connue : le scoring KOL tourne sur des scores
+      **vides**. Ne cause pas la panne d'alertes de v14e.79, c'est un problème distinct.
+      Suspect n°1 : le mega sweep qui martèle `price_ticks` en parallèle. À instrumenter.
+
+### Fait le 07/08
+
+- ✅ 🔴 **Le deck n'ouvrait AUCUN trade main depuis 21 h — panne totalement silencieuse.**
+      58 détections RT, 0 ouverture, 0 alerte, **0 erreur**. Le gate sentiment des 3 `PF_*`
+      lisait `kol_mentions`, écrite par le batch ~30 min après le message (0 ligne sur 1724
+      sous 60 s) alors que le RT décide en ~7 s ⇒ `None` ⇒ rejet systématique. L'alerte étant
+      gardée par `if opened > 0`, un seul bug produisait deux symptômes.
+      Corrigé **v14e.79** (`dce5e49`), déployé et vérifié en prod : sentiment calculé **en
+      ligne** depuis le texte du message (fonction pure, pas du look-ahead), coût **0 ms**.
+      ⚠️ Attendre **~4 alertes/jour** : le deck E30 est très sélectif par conception.
+- ✅ Bankrolls du deck **réconciliées au centime** avec `paper_trades` (1/2/2 trades,
+      +90.11 / +72.26 / +98.38, seeds $1 000 intacts). Rien de corrompu, elles n'avaient
+      simplement pas bougé. ⚠️ `rt_bankroll.current_balance` ($63 123) reste l'agrégat
+      historique toutes stratégies/chaînes — ne représente **pas** le deck.
+- ✅ Run mega sweep `31089886117` dépouillé (section en tête + E34).
+- ℹ️ Échec cron `Fill Outcome Labels` du 06/08 16:04 = panne d'infra GitHub
+      (`job was not acquired by Runner`), pas le code. Les 3 runs suivants sont verts.
 
 ### Fait le 06/08, rien à reprendre
 

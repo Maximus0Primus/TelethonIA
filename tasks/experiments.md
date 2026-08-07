@@ -556,6 +556,76 @@ gagner 20 % d'EV en plus ne déplace pas le plafond, ça le déplace de 20 %.
 
 ---
 
+## ✅ E34 · LE SWEEP SUR 4 MOIS RÉELS — un seul bras survit, et ce n'est pas celui du deck
+
+> Run `31089886117` (06/08, 09:37→14:33 UTC, 18 shards, SHA `29c0100`). **Le premier sweep
+> qui voit réellement 4 mois** — il clôt E33 et requalifie E32.
+
+- **Contrôle d'instrument passé en premier** (protocole E33) :
+  `Universe: 2734 unique tokens since 2026-04-13` → **`2734 with ticks`**, soit **100 %**
+  contre 8.9 % au run précédent. Aucun `[WARN]`. Les résultats sont opposables.
+
+- **Le classement reste du bruit — et ce n'est plus un problème de volume de données.**
+  Plancher de bruit de sélection **24.88 pts**, meilleure config du CSV **23.90 pts** :
+  **0 / 962 802** configs le dépassent. Avec 11× plus d'univers et 4 mois au lieu de 9 jours,
+  le top-30 est **toujours** sous le plancher. ⇒ Ce n'était pas la faim de données : le
+  classement par max sur ~1 M de configs est structurellement du dredging. **Ne jamais
+  promouvoir depuis le top-30**, la conclusion est maintenant définitive.
+
+- **Ce que les 4 mois débloquent vraiment** : `cross_regime_robust = True` sur **59 138**
+  configs, contre **0** au run précédent. La machinerie de régime ne fonctionnait pas faute
+  de régimes visibles sur 9 jours. Les colonnes `mois+` / `top_mois` sont opposables pour la
+  première fois.
+
+- **`[verdict par bras]`** — test apparié, cellule `jupiter/raw/lazy_fast`, 2 404 cellules :
+
+| bras | Δ$/j | Δargent | ΔEV | gagne | volume | mois+ | top_mois | |
+|---|---|---|---|---|---|---|---|---|
+| **SENT_NOHYPE** | **+1.8** | **+183** | **+0.51** | **74 %** | **96 %** | **4/5** | 44 % | ✅ **retenu** |
+| NOBURST | −0.6 | −64 | +0.38 | 39 % | 83 % | 4/5 | 49 % | |
+| GAP24 | −2.9 | −290 | **+1.06** | 29 % | 42 % | 3/5 | 49 % | ❌ |
+| SCORE45 | −4.0 | −403 | −0.69 | 24 % | 34 % | 4/5 | **66 %** | ❌ un seul mois fait le résultat |
+| SENT30_70 | −4.2 | −422 | +0.22 | 25 % | 27 % | 3/5 | 52 % | ❌ |
+| SENT50_60 | −49.1 | −5699 | **+7.50** | 32 % | **5 %** | 5/5 | 42 % | ❌ |
+| TOPKOL | −59.8 | −6933 | −2.49 | 23 % | 13 % | 4/5 | 54 % | ❌ |
+
+  **1 bras retenu sur 24 : `SENT_NOHYPE`.**
+
+- **Le résultat qui compte : c'est la borne HAUTE du sentiment qui paie, pas la bande.**
+  `SENT_NOHYPE` = `s < 0.70` (couper la seule queue de hype).
+  `SENT30_70` = `0.30 ≤ s < 0.70` (couper les deux queues) — **c'est le filtre en production
+  sur les trois `PF_*` du deck E30**.
+  `SENT_NOHYPE` **domine `SENT30_70` sur les deux axes** : EV supérieure (+0.51 vs +0.22)
+  **et** 96 % du volume conservé contre 27 %. La borne basse ne paie pas sa perte de volume
+  — elle ne gagne même pas en EV. ⚠️ Ça ne contredit pas le U inversé d'E28 : l'EV monte bien
+  quand la bande se resserre (`SENT50_60` : **EV +7.50**, la plus haute du tableau, 5/5 mois
+  positifs). Mais à mise plafonnée **argent = n × EV**, et couper 95 % du volume coûte
+  −$49/j. C'est **exactement la leçon d'E30**, reconfirmée sur un axe indépendant.
+
+- **Les 3 verdicts requalifiés d'E32, tranchés :**
+  - **SCORE45** — le candidat n°1 du run aveugle est **mort** : −$4.0/j, EV −0.69, et
+    `top_mois 66 %` (un seul mois porte tout). Son +6.71 pp mesuré sur 8.9 % de l'univers
+    était un artefact de fenêtre.
+  - **GAP24** — la contradiction est résolue, et **les deux camps avaient raison** :
+    EV **+1.06** (la validation 120 j ne mentait pas) mais **−$290** d'argent, parce qu'il
+    jette 58 % du volume. Bon filtre au sens de la qualité par trade, perdant à mise
+    plafonnée. **Ne pas promouvoir.**
+  - **SENT30_70** — « n'apporte rien » devient **« coûte de l'argent »** : −$4.2/j,
+    3/5 mois positifs, plus d'un mois négatif.
+
+- **Portefeuille : rien.** `1 configs decorrelees (|r| ≤ 0.55)`, TOTAL = meilleure seule
+  = 26 676 → **1.00×**. L'espoir « la complémentarité inter-mois était invisible sur 9 jours »
+  ne s'est pas matérialisé. E30 reste une découverte manuelle non reproduite par le sweep.
+
+- **Verdict** : ✅ l'instrument fonctionne enfin ; ❌ il ne désigne toujours pas de gagnant par
+  classement. Le seul acquis est `SENT_NOHYPE`, obtenu par **test apparié**, pas par le top-30.
+- **À faire** : cloner les 3 `PF_*` en variantes sans borne basse (`max_sentiment` seul)
+  **en shadow**, et les comparer en apparié au deck actuel. ⚠️ **Pas de promotion directe** —
+  un seul run, et le passage à `SENT_NOHYPE` multiplierait le volume de trades du deck par
+  ~3.5, ce qui déplace le point de fonctionnement vers le plafond de capacité d'E31.
+
+---
+
 ## Journal des sessions
 
 ### 2026-08-05 — session fondatrice du registre
