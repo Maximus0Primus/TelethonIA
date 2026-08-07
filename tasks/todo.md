@@ -114,11 +114,41 @@ token** `SANSLOCK` vs `LOCK15`. Si l'écart reste ≤ 1 pp → **retirer le LOCK
 version simple. Si `LOCK15` décroche → pénalité d'exécution confirmée, et la famille BE+LOCK
 est à abandonner malgré son excellent sim.
 
-⚠️ **Le volume passe de ~5.7 à ~22 trades/jour** sur les bras `NOHYPE` (effet recherché d'E34 :
-96 % du volume au lieu de 25 %). À 100 €/trade ça projette ~4 000 €/mois, **incompatible avec
-le plafond de capacité d'E31** (+23 $/jour). L'un des deux est faux : E31 a été mesuré sur une
-config à 1.6 trade/jour, pas 22. À trancher avant toute extrapolation en euros — **ne pas
-croire la colonne 100 € tant que ce n'est pas fait.**
+### 🚨 E37 · L'EV ABSOLUE DU SWEEP EST FAUSSE — aucun chiffrage en euros n'est possible
+
+Trouvé en voulant chiffrer un gain mensuel. Mêmes stratégies, même fenêtre (13/04 → 07/08),
+**dédoublonnées** :
+
+| stratégie | EV **sweep** | EV **réelle** (`paper_trades`) | écart |
+|---|---|---|---|
+| `BE25_LOCK15_TP200_SL40_4H_NZ_S40` | +10.16 % | **−1.37 %** | −11.5 pp |
+| `BE25_TP200_SL40_4H` (sans lock) | +7.04 % | **−4.06 %** | −11.1 pp |
+| `BE25_TP80_SL30` | +6.46 % | **−1.86 %** (−0.94 % en NOHYPE) | −8.3 pp |
+
+**Toutes positives en simulation, toutes négatives dans les trades enregistrés.**
+Explications écartées **par mesure** : le dédoublonnage ne change presque rien
+(−1.80 → −1.37 %) ; le filtre sentiment aide sans franchir zéro (−1.86 → −0.94 %) et ne retire
+que **6 tokens sur 2 385** (99 % du flux est déjà sous 0.70, donc `SENT_NOHYPE` ≈ pas de
+filtre en production) ; `pnl_pct <= 20` ne coupe que les 3 tokens corrompus.
+
+⇒ ❌ **Aucune projection en €/jour ou €/mois depuis le sweep.** Le tableau annonçant
+~2 000 €/mois à 50 €/trade est **faux**.
+⇒ ✅ **Les verdicts APPARIÉS restent l'outil valide** : ils comparent des bras *dans le même
+moteur*, donc un biais commun se soustrait. Cohérent avec `mega_sweep_cannot_pick_a_winner` —
+le sweep sert à **ordonner**, jamais à **chiffrer**.
+
+⚠️ **Ça corrige la conclusion écrite plus haut** : sur données réelles le **LOCK aide**
+(−1.37 % contre −4.06 % sans lock, soit **+2.7 pp**). La conclusion inverse venait de
+soustraire un drift estimé aux EV du sweep — raisonnement invalidé par ce qui précède.
+Le bras `PFS_TP200_SANSLOCK_NOHYPE` reste utile, mais comme **contrôle**, pas comme favori.
+
+✅ Validé sur données de production au passage : hype ≥ 0.70 → **−33.5 %**, et sans sentiment
+joint → **−45.7 %** (le contrat « `None` = on n'ouvre pas » tient).
+
+**À faire** : diagnostiquer l'écart. Le sweep rejoue `price_ticks` (jupiter/raw/lazy_fast), le
+paper trader utilise des quotes Jupiter temps réel avec slippage. Suspects : modèle de fill,
+univers restreint aux tokens *ayant des ticks*, sortie intra-bougie. Le skill
+`ground-truth-strat-perf` existe pour ça — le passer avant tout nouveau chiffrage.
 
 ### Reste du backlog ouvert (inchangé)
 
