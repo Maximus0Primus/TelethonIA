@@ -4133,6 +4133,93 @@ for _pf_name, (_pf_spec, _pf_filter) in _PF_MEMBRES.items():
     SHADOW_STRATEGIES.append(_pf_name)
 
 # ---------------------------------------------------------------------------
+# v14e.83 — CANDIDATS E34/E35/E36 (2026-08-07)
+# ---------------------------------------------------------------------------
+# Deux resultats du sweep sur 4 mois reels, chacun obtenu par TEST APPARIE et
+# non par le classement (qui reste sous son plancher de bruit, 3 runs de suite):
+#
+#   E34  la borne HAUTE du sentiment paie, la bande non. `SENT_NOHYPE`
+#        (s < 0.70) donne la MEME EV que la bande 0.30-0.70 en gardant 96 % du
+#        volume au lieu de 25 %. Sur les 3 exits du deck: 27 327 vs 7 047.
+#   E36  la meilleure sortie connue est BE25_LOCK15_TP200_SL40 (4H, NZ, S40):
+#        EV 10.16 %, 5/5 mois positifs, ecart jupiter<->dexscreener de -0.04
+#        (le meilleur du tableau), et la plus faible correlation au deck actuel.
+#
+# ⚠️ LA RESERVE QUI JUSTIFIE CE BLOC. Le sweep ne modelise pas le cout
+# d'execution des declencheurs intra-trade. Le test appariee sim<->live par
+# token, sur les seules LOCK jamais passees en live, le chiffre:
+#
+#   BE15_LOCK5_TP50_SL30           32 paires  sim +2.91 -> live -1.98  (-4.89 pp)
+#   BE25_LOCK10_TP100_SL30_NZ_S40  30 paires  sim +2.31 -> live -1.23  (-3.54 pp)
+#   BE25_TP80_SL30 (sans LOCK)    145 paires                           (-1.90 pp)
+#   FAST_TP50_SL30 (sans LOCK)    144 paires                           (-0.09 pp)
+#
+# Les deux LOCK sont devenues NEGATIVES en live. ~3 pp de penalite imputables au
+# LOCK. C'est la seule inconnue qui reste, et elle est decisive: d'ou le bras
+# `..._SANSLOCK` ci-dessous, qui est le CONTROLE de tout ce bloc.
+#
+# Les 3 PF_* d'origine restent en place: ce sont eux la reference appariee.
+# Chaque bras ci-dessous ne change QU'UNE variable a la fois.
+_NOHYPE = {"max_sentiment": 0.70}          # E34: borne haute seule, pas de plancher
+_LOCK15_TP200 = {"pct": 1.0, "tp_mult": 3.00, "sl_mult": 0.60, "horizon_min": 240,
+                 "be_activation": 0.25, "be_lock_pct": 0.15, "label": "main"}
+
+_PF2_MEMBRES = {
+    # --- MAIN (alertes + bankroll) ---------------------------------------
+    # Le candidat complet: meilleure sortie + meilleur filtre.
+    "PF2_LOCK15_TP200_NOHYPE": (
+        dict(_LOCK15_TP200),
+        {"min_liquidity_usd": 1, "min_rt_score": 40, **_NOHYPE},
+    ),
+    # Le prudent: sortie DEJA du deck (145 paires live, drift -1.90 pp
+    # seulement), on ne change que le filtre. Isole le gain d'E34 sans
+    # embarquer le risque d'execution du LOCK.
+    "PF2_BE25_TP80_NOHYPE": (
+        {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.70, "horizon_min": 30,
+         "be_activation": 0.25, "label": "main"},
+        {"max_age_hours": 12, **_NOHYPE},
+    ),
+}
+
+_PFS_MEMBRES = {
+    # --- SHADOW (mesure seule) -------------------------------------------
+    # LE CONTROLE: meme sortie, meme TP, meme horizon, SANS le lock. L'ecart
+    # avec PF2_LOCK15_TP200_NOHYPE mesure ce que le LOCK apporte en paper ET
+    # ce qu'il coute en live -- la seule facon de trancher la reserve ci-dessus.
+    "PFS_TP200_SANSLOCK_NOHYPE": (
+        {"pct": 1.0, "tp_mult": 3.00, "sl_mult": 0.60, "horizon_min": 240,
+         "be_activation": 0.25, "label": "main"},
+        {"min_liquidity_usd": 1, "min_rt_score": 40, **_NOHYPE},
+    ),
+    # LOCK10 vs LOCK15 a TP200: tranche en prod la note de strategies.py:428
+    # ("sweet spot LOCK10"), que la decomposition d'E36 montre vraie au TP100
+    # seulement.
+    "PFS_LOCK10_TP200_NOHYPE": (
+        {**_LOCK15_TP200, "be_lock_pct": 0.10},
+        {"min_liquidity_usd": 1, "min_rt_score": 40, **_NOHYPE},
+    ),
+    # Meme sortie, ANCIENNE bande: isole l'effet du filtre seul sur la
+    # nouvelle sortie (E34 mesure sur les anciennes).
+    "PFS_LOCK15_TP200_BANDE": (
+        dict(_LOCK15_TP200),
+        {"min_liquidity_usd": 1, "min_rt_score": 40,
+         "min_sentiment": 0.30, "max_sentiment": 0.70},
+    ),
+    # Le dauphin d'E36, a 0.90 de correlation avec le candidat: on verifie en
+    # prod que c'est bien un doublon, et qu'on a eu raison de n'en garder qu'un.
+    "PFS_LOCK15_TP150_T2H_NOHYPE": (
+        {"pct": 1.0, "tp_mult": 2.50, "sl_mult": 0.60, "horizon_min": 120,
+         "be_activation": 0.25, "be_lock_pct": 0.15, "label": "main"},
+        {"min_liquidity_usd": 1, **_NOHYPE},
+    ),
+}
+
+for _n, (_spec, _filt) in {**_PF2_MEMBRES, **_PFS_MEMBRES}.items():
+    STRATEGIES[_n] = [dict(_spec)]
+    STRATEGY_FILTERS[_n] = {"chain": "solana", **_filt}
+    SHADOW_STRATEGIES.append(_n)
+
+# ---------------------------------------------------------------------------
 # v14e.36 — auto-deprecate every artifact-family strategy registered above.
 # Trail/dip/split/bond shadows pollute analytics (sim ranks them top via
 # 47x slip miscalibration) and cannot be promoted to live. This finalization
