@@ -4800,6 +4800,43 @@ def _mega_family_slip_mult(strat_name: str) -> float:
     return 1.0
 
 
+def _mega_gap_through(ev, exec_p, entry_price, sell_slip):
+    """v14e.84 — le sweep bookait ses stops au niveau THEORIQUE du stop.
+
+    C'est l'origine principale d'un ecart mesure de +11.71 pp entre le sweep et
+    les trades reellement enregistres (104 paires rejouees sur les memes tokens,
+    meme entree, meme strategie). Decomposition par type de sortie:
+
+        sl_hit   n=41   reel -51.21 %   sweep -32.68 %
+        be_stop  n=11   reel -24.16 %   sweep  -1.23 %
+
+    Les DECISIONS de sortie concordent (sl_hit -> sl_hit dans 85 % des cas);
+    c'est le PRIX booke pour la meme sortie qui diverge. Mesure cote production
+    sur 608 sl_hit de BE25_TP80_SL30:
+
+        stop theorique          -30.00 %
+        sortie reellement booke -49.09 %   soit -27.27 % SOUS le stop
+        416/608 sortent a plus de 10 % sous le stop
+
+    C'est le gap-through, et il n'a rien d'un artefact: un memecoin qui declenche
+    un stop a -30 % est deja en train de s'effondrer quand la vente passe. La
+    production modelise ca (et se tient a -1.90 pp du live sur 145 paires
+    sim<->live, donc elle est calibree); `_evaluate_trade_exit` renvoie, lui, un
+    exit_price ancre sur `sl_price` + quelques bps, ce qui suppose une sortie
+    AU niveau du stop -- une hypothese qui ne tient que sur un marche liquide.
+
+    Correctif: quand le prix OBSERVE au moment du declenchement est sous le prix
+    booke, on rebooke a ce prix observe. On ne peut pas vendre mieux que le
+    marche. Aucun effet sur les sorties TP (le prix observe est au-dessus) ni
+    sur les timeouts (deja bookes au prix courant).
+    """
+    pnl = ev.get("pnl_pct", 0)
+    if ev.get("status") not in ("sl_hit", "be_stop") or not entry_price or not exec_p:
+        return pnl
+    reel = (exec_p * sell_slip) / entry_price - 1
+    return round(min(pnl, reel), 4)
+
+
 def _mega_replay_one(tp_mult, sl_mult, horizon_min, be_act,
                     jp_sorted, ds_sorted, entry_price, entry_time_iso,
                     source, smoothing, polling_mode, rt_liq_usd,
@@ -4866,7 +4903,7 @@ def _mega_replay_one(tp_mult, sl_mult, horizon_min, be_act,
             if h > float(fake_trade.get("high_price_seen") or 0):
                 fake_trade["high_price_seen"] = h
         if "status" in ev and ev["status"]:
-            return ev.get("pnl_pct", 0)
+            return _mega_gap_through(ev, exec_p, entry_price, _sell_slip)
     if last_exec is None: return None
     return round((last_exec / entry_price) - 1, 4) if entry_price else 0
 
