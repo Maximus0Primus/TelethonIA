@@ -617,12 +617,84 @@ gagner 20 % d'EV en plus ne déplace pas le plafond, ça le déplace de 20 %.
   = 26 676 → **1.00×**. L'espoir « la complémentarité inter-mois était invisible sur 9 jours »
   ne s'est pas matérialisé. E30 reste une découverte manuelle non reproduite par le sweep.
 
+- **⚠️ Vérification au niveau du DECK** (posée par l'user : « on avait vu que la bande était le
+  meilleur »). Le `[verdict par bras]` moyenne sur **toutes** les stratégies ; le résultat du
+  05/08 portait sur **une** stratégie. Rejeu sur les 3 exits du deck, cellule
+  `jupiter/raw/lazy_fast`, `age_band=ALL`, 4 mois :
+
+| filtre | n | argent | EV | vs NONE |
+|---|---|---|---|---|
+| `NONE` | 8 063 | 24 672 | 3.06 | — |
+| **`SENT_NOHYPE`** | 7 712 | **27 327** | 3.54 | **+2 656** |
+| `SENT30_70` | 1 978 | 7 047 | 3.56 | **−17 625** |
+| `SENT45_65` | 834 | 4 663 | 5.59 | −20 009 |
+| `SENT50_60` | 435 | 4 552 | 10.46 | −20 120 |
+| `GAP24` | 2 876 | 13 803 | 4.80 | −10 869 |
+
+  **Le classement est `SENT_NOHYPE` > `NONE` > `GAP24` > `SENT30_70` > bandes serrées.**
+  ⇒ **Retirer purement la bande bat déjà `SENT30_70`** (24 672 vs 7 047), et `SENT_NOHYPE` bat
+  les deux. **Le résultat du 05/08 n'est PAS démenti** : sur `FAST_TP50_SL30_MCAP_S40` la bande
+  monte bien l'EV de **3.09 → 3.51**, exactement ce qui avait été mesuré. Mais `SENT_NOHYPE`
+  donne **la même EV (3.51)** en gardant **96 %** du volume au lieu de 25 %. ⇒ **tout le gain
+  d'EV de la bande vient de sa borne haute ; la borne basse n'apporte aucune EV et détruit
+  75 % du volume.** L'option « couper seulement le haut » n'avait jamais été testée le 05/08.
+  ⚠️ Contre-signal à ne pas cacher : sur le split walk-forward, `SENT30_70` fait **mieux**
+  (`wf_test` +4.08 vs −0.63 sur FAST). Échantillon de queue très petit, mais c'est la seule
+  mesure hors-échantillon disponible — raison de plus pour passer par le shadow.
+
 - **Verdict** : ✅ l'instrument fonctionne enfin ; ❌ il ne désigne toujours pas de gagnant par
   classement. Le seul acquis est `SENT_NOHYPE`, obtenu par **test apparié**, pas par le top-30.
 - **À faire** : cloner les 3 `PF_*` en variantes sans borne basse (`max_sentiment` seul)
   **en shadow**, et les comparer en apparié au deck actuel. ⚠️ **Pas de promotion directe** —
   un seul run, et le passage à `SENT_NOHYPE` multiplierait le volume de trades du deck par
   ~3.5, ce qui déplace le point de fonctionnement vers le plafond de capacité d'E31.
+
+---
+
+## ✅ E35 · POURQUOI LE SWEEP NE TROUVAIT QUE DU BRUIT — il n'appariait qu'un axe sur deux
+
+- **Hypothèse** (posée par l'user) : « faut trouver une solution pour que ce run trouve
+  vraiment de bonnes stratégies et pas du bruit. »
+- **Constat** : le sweep possédait **déjà** l'instrument qui marche — test apparié + plancher
+  de permutation — et ne l'appliquait qu'aux **filtres** (`verdict_par_bras`). Les stratégies
+  n'avaient qu'un **classement**. Et c'est le classement qui est du bruit.
+- **Cause, mécanique** : le classement compare des configs mesurées sur des **tokens
+  différents** (filtre, bande d'âge, hypothèse de lecture du prix distincts). Cette variance
+  inter-cellules est énorme devant l'écart réel entre deux sorties, et c'est exactement elle
+  que le maximum de ~1 M de tests va chercher. Ajouter des données n'y change rien — E34 l'a
+  prouvé : 11× plus d'univers, sommet toujours sous le plancher.
+- **Méthode** : `verdict_par_exit` (v14e.80). **Dans** une cellule (même filtre, même bande
+  d'âge, même source/lissage/cadence), toutes les sorties voient les **mêmes tokens**. On
+  mesure l'écart de chaque sortie à la **médiane de sa cellule** — pas à une référence
+  arbitraire — puis la médiane de ces écarts sur toutes les cellules.
+- **Contrôle** (règle L2) : permutation des étiquettes de stratégie **à l'intérieur** de
+  chaque cellule, ce qui détruit le lien sortie → résultat en conservant la structure et les
+  effectifs. p95 du **maximum** sous H0 ⇒ absorbe la multiplicité des ~600 sorties.
+- **Résultat**, run `31089886117`, cellule `jupiter/raw/lazy_fast`, 601 sorties :
+
+| | plancher de bruit | meilleur observé | survivants |
+|---|---|---|---|
+| classement de configs | 24.88 | 23.90 ❌ **dessous** | **0** / 962 802 |
+| **apparié par sortie** | **150** | **+1 490** ✅ **10×** | **226** (67 après regroupement des clones) |
+
+- **CONTRÔLE MULTI-SOURCES** — celui qui avait tué E20b (+58 pp sur une source, négatif sur
+  l'autre). Rejoué sur `dexscreener`, source de prix indépendante :
+  **Spearman ρ = 0.987** sur l'argent, **0.991** sur l'EV, **14/20** du top-20 commun,
+  **2.2 %** de changements de signe. Même tête de classement sur les deux sources.
+  ⇒ **le résultat n'est pas un artefact de source.**
+- **Ce que ça désigne** : le haut du classement est **entièrement la famille BE+LOCK**
+  (break-even + verrouillage), sur les deux sources :
+  `BE25_LOCK15_TP150_SL40_T2H` (+1 490, EV +4.76, 75 % des cellules, **5/5 mois**),
+  `BE25_LOCK15_TP200_SL40_4H_NZ_S40`, `BE35_LOCK20_TP150_SL40_T2H`,
+  `TD2_BE5_TP120_SL44_T25` (**99 %** des cellules, `top_mois` 31 % = le plus régulier).
+  ⚠️ **Aucun des 3 exits du deck E30 n'y figure** — le deck utilise `BE25_TP80_SL30` (sans
+  LOCK), `FAST_TP50_SL30_MCAP_S40`, `TP50_SL40_S35`.
+- **Verdict** : ✅ l'axe stratégie devient opposable. **La leçon n'est pas « il fallait plus de
+  données » mais « il fallait apparier ».**
+- **À faire** : ⚠️ ne rien promouvoir sur ce seul résultat. BE+LOCK est **path-dépendant**,
+  donc exposé au piège des sorties dynamiques (E20b, `dtrail_shadow_artifact`) même s'il passe
+  le contrôle multi-sources. Prochain pas : les faire tourner **en shadow** et comparer en
+  apparié au deck, comme pour `SENT_NOHYPE`.
 
 ---
 

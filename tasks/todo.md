@@ -36,13 +36,27 @@ couper 95 % du volume coûte −$49/j. Même leçon qu'E30, sur un axe indépend
 **4. Portefeuille : rien.** 1 seule config décorrélée, TOTAL = meilleure seule (**1.00×**).
 E30 reste une découverte manuelle que le sweep ne reproduit pas.
 
-### ▶️ Prochaine action concrète (non faite)
+### ▶️ Prochaines actions concrètes (non faites)
 
-- [ ] Cloner les 3 `PF_*` en variantes **sans borne basse** (`max_sentiment` seul, `min_sentiment`
-      retiré) — **en shadow**, puis comparaison **appariée** au deck actuel.
-      ⚠️ **Pas de promotion directe** : un seul run, et ce changement multiplierait le volume de
-      trades du deck par ~3.5, ce qui le pousse vers le plafond de capacité d'E31.
-      ⚠️ Effet de bord souhaitable : le deck n'ouvre aujourd'hui que ~4 trades/jour (cf. v14e.79).
+- [ ] **Bande de sentiment — vérification au niveau du deck faite le 07/08** (E34). Sur les
+      3 exits du deck, 4 mois : `SENT_NOHYPE` **27 327** > `NONE` **24 672** > `GAP24` 13 803
+      > `SENT30_70` **7 047**. ⇒ **retirer la bande bat déjà `SENT30_70`**, et `SENT_NOHYPE`
+      bat les deux. Le résultat du 05/08 n'est pas démenti (la bande monte bien l'EV
+      3.09 → 3.51 sur FAST) mais `SENT_NOHYPE` donne **la même EV** avec **96 %** du volume
+      au lieu de 25 % : tout le gain venait de la borne **haute**.
+      → Cloner les 3 `PF_*` en `max_sentiment` seul, **en shadow**, comparés en apparié.
+      ⚠️ Contre-signal : `wf_test` favorise `SENT30_70` (+4.08 vs −0.63 sur FAST) — queue
+      d'échantillon très petite, mais c'est la seule mesure hors-échantillon dont on dispose.
+      ⚠️ ~×3.5 de volume ⇒ pousse le deck vers le plafond de capacité d'E31.
+
+- [ ] **Famille BE+LOCK — ce que le nouvel instrument désigne** (E35, v14e.80). Le haut du
+      classement apparié est **entièrement** BE+LOCK, identique sur les deux sources de prix
+      (ρ = 0.987) : `BE25_LOCK15_TP150_SL40_T2H` (+1 490 vs plancher +150, 5/5 mois),
+      `BE25_LOCK15_TP200_SL40_4H_NZ_S40`, `BE35_LOCK20_TP150_SL40_T2H`,
+      `TD2_BE5_TP120_SL44_T25` (99 % des cellules).
+      ⚠️ **Aucun des 3 exits du deck n'y figure.**
+      → Les passer **en shadow** et comparer en apparié. ⚠️ Path-dépendantes ⇒ exposees au
+      piège d'E20b même après le contrôle multi-sources. **Pas de promotion directe.**
 
 ### ⏳ Run `31147456647` en cours
 
