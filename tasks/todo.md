@@ -58,24 +58,35 @@ E30 reste une découverte manuelle que le sweep ne reproduit pas.
       → Les passer **en shadow** et comparer en apparié. ⚠️ Path-dépendantes ⇒ exposees au
       piège d'E20b même après le contrôle multi-sources. **Pas de promotion directe.**
 
-### ⏳ Run `31147456647` en cours — il aura `verdict_par_exit` SANS relance
+### ✅ Run `31147456647` dépouillé — tout est reproduit, et `verdict_par_exit` a bien tourné
 
-Lancé le **07/08 04:27 UTC**, SHA `24833b6`. Fin des shards attendue **~09:30 UTC**,
-résultats **~09:45 UTC**.
+Fini le **07/08 09:17 UTC**. ⚠️ **Le run est marqué ROUGE par GitHub, et ce n'est pas grave** :
+un seul job de matrice sur 18 est mort (`sweep-both-s6`, runner interrompu à 05:59).
+**17/18 shards fusionnés**, dont **les 6 jupiter et les 6 dexscreener** ⇒ la cellule canonique
+`jupiter/raw/lazy_fast` est complète et **les deux verdicts appariés sont intacts**. Le shard
+perdu n'affecte que le classement, déjà du bruit. (v14e.81 fait désormais dire tout ça au
+rapport lui-même, pour qu'un run rouge soit interprétable sans enquête.)
 
-✅ **Rien à arrêter ni à relancer.** Le workflow a deux politiques de checkout délibérément
-distinctes (v14e.77) : les shards gardent le SHA déclencheur, mais `merge_and_analyze` fait
-`checkout ref: master` **au moment où il démarre**. Comme v14e.80 est déjà sur master, l'analyse
-prendra `verdict_par_exit` toute seule. C'est exactement le scénario pour lequel ce mécanisme
-a été ajouté (des correctifs poussés *pendant* les 5 h avaient été ignorés par le merge).
+✅ **`merge_and_analyze` a bien pris v14e.80 depuis master** — la section `[verdict par sortie]`
+est présente, sans qu'on ait eu à relancer quoi que ce soit.
 
-⚠️ `sweep-both-s6/6` est mort à 05:59 (runner interrompu, logs perdus). 1 shard sur 18 :
-`fail-fast: false` + `if: always()` sur le merge ⇒ toléré. La source `both` est en outre la
-moins utile (elle mélange les sources, cf. `price_ticks_multisource_backtest_trap`).
-Si **plusieurs** shards tombent au prochain run, passer de 6 à 8 tiers.
+**Tout se reproduit à un jour d'intervalle** (1 001 364 configs, 117 jours) :
 
-Lecture : même protocole qu'en tête, **plus** la nouvelle section `[verdict par sortie]`
-(plancher de permutation + top des sorties appariées).
+| | run `31089886117` | run `31147456647` |
+|---|---|---|
+| classement : plancher / meilleur | 24.88 / 23.90 ❌ | 24.46 / **23.35** ❌ |
+| bras retenu | `SENT_NOHYPE` seul | **`SENT_NOHYPE` seul** |
+| `SENT30_70` | −$4.2/j | **−$4.4/j** |
+| `GAP24` | EV +1.06, argent −290 | **EV +1.07, argent −289** |
+| sortie n°1 | `BE25_LOCK15_TP150_SL40_T2H` +1490 | **la même, +1480, 5/5 mois** |
+| apparié : plancher / meilleur | 150 / +1490 ✅ | **135 / +1480** ✅ |
+
+⚠️ Les deux runs partagent l'essentiel de leur fenêtre de données : c'est un contrôle de
+**stabilité**, pas une réplication indépendante. La réplication indépendante, c'est le
+contrôle multi-sources d'E35 (ρ = 0.987 entre jupiter et dexscreener).
+
+→ **3e confirmation d'affilée que le classement est du bruit.** Le sujet est clos : seul
+l'apparié se lit.
 
 ### Reste du backlog ouvert (inchangé)
 
