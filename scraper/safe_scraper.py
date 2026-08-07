@@ -265,6 +265,50 @@ def load_group_cache() -> dict:
     return {}
 
 
+def _message_text_with_entity_urls(message) -> str:
+    """Texte d'un message Telethon, augmente des URLs cachees dans les entites.
+
+    v14e.79: extrait du corps de `_fetch_messages` pour que le chemin RT calcule
+    son sentiment sur EXACTEMENT le meme texte que le batch. Le sentiment stocke
+    dans kol_mentions -- celui sur lequel les bandes du portefeuille E30 ont ete
+    mesurees -- porte sur ce texte-la, URLs comprises. Calculer le RT sur le seul
+    `message.message` donnerait une autre valeur, donc un autre gate que celui du
+    backtest. Deux appelants, une seule construction : ils ne peuvent plus deriver.
+    """
+    if message is None or not getattr(message, "message", None):
+        return ""
+    text = message.message.strip()
+    entity_urls = [
+        e.url for e in (getattr(message, "entities", None) or [])
+        if getattr(e, "url", None)
+    ]
+    if entity_urls:
+        text += "\n" + "\n".join(entity_urls)
+    return text
+
+
+def _rt_message_sentiment(message) -> float | None:
+    """Sentiment du message qui declenche le call, calcule a l'instant du call.
+
+    v14e.79: meme fonction et meme texte que le batch, donc meme valeur que celle
+    qui finira dans kol_mentions ~30 min plus tard -- mais disponible tout de
+    suite, quand la decision d'ouvrir se prend.
+
+    Renvoie None si le calcul echoue, ce que `_passes_strategy_filter` traite
+    comme "gate non satisfait" : en cas de panne on n'ouvre pas de position sur
+    un sentiment inconnu, on ne l'invente pas.
+    """
+    try:
+        text = _message_text_with_entity_urls(message)
+        if not text:
+            return None
+        from pipeline import calculate_sentiment
+        return float(calculate_sentiment(text))
+    except Exception as e:
+        logger.warning("RT sentiment inline failed: %s", e)
+        return None
+
+
 async def _fetch_messages(client: TelegramClient, peer, count: int) -> list[dict]:
     """
     Fetch up to `count` messages from a peer, stopping early if messages
@@ -300,14 +344,8 @@ async def _fetch_messages(client: TelegramClient, peer, count: int) -> list[dict
                 continue
 
             # Extract URLs hidden in Telegram entities (hyperlinked text, buttons)
-            text = message.message.strip()
-            if message.entities:
-                entity_urls = []
-                for entity in message.entities:
-                    if hasattr(entity, 'url') and entity.url:
-                        entity_urls.append(entity.url)
-                if entity_urls:
-                    text += "\n" + "\n".join(entity_urls)
+            # v14e.79: construction partagee avec le chemin RT (parite du sentiment).
+            text = _message_text_with_entity_urls(message)
 
             all_msgs.append({
                 "text": text,
@@ -1709,6 +1747,21 @@ def _rt_open_trades(ca: str, symbol: str, price: float, mcap: float,
         "_rt_hours_since_first_call": hours_since_first_call,
         "_rt_first_call_price": first_call_price,
         "_rt_peak_after_first": peak_after_first,
+        # v14e.79: sentiment calcule EN LIGNE, a partir du message qui declenche
+        # le call. Sans lui, les trois strategies du portefeuille E30 sont
+        # rejetees a chaque fois et le deck main n'ouvre RIEN (58 detections
+        # d'affilee du 06 au 07/08, "opened 0 rows", zero alerte).
+        #
+        # Le gate lisait kol_mentions, table ecrite par le batch : sur 1724
+        # mentions de 7 jours, aucune n'est ecrite en moins de 60 s apres le
+        # message (mediane 29.3 min). Le RT decide en ~7 s, donc le SELECT ne
+        # trouvait jamais rien et _msg_sentiment renvoyait None -- "gate non
+        # satisfait" par contrat. Le gate etait insatisfiable par construction.
+        #
+        # Ce n'est pas du look-ahead : le sentiment est une fonction pure du
+        # texte du message, disponible a l'instant du call. Seul son STOCKAGE
+        # etait tardif. On le calcule donc ici, ou on a deja le message.
+        "_rt_msg_sentiment": _rt_message_sentiment(msg),
     }
 
     now = datetime.now(timezone.utc)

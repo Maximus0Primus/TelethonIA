@@ -428,12 +428,26 @@ def _passes_strategy_filter(token: dict, strategy_name: str) -> bool:
     _s_lo = filt.get("min_sentiment")
     _s_hi = filt.get("max_sentiment")
     if _s_lo is not None or _s_hi is not None:
-        _kol_s = token.get("_rt_kol_group") or token.get("kol_group")
-        if not _kol_s:
-            return False
-        _sent = _msg_sentiment(_kol_s, token.get("token_address") or "")
+        # v14e.79: le chemin RT calcule le sentiment en ligne et le pose ici.
+        # On le prefere au SELECT, pour deux raisons :
+        #   1. En RT le SELECT ne peut PAS aboutir. kol_mentions est ecrite par
+        #      le batch : sur 1724 mentions de 7 jours, zero est ecrite en moins
+        #      de 60 s apres le message (mediane 29.3 min), alors que le RT
+        #      decide en ~7 s. Le gate renvoyait donc None -> rejet, a chaque
+        #      call, pour toutes les strategies a bande. Le deck E30 n'a ouvert
+        #      aucun trade main pendant 21 h et le systeme est devenu muet.
+        #   2. Meme quand il aboutit, le SELECT coute un aller-retour DB sur le
+        #      chemin critique -- pendant que la DB rend deja des timeouts.
+        # Le repli DB reste en place pour le chemin batch, qui n'a pas le message.
+        _sent = token.get("_rt_msg_sentiment")
+        if _sent is None:
+            _kol_s = token.get("_rt_kol_group") or token.get("kol_group")
+            if not _kol_s:
+                return False
+            _sent = _msg_sentiment(_kol_s, token.get("token_address") or "")
         if _sent is None:
             return False
+        _sent = float(_sent)
         if _s_lo is not None and _sent < float(_s_lo):
             return False
         if _s_hi is not None and _sent >= float(_s_hi):
