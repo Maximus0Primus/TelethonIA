@@ -1,7 +1,18 @@
 """Shared fixtures for TelethonIA scraper tests."""
 
+import os
+
 import pytest
 from unittest.mock import MagicMock, patch
+
+# v14e.79: safe_scraper lit ces deux variables A L'IMPORT du module
+# (`os.environ[...]`, pas `.get`). En local le .env les fournit, en CI non :
+# tout test qui importe safe_scraper echouait donc sur un KeyError avant meme
+# d'executer quoi que ce soit. conftest est charge avant les modules de test,
+# donc c'est le seul endroit ou l'on peut les poser a temps.
+# `setdefault` : on n'ecrase jamais de vraies valeurs si elles existent.
+os.environ.setdefault("TELEGRAM_API_ID", "0")
+os.environ.setdefault("TELEGRAM_API_HASH", "test-hash")
 
 
 @pytest.fixture(autouse=True)
