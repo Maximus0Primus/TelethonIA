@@ -1,5 +1,94 @@
 # Operational Backlog
 
+## 🔴 REPRISE DE SESSION — à faire dans cet ordre (état au 07/08 12:45 UTC)
+
+> Session fermée par l'user pendant que le sweep tourne. Tout ce qui suit est actionnable
+> sans contexte supplémentaire.
+
+### 1. ⏳ Dépouiller le run `31179027155` (le seul travail bloqué sur une attente)
+
+Lancé **07/08 12:38 UTC**, SHA `6643678`, 18 shards. **Résultats vers 18:00 UTC.**
+Premier run où shards **et** analyse portent tous les correctifs.
+
+```bash
+gh run view 31179027155
+MID=$(gh api repos/Maximus0Primus/TelethonIA/actions/runs/31179027155/jobs --paginate \
+      -q '.jobs[]|select(.name=="merge_and_analyze")|.id')
+gh api repos/Maximus0Primus/TelethonIA/actions/jobs/$MID/logs | sed -E 's/^[0-9T:.-]+Z //'
+```
+
+⚠️ **Un run rouge n'est pas forcément grave** : si un seul shard meurt, le merge tourne quand
+même (`if: always()`). Le rapport dit maintenant lui-même si la cellule canonique est amputée
+(v14e.81). Seule la perte d'un shard **jupiter** invalide les verdicts.
+
+**Lire dans cet ordre :**
+1. `2734 with ticks` — contrôle d'instrument.
+2. `[verdict par bras]` — **témoin** : `SENT_NOHYPE` est un filtre d'entrée, il ne dépend pas
+   du booking des stops, il **doit** être stable. S'il bouge, chercher ailleurs.
+3. `[verdict par sortie]` — **c'est là que ça se joue.** Le biais corrigé flattait les
+   stratégies à stops. `BE25_LOCK15_TP200_SL40` cumule SL −40 % + BE + LOCK.
+   → **reste en tête = edge réel** ; **décroche = E36 était un artefact de booking.**
+4. **AVANT toute conclusion**, refaire le contrôle sweep↔réel (voir §2).
+
+### 2. 🔑 Rendre systématique le contrôle qui a tout révélé
+
+C'est ce contrôle, et lui seul, qui a fait tomber les +11.71 pp. **Il doit précéder toute
+lecture de résultat, et interdire tout chiffrage en euros tant qu'il n'est pas passé.**
+
+```sql
+-- EV du sweep vs EV réellement enregistrée, même fenêtre, dédoublonnée
+with premier as (
+  select distinct on (strategy, token_address) strategy, pnl_pct
+  from paper_trades
+  where strategy in ('<strat1>','<strat2>') and chain='solana'
+    and status<>'open' and pnl_pct is not null and pnl_pct <= 20
+    and created_at >= '2026-04-13'
+  order by strategy, token_address, created_at)
+select strategy, count(*) n, round((100*avg(pnl_pct))::numeric,2) ev_reel from premier group by 1;
+```
+
+Script de replay trade-par-trade (celui qui a isolé la cause) : `/tmp/diag_ecart.py` et
+`/tmp/diag2.py` sur le VPS — **les recréer dans `scripts/` s'ils ont disparu**, ils valent
+d'être versionnés.
+
+### 3. ⏰ Vers le 21/08 — trancher la question du LOCK sur données de production
+
+6 bras tournent depuis le 07/08 11:10 UTC (~300 trades/bras attendus). **Confirmé actif** :
+`PF2_LOCK15_TP200_NOHYPE` ×4, `PFS_TP200_SANSLOCK_NOHYPE` ×4, `PF2_BE25_TP80_NOHYPE` ×3.
+
+Comparer **en apparié par token** `PFS_TP200_SANSLOCK_NOHYPE` vs `PF2_LOCK15_TP200_NOHYPE` :
+elles sont identiques **au lock près**, donc l'écart mesure le lock, exécution comprise.
+- écart ≤ 1 pp → retirer le LOCK, garder la version simple ;
+- `LOCK15` décroche → pénalité d'exécution confirmée, abandonner BE+LOCK.
+
+⚠️ Ces bras sont **indépendants du bug du sweep** (ils mesurent sur données de production),
+mais leur *justification* (E36) est à reconfirmer par le §1.
+
+### 4. 🐛 Bugs connus, non corrigés (par choix)
+
+- **Zéro falsy dans `_dynamic_sell_slip_factor`** (`paper_trader.py` ~1980) :
+  `float(liq or 50_000)` ⇒ une liquidité **0** (bonding curve, **42 %** de l'échantillon) est
+  traitée comme **50 000 $**, donc le slippage le **plus faible** (3.35 %) appliqué aux tokens
+  les **moins** liquides (100 $ → 7.70 %). **Non corrigé volontairement** : c'est le chemin de
+  production, calibré à −1.90 pp du live. Le corriger déplace cette calibration ⇒ **mesurer
+  l'effet sur les paires sim↔live AVANT de toucher**.
+- **Timeouts SQL chroniques** (`57014`, ~13/h) : `compute KOL scores`, `paper_trader: summary`,
+  `kol_attribution` échouent à chaque cycle ⇒ le scoring KOL tourne sur des **scores vides**.
+  Le sweep martelait `price_ticks` ; vérifier si ça persiste **hors période de sweep**.
+- **Sweep ATA** (quota Helius, 44 ATA / ~$13.65 bloqués) — en attente user.
+
+### 5. ✅ Clos cette session, ne pas y revenir
+
+- **v14e.79** — le deck n'ouvrait rien depuis 21 h (gate sentiment insatisfiable en RT).
+  Corrigé, déployé, **vérifié de bout en bout** : ouvertures main réelles sur $WIG et $HTZ,
+  0 échec d'alerte. ⚠️ Attendre **~4 alertes/jour** avant v14e.83, davantage depuis
+  (`SENT_NOHYPE` garde 96 % du flux) — un silence de quelques heures est **normal**.
+- **v14e.84** — gap-through sur les stops : écart sweep↔réel **+11.71 → −1.40 pp**.
+- Échec CI `Run Tests` du 07/08 06:53 — c'était `TELEGRAM_API_ID` absent en CI, corrigé.
+- Échec cron `Fill Outcome Labels` du 06/08 — infra GitHub, pas le code.
+
+---
+
 ## ✅ DÉPOUILLÉ — run `31089886117` (le premier sweep qui voit vraiment 4 mois)
 
 > Lancé le **06/08 09:37 UTC**, fini **14:33 UTC**, 18 shards + merge tous verts.
