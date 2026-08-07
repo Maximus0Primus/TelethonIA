@@ -396,6 +396,32 @@ def verdict_par_exit(df, csv_path, cellule_ref=("jupiter", "raw", "lazy_fast"),
         print(f"  [verdict sortie] cellule {cellule_ref} trop petite "
               f"({len(ref)} lignes) — etape sautee")
         return
+
+    # v14e.82 — appliquer les MEMES exclusions que le classement.
+    #
+    # Oubli de la v14e.80: le classement filtrait deja family_realism >= 0.5 et
+    # les strats non enregistrees, mais `verdict_par_exit` prenait le CSV brut.
+    # Consequence immediate sur le run 31147456647: `TD2_BE5_TP120_SL44_T25`
+    # ressortait 1er par EV (10.07 %) alors que `TD2_` est explicitement une
+    # famille artefact ("prefixes whose shadow $/day cannot translate to live",
+    # strategies.py:132). Un instrument cense trier le vrai du bruit ne doit pas
+    # remonter en tete une famille dont on sait deja qu'elle ne se transpose pas.
+    #
+    # Les BE*_LOCK*, eux, ne sont PAS une famille artefact: ils survivent.
+    avant = len(ref)
+    if "family_realism" in ref.columns:
+        ref = ref[ref["family_realism"] >= 0.5]
+    else:
+        ref = ref[~ref["strategy"].map(lambda s: family_realism(str(s)) < 0.5)]
+    if _REGISTERED_STRATS_SET:
+        ref = ref[ref["strategy"].isin(_REGISTERED_STRATS_SET)]
+    ref = ref.copy()
+    if len(ref) < avant:
+        print(f"  [verdict sortie] {avant - len(ref):,} lignes ecartees "
+              f"(famille artefact ou strat non enregistree)")
+    if len(ref) < 200:
+        print("  [verdict sortie] plus assez de lignes apres exclusions — etape sautee")
+        return
     ref["argent"] = ref["n"] * ref["avg_pnl_pct"]
 
     cellule = [c for c in ("filter", "age_band") if c in ref.columns]
