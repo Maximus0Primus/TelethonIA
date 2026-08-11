@@ -542,6 +542,155 @@ def verdict_par_exit(df, csv_path, cellule_ref=("jupiter", "raw", "lazy_fast"),
     print(f"    -> {out}")
 
 
+def verdict_kol_whitelist(df, csv_path, n_permutations=60, min_train_tokens=5,
+                          seed=20260811):
+    """v14e.88 — recherche EXHAUSTIVE (sortie x sous-ensemble de KOL), walk-forward.
+
+    Portage dans le sweep de `scripts/kol_strategy_search.py`, qui tournait sur
+    `paper_trades` (10 semaines). Ici on rejoue sur 4 mois de prix simules: c'est
+    exactement le gain de puissance qui manquait — le run local sortait a
+    p ~ 0.033 avec une marge de +5 % sur son plancher, trop juste pour conclure.
+
+    POURQUOI C'EST EXACT ET NON HEURISTIQUE. A mise plafonnee l'argent est la
+    somme des pnl retenus, donc ADDITIF sur les KOL:
+
+        argent(S) = somme_{k dans S} argent(k)
+
+    Maximiser sur les 2^N sous-ensembles se resout donc exactement par
+    S* = { k : argent_train(k) > 0 }. Toutes les associations de KOL sont
+    couvertes, en O(N) au lieu de O(2^N).
+
+    PROTOCOLE. Walk-forward par MOIS, fenetre expansive: la whitelist est
+    construite sur les mois anterieurs, notee sur le mois courant, jamais
+    regarde pendant la selection. Le classement porte sur la somme des mois de
+    test — jamais sur de l'in-sample.
+
+    CONTROLE. `n_permutations` tirages rejouent le PIPELINE COMPLET (selection
+    incluse) en melangeant les etiquettes KOL. Le controle porte sur la
+    PROCEDURE, pas sur une cellule: c'est ce qui manquait aux classements qui
+    ont produit de faux gagnants (11/08: meilleur reel +23.19 contre H0 +29.84).
+    """
+    if "kol_month_json" not in df.columns:
+        return
+    sub = df[df["kol_month_json"].notna() & (df["kol_month_json"] != "")]
+    if sub.empty:
+        print("\n  [verdict KOL] aucune ligne ne porte kol_month_json — le sweep "
+              "tourne sur un SHA anterieur a v14e.88, section ignoree.")
+        return
+
+    strategies = sorted(sub["strategy"].unique())
+    parsed, kols, mois = {}, set(), set()
+    for _, r in sub.iterrows():
+        try:
+            d = json.loads(r["kol_month_json"])
+        except Exception:
+            continue
+        parsed[r["strategy"]] = d
+        for k, mm in d.items():
+            kols.add(k)
+            mois.update(mm.keys())
+    if len(mois) < 3:
+        print(f"\n  [verdict KOL] {len(mois)} mois seulement: il en faut 3 "
+              "(1 de train + 2 de test) pour un walk-forward. Section ignoree.")
+        return
+
+    strategies = [s for s in strategies if s in parsed]
+    kols = sorted(kols)
+    mois = sorted(mois)
+    si = {s: i for i, s in enumerate(strategies)}
+    ki = {k: i for i, k in enumerate(kols)}
+    mi = {m: i for i, m in enumerate(mois)}
+    ns, nk, nm = len(strategies), len(kols), len(mois)
+
+    money = np.zeros((ns, nk, nm))
+    count = np.zeros((ns, nk, nm))
+    for s, d in parsed.items():
+        for k, mm in d.items():
+            for m, (c, tot) in mm.items():
+                money[si[s], ki[k], mi[m]] = tot
+                count[si[s], ki[k], mi[m]] = c
+
+    def run(mny, cnt):
+        total = np.zeros(ns)
+        base = np.zeros(ns)
+        per_m = np.zeros((ns, nm))
+        for f in range(1, nm):
+            keep = ((mny[:, :, :f].sum(axis=2) > 0)
+                    & (cnt[:, :, :f].sum(axis=2) >= min_train_tokens))
+            g = (mny[:, :, f] * keep).sum(axis=1)
+            per_m[:, f] = g
+            total += g
+            base += mny[:, :, f].sum(axis=1)
+        wl = ((mny.sum(axis=2) > 0) & (cnt.sum(axis=2) >= min_train_tokens))
+        return total, base, per_m, wl
+
+    total, base, per_m, wl = run(money, count)
+
+    # ⚠️ LE NULL DOIT CASSER LA PERSISTANCE TEMPORELLE DU KOL, pas autre chose.
+    # Premiere version (rejetee par le test): une seule permutation appliquee a
+    # TOUTES les sorties. Elle ne fait que renommer les colonnes de la matrice
+    # (sortie x KOL) => les maxima par ligne sont identiques, le plancher egale
+    # le reel par construction et le controle ne controle RIEN.
+    # Le bon null permute les KOL INDEPENDAMMENT PAR MOIS: la distribution
+    # transversale de chaque mois et la structure par sortie sont preservees,
+    # mais un KOL rentable en mai n'est plus le meme qu'en juin. Or c'est
+    # exactement l'hypothese qu'exploite le walk-forward (le passe d'un KOL
+    # predit son futur). H0 = "il n'y a pas de persistance".
+    rng = np.random.default_rng(seed)
+    h0 = []
+    for _ in range(n_permutations):
+        mny = np.empty_like(money)
+        cnt = np.empty_like(count)
+        for m in range(nm):
+            p = rng.permutation(nk)
+            mny[:, :, m] = money[:, p, m]
+            cnt[:, :, m] = count[:, p, m]
+        t_h0, _, _, _ = run(mny, cnt)
+        h0.append(t_h0.max())
+    h0 = np.array(h0)
+    plancher = float(np.quantile(h0, 0.95))
+    best_i = int(np.argmax(total))
+    best = float(total[best_i])
+
+    print(f"\n  [verdict KOL] recherche exhaustive sortie x sous-ensemble de KOL")
+    print(f"    {ns} sorties x {nk} KOL x {nm} mois "
+          f"(2^{nk} sous-ensembles couverts exactement)")
+    print(f"    plancher de bruit ({n_permutations} permutations du pipeline "
+          f"complet, p95 du max): {plancher:+,.1f}")
+    print(f"    meilleur reel                                            : "
+          f"{best:+,.1f}")
+    if best <= plancher:
+        print("    => AUCUNE config ne depasse le plancher. Selectionner des KOL "
+              "ne rapporte")
+        print("       pas plus que tout prendre. Ne rien promouvoir.")
+        return
+    pval = float((h0 >= best).mean())
+    print(f"    => DEPASSE le plancher (p ~ {pval:.3f}, "
+          f"marge {100 * (best / plancher - 1):+.0f} % sur le p95)")
+    print(f"    {'sortie':<34}{'test':>9}{'sans WL':>9}{'nKOL':>6}{'mois+':>7}")
+    print("    " + "-" * 66)
+    for i in np.argsort(-total)[:10]:
+        print(f"    {strategies[i][:34]:<34}{total[i]:>+9.1f}{base[i]:>+9.1f}"
+              f"{int(wl[i].sum()):>6}"
+              f"{int((per_m[i, 1:] > 0).sum()):>4}/{nm - 1}")
+    gagnants = [kols[j] for j in range(nk) if wl[best_i, j]]
+    print(f"    meilleure: {strategies[best_i]} — whitelist {len(gagnants)}/{nk}")
+    print(f"      {', '.join(gagnants[:25])}{' ...' if len(gagnants) > 25 else ''}")
+
+    out = csv_path.parent / f"{csv_path.stem.replace('extended', 'verdict_kol')}.csv"
+    pd.DataFrame({
+        "strategy": strategies,
+        "test_money": total,
+        "baseline_no_whitelist": base,
+        "uplift": total - base,
+        "n_kols": wl.sum(axis=1),
+        "mois_test_positifs": (per_m[:, 1:] > 0).sum(axis=1),
+        "plancher": plancher,
+        "retenue": total > plancher,
+    }).to_csv(out, index=False)
+    print(f"    -> {out}")
+
+
 def benjamini_hochberg(pvals: list[float]) -> list[float]:
     """BH FDR-controlled q-values."""
     n = len(pvals)
@@ -910,6 +1059,7 @@ def main():
     # c'est la seule section du rapport qui reste lisible.
     verdict_par_bras(df_eligible, csv_path)
     verdict_par_exit(df_eligible, csv_path)
+    verdict_kol_whitelist(df_eligible, csv_path)
 
     # v14e.45: bi-ranking — second top-N optimisé pour les déploiements récents.
     # Gates relâchés: pas de cross_regime_robust, n_recent>=min_n_recent (15 par

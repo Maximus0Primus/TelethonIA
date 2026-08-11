@@ -4959,6 +4959,27 @@ def _mega_replay_one(tp_mult, sl_mult, horizon_min, be_act,
     return round((last_exec / entry_price) - 1, 4) if entry_price else 0
 
 
+# v14e.88 — cellule de reference des verdicts apparies (cf. analyze_mega_sweep).
+# La ventilation par KOL n'est emise QUE la: ailleurs elle ferait 87 KOL x 4 mois
+# sur ~1M de lignes de config.
+_MEGA_KOL_CELL = ("NONE", "ALL", "jupiter", "raw", "lazy_fast")
+
+
+def _mega_kol_month_payload(kol_month, fname, age_band, source, smoothing,
+                            polling_mode) -> str:
+    """Serialise {kol: {mois: [n, somme_pnl]}} sur la cellule canonique seule.
+
+    Chaine vide ailleurs — l'analyse ignore simplement les lignes vides.
+    """
+    import json as _json
+    if (fname, age_band, source, smoothing, polling_mode) != _MEGA_KOL_CELL:
+        return ""
+    out: dict = {}
+    for (kol, mois), (cnt, tot) in kol_month.items():
+        out.setdefault(kol, {})[mois] = [cnt, round(tot, 4)]
+    return _json.dumps(out, separators=(",", ":"))
+
+
 def _mega_process_config(args):
     import numpy as np
     import json as _json
@@ -4975,6 +4996,11 @@ def _mega_process_config(args):
          fname, age_band, source, smoothing, polling_mode, universe) = args
     pnls = []
     pnls_by_day = defaultdict(list)  # v14e.26: track per-day pnls
+    # v14e.88 — ventilation (KOL x mois), pour la recherche exhaustive
+    # strategie x sous-ensemble de KOL faite a l'analyse. Accumulee toujours
+    # (c'est deux additions), mais EMISE uniquement sur la cellule canonique:
+    # 87 KOL x 4 mois par ligne x ~1M lignes ferait exploser le CSV.
+    kol_month = defaultdict(lambda: [0, 0.0])
     for u in universe:
         if not _mega_apply_filter(u, fname): continue
         if not _mega_apply_age_band(u, age_band): continue
@@ -4994,6 +5020,11 @@ def _mega_process_config(args):
         if pnl is not None:
             pnls.append(pnl)
             pnls_by_day[u["created_at"][:10]].append(pnl)
+            _kg = u.get("kol_group")
+            if _kg:
+                _slot = kol_month[(_kg, u["created_at"][:7])]
+                _slot[0] += 1
+                _slot[1] += pnl
     n = len(pnls)
     if n < 10: return None
     arr = np.array(pnls)
@@ -5129,6 +5160,9 @@ def _mega_process_config(args):
         "fragile_recent": fragile_recent,
         "regime_change_3d": regime_change,
         "daily_pnl_json": _json.dumps(daily_pnl, separators=(",", ":")),
+        # v14e.88 — {kol: {mois: [n, somme_pnl]}}, cellule canonique uniquement.
+        "kol_month_json": _mega_kol_month_payload(
+            kol_month, fname, age_band, source, smoothing, polling_mode),
     }
 
 
