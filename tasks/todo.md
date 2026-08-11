@@ -157,7 +157,227 @@ classe `SENT_NOHYPE` **22e/24**. Deux instruments indépendants, même conclusio
       Tests : **207 passed, 367 subtests**.
 - [ ] ⏰ **Vers le 08/09** (~4 semaines, ~150 trades/bras) : lire les 4 bras **en apparié par
       token** contre leur référence. Décision au niveau **famille**, jamais config.
-- [ ] **Trancher `PF2_BE25_TP80_NOHYPE`** (voir §5 ter) — le retirer des allocations ?
+- [x] ✅ **`PF2_BE25_TP80_NOHYPE` RETIRÉ** (§5 ter). Allocations **16 → 13**. Le deck SOL revient
+      aux **3 `PF_*` d'origine** (E30), les seuls dans le vert.
+- [x] ✅ **Déployé** le 11/08 12:05 UTC (`c842986`) — gate `pre_deploy_check.sh` passé, service
+      actif, Telegram connecté, **RT listener sur 99 groupes** (13 S-tier), 0 erreur, les 4 bras
+      `PFA_` vérifiés dans le registre du VPS.
+
+### 7. 💵 Ce que valent les 4 nouveaux bras — estimation par PROXY, pas une mesure
+
+⚠️ **Les 4 bras `PFA_` ont ZÉRO trade** (créés le 11/08). Ce qui suit vient de leurs **proxies
+historiques** déjà dans la grille shadow. À mise fixe **$100**, `$/j = trades/j × EV` :
+
+| bras | période A (35 j) | période B (22 j) |
+|---|---|---|
+| `BE25_TP80_SL30` *(réf)* | 22.3 tr/j · −1.57 % · **−$35/j** | 24.6 tr/j · −1.88 % · **−$46/j** |
+| `BE25_TP80_SL30_A3to12` | 4.9 tr/j · +3.26 % · **+$16/j** | 5.2 tr/j · +3.98 % · **+$21/j** |
+| `FAST_TP100_SL20` *(réf)* | 25.9 tr/j · −1.44 % · **−$37/j** | 27.7 tr/j · −2.62 % · **−$73/j** |
+| `FAST_TP100_SL20_A3to12` | 4.9 tr/j · +3.83 % · **+$19/j** | 5.2 tr/j · +3.60 % · **+$19/j** |
+| `FAST_TP50_SL30` *(réf)* | 22.3 tr/j · −2.02 % · **−$45/j** | 24.6 tr/j · −1.58 % · **−$39/j** |
+| `FAST_TP50_SL30_A3to12` | 4.9 tr/j · +4.23 % · **+$21/j** | 5.2 tr/j · +2.41 % · **+$12/j** |
+
+Écart bandé − référence : **+$51 à +$92/j**, stable sur les deux périodes. Mais 5 réserves :
+
+1. **Ce ne sont pas les bras du deck.** Les références ci-dessus tournent à 22–28 trades/j sans
+   filtre d'entrée ; le deck fait ~4/j avec filtres score+sentiment. Leur −$35 à −$73/j n'est
+   **pas** ce que fait le deck.
+2. **Les 3 bras `_A3to12` partagent les mêmes 114 tokens** en B ⇒ +$12, +$19, +$21 ne sont
+   **pas 3 confirmations**, c'est un échantillon lu 3 fois.
+3. **Queue épaisse** : ~la moitié de l'EV en B vient des trades > +300 %.
+4. **Drift d'exécution non déduit** : −1.90 pp mesuré sur `BE25_TP80_SL30` (145 paires sim↔live)
+   ⇒ à 5 trades/j × $100 ça retire **~$9.5/j**, soit près de la moitié du gain estimé.
+5. **Plafond de capacité** : +$16 à +$21/j à $100/trade tombe pile sur le plafond documenté
+   (**+$23/j dès $1 000**, contrainte de liquidité). Cohérent — mais ça ne montera pas.
+
+⚠️ Et les bras du deck font **déjà** cet ordre de grandeur : `PF_TP50_SL40_S35` ~**+$29/j** et
+`PF_BE25_TP80_SL30` ~**+$17/j** sur leurs 5 premiers jours. Les proxies bandés ne les dominent
+donc **pas** de façon évidente — sur 5 jours contre 22–35, la comparaison n'est pas conclusive.
+⇒ **C'est exactement pourquoi les 4 bras sont en shadow et pas en main.**
+
+### 7 bis. 🔴 CORRECTION — sur les trades RÉELS du deck, la bande d'âge FAIT PERDRE
+
+Le §7 surestimait la bande d'âge. Test décisif : partitionner les **89 trades réels du deck**
+de la semaine selon la bande — littéralement les mêmes trades, séparés en deux tas.
+
+| bras | solde TG | $/j **actuel** | $/j **avec filtre âge** | trades |
+|---|---|---|---|---|
+| `PF_TP50_SL40_S35` | $1 145.16 (pic $1 288.89) | **+$27.46** | +$14.09 | 28 → **6** |
+| `PF_BE25_TP80_SL30` | $1 084.60 | **+$16.30** | +$7.80 | 42 → **8** |
+| `PF_FAST_TP50_SL30_MCAP_S40` | $1 000.14 | +$0.03 | **+$9.75** | 19 → **2** |
+| **deck** | **$3 229.90** | **+$43.79/j** | **+$31.64/j** | 89 → **16** |
+
+⇒ **Le filtre d'âge aurait coûté ~$12/j au deck (−28 %)** — alors qu'il **monte l'EV sur les 3
+bras** (12.45 vs 3.25 · 5.10 vs 1.34 · 25.82 vs −2.98). **Même piège qu'E34/E30 : à mise
+plafonnée, argent = n × EV.** ×4 sur l'EV en coupant 82 % du volume = perte. Et on ne peut pas
+compenser par la mise (liquidité memecoin ~$100/token, cf. plafond de capacité).
+
+🔑 **Synthèse qui réconcilie le §7 et le §7 bis** — les deux mesures sont vraies :
+- les **références shadow** (`BE25_TP80_SL30`, `FAST_TP100_SL20`) tournent **sans filtre
+  d'entrée**, 22–28 tr/j, et perdent ⇒ la bande d'âge les **sauve** ;
+- les bras du **deck** ont **déjà** `min_rt_score` + bande de sentiment et gagnent ⇒ la bande
+  d'âge ne fait plus que **couper du volume**.
+
+⇒ **Le filtre d'âge est un SUBSTITUT aux filtres du deck, pas un complément.** Il rattrape un
+bras non filtré, il appauvrit un bras déjà filtré. ⇒ **ne rien promouvoir** sur cette base ;
+l'intérêt d'un `_A3to12` en main est **revu à la baisse**.
+⚠️ n = 6, 8 et 2 trades dans la bande cette semaine : direction cohérente sur les 3 bras,
+**magnitude sans valeur**. Seul cas encore ouvert : `PF_FAST_TP50_SL30_MCAP_S40` (bras plat où
+le filtre semble aider fort — sur **2 trades**, donc bruit).
+
+### 8. 🚫 Audit de la blacklist KOL sur 14 jours (11/08)
+
+Mesurable parce que la blacklist coupe le **main** mais pas le **shadow** : les 16 KOL bannis
+produisent encore **51 062 trades shadow sur 155 tokens** en 14 jours. Sortie de référence
+unique `BE25_TP80_SL30`, dédoublonné par token, `pnl_pct <= 20`.
+
+**✅ En AGRÉGAT, la blacklist est justifiée :**
+
+| groupe | KOLs | tokens | EV | médiane | WR |
+|---|---|---|---|---|---|
+| 🚫 blacklistés | 11 | 122 | **−8.79 %** | −21.96 | 29.5 % |
+| autorisés | 41 | 273 | **−0.37 %** | −18.71 | 31.1 % |
+
+Écart **+8.4 pp** en faveur des autorisés. Meilleure justification individuelle : `jadendegens`
+**−30.81 %** sur 22 tokens.
+
+**❌ Mais AUCUN ajout/retrait individuel n'est justifiable sur 14 jours.** Contrôle
+semaine 1 → semaine 2 (10 KOL avec ≥ 3 tokens dans les deux semaines) :
+
+| | |
+|---|---|
+| corrélation EV S1↔S2 | 0.346 |
+| EV en S2 des KOL **bons** en S1 | **−8.71 %** |
+| EV en S2 des KOL **mauvais** en S1 | **−0.23 %** |
+
+⇒ **inversion complète.** Sur cette fenêtre le classement par KOL ne se reproduit pas d'une
+semaine à l'autre. Cohérent avec la structure du problème : 14 j ⇒ **4 à 20 tokens par KOL**,
+c'est structurellement trop mince. L'edge KOL de `kol_axis_is_the_only_edge_aug5` avait été
+établi sur l'historique complet avec plancher de permutation (161 vs ~95), pas sur 2 semaines.
+
+Donc **ne rien changer** — pour information seulement, et **à ne pas actionner** :
+- blacklistés qui paraissent bons : `ChairmanDN1` +33.4 % (n=**4**), `explorer_gems` +22.8 % (n=**6**) ;
+- autorisés qui paraissent mauvais : `KittysKasino` −41.3 % (n=5), `DoxxedChannel` −29.5 % (n=5),
+  `reapergamble` −17.2 % (n=10), `gubbinscalls` −6.7 % (n=16).
+
+### 9. 🎣 Couplage KOL × stratégie sur 14 j — le top est UN SEUL trade
+
+**5 293 cellules** (418 stratégies × 19 KOL, n ≥ 8 tokens), médiane **−2.60 %**, meilleure
+**+99.69 %**. Le top 10 est **entièrement `spidersjournal`** croisé avec 10 sorties TP200/TP300
+**corrélées entre elles** (mêmes tokens, exits voisins) — donc **une** observation, pas dix.
+
+Décomposition de `spidersjournal × BE25_TP200_SL40_4H` (n=21, EV +90.67 %) :
+
+| | |
+|---|---|
+| médiane | **−8.28 %** |
+| meilleur trade | **+1 988 %** (un ×20) |
+| EV **sans ce seul trade** | **−4.18 %** |
+| EV sans les 3 trades ≥ +200 % | **−29.98 %** |
+
+⇒ **Tout le +90 % vient d'un unique token.** Et sur la sortie du deck (`BE25_TP80_SL30`), le
+même `spidersjournal` fait **+1.56 % d'EV et −$198**. ⇒ **Rien à promouvoir.** Avec 5 293
+cellules à queue épaisse et n ≈ 8–20, un maximum spectaculaire est **garanti** sous H0 : c'est
+la définition du dredging, pas un résultat.
+
+▶️ **Si on veut vraiment trancher les KOL**, il faut la fenêtre longue + plancher de permutation
+(la méthode qui avait produit 161 vs ~95), pas 14 jours. **Fait au §10.**
+
+### 10. 🎯 Classement KOL × stratégie REFAIT, stable et robuste aux outliers (11/08)
+
+Fenêtre portée à **10 semaines** (01/06 → 11/08) : la stabilité est **inévaluable** sur 14 j
+(4–20 tokens/KOL). Métrique = **moyenne** (règle `mean_vs_median_ranking_rule` : à mise fixe
+l'argent c'est la moyenne ; retirer la queue reviendrait à jeter là où est l'argent). La
+robustesse est obtenue par **exigences**, pas par troncature :
+
+`ev_sans_meilleur_trade > 0` **ET** positif sur **les 2 moitiés** **ET** ≥ 60 % de semaines
+positives **ET** n ≥ 30 tokens (≥ 10 par moitié).
+
+**Résultat : 397 survivants sur 5 471 cellules (7.26 %). Sous H0 : 7.92 %.**
+Plancher sur la meilleure cellule, 2 permutations (lien token↔KOL cassé, même tri) :
+
+| | max `ev_sans_top1` |
+|---|---|
+| réel (meilleur : `batman_gem × BE50_LOCK20_TP150_SL30`) | **+23.19 %** |
+| H0 permutation 1 | **+29.84 %** (p95 15.41) |
+| H0 permutation 2 | **+39.67 %** (p95 26.85) |
+
+⇒ ❌ **Le meilleur croisement réel est SOUS le hasard.** Les filtres de stabilité n'ont pas
+aidé : avec 5 471 cellules, une cellule aléatoire passe facilement « positive aux 2 moitiés +
+survit au retrait de son meilleur trade ». **L'axe KOL × stratégie ne donne rien.**
+
+**🔑 Reframe qui, lui, donne quelque chose : le KOL SEUL** (20 candidats au lieu de 5 471
+cellules ⇒ sélection 270× plus faible). Sortie unique `BE25_TP80_SL30`, 10 semaines,
+t-stat vs la moyenne globale (−1.87 %), seuil **|t| > 3** pour 20 tests simultanés :
+
+| KOL | n | EV | t | blacklist ? |
+|---|---|---|---|---|
+| `reapergamble` | 34 | **−23.16 %** | **−5.24** ✅ | ❌ **NON — à ajouter** |
+| `jadendegens` | 64 | −24.93 % | **−3.41** ✅ | ✅ oui (0/10 semaines +) |
+| `olympeqg` | **432** | −10.62 % | −2.76 | ❌ non — **plus gros volume du flux** |
+| `spidersjournal` | 97 | −10.95 % | −1.69 | ❌ non (3/11 semaines +) |
+| `batman_gem` | 31 | +27.57 % | < 1.6 | non |
+| `explorer_gems` | 37 | +14.72 % | 1.69 | 🚫 oui |
+| `slingoorioyaps` | 46 | +12.85 % | 1.69 | non |
+
+⇒ **AUCUN KOL positif n'est significatif.** `batman_gem`, `explorer_gems`, `slingoorioyaps`
+paraissent excellents mais |t| < 1.7 : indiscernables du bruit quand on en regarde 20.
+⇒ **Deux KOL négatifs le sont.** **3e confirmation indépendante aujourd'hui** de
+`downside_predictable_upside_not` : *éliminer les pires marche, choisir le meilleur non.*
+
+### 10 bis. 🚨 CORRECTION — j'avais audité la blacklist sur une liste PÉRIMÉE
+
+Le §8 et le premier jet du §10 utilisaient la liste de **16 KOL de ma mémoire**. La vraie
+blacklist en DB en compte **22** (`scoring_config.paper_trade_config.kol_chain_blacklist`).
+Différences : `MaybachGambleCalls`, `ramcalls`, `explorer_gems`, `bounty_journal` n'y sont
+**pas** ; `TheReaperGems`, `zcallz`, `venom_gambles`, `robo_gambles`, `certifiedprintor`,
+`CSCalls`, `CarnagecallsGambles`, `unemployedDegen`, `UnemployedPlays` et **`olympeqg`** y sont.
+
+⇒ **`olympeqg` était DÉJÀ banni** — ma recommandation de l'ajouter était sans objet.
+⚠️ **Règle : lire la config en DB, jamais la mémoire, avant toute recommandation.**
+
+**Audit refait sur la vraie liste** (10 semaines, `BE25_TP80_SL30`, dédoublonné) :
+
+| groupe | KOLs | tokens | EV | WR |
+|---|---|---|---|---|
+| 🚫 blacklistés | 21 | 967 | **−4.29 %** | 33.1 % |
+| autorisés | 54 | 811 | **+1.01 %** | 33.3 % |
+
+⇒ **La blacklist tient (+5.3 pp) et le groupe autorisé est positif.** Contraste
+**pré-spécifié** (2 groupes définis d'avance, aucun maximum choisi) ⇒ lisible, contrairement au
+croisement KOL × stratégie du §10.
+
+### 10 ter. ✅ FAIT — `reapergamble` banni + l'axe KOL enfin testable dans le sweep
+
+- [x] **`reapergamble` ajouté** à `kol_chain_blacklist.solana` (22 → **23**), ethereum intact.
+      t = −5.24, EV −23.16 % sur 34 tokens, 2/10 semaines positives — le signal le plus fort du
+      jeu de données, plus fort que `jadendegens` (t = −3.41) déjà banni.
+- [x] 🐛 **`TOPKOL` du sweep est une liste morte** — `_MEGA_TOP_KOLS` (`sim.py:4255`) est figée
+      et contient **ses deux pires membres** : `ChadleyGambles123` **−32.05 %** et
+      `jadendegens` **−24.93 %** (banni). D'où d_EV −1.37 / −1.87 et **0/5 mois positifs** sur
+      les deux derniers runs. **L'axe KOL n'avait jamais été testé — on testait une liste
+      périmée.**
+- [x] **Arm `NOBLACKLIST` ajouté** (v14e.86, `_MEGA_EXT_FILTERS`) : exclut la blacklist prod,
+      **lue depuis la DB à chaque run** (la figer serait refaire le bug de `TOPKOL`). Il log
+      `23 KOL exclus`, et log un `[warn]` explicite s'il tombe à vide (sinon l'arm devient un
+      no-op silencieux identique à `NONE` — piège v14e.79). Testé : `reapergamble`, `olympeqg`,
+      `jadendegens` rejetés ; `FrenzGems`, `slingoorioyaps`, KOL vide acceptés.
+- [ ] ⚠️ **Conséquence à instruire** : `sim.py` n'a qu'une blacklist *qualité de données*
+      (2 entrées). **Le sweep évalue donc sur un univers incluant les 23 KOL bannis en prod** —
+      il mesure un flux que le deck ne trade jamais. `NOBLACKLIST` va chiffrer cet écart au
+      prochain run. Piste sérieuse pour une part de l'écart d'E37 (sweep ↔ réel).
+
+▶️ **Actions restantes :**
+- [ ] **Ajouter `reapergamble`** — t = −5.24, le signal le plus fort du jeu de données,
+      2/10 semaines positives.
+- [ ] **Instruire `olympeqg`** — t = −2.76 sous le seuil, mais **432 tokens** (de loin le plus
+      gros contributeur) ⇒ **l'impact en argent domine tout le reste**. ⚠️ La mémoire du 05/08
+      dit « olympeqg banni ⇒ +1.3 à +2.3 pp partout » — **il n'est PAS dans la blacklist solana
+      actuelle**. Comprendre pourquoi avant d'agir.
+- [ ] **Ne PAS débannir** `explorer_gems` ni `mad_apes_gambles` malgré leurs chiffres positifs :
+      non significatifs.
+- [ ] `spidersjournal` (−10.95 % sur 97 tokens, 3/11 semaines) : candidat faible, à surveiller.
+      C'est lui qui produisait le faux top du §9 via un unique ×20.
 - [ ] Les 3 shadow `PFS_LOCK*` restants (`PFS_LOCK10_TP200_NOHYPE`, `PFS_LOCK15_TP200_BANDE`,
       `PFS_LOCK15_TP150_T2H_NOHYPE`) répondent à une question **close** (LOCK = no-op, TP200 =
       pire famille). Elles ne coûtent rien mais polluent le classement — retirables.

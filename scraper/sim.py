@@ -1362,6 +1362,53 @@ def _load_live_strategy_overrides() -> dict:
     return {}
 
 
+_PROD_KOL_BLACKLIST_CACHE: "frozenset | None" = None
+
+
+def _load_prod_kol_blacklist(chain: str = "solana") -> frozenset:
+    """v14e.86: production KOL blacklist, READ FROM THE DB at run time.
+
+    ⚠️ Ne jamais figer cette liste en dur. C'est exactement comme ça que
+    `_MEGA_TOP_KOLS` (arm TOPKOL) a pourri: sa liste gelée porte encore
+    `jadendegens` (EV -24.93 % sur 64 tokens, t = -3.41) et
+    `ChadleyGambles123` (-32.05 %), ses deux pires membres. D'où un arm a
+    d_EV -1.37 / -1.87 et **0/5 mois positifs** sur les deux derniers runs:
+    l'axe KOL n'a jamais été testé, on testait une liste périmée.
+
+    Mesuré le 11/08 sur 10 semaines, sortie de référence BE25_TP80_SL30,
+    dédoublonné par token: bannis **-4.29 %** (21 KOL, 967 tokens) contre
+    autorisés **+1.01 %** (54 KOL, 811 tokens). C'est un contraste
+    PRÉ-SPÉCIFIÉ (deux groupes définis à l'avance, aucun maximum choisi),
+    donc lisible — contrairement au croisement KOL x stratégie, qui reste
+    SOUS son plancher de permutation (meilleur réel +23.19 contre H0
+    +29.84 / +39.67).
+    """
+    global _PROD_KOL_BLACKLIST_CACHE
+    if _PROD_KOL_BLACKLIST_CACHE is not None:
+        return _PROD_KOL_BLACKLIST_CACHE
+    names: set = set()
+    try:
+        rows = sb_get("scoring_config", [("id", "eq.1"), ("select", "paper_trade_config")])
+        if rows and rows[0].get("paper_trade_config"):
+            cfg = rows[0]["paper_trade_config"]
+            if isinstance(cfg, str):
+                import json
+                cfg = json.loads(cfg)
+            names = set((cfg.get("kol_chain_blacklist") or {}).get(chain) or [])
+    except Exception as e:
+        print(f"[warn] failed to load prod KOL blacklist: {e}")
+    if not names:
+        # Un filtre insatisfaisable qui ne dit rien est le pire cas (cf. v14e.79,
+        # 21 h sans ouverture). Ici l'échec est inverse — l'arm devient un no-op
+        # identique à NONE — mais il doit rester VISIBLE dans le log du run.
+        print("[warn] prod KOL blacklist vide -> l'arm NOBLACKLIST sera un no-op "
+              "(identique a NONE). Ne pas lire son verdict.")
+    else:
+        print(f"[mega] prod KOL blacklist chargee: {len(names)} KOL exclus de l'arm NOBLACKLIST")
+    _PROD_KOL_BLACKLIST_CACHE = frozenset(names)
+    return _PROD_KOL_BLACKLIST_CACHE
+
+
 # v137: realistic polling — replaces the v131 "next-tick-after-gap" subsample
 # with deterministic 30s grid + cache look-back. Mimics paper_trader's actual
 # unified_check_loop (30s) + _should_poll_trade(polling_sec) + _jupiter_prices_cache
@@ -4293,7 +4340,7 @@ _MEGA_EXT_SMOOTHINGS = ["raw", "ema_fast", "ema_slow", "median_3", "median_5",
 _MEGA_EXT_POLLING_MODES = ["fast", "static_30", "static_60", "static_120", "static_240",
                            "lazy_fast", "lazy_med", "lazy", "lazy_slow", "lazy_xslow"]
 _MEGA_EXT_FILTERS = ["NONE", "NOZEROLIQ", "SCORE30", "SCORE35", "SCORE40",
-                     "SCORE45", "SCORE50", "MCAP_MID", "TOPKOL",
+                     "SCORE45", "SCORE50", "MCAP_MID", "TOPKOL", "NOBLACKLIST",
                      "NOZEROLIQ_SCORE30", "NOZEROLIQ_SCORE40", "MCAP_MID_SCORE40",
                      # v14e.43 — BSR gates. ⚠ BSR seul perd $/d (validation
                      # empirique post-add). Gardés pour confirmation out-of-
@@ -4561,6 +4608,10 @@ def _mega_apply_filter(u, fname):
     if fname == "SCORE50": return (u.get("rt_score") or 0) >= 50
     if fname == "MCAP_MID": return 30_000 <= (u.get("entry_mcap") or 0) <= 500_000
     if fname == "TOPKOL": return (u.get("kol_group") or "") in _MEGA_TOP_KOLS
+    # v14e.86 — l'axe KOL, enfin testé sur un contraste PRÉ-SPÉCIFIÉ. Voir
+    # _load_prod_kol_blacklist() pour pourquoi TOPKOL ci-dessus ne vaut rien.
+    if fname == "NOBLACKLIST":
+        return (u.get("kol_group") or "") not in _load_prod_kol_blacklist()
     # v14e.43 — BSR gates (rt_buy_sell_ratio) from reverse-engineer findings
     if fname == "BSR52": return (u.get("rt_buy_sell_ratio") or 0) >= 0.52
     if fname == "BSR55": return (u.get("rt_buy_sell_ratio") or 0) >= 0.55
