@@ -369,6 +369,67 @@ non déployable tel quel ; **drift paper→live −1.90 pp** ≈ −$23/j à ce 
 `papicall`, `robo_gambles`, `unemployedDegen`, `venom_gambles`, `zcallz`). Pas contradictoire
 avec le §10 bis : **la blacklist est globale, l'optimum est par stratégie.** À instruire.
 
+### 11 ter. 🚨 BUG dans ma propre recherche — le filtre famille-artefact manquait
+
+Le **1er** run 4 mois sortait `TD2_BE5_TP120_SL44_T25` en **n°1** (+$4 935), avec
+`BOND_FAST_TP50_SL20_T20` et deux `DTRAIL` dans le top 10. **Ce sont des artefacts connus**
+(slippage sim ×47, `dtrail_shadow_artifact_apr20`), jamais promouvables en live.
+`verdict_par_exit` les écarte depuis longtemps ; **ni `kol_strategy_search.py` ni
+`verdict_kol_whitelist()` ne le faisaient**. ⇒ Corrigé (v14e.89) + 6ᵉ test qui plante un
+`DTRAIL` au sommet et vérifie qu'il ne remonte pas.
+⚠️ **Un chercheur de maximum sans filtre artefact ne trouve pas la meilleure stratégie, il
+trouve la mieux mal-mesurée.**
+
+### 11 quater. 📊 VERDICT 4 MOIS (artefacts exclus)
+
+1 105 617 lignes, **555 sorties × 92 KOL × 2 910 tokens**, 5 folds, 96 jours de test.
+
+| stratégie | test | sans WL | $/j | nKOL | folds+ |
+|---|---|---|---|---|---|
+| **`FAST_TP50_SL30_LAZYMED`** | **+$4 361** | −$501 | **+$45.3** | 30 | **4/4** |
+| `BE25_LOCK15_TP120_SL30` | +$3 510 | −$58 | +$36.4 | 29 | 3/4 |
+| `FAST_TP80_SL25_MED3` | +$3 397 | −$553 | +$35.3 | 32 | 4/4 |
+| `FAST_TP50_SL30_NOLAZY` | +$3 313 | **+$370** | +$34.4 | 36 | 4/4 |
+
+| contrôle | réel | plancher H0 (p95) | max H0 | verdict |
+|---|---|---|---|---|
+| **argent absolu** | +$4 361 | +$3 707 | +$4 052 | ✅ **dépasse**, p ~ 0.000, +18 % |
+| **apport de la whitelist** | +$18 594 | +$18 756 | +$19 811 | ❌ **ne dépasse pas**, p ~ 0.067 |
+
+⇒ **L'axe stratégie porte quelque chose ; la sélection de KOL prise isolément ne franchit pas
+son plancher sur 4 mois.** Le p ~ 0.033 des 10 semaines **n'a pas répliqué**.
+✅ **Correction de ce que j'avais dit sur les variantes** : sur 14 jours l'écart entre
+`_LAZYMED`/`_NOLAZY`/`_JUPITER`/`_LAZYSLOW` atteignait **$137/j** et j'en avais conclu à un
+artefact de mesure. Sur **4 mois**, `_NOLAZY` (#4) et `_JUPITER` (#6) sont **aussi 4/4** : la
+famille est cohérente à cette échelle. C'était du bruit de fenêtre courte. **Le verdict 4 mois
+prime.**
+
+### 11 quinquies. ✅ DÉPLOYÉ (v14e.90, `13:38 UTC`) — 1 main + 4 shadow à whitelist
+
+**MAIN** — `PFW_TP50_SL30_LM_WL`, seed **$1 000**, **$100/trade**, ~**9.3 trades/j** attendus.
+**SHADOW** — `PFWS_TP50_SL30_LM_WL_NOBAN` (le contrôle), `PFWS_BE25_LOCK15_TP120_SL30_WL`,
+`PFWS_TP80_SL25_MED3_WL`, `PFWS_TP50_SL30_NOLAZY_WL` (~13.9 trades/j).
+
+Trois pièges traités :
+1. 🔑 **`kol_chain_blacklist` fait sauter la ligne MAIN seulement, pas le shadow**
+   (`paper_trader.py:1351`). **9 des 30 KOL de la whitelist sont bannis** — dont
+   `mad_apes_gambles`, `zcallz`, `unemployedDegen`, parmi les plus gros contributeurs. Le bras
+   main n'en verra que **21**. D'où le jumeau shadow `..._NOBAN`, identique en tout point :
+   **l'écart main↔shadow chiffre exactement ce que la blacklist coûte** sur cette sortie.
+   ⚠️ On ne code **pas** en dur la liste « whitelist moins bannis » : la figer refait le bug de
+   `_MEGA_TOP_KOLS`. La source vivante est la DB.
+2. Le mode d'évaluation (`LAZYMED` = polling 360 s + `median_3`) vit dans
+   `rt_trade_config.strategy_overrides`, **pas** dans `strategies.py`. Sans entrée au nouveau
+   nom, le bras ne reproduirait pas la variante mesurée. 4 entrées ajoutées.
+3. Les **3 endroits** d'une promotion sont faits : allocations (13 → 14), overrides, seed $1 000.
+
+Vérifié : 5 bras enregistrés sur le VPS, service actif, RT listener sur 99 groupes, 0 erreur.
+
+- [ ] ⏰ **Vers le 25/08** (~130 trades main) : lire `PFW_TP50_SL30_LM_WL` contre son bankroll,
+      et **`PFW` vs `PFWS_..._NOBAN` en apparié** pour chiffrer le coût de la blacklist.
+- [ ] ⚠️ Attendre **moins** que les $45/j simulés : ~9-14 trades/j dépasse le plafond de
+      capacité (~7.4/j à $100), et le drift paper→live est de −1.90 pp.
+
 ### 11 bis. ✅ Intégré au mega sweep (v14e.88, `c7405e1`)
 
 - `sim.py` : colonne **`kol_month_json`** = `{kol: {mois: [n, somme]}}`, émise **uniquement sur
