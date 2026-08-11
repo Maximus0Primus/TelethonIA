@@ -573,6 +573,22 @@ def verdict_kol_whitelist(df, csv_path, n_permutations=60, min_train_tokens=5,
     if "kol_month_json" not in df.columns:
         return
     sub = df[df["kol_month_json"].notna() & (df["kol_month_json"] != "")]
+    # ⚠️ EXCLURE LA FAMILLE ARTEFACT (trail/dip/split/bond): classee en tete par
+    # la simulation a cause d'une calibration de slippage x47, et jamais
+    # promouvable en live (dtrail_shadow_artifact_apr20). `verdict_par_exit` le
+    # fait deja; l'oubli ici a fait sortir TD2_BE5_TP120_SL44_T25 en n°1 du
+    # premier run 4 mois — un artefact connu, presente comme la meilleure strat.
+    _n_avant = sub["strategy"].nunique()
+    try:
+        from strategies import _is_artifact_family, _DEFAULT_DEPRECATED
+        sub = sub[~sub["strategy"].map(
+            lambda s: _is_artifact_family(s) or s in _DEFAULT_DEPRECATED)]
+        _ecartees = _n_avant - sub["strategy"].nunique()
+        if _ecartees:
+            print(f"\n  [verdict KOL] {_ecartees} sorties ecartees (famille artefact)")
+    except Exception as e:  # registre indisponible: on le DIT, on ne fait pas semblant
+        print(f"\n  [verdict KOL] !! filtre artefact indisponible ({e}) — "
+              "le classement peut contenir des familles non promouvables.")
     if sub.empty:
         print("\n  [verdict KOL] aucune ligne ne porte kol_month_json — le sweep "
               "tourne sur un SHA anterieur a v14e.88, section ignoree.")

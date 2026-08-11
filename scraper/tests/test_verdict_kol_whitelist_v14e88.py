@@ -97,6 +97,22 @@ class TestVerdictKolWhitelist(unittest.TestCase):
         out = self._run(_df(payloads))
         self.assertIn("AUCUNE config ne depasse le plancher", out, out)
 
+    def test_famille_artefact_est_ecartee(self):
+        """DTRAIL/TRAIL/DIP/SPLIT/BOND ne doivent JAMAIS remonter en tete.
+
+        Le 1er run 4 mois a sorti TD2_BE5_TP120_SL44_T25 en n°1 faute de ce
+        filtre: un artefact connu (slippage mal calibre x47) presente comme la
+        meilleure strategie. `verdict_par_exit` l'ecartait deja, pas celui-ci.
+        """
+        rng = np.random.default_rng(3)
+        payloads = _bruit(rng)
+        payloads["DTRAIL9_ACT5_SL70"] = {
+            f"kol{k}": {m: [12, 60.0] for m in MOIS} for k in range(20)}
+        out = self._run(_df(payloads))
+        self.assertNotIn("DTRAIL9_ACT5_SL70", out,
+                         "famille artefact remontee en tete:\n" + out)
+        self.assertIn("ecartees (famille artefact)", out, out)
+
     def test_colonne_absente_ne_casse_pas(self):
         """Sweep tournant sur un SHA anterieur: la section doit s'ignorer."""
         out = self._run(pd.DataFrame([{"strategy": "X"}]))

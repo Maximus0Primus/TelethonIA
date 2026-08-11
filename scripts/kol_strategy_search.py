@@ -195,7 +195,20 @@ def main() -> int:
             print(f"      cache ecrit -> {cache}")
     print(f"      {len(ded):,} apres dedup (strategie, KOL, token)")
 
+    # ⚠️ EXCLURE LA FAMILLE ARTEFACT. trail/dip/split/bond sont classes en tete
+    # par la simulation a cause d'une mauvaise calibration du slippage (x47) et
+    # ne sont PAS promouvables en live (cf. dtrail_shadow_artifact_apr20).
+    # `verdict_par_exit` les ecarte deja; ce script ne le faisait pas, et le
+    # premier run 4 mois a donc sorti TD2_BE5_TP120_SL44_T25 en n°1.
+    try:
+        from strategies import _is_artifact_family, _DEFAULT_DEPRECATED
+    except Exception:
+        _is_artifact_family, _DEFAULT_DEPRECATED = (lambda _n: False), set()
+    n_avant = len({d[0] for d in ded})
+    ded = [d for d in ded
+           if not _is_artifact_family(d[0]) and d[0] not in _DEFAULT_DEPRECATED]
     strats = sorted({d[0] for d in ded})
+    print(f"      {n_avant - len(strats)} strategies ecartees (famille artefact)")
     kols = sorted({d[1] for d in ded})
     tokens = sorted({d[2] for d in ded})
     si = {s: i for i, s in enumerate(strats)}
