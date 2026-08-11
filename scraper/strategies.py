@@ -4220,6 +4220,81 @@ for _n, (_spec, _filt) in {**_PF2_MEMBRES, **_PFS_MEMBRES}.items():
     SHADOW_STRATEGIES.append(_n)
 
 # ---------------------------------------------------------------------------
+# v14e.85 — AGE 3-12 H + famille TP100/SL20 (2026-08-11)
+# ---------------------------------------------------------------------------
+# Contexte: les deux bras TP200 (PF2_LOCK15_TP200_NOHYPE, PFS_TP200_SANSLOCK_
+# NOHYPE) ont ete RETIRES des allocations ce jour. Ils sont tombes de $1 009 a
+# ~$145 en 4 jours (-85 % du seed). Mecanique mesuree sur leurs 57 trades:
+# SL pris sur 74 % des trades et booke -49 % (gap-through), TP atteint 5 %.
+# Le taux de TP s'effondre avec la cible (TP50 36 % -> TP80 21 % -> TP200 5 %)
+# alors que le cout du SL reste ~-45 % quel que soit son niveau nominal.
+#
+# ⚠️ CE QUI ENCADRE CE BLOC — le classement par BRAS ne persiste PAS.
+# 355 bras shadow, selection 15/06->20/07, mesure 20/07->11/08, 841 tokens
+# apparies: correlation de rang A->B = 0.019, le top-10 de A retombe au rang
+# 137/355 en B. Le bottom-10, lui, RESTE en bas. Donc: eliminer les pires
+# marche, choisir le meilleur non. Aucun bras ci-dessous n'est promu en main;
+# ils sont la pour produire une mesure APPARIEE contre une reference qui
+# tourne deja, chacun ne changeant QU'UNE chose.
+#
+# Ce que l'age 3-12 h vaut (mesure du 11/08): sur les 3 sorties testees, la
+# tranche 3-12 h bat la tranche <3 h -- BE25_TP80_SL30 -2.22 -> +1.68,
+# FAST_TP100_SL20 -2.21 -> +1.45, TP200_SL40_4H -5.93 -> -1.36. Flux ~5
+# tokens/jour, soit l'ordre de grandeur du deck: pas de cout en volume.
+# Controles passes: filtre bien applique (5 499/5 499 lignes dans la bande);
+# meme sortie + meme bande, bras bande vs non bande sur 185 tokens communs =
+# -0.15 pp, donc l'edge est dans la SELECTION de tokens, pas dans la sortie;
+# les bandes voisines ne tiennent pas (A1to3 -0.52 -> -7.27, A24to48 +4.05 ->
+# -5.34).
+# ⚠️ RESERVE: les 17 bras `_A3to12` existants partagent les MEMES 114 tokens
+# en periode B -- c'est un echantillon lu 17 fois, pas 17 confirmations -- et
+# ~la moitie de l'EV vient des trades > +300 %. D'ou shadow, pas main.
+_PFA_MEMBRES = {
+    # Reference: PF_TP50_SL40_S35 (le meilleur bras du deck, +14.5 % depuis le
+    # 06/08). Sortie et filtre IDENTIQUES, on n'ajoute que la bande d'age.
+    # L'ecart mesure l'age seul, execution comprise.
+    "PFA_TP50_SL40_S35_A3to12": (
+        {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.60, "horizon_min": 120,
+         "label": "main"},
+        {"min_rt_score": 35, "min_sentiment": 0.35, "max_sentiment": 0.70,
+         "min_age_hours": 3, "max_age_hours": 12},
+    ),
+    # Reference: PF_BE25_TP80_SL30 (+8.5 %). Il declare deja max_age_hours=12,
+    # donc ce bras n'ajoute QU'UN plancher d'age a 3 h: le test le plus propre
+    # du bloc (une seule borne change).
+    "PFA_BE25_TP80_SL30_A3to12": (
+        {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.70, "horizon_min": 30,
+         "be_activation": 0.25, "label": "main"},
+        {"min_age_hours": 3, "max_age_hours": 12,
+         "min_sentiment": 0.25, "max_sentiment": 0.75},
+    ),
+    # La famille que le sweep corrige retient. Sur les 2 runs avec les stops
+    # correctement bookes, la SEULE sortie au-dessus du plancher de bruit est
+    # AGE24_FAST15_TP100_SL20 (07/08, +517, d_EV +3.40, 4/5 mois). Elle est
+    # absente du deck. Filtre tenu identique a PF_TP50_SL40_S35: seul l'exit
+    # change (TP 1.50 -> 2.00, SL 0.60 -> 0.80), donc l'ecart mesure l'exit.
+    "PFA_TP100_SL20_S35": (
+        {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.80, "horizon_min": 120,
+         "label": "main"},
+        {"min_rt_score": 35, "min_sentiment": 0.35, "max_sentiment": 0.70},
+    ),
+    # Le meme, dans la bande d'age: croise les deux resultats ci-dessus. S'il
+    # bat PFA_TP100_SL20_S35 ET PFA_TP50_SL40_S35_A3to12, les deux effets
+    # s'additionnent; sinon ils se recouvrent.
+    "PFA_TP100_SL20_S35_A3to12": (
+        {"pct": 1.0, "tp_mult": 2.00, "sl_mult": 0.80, "horizon_min": 120,
+         "label": "main"},
+        {"min_rt_score": 35, "min_sentiment": 0.35, "max_sentiment": 0.70,
+         "min_age_hours": 3, "max_age_hours": 12},
+    ),
+}
+
+for _n, (_spec, _filt) in _PFA_MEMBRES.items():
+    STRATEGIES[_n] = [dict(_spec)]
+    STRATEGY_FILTERS[_n] = {"chain": "solana", **_filt}
+    SHADOW_STRATEGIES.append(_n)
+
+# ---------------------------------------------------------------------------
 # v14e.36 — auto-deprecate every artifact-family strategy registered above.
 # Trail/dip/split/bond shadows pollute analytics (sim ranks them top via
 # 47x slip miscalibration) and cannot be promoted to live. This finalization

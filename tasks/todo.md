@@ -1,11 +1,190 @@
 # Operational Backlog
 
+## 🔴 11/08 — AUDIT DECK MAIN × SWEEP : les 2 bras TP200 sont à tuer
+
+> Mesuré le 11/08 sur `paper_trades` (dédoublonné par token, `pnl_pct <= 20`) + run de sweep
+> `31456432044` (cron 48h, 18/18 shards verts) et `31179027155` (07/08).
+
+### 1. Les 6 bras main, depuis le 07/08 11:00 UTC
+
+| bras | n | EV | médiane | WR |
+|---|---|---|---|---|
+| `PF_TP50_SL40_S35` | 25 | **−0.03 %** | −14.24 | 40.0 % |
+| `PF_BE25_TP80_SL30` | 40 | −1.99 % | −12.16 | 30.0 % |
+| `PF2_BE25_TP80_NOHYPE` | 82 | −3.54 % | −21.86 | 30.5 % |
+| `PF_FAST_TP50_SL30_MCAP_S40` | 17 | −4.20 % | −4.18 | 47.1 % |
+| `PF2_LOCK15_TP200_NOHYPE` | 57 | **−24.23 %** | −44.93 | 17.5 % |
+| `PFS_TP200_SANSLOCK_NOHYPE` | 57 | **−24.23 %** | −44.16 | 15.8 % |
+
+Apparié sur les 15 tokens communs aux 6 bras : `PF_TP50_SL40_S35` **+4.44**, la famille TP80
+entre −5 et −6, et les deux TP200 à **−42.4 / −42.7**. L'écart n'est pas du bruit d'échantillon.
+
+**Mécanique (par type de sortie).** Les bras TP200 prennent le SL sur **42/57 = 74 %** des trades,
+booké à **−49 %** (gap-through), et n'atteignent le TP que **3/57 = 5 %**. Le taux de TP s'effondre
+avec la cible : **TP50 → 36 %, TP80 → 21 %, TP200 → 5 %**, pendant que le coût du SL reste
+~−42 à −49 % quel que soit son niveau nominal. Élargir le SL ne sauve donc aucun trade, ça
+augmente seulement la perte bookée. **Un TP haut + un SL large est la pire combinaison possible
+sur ce flux.**
+
+### 2. ✅ La question du LOCK (prévue pour le 21/08) est déjà tranchée — **retirer le LOCK**
+
+`PF2_LOCK15_TP200_NOHYPE` et `PFS_TP200_SANSLOCK_NOHYPE` : **−24.23 % toutes les deux**, sommes
+à 0.2 pp près sur 57 tokens appariés (écart **0.26 pp**, critère « ≤ 1 pp » du §3 ci-dessous).
+Raison : avec une médiane à −45 %, le prix ne monte quasi jamais à +25 %, donc **le BE/LOCK ne
+s'arme jamais**. Ce n'est pas « le lock est neutre », c'est « le lock est un no-op sur ce flux ».
+⚠️ Ça ne valide pas E37 pour autant : E37 mesurait LOCK vs SANSLOCK sur des *sorties* différentes.
+
+### 3. Cohérence avec le mega sweep — les deux instruments sont d'accord
+
+- **Classement : bruit, 5e confirmation.** `31456432044` : plancher 24.54, meilleure config
+  **18.04**, **0/972 414**. `31179027155` : 24.94 vs 19.11, 0/972 414. Sujet clos définitivement.
+- **`verdict par sortie`** — 07/08 : **1 seule** survivante, `AGE24_FAST15_TP100_SL20`
+  (TP +100 / SL −20 / âge ≤ 24 h). 11/08 : **0**, mais ⚠️ **pas parce que le plancher n'est pas
+  franchi** (meilleure réelle **+847** contre plancher **+129**) — c'est une **garde de
+  régularité** qui coupe (`analyze_mega_sweep.py:502-504` : `mois_positifs >= mois-1` et
+  `part_meilleur_mois <= 0.6`). À ne pas lire comme « l'axe sortie est du bruit ».
+- **BE+LOCK a disparu du haut** dans les deux runs corrigés ⇒ **E36 était bien un artefact de
+  booking**, confirmé indépendamment par la production (§2).
+- **Accord de fond** : sweep et production désignent la même chose — **TP ~100 + SL serré
+  (≤ 30) battent TP 200 + SL 40**, et **filtrer l'entrée par l'âge du token paie**.
+- ⚠️ **Désaccord à instruire** : `verdict par bras` retient **`SENT50_60`** dans les *deux* runs
+  corrigés, et classe **`SENT_NOHYPE` 22e/24** (+7.2 $/j, 96 % du volume). Or les 3 bras main
+  posés le 07/08 tournent **tous en `NOHYPE`**. Le deck tourne donc sur le filtre que le sweep
+  corrigé classe dernier. (Prudence : `d_arg/j` favorise mécaniquement les bras qui coupent le
+  volume — SENT50_60 garde 5 % du flux ; à réconcilier avant d'agir.)
+
+### 4. ⚠️ Ce qu'on ne peut PAS faire : désigner « la meilleure stratégie »
+
+Contrôle hors-échantillon sur la grille shadow (355 bras, sélection 15/06→20/07, mesure
+20/07→11/08, apparié sur 841 tokens communs) :
+
+| | résultat |
+|---|---|
+| corrélation de rang A→B | **0.019** (nulle) |
+| top-10 de A → rang moyen en B | **137 / 355** (le milieu) |
+| top-10 de A → EV en B | +0.11 % |
+| bottom-10 de A → rang moyen en B | 230 / 355, EV **−2.31 %** |
+
+⇒ **Choisir le meilleur bras ne sert à rien ; éliminer les pires marche.** C'est la forme
+« downside prédictible, upside non » au niveau stratégie. **Toute décision doit être prise au
+niveau FAMILLE**, jamais au niveau config.
+
+**Au niveau famille, l'ordre tient A→B** (non apparié, ordre seul) : `TP≤80/SL≤25` −0.10 → −1.65
+et `TP81-120/SL26-30` −1.27 → −1.38 en haut ; `TP≥200/SL31-40` −3.90 → −7.08 et `TP≥200/SL>40`
+−5.60 → −9.54 en bas. Les bras TP200 du deck sont dans la **pire famille des deux périodes**.
+
+### 5. Piste âge 3–12 h — réelle mais à ne pas surinterpréter
+
+Sur les 3 sorties testées, la tranche **3–12 h bat systématiquement la tranche <3 h** :
+`BE25_TP80_SL30` −2.22 → **+1.68**, `FAST_TP100_SL20` −2.21 → **+1.45**,
+`TP200_SL40_4H` −5.93 → −1.36. Uplift **+3.5 à +4.6 pp**, cohérent sur les 3 sorties.
+Flux disponible ≈ **5 tokens/jour**, soit l'ordre de grandeur du deck ⇒ **pas de coût en volume**.
+
+Contrôles passés :
+- filtre bien appliqué (5 499/5 499 lignes dans la bande) ;
+- même sortie, même bande, bras bandé vs non bandé sur 185 tokens communs : **−0.15 pp**
+  ⇒ l'edge vient de **la sélection de tokens**, pas de la sortie ;
+- les bandes voisines **ne tiennent pas** (`A1to3` −0.52 → −7.27, `A24to48` +4.05 → −5.34).
+
+⚠️ **Limites à retenir** : les 17 bras `_A3to12` partagent **les mêmes 114 tokens** en période B
+— ce n'est **pas** 17 confirmations indépendantes, c'est un échantillon de 114 tokens lu 17 fois.
+Et en B, ~la moitié de l'EV vient des trades > +300 % (EV 2.47 → **1.07** en les retirant).
+⇒ **shadow d'abord**, pas de promotion directe.
+
+### 5 bis. 🚨 CORRECTION — mon premier tableau était mesuré sur la mauvaise fenêtre
+
+J'avais démarré la fenêtre au **07/08 11:00** (déploiement des 3 nouveaux bras, pour que les 6
+soient comparables). Les 3 `PF_*` d'origine ont démarré le **06/08** et ont fait leurs gains
+dans les premières 24 h — **juste avant la fenêtre**. D'où un tableau tout négatif, à tort.
+
+État réel depuis le début de chaque bras (= ce qu'affiche l'alerte, `rt_bankroll.strategy_bankrolls`) :
+
+| bras | solde | pic | creux | vs seed |
+|---|---|---|---|---|
+| `PF_TP50_SL40_S35` | **$1 145** | **$1 289** | $904 | **+14.5 %** |
+| `PF_BE25_TP80_SL30` | **$1 085** | $1 214 | $1 056 | **+8.5 %** |
+| `PF_FAST_TP50_SL30_MCAP_S40` | $1 000 | $1 167 | $956 | +0.0 % |
+| `PF2_BE25_TP80_NOHYPE` | $709 | $1 206 | $709 | −29 % |
+| `PF2_LOCK15_TP200_NOHYPE` | **$145** | $1 009 | $145 | **−85 %** |
+| `PFS_TP200_SANSLOCK_NOHYPE` | **$147** | $1 009 | $147 | **−85 %** |
+
+⇒ **3 bras sur 6 sont dans le vert.** L'ordre entre bras est **identique** dans les deux
+lectures, donc le diagnostic ne change pas — il s'aggrave : les TP200 ont brûlé **85 % du seed**
+en 4 jours sans jamais repasser $1 000. Verdict LOCK inchangé : **$1.31** d'écart sur 57 trades.
+
+⚠️ **Leçon** : toujours mesurer un bras **depuis sa propre date de début**, pas depuis une
+fenêtre commune, quand on veut savoir « est-ce que ça marche ». La fenêtre commune sert au
+**comparatif apparié**, pas au bilan. Les deux tableaux répondent à deux questions différentes.
+
+⚠️ Les bras **ETH** de `rt_bankroll` affichent $1 200–$2 100 avec `last_updated_at` bloqué au
+**26–30 avril** : soldes **gelés** (flux ETH tari), pas de la perf récente. Trompeur en alerte.
+
+### 5 ter. 🔴 E34 EST CONTREDIT PAR LA PRODUCTION — le plancher de sentiment paie
+
+`PF_BE25_TP80_SL30` et `PF2_BE25_TP80_NOHYPE` ont **exactement la même sortie** (tp 1.80,
+sl 0.70, horizon 30, be 0.25) et ne diffèrent que par le filtre : bande `0.25–0.75` contre
+`max_sentiment 0.70` seul. Expérience naturelle, décomposée par segment de tokens :
+
+| segment | n | EV | $ |
+|---|---|---|---|
+| tokens communs | 40 | — | +$121 |
+| **exclusifs NOHYPE** (que la bande refusait) | 43 | **−9.18 %** | **−$396** |
+| **exclusifs bande** (que NOHYPE refusait, s ∈ 0.70–0.75) | 2 | +82.86 % | **+$166** |
+
+⇒ Retirer le **plancher** a fait entrer 43 tokens qui perdent **$396**, et resserrer la borne
+haute de 0.75 à 0.70 a fait manquer **$166**. Les deux changements d'E34 ont coûté.
+✅ **Cohérent avec le sweep corrigé**, qui retient `SENT50_60` (une bande) dans les deux runs et
+classe `SENT_NOHYPE` **22e/24**. Deux instruments indépendants, même conclusion.
+⚠️ n=43 et n=2 : direction solide, magnitude non. Les $166 tiennent sur **2 tokens**.
+→ **`PF2_BE25_TP80_NOHYPE` (−29 %) est le prochain candidat à la coupe** — en attente user.
+
+### 6. ▶️ Actions
+
+- [x] ✅ **11/08 — `PF2_LOCK15_TP200_NOHYPE` et `PFS_TP200_SANSLOCK_NOHYPE` RETIRÉS** de
+      `scoring_config.rt_trade_config.hybrid_strategy.allocations` (16 → 14 bras, les 14 autres
+      préservés, 0 position ouverte orpheline). Elles restent dans le registre `strategies.py`
+      donc **continuent de tourner en shadow** : l'historique reste comparable, elles ne
+      consomment plus de bankroll ni d'alertes.
+- [x] ✅ **4 bras shadow ajoutés** (v14e.85, `strategies.py`) — aucun en main, par construction :
+      le classement par bras ne persiste pas (§4), donc on **mesure** avant de promouvoir.
+      | bras | référence | ce qu'il change | volume attendu |
+      |---|---|---|---|
+      | `PFA_TP50_SL40_S35_A3to12` | `PF_TP50_SL40_S35` | bande d'âge seule | ~3.7/j |
+      | `PFA_BE25_TP80_SL30_A3to12` | `PF_BE25_TP80_SL30` | **plancher d'âge seul** (le plus propre) | ~6/j |
+      | `PFA_TP100_SL20_S35` | `PF_TP50_SL40_S35` | exit seul → famille retenue par le sweep | ~15/j |
+      | `PFA_TP100_SL20_S35_A3to12` | les deux ci-dessus | croise âge × exit | ~3.7/j |
+      Satisfiabilité vérifiée (leçon v14e.79) : **~25 %** du flux du deck est dans la bande 3–12 h.
+      Tests : **207 passed, 367 subtests**.
+- [ ] ⏰ **Vers le 08/09** (~4 semaines, ~150 trades/bras) : lire les 4 bras **en apparié par
+      token** contre leur référence. Décision au niveau **famille**, jamais config.
+- [ ] **Trancher `PF2_BE25_TP80_NOHYPE`** (voir §5 ter) — le retirer des allocations ?
+- [ ] Les 3 shadow `PFS_LOCK*` restants (`PFS_LOCK10_TP200_NOHYPE`, `PFS_LOCK15_TP200_BANDE`,
+      `PFS_LOCK15_TP150_T2H_NOHYPE`) répondent à une question **close** (LOCK = no-op, TP200 =
+      pire famille). Elles ne coûtent rien mais polluent le classement — retirables.
+- [ ] ⚠️ **Déploiement VPS requis** pour que les 4 bras shadow commencent à tourner. La coupe
+      des 2 TP200, elle, est **déjà active** (config DB, lue à chaud).
+- [ ] Garder le deck sur **TP 80–100 / SL ≤ 30**.
+- [ ] **Réconcilier `SENT50_60` vs `SENT_NOHYPE`** avant de retoucher le filtre du deck :
+      vérifier si `d_arg/j` du `verdict par bras` avantage mécaniquement les bras à faible volume.
+- [ ] 🐛 doc : la ligne 8 renvoie à une section « DÉPOUILLÉ — run `31179027155` » **qui n'existe
+      pas** dans ce fichier. Le verdict est désormais consigné au §3 ci-dessus.
+
+⚠️ **Aucun chiffrage en euros** (règle E37) : la période 20/07→11/08 est négative pour
+**presque tous** les bras, deck compris. Tout ce qui précède est un **ordre relatif**, pas la
+promesse d'un système rentable.
+
+---
+
 ## 🔴 REPRISE DE SESSION — à faire dans cet ordre (état au 07/08 12:45 UTC)
 
 > Session fermée par l'user pendant que le sweep tourne. Tout ce qui suit est actionnable
 > sans contexte supplémentaire.
 
-### 1. ⏳ Dépouiller le run `31179027155` (le seul travail bloqué sur une attente)
+### 1. ✅ FAIT — run `31179027155` dépouillé le 08/08 → voir « DÉPOUILLÉ — run `31179027155` » plus bas
+
+**Verdict en une ligne : `BE25_LOCK15_TP200_SL40` décroche. E36 était un artefact de booking.**
+
+<details><summary>Protocole de lecture utilisé (à réappliquer aux runs suivants)</summary>
 
 Lancé **07/08 12:38 UTC**, SHA `6643678`, 18 shards. **Résultats vers 18:00 UTC.**
 Premier run où shards **et** analyse portent tous les correctifs.
