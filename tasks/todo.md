@@ -425,10 +425,70 @@ Trois pièges traités :
 
 Vérifié : 5 bras enregistrés sur le VPS, service actif, RT listener sur 99 groupes, 0 erreur.
 
+### 11 sexies. 🚨 CORRECTIF v14e.91 — le bras main ne pouvait PAS reproduire ses chiffres
+
+**Signalé par l'user, et c'était une erreur de conception de ma part.** Le gate
+`kol_chain_blacklist` s'applique **au niveau du TOKEN, avant la boucle par stratégie**
+(`continue` sur la boucle externe, `paper_trader.py:1621`). Un KOL banni était donc écarté de
+**toutes** les stratégies main, whitelist ou pas. `PFW_TP50_SL30_LM_WL` tournait sur **21** de
+ses 30 KOL — alors que les +$4 361 (4 mois) et +$80.65/j (14 j) sont mesurés **sur les 30**.
+
+**Correctif** : une `kol_whitelist` **explicite prime** sur la blacklist globale. La blacklist
+est une décision **globale** (« mauvais en moyenne »), la whitelist une décision **par
+stratégie** (« rentable sur cette sortie ») — la plus spécifique gagne. Le gate calcule
+`_kol_banned` et la décision est prise **dans** la boucle par stratégie.
+⚠️ **Portée volontairement étroite** : n'affecte que les bras déclarant une whitelist. Les 13
+autres bras main du deck n'en déclarent aucune et gardent le comportement v14e.37 **à la
+lettre** (testé). Opt-out : `respect_chain_blacklist: True`.
+
+**Les 9 KOL de la whitelist qui bénéficient du privilège** : `mad_apes_gambles`, `zcallz`,
+`unemployedDegen`, `robo_gambles`, `ChairmanDN1`, `venom_gambles`, `aliensalphacalls`,
+`UnemployedPlays`, `bagcalls`. ⚠️ **Ils restent bannis pour tout le reste du deck** — le
+privilège est strictement limité aux bras `PFW*`/`PFWS*`.
+ℹ️ `FrenzGems`, `slingoorioyaps` et `bounty_journal` **n'ont jamais été blacklistés** : rien ne
+change pour eux, ils tradaient déjà.
+
+**Jumeau `PFWS_TP50_SL30_LM_WL_NOBAN` supprimé** : il devait mesurer le coût du ban par
+différence, ce qui était faux deux fois — (1) `kol_chain_blacklist` ne filtre **que** la ligne
+MAIN, les shadows n'ont jamais été filtrés, donc il ne mesurait rien ; (2) depuis le correctif
+les deux configs sont identiques. Le coût du ban se calcule **sans bras supplémentaire**, en
+découpant les lignes du bras main sur la blacklist (9 / 21).
+
+### 11 septies. 🔑 CHOISIR LES MEILLEURS KOL NE MARCHE PAS — la règle inclusive, si
+
+Question de l'user : « un seul KOL, genre FrenzGems, ne ferait-il pas mieux ? »
+Test honnête : sélection sur avril→06/07, mesure sur 06/07→11/08.
+
+| règle de sélection | trades/j | argent période B |
+|---|---|---|
+| top-1 par EV | 0.22 | **−$9** |
+| top-3 par EV | 0.44 | **−$121** |
+| top-5 par EV | 1.17 | **−$98** |
+| top-10 par EV | 3.33 | **−$447** |
+| top-20 par EV | 10.92 | **−$750** |
+| top-1 par argent | 3.81 | **−$105** |
+| top-5 par argent | 4.81 | **−$393** |
+| **règle utilisée : « argent passé > 0 » (~30 KOL)** | 13.11 | **+$1 410** |
+
+⇒ **Toutes les sélections d'élite perdent. Seule la règle large et inclusive gagne.**
+
+🔑 **Pourquoi — le cas FrenzGems l'explique entièrement.** Il fait **+$1 969 à lui seul** en
+période B (EV +33.9 %, 1.61 trade/j), soit 45 % du total. Mais en période A il faisait
+**+$10** (EV +0.3 %) : **avant-dernier du groupe positif**. **N'importe quel top-K l'aurait
+éliminé.** La star de la période suivante est **invisible à l'avance**.
+⇒ La whitelist ne marche pas parce qu'elle **trouve des stars**, mais parce que c'est une
+**règle d'EXCLUSION** (« vire ceux qui perdaient ») qui laisse passer les futurs gagnants
+qu'on ne sait pas identifier. **4e confirmation du jour** de
+`downside_predictable_upside_not`.
+
+ℹ️ Plus stables que FrenzGems mais plus petits : `bounty_journal` (+9.5 % → +6.5 %) et
+`slingoorioyaps` (+4.4 % → +13.8 %), ~1.3 trade/j chacun. Les garder **seuls** aurait rapporté
+~$940 contre $1 410 pour le groupe entier.
+
 - [ ] ⏰ **Vers le 25/08** (~130 trades main) : lire `PFW_TP50_SL30_LM_WL` contre son bankroll,
-      et **`PFW` vs `PFWS_..._NOBAN` en apparié** pour chiffrer le coût de la blacklist.
-- [ ] ⚠️ Attendre **moins** que les $45/j simulés : ~9-14 trades/j dépasse le plafond de
-      capacité (~7.4/j à $100), et le drift paper→live est de −1.90 pp.
+      et **découper ses lignes sur la blacklist** (9 bannis / 21 non bannis) pour chiffrer ce
+      que le ban coûte sur cette sortie.
+- [ ] ⚠️ Attendre **moins** que les $45/j simulés : le drift paper→live est de **−1.90 pp**.
 
 ### 11 bis. ✅ Intégré au mega sweep (v14e.88, `c7405e1`)
 
