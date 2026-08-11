@@ -325,6 +325,69 @@ paraissent excellents mais |t| < 1.7 : indiscernables du bruit quand on en regar
 ⇒ **Deux KOL négatifs le sont.** **3e confirmation indépendante aujourd'hui** de
 `downside_predictable_upside_not` : *éliminer les pires marche, choisir le meilleur non.*
 
+### 11. 🔍 RECHERCHE EXHAUSTIVE stratégie × sous-ensemble de KOL (v14e.87 / v14e.88)
+
+**Univers COMPLET** : 813 932 lignes → 752 615 dédoublonnées, **542 stratégies × 87 KOL
+(blacklistés inclus) × 1 920 tokens**, depuis le 01/06. Script `scripts/kol_strategy_search.py`.
+
+🔑 **Pourquoi c'est EXACT et pas heuristique.** À mise plafonnée l'argent est la somme des
+`pnl_pct` retenus, donc **additif sur les KOL** : `argent(S) = Σ_{k∈S} argent(k)`. Maximiser
+sur les **2⁸⁷** sous-ensembles se résout donc exactement par `S* = {k : argent_train(k) > 0}`.
+**Toutes les associations de KOL sont réellement couvertes, en O(87)** — aucun greedy.
+
+**Protocole** : walk-forward 4 folds à fenêtre expansive, whitelist construite sur le train
+seul et notée sur le test seul. **Contrôle : 60 permutations rejouant le pipeline COMPLET,
+sélection comprise** — le contrôle porte sur la **procédure**, pas sur une cellule.
+
+**Réponse — top par argent hors échantillon** (mise $100, 54 jours de test) :
+
+| stratégie | argent test | sans whitelist | $/j | nKOL | folds+ |
+|---|---|---|---|---|---|
+| **`FAST_TP50_SL30_LAZYMED`** | **+$4 045** | −$876 | **+$75.6** | 30 | **3/3** |
+| `BE15_LOCK15_TP80_SL30` | +$3 004 | +$274 | +$56.1 | 30 | 3/3 |
+| `BE25_LOCK15_TP100_SL30` | +$2 864 | −$1 759 | +$53.5 | 30 | 3/3 |
+| `BE25_TP80_SL30_BOTH` | +$2 681 | −$1 922 | +$50.1 | 31 | 3/3 |
+
+Les **11 premières sont 3/3 folds positifs** et forment la **même famille** que le §4
+(FAST TP50-80/SL25-30 et BE+LOCK TP80-100/SL30) — **confirmation croisée par une méthode
+indépendante**. Sans whitelist, la n°1 **perd $876** : la sélection de KOL fait tout le travail.
+
+⚠️ **MAIS LE CONTRÔLE EST SERRÉ — ce n'est PAS « sûr »** :
+
+| | |
+|---|---|
+| meilleur réel | **+$4 045** |
+| plancher H0 (p95, 60 permutations) | +$3 865 |
+| **max H0 observé** | **+$4 417** |
+
+**p ≈ 0.033, marge +5 % sur le p95, et SOUS le max de 60 tirages aléatoires.** Signal réel mais
+faible. ⚠️ S'ajoutent : **$75.6/j dépasse le plafond de capacité** (+$23/j documenté) donc
+non déployable tel quel ; **drift paper→live −1.90 pp** ≈ −$23/j à ce volume.
+
+⚠️ **10 des 23 KOL bannis figurent dans la whitelist optimale** de cette sortie
+(`CarnagecallsGambles`, `ChairmanDN1`, `bagcalls`, `mad_apes_gambles`, `markdegens`,
+`papicall`, `robo_gambles`, `unemployedDegen`, `venom_gambles`, `zcallz`). Pas contradictoire
+avec le §10 bis : **la blacklist est globale, l'optimum est par stratégie.** À instruire.
+
+### 11 bis. ✅ Intégré au mega sweep (v14e.88, `c7405e1`)
+
+- `sim.py` : colonne **`kol_month_json`** = `{kol: {mois: [n, somme]}}`, émise **uniquement sur
+  la cellule canonique** `NONE/ALL/jupiter/raw/lazy_fast` (~73 o pour 2 KOL) — ailleurs vide,
+  sinon 87 KOL × 4 mois × ~1 M de lignes ferait exploser le CSV.
+- `analyze_mega_sweep.py` : **`verdict_kol_whitelist()`** rejoue l'algo sur **4 mois de prix
+  simulés** au lieu de 10 semaines de `paper_trades` ⇒ c'est le gain de puissance qui manque
+  pour trancher le p = 0.033.
+- 🐛 **Le null a dû être corrigé, et c'est le test qui l'a attrapé.** 1re version : une seule
+  permutation des KOL appliquée à **toutes** les sorties ⇒ elle ne fait que renommer les
+  colonnes de la matrice (sortie × KOL), les maxima par ligne sont inchangés, et le plancher
+  égalait le réel **exactement** (+362.1 vs +362.1). Un contrôle qui ne contrôle rien. Le null
+  correct permute les KOL **indépendamment par mois** : il casse la **persistance temporelle**,
+  qui est précisément ce que le walk-forward exploite.
+- 5 tests, les deux sens : signal stable **trouvé** ; signal sur **un seul mois refusé** ;
+  faux positifs **calibrés** sur 12 tirages de bruit (⚠️ ne pas tester une seule réalisation :
+  un seuil p95 se trompe 5 % du temps *par construction*).
+- [ ] ⏰ **Lire `[verdict KOL]` au prochain run du cron 48 h.**
+
 ### 10 bis. 🚨 CORRECTION — j'avais audité la blacklist sur une liste PÉRIMÉE
 
 Le §8 et le premier jet du §10 utilisaient la liste de **16 KOL de ma mémoire**. La vraie
