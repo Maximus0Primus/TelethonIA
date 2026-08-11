@@ -312,6 +312,28 @@ def _msg_sentiment(kol: str, token_addr: str) -> float | None:
     return val
 
 
+def _strategy_overrides_blacklist(strategy_name: str, kol: str) -> bool:
+    """v14e.91 — cette stratégie whiteliste-t-elle explicitement ce KOL ?
+
+    Si oui, sa `kol_whitelist` prime sur `kol_chain_blacklist` pour la ligne
+    MAIN. La blacklist est une décision GLOBALE ("mauvais en moyenne"), la
+    whitelist une décision PAR STRATÉGIE ("rentable sur cette sortie") : la
+    plus spécifique gagne. Sans ça, un bras à whitelist tourne sur une liste
+    amputée et ne peut pas reproduire les chiffres qui l'ont justifié.
+
+    Une stratégie peut refuser ce privilège avec `respect_chain_blacklist: True`
+    — utile pour un bras témoin qui doit, lui, subir la blacklist afin d'en
+    chiffrer le coût par différence.
+    """
+    if not kol:
+        return False
+    filt = STRATEGY_FILTERS.get(strategy_name) or {}
+    if filt.get("respect_chain_blacklist"):
+        return False
+    wl = filt.get("kol_whitelist")
+    return bool(wl) and kol in wl
+
+
 def _passes_strategy_filter(token: dict, strategy_name: str) -> bool:
     """Check if a token passes the entry filter for a given strategy."""
     # v14: chain gate — cheapest check, short-circuit first.
@@ -1347,6 +1369,7 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
     sell_slip_bps = SELL_SLIPPAGE_BPS
     buy_fee_bps = BUY_FEE_BPS
 
+    # (helper v14e.91 defini au niveau module, voir _strategy_overrides_blacklist)
     # v14e.37: per-chain KOL blacklist gate. Format in JSONB:
     #   paper_trade_config.kol_chain_blacklist = {"solana": [...], "ethereum": [...]}
     # Skips MAIN row creation only — shadows + telemetry (snapshots, ticks,
@@ -1618,7 +1641,30 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
         # safe_scraper using the same JSONB list.
         _row_kol = base_row.get("kol_group")
         _row_chain = base_row.get("chain") or "solana"
-        if _row_kol and _row_chain in _kol_chain_bl and _row_kol in _kol_chain_bl[_row_chain]:
+        _kol_banned = bool(
+            _row_kol and _row_chain in _kol_chain_bl
+            and _row_kol in _kol_chain_bl[_row_chain]
+        )
+        # v14e.91: une `kol_whitelist` EXPLICITE prime sur la blacklist globale,
+        # pour cette strategie seulement.
+        #
+        # Pourquoi: la blacklist est une decision GLOBALE ("ce KOL est mauvais
+        # en moyenne"), la whitelist une decision PAR STRATEGIE ("ce KOL est
+        # rentable sur cette sortie precise"). La seconde est plus specifique,
+        # donc elle gagne — sinon un bras a whitelist perd silencieusement une
+        # partie de sa liste et ne peut PAS reproduire les chiffres qui ont
+        # justifie sa creation. C'est exactement ce qui serait arrive a
+        # PFW_TP50_SL30_LM_WL: 9 de ses 30 KOL sont bannis, dont
+        # mad_apes_gambles, zcallz et unemployedDegen, parmi ses plus gros
+        # contributeurs — il aurait tourne sur 21 KOL en pretendant en tester 30.
+        #
+        # Portee: n'affecte QUE les strategies qui declarent `kol_whitelist`.
+        # Les autres (tout le deck actuel) gardent le comportement v14e.37.
+        # Une strategie peut redemander le comportement global en posant
+        # `respect_chain_blacklist: True` — c'est ce que fait le bras temoin.
+        if _kol_banned and not any(
+            _strategy_overrides_blacklist(s, _row_kol) for s in active_strategies
+        ):
             logger.info(
                 "paper_trader: SKIP MAIN (kol blacklist v14e.37): %s/%s on %s",
                 _row_kol, token.get("symbol", "???"), _row_chain,
@@ -1626,6 +1672,8 @@ def open_paper_trades(client, ranking: list[dict], cycle_ts: datetime, config: d
             continue  # outer token loop — shadow loop below still runs
 
         for strat_name in active_strategies:
+            if _kol_banned and not _strategy_overrides_blacklist(strat_name, _row_kol):
+                continue  # banni globalement, et cette strat ne l'a pas whiteliste
             if not _passes_strategy_filter(token, strat_name):
                 continue  # token doesn't qualify for this strategy
             tranches = STRATEGIES[strat_name]

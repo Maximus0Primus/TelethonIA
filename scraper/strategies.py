@@ -4404,16 +4404,18 @@ _PFWS_MEMBRES = {
          "label": "main"},
         {"kol_whitelist": _WL_TP50_NOLAZY},
     ),
-    # LE CONTROLE DU BLOC: sortie et whitelist IDENTIQUES au bras main. Seule
-    # difference, structurelle: le shadow n'est pas filtre par
-    # `kol_chain_blacklist`. L'ecart avec `PFW_TP50_SL30_LM_WL` chiffre donc
-    # exactement ce que le ban des 9 KOL coute (ou rapporte) sur cette sortie.
-    "PFWS_TP50_SL30_LM_WL_NOBAN": (
-        {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.70, "horizon_min": 30,
-         "label": "main"},
-        {"kol_whitelist": _WL_LAZYMED},
-    ),
 }
+# ⚠️ Pas de bras temoin "sans ban" ici, et c'est volontaire (v14e.91).
+# Premiere version: un jumeau shadow cense mesurer le cout de la blacklist par
+# difference avec le main. Faux sur deux plans:
+#   1. `kol_chain_blacklist` ne filtre QUE la ligne MAIN — les shadows n'ont
+#      jamais ete filtres, donc le jumeau ne mesurait aucune difference ;
+#   2. depuis v14e.91 le bras main honore sa whitelist en entier, donc les deux
+#      configurations sont devenues identiques.
+# Le cout du ban se calcule desormais SANS bras supplementaire: les lignes du
+# bras main portent les 30 KOL, il suffit de les decouper sur la blacklist
+# (9 bannis / 21 non bannis). Un bras de plus aurait coute des alertes et un
+# bankroll pour une information deja presente dans les donnees.
 
 for _n, (_spec, _filt) in {**_PFW_MEMBRES, **_PFWS_MEMBRES}.items():
     STRATEGIES[_n] = [dict(_spec)]
