@@ -454,6 +454,28 @@ MAIN, les shadows n'ont jamais été filtrés, donc il ne mesurait rien ; (2) de
 les deux configs sont identiques. Le coût du ban se calcule **sans bras supplémentaire**, en
 découpant les lignes du bras main sur la blacklist (9 / 21).
 
+### 11 octies. 🐛 ALERTE TG À BANKROLL $0 — une promo touche **4** endroits, pas 3
+
+Signalé par l'user : l'alerte affichait `PFW_TP50_SL30_LM_WL bankroll $0` alors que le seed
+était bien en base. **Cause** : j'ai écrit dans `rt_bankroll.strategy_bankrolls` (dict plat)
+alors que les lectures passent **d'abord** par
+`rt_bankroll.strategy_bankrolls_per_chain[chain]` (`safe_scraper.py:1003`), le dict plat
+n'étant qu'un **fallback legacy**. ⚠️ **Le bras tradait normalement — seul le chiffre affiché
+était faux.** Panne silencieuse, rien ne plantait.
+
+**Les 4 endroits (+1)** :
+1. `strategies.py` — la stratégie existe
+2. `rt_trade_config.hybrid_strategy.allocations` — elle est allouée
+3. 🔑 **`rt_bankroll.strategy_bankrolls_per_chain[chain]` — celui qui est LU**
+4. `rt_bankroll.strategy_bankrolls` — fallback legacy
+5. `rt_trade_config.strategy_overrides` — pour tout clone de variante, sinon **ce n'est pas la
+   stratégie qui a été mesurée**
+
+✅ Corrigé (per_chain.solana 44 → 45, PFW à $1 000). Aucune réconciliation : 1 seul trade,
+encore ouvert, 0 PnL réalisé.
+✅ Garde écrite : **`python scripts/check_main_arm_wiring.py`** — vérifie les 4 endroits pour
+chaque bras alloué et sort 1 si l'un manque. Les 4 bras main solana sont complets.
+
 ### 11 septies. 🔑 CHOISIR LES MEILLEURS KOL NE MARCHE PAS — la règle inclusive, si
 
 Question de l'user : « un seul KOL, genre FrenzGems, ne ferait-il pas mieux ? »
