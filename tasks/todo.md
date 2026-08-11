@@ -454,6 +454,46 @@ MAIN, les shadows n'ont jamais été filtrés, donc il ne mesurait rien ; (2) de
 les deux configs sont identiques. Le coût du ban se calcule **sans bras supplémentaire**, en
 découpant les lignes du bras main sur la blacklist (9 / 21).
 
+### 11 nonies. 🔴 LE TOP-10 SHADOW DES 2 DERNIÈRES SEMAINES NE TIENT PAS SUR 4 MOIS
+
+Demandé par l'user : « les 10 meilleurs shadow des 2 dernières semaines tiennent-ils ? »
+Classement 28/07 → 11/08 (artefacts `TD2_*` / `DTRAIL_*` retirés), puis argent cumulé **par
+mois** sur 4 mois (mise $100, dédoublonné par token) :
+
+| stratégie | $/j sur 14 j | avr | mai | juin | juil | août | **total 4 mois** | mois+ |
+|---|---|---|---|---|---|---|---|---|
+| `BE15_LOCK5_TP50_SL30` | +46.4 | +369 | +574 | +1128 | −871 | +620 | **+1 820** | 4/5 |
+| **`TP200_SL40_2H_A3to12`** | +61.2 | — | +475 | +104 | +252 | +315 | **+1 145** | **4/4** |
+| **`TP200_SL50_A3to12`** | +60.9 | — | +403 | +146 | +180 | +296 | **+1 025** | **4/4** |
+| **`TP150_SL50_A3to12`** | +44.6 | — | +285 | +163 | +111 | +215 | **+773** | **4/4** |
+| `BE15_LOCK15_TP80_SL30` | +34.3 | −172 | −372 | +1900 | −1562 | +743 | +537 | 2/5 |
+| `SLOW6H_TP150_SL50_A3to12` | +35.2 | — | −96 | −353 | −679 | +184 | **−944** | 1/4 |
+| `FAST_TP200_SL40_60M_MCAP_S40` | **+129.4** | +532 | −89 | −1539 | −1187 | +970 | **−1 313** | 2/5 |
+| `BE25_LOCK15_TP200_SL40_4H_NZ_S40` | +108.7 | +390 | +148 | −2191 | −1921 | +948 | **−2 626** | 3/5 |
+| `BE25_LOCK10_TP200_SL40_4H_NZ_S40` | +104.3 | — | −55 | −2682 | −1790 | +776 | **−3 750** | 1/4 |
+| `BE25_LOCK10_TP200_SL40_4H_MCAP_S40` | +57.6 | — | −74 | −2440 | −1457 | −315 | **−4 286** | **0/4** |
+
+🚨 **Le n°1 des 2 semaines (+$129/j) est à −$1 313 sur 4 mois.** Les quatre premiers de la
+fenêtre courte sont tous de la famille **TP200/SL40** et cumulent **−$11 975** sur 4 mois ;
+ils ont simplement eu un très bon mois d'août. **6 des 10 ne tiennent pas.**
+⇒ **Un classement à 2 semaines aurait fait promouvoir un bras à −$1 313.** 5e illustration du
+jour de la règle : le classement sur fenêtre courte ne prédit rien (ρ = 0.019).
+
+✅ **Ce qui tient** :
+- **Les 3 bras `_A3to12` sont les SEULS positifs tous les mois (4/4)**, à ~5.6 trades/j.
+  Cohérent avec la mesure du §7 bis : sur les tokens de 3–12 h la famille TP large cesse
+  d'être toxique (TP200/SL40 : **−5.93 % à <3 h → −1.36 % à 3–12 h**). **La bande d'âge
+  RACHÈTE la famille TP large** — confirmation que c'est un **substitut** aux autres filtres,
+  pas un complément.
+  ⚠️ Mais ce sont des **quasi-clones** (TP200/SL40-2H, TP200/SL50, TP150/SL50) sur **les
+  mêmes 78 tokens** : **une** observation lue trois fois, pas trois confirmations.
+- **`BE15_LOCK5_TP50_SL30`** : meilleur total (**+$1 820**), 4/5 mois, 27 trades/j, et il est
+  dans la famille **TP50-80/SL30** que le bras main teste déjà.
+
+- [ ] **Piste** : poser `BE15_LOCK5_TP50_SL30` **en shadow avec la whitelist KOL** — c'est le
+      croisement des deux seules choses qui ont tenu aujourd'hui (la famille TP50-80/SL30 et
+      la règle d'exclusion par KOL). **En attente user.**
+
 ### 11 octies. 🐛 ALERTE TG À BANKROLL $0 — une promo touche **4** endroits, pas 3
 
 Signalé par l'user : l'alerte affichait `PFW_TP50_SL30_LM_WL bankroll $0` alors que le seed
