@@ -4295,6 +4295,132 @@ for _n, (_spec, _filt) in _PFA_MEMBRES.items():
     SHADOW_STRATEGIES.append(_n)
 
 # ---------------------------------------------------------------------------
+# v14e.90 — WHITELIST KOL, issue de la recherche exhaustive (2026-08-11)
+# ---------------------------------------------------------------------------
+# `scripts/kol_strategy_search.py` sur 4 mois: 1 105 617 lignes dedoublonnees,
+# 555 sorties x 92 KOL x 2 910 tokens, walk-forward 5 folds, familles artefact
+# exclues. La whitelist optimale est EXACTE et non heuristique: a mise plafonnee
+# l'argent est additif sur les KOL, donc le meilleur des 2^92 sous-ensembles est
+# { k : argent_train(k) > 0 }.
+#
+# Resultats hors echantillon (96 jours de test, $100/trade):
+#   FAST_TP50_SL30_LAZYMED   +4 361 $ (+45.3 $/j)  sans whitelist -501 $  4/4 folds
+#   BE25_LOCK15_TP120_SL30   +3 510 $ (+36.4 $/j)  sans whitelist  -58 $  3/4
+#   FAST_TP80_SL25_MED3      +3 397 $ (+35.3 $/j)  sans whitelist -553 $  4/4
+#   FAST_TP50_SL30_NOLAZY    +3 313 $ (+34.4 $/j)  sans whitelist +370 $  4/4
+# Sur les 14 derniers jours, whitelist construite AVANT le 28/07 puis appliquee:
+#   +80.65 $/j avec, -178.41 $/j sans.
+#
+# ⚠️ CE QUE LE CONTROLE DIT, ET QU'IL FAUT GARDER EN TETE.
+# L'argent absolu depasse son plancher de permutation (p ~ 0.000, marge +18 %),
+# mais l'UPLIFT de la whitelist, lui, ne depasse PAS le sien sur 4 mois
+# (p ~ 0.067). Le p ~ 0.033 obtenu sur 10 semaines n'a pas replique. Ces bras
+# sont donc une MESURE en conditions reelles, pas un edge demontre.
+# ⚠️ Volume attendu ~17 trades/j sur le bras main: au-dessus du plafond de
+# capacite (~7.4 trades/j a $100). Le $/j observe sera plus bas que le simule.
+#
+# ⚠️ POURQUOI LA MEME WHITELIST EN MAIN ET EN SHADOW, ET SURTOUT POURQUOI ON NE
+# CODE PAS EN DUR LA VERSION "SANS LES BANNIS": `kol_chain_blacklist` (DB) fait
+# sauter la creation de la ligne MAIN uniquement (paper_trader.py:1351), les
+# shadows passent. Le bras main ne verra donc QUE les KOL non bannis, le shadow
+# les verra tous. L'ecart main<->shadow mesure exactement ce que la blacklist
+# coute sur cette sortie -- question ouverte depuis l'audit du 11/08 (9 des 30
+# KOL de la whitelist sont bannis, dont mad_apes_gambles, zcallz et
+# unemployedDegen qui sont parmi les plus gros contributeurs).
+# Deriver ici la liste "whitelist moins blacklist" la figerait: c'est exactement
+# ainsi que `_MEGA_TOP_KOLS` a pourri. La source vivante est la DB.
+_WL_LAZYMED = [
+    "FrenzGems", "mad_apes_gambles", "dddegens", "zcallz", "slingoorioyaps",
+    "bounty_journal", "unemployedDegen", "robo_gambles", "letswinallgems",
+    "Archerrgambles", "ChairmanDN1", "venom_gambles", "AnimeGems",
+    "explorer_gems", "sadcatgamble", "eveesL", "ALSTEIN_GEMCLUB",
+    "CryptoChefCooks", "UnemployedPlays", "lucyalphas", "cryptowhalecalls7",
+    "aliensalphacalls", "DoxxedChannel", "BossmanCallsOfficial",
+    "dylansdirtydiary", "snoopsalpha", "bagcalls", "robogems",
+    "fakepumpsbynumer0", "ghastlygems",
+]
+_WL_BE25_LOCK15_TP120 = [
+    "mad_apes_gambles", "dddegens", "zcallz", "letswinallgems", "slingoorioyaps",
+    "ChairmanDN1", "unemployedDegen", "explorer_gems", "FrenzGems",
+    "MaybachGambleCalls", "ALSTEIN_GEMCLUB", "CryptoChefCooks", "AnimeGems",
+    "legerlegends", "Archerrgambles", "gubbinscalls", "UnemployedPlays",
+    "venom_gambles", "aliensalphacalls", "eveesL", "bagcalls", "bounty_journal",
+    "fakepumpsbynumer0", "dylansdirtydiary", "robo_gambles", "DegensCabal",
+    "BossmanCallsOfficial", "CarnagecallsGambles", "snoopsalpha",
+]
+_WL_TP80_MED3 = [
+    "mad_apes_gambles", "dddegens", "FrenzGems", "zcallz", "slingoorioyaps",
+    "unemployedDegen", "ChairmanDN1", "letswinallgems", "gubbinscalls",
+    "DoxxedChannel", "venom_gambles", "robo_gambles", "explorer_gems",
+    "dylansdirtydiary", "ALSTEIN_GEMCLUB", "CryptoChefCooks", "AnimeGems",
+    "legerlegends", "cryptowhalecalls7", "UnemployedPlays", "bounty_journal",
+    "DegenSeals", "DegensCabal", "ghastlygems", "snoopsalpha",
+    "fakepumpsbynumer0", "lollycalls", "aliensalphacalls", "caniscooks",
+    "lucyalphas", "bagcalls", "ryoshigamble",
+]
+_WL_TP50_NOLAZY = [
+    "mad_apes_gambles", "FrenzGems", "dddegens", "unemployedDegen",
+    "slingoorioyaps", "zcallz", "AnimeGems", "ChairmanDN1", "letswinallgems",
+    "MaybachGambleCalls", "DegensCabal", "DoxxedChannel", "robo_gambles",
+    "Luca_Apes", "DegenSeals", "explorer_gems", "Archerrgambles",
+    "bounty_journal", "dylansdirtydiary", "ALSTEIN_GEMCLUB", "gubbinscalls",
+    "venom_gambles", "cryptowhalecalls7", "sadcatgamble", "UnemployedPlays",
+    "lucyalphas", "CryptoChefCooks", "veigarcalls", "bagcalls",
+    "fakepumpsbynumer0", "robogems", "aliensalphacalls", "BossmanCallsOfficial",
+    "ryoshigamble", "ghastlygems", "lollycalls",
+]
+
+_PFW_MEMBRES = {
+    # --- MAIN (alertes + bankroll $1 000, $100/trade) ---------------------
+    # La n°1 de la recherche 4 mois. Sortie identique a FAST_TP50_SL30_LAZYMED
+    # (TP +50 / SL -30 / 30 min); la SEULE chose ajoutee est la whitelist.
+    # ⚠️ Son mode d'evaluation (polling 360 s, price_source median_3) vit dans
+    # `rt_trade_config.strategy_overrides`, PAS ici: sans une entree a ce nom,
+    # le bras ne reproduirait pas la variante mesuree. Entree ajoutee en DB.
+    "PFW_TP50_SL30_LM_WL": (
+        {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.70, "horizon_min": 30,
+         "label": "main"},
+        {"kol_whitelist": _WL_LAZYMED},
+    ),
+}
+
+_PFWS_MEMBRES = {
+    # --- SHADOW (mesure seule) -------------------------------------------
+    # Les 3 suivantes du classement 4 mois, chacune avec SA propre whitelist
+    # (elles different: 29 a 36 KOL). Si une seule famille tenait, on le verrait
+    # ici; si les 4 tiennent, l'effet est celui de la whitelist, pas de la sortie.
+    "PFWS_BE25_LOCK15_TP120_SL30_WL": (
+        {"pct": 1.0, "tp_mult": 2.20, "sl_mult": 0.70, "horizon_min": 30,
+         "be_activation": 0.25, "be_lock_pct": 0.15, "label": "main"},
+        {"kol_whitelist": _WL_BE25_LOCK15_TP120},
+    ),
+    "PFWS_TP80_SL25_MED3_WL": (
+        {"pct": 1.0, "tp_mult": 1.80, "sl_mult": 0.75, "horizon_min": 30,
+         "label": "main"},
+        {"kol_whitelist": _WL_TP80_MED3},
+    ),
+    "PFWS_TP50_SL30_NOLAZY_WL": (
+        {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.70, "horizon_min": 30,
+         "label": "main"},
+        {"kol_whitelist": _WL_TP50_NOLAZY},
+    ),
+    # LE CONTROLE DU BLOC: sortie et whitelist IDENTIQUES au bras main. Seule
+    # difference, structurelle: le shadow n'est pas filtre par
+    # `kol_chain_blacklist`. L'ecart avec `PFW_TP50_SL30_LM_WL` chiffre donc
+    # exactement ce que le ban des 9 KOL coute (ou rapporte) sur cette sortie.
+    "PFWS_TP50_SL30_LM_WL_NOBAN": (
+        {"pct": 1.0, "tp_mult": 1.50, "sl_mult": 0.70, "horizon_min": 30,
+         "label": "main"},
+        {"kol_whitelist": _WL_LAZYMED},
+    ),
+}
+
+for _n, (_spec, _filt) in {**_PFW_MEMBRES, **_PFWS_MEMBRES}.items():
+    STRATEGIES[_n] = [dict(_spec)]
+    STRATEGY_FILTERS[_n] = {"chain": "solana", **_filt}
+    SHADOW_STRATEGIES.append(_n)
+
+# ---------------------------------------------------------------------------
 # v14e.36 — auto-deprecate every artifact-family strategy registered above.
 # Trail/dip/split/bond shadows pollute analytics (sim ranks them top via
 # 47x slip miscalibration) and cannot be promoted to live. This finalization
