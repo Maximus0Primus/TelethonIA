@@ -275,10 +275,37 @@ non filtré est mort en live.** À comparer : les bras du deck, **avec** filtres
 ~**+7 % par trade** (`PF_TP50_SL40_S35`, +$27.46/j pour ~4 trades/j). ⇒ **La marge live vient
 du filtre d'entrée, pas de la sortie.**
 
-- [ ] **Piste bien formée (en attente user)** : un bras **shadow** scalp **AVEC les filtres du
-      deck** (`TP15-20 / SL25-30` + `min_rt_score` + bande de sentiment). C'est le croisement du
-      gradient ci-dessus et du seul axe qui crée de la marge. ℹ️ Recoupe une piste déjà ouverte
-      et jamais testée : `SCALP_TP20_NOSL` (`live_tested_wrong_horses_jul5`).
+- [x] ✅ **FAIT — 3 bras shadow scalp déployés** (v14e.94, `f3ea059`, 12/08 ~11:00 UTC).
+      Chacun **apparié** à une référence du deck : filtre d'entrée **et** horizon copiés à la
+      lettre, **seule la sortie change** — donc l'écart mesure la sortie seule, par token.
+      | bras | référence | ce qu'il change |
+      |---|---|---|
+      | `PFSC_TP20_SL30_S35` | `PF_TP50_SL40_S35` | sortie TP50/SL40 → **TP20/SL30** |
+      | `PFSC_TP20_SL30_BANDE` | `PF_BE25_TP80_SL30` | sortie TP80/SL30 + retrait du BE → **TP20/SL30** |
+      | `PFSC_TP15_SL25_S35` | *(sonde)* | **sous** TP20 : le gradient continue-t-il ? |
+      **Pas de BE/LOCK** : à TP20, un BE à +25 % s'armerait **après** la cible — no-op garanti,
+      exactement le piège des LOCK sur TP200 (11/08). Satisfiabilité (leçon v14e.79) acquise
+      **par construction** : filtres identiques à des bras qui tradent déjà ~4–9 tokens/j.
+      Vérifié sur le VPS : service actif, RT listener 99 groupes, **0 erreur**, 3 bras au
+      registre en `shadow=True`. Gate `pre_deploy_check` passée, **228 tests / 1 128 subtests**.
+
+- [ ] ⏰ **Vers le 09/09** (~4 semaines) : lire les 3 bras **en apparié par token** contre leur
+      référence. 🚨 **PROTOCOLE OBLIGATOIRE — LIRE NET, JAMAIS BRUT** :
+      1. **retirer ~3.5 pp par trade** (`solana_fees_per_trade`) : `pnl_pct` en paper est
+         **brut**. À TP20 c'est **un sixième de la cible** — un bras à +2 % brut est **négatif**
+         en live. Sur les références TP50/TP80, la même friction pèse 3× moins ;
+      2. **retirer le drift paper→live** de **−1.90 pp** en plus ;
+      3. ⚠️ **`_dynamic_sell_slip_factor` flatte structurellement ces bras** : liquidité nulle
+         (bonding curve, 42 % des trades) traitée comme $50 000 ⇒ slippage le plus faible sur
+         les tokens les moins liquides. L'optimisme pèse bien plus sur une cible à +20 % que sur
+         une cible à +200 %. **Si l'écart net est inférieur à ~5 pp, ne rien conclure.**
+      4. décision au niveau **famille**, jamais config (§4) : les 2 bras `TP20` d'abord, la
+         sonde `TP15` seulement pour dire si le gradient continue ou plafonne.
+
+- [ ] 🔬 **Contrôle négatif à faire en même temps** : si le scalp gagne aussi bien **avec** que
+      **sans** les filtres, alors ce n'est pas « scalp + filtres », c'est juste « scalp », et la
+      thèse F bis (« la marge vient du filtre ») est fausse. Comparer les `PFSC_*` aux
+      `SCALP_TP10_*` non filtrés déjà présents dans la grille shadow.
 
 **▶️ Réponse opérationnelle à « quand changer de bras et par lequel »**
 - **Quand : jamais sur la performance.** Ni P&L de la semaine, ni du mois. F2 le ferme.
