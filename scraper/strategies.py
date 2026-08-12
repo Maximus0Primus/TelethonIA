@@ -4295,6 +4295,89 @@ for _n, (_spec, _filt) in _PFA_MEMBRES.items():
     SHADOW_STRATEGIES.append(_n)
 
 # ---------------------------------------------------------------------------
+# v14e.94 — SCALP AVEC LES FILTRES DU DECK (2026-08-12)
+# ---------------------------------------------------------------------------
+# D'ou ca vient. Le 12/08, en testant l'idee "changer de strategie selon le
+# regime" (scripts/regime_rotation_test.py), deux resultats sont tombes:
+#
+#   1. Dans une famille donnee, le choix du BRAS est du bruit: l'oracle
+#      INTRA-famille, qui choisit avec le futur, est SOUS son plancher de
+#      permutation aux 3 granularites. Donc rien a gagner a changer de bras.
+#   2. Ce qui separe les bras d'une meme famille, c'est le FILTRE D'ENTREE:
+#      le volume correle -0.328 (p < 0.001) avec l'argent, et les petits volumes
+#      sont exactement ceux qui portent un filtre.
+#
+# Et un GRADIENT PRE-SPECIFIE sur la cible (4 tranches ordonnees, SL <= 30,
+# argent moyen par bras et par mois sur 4 mois) — pas un maximum sur une grille:
+#
+#      TP<=20    +$618  (3/5 mois, SEULE tranche positive)
+#      TP21-40 -$1 521  (2/5)
+#      TP41-60 -$1 502  (2/5)
+#      TP61-80 -$1 960  (1/5)
+#
+# Monotone, et mecaniquement predit par ce qu'on sait deja des taux de TP (TP50
+# atteint sa cible 36 % du temps, TP200 5 %, et le SL coute ~-45 % quel que soit
+# son niveau a cause du gap-through): plus la cible est basse, plus on l'atteint.
+# En juillet, mois noir pour tout le monde, le scalp encaisse -$130 contre
+# -$1 333 a -$1 456 pour les autres tranches.
+#
+# 🚫 POURQUOI SHADOW ET PAS MAIN, ET COMMENT LE LIRE.
+# Ce +$618 vaut ~+0.2 a +0.8 % par trade sur ~2 968 tokens. Le seuil de
+# rentabilite Solana est de ~+3.5 % de PnL moyen (frais + rent ATA, cf.
+# solana_fees_per_trade), et `pnl_pct` en paper est BRUT. ⇒ un scalp NON FILTRE
+# est mort en live: la friction mange tout. Les bras du deck, eux, tournent a
+# ~+7 %/trade parce qu'ils FILTRENT l'entree. D'ou ces 3 bras: le gradient
+# ci-dessus applique aux filtres qui, eux, creent de la marge.
+#
+# ⚠️ DEUX RESERVES A APPLIQUER AVANT DE CONCLURE QUOI QUE CE SOIT:
+#   - retirer ~3.5 pp par trade avant toute lecture. A TP20 c'est ~un sixieme de
+#     la cible: un bras qui sort a +2 % brut est NEGATIF en live.
+#   - `_dynamic_sell_slip_factor` (~paper_trader.py:1980) traite une liquidite
+#     nulle (bonding curve, 42 % des trades) comme $50 000, donc applique le
+#     slippage le PLUS FAIBLE aux tokens les MOINS liquides. Sur une cible a
+#     +20 % cet optimisme pese bien plus lourd que sur une cible a +200 %.
+#     ⇒ ces bras sont structurellement FLATTES par le simulateur.
+#
+# Construction: chaque bras garde les filtres de sa reference du deck A LA
+# LETTRE et ne change QUE la sortie — l'ecart mesure donc la sortie seule, en
+# apparie par token.
+_PFSC_MEMBRES = {
+    # Reference: PF_TP50_SL40_S35 (meilleur bras du deck). Filtre identique,
+    # horizon identique; seule la sortie passe de TP50/SL40 a TP20/SL30.
+    "PFSC_TP20_SL30_S35": (
+        {"pct": 1.0, "tp_mult": 1.20, "sl_mult": 0.70, "horizon_min": 120,
+         "label": "main"},
+        {"min_rt_score": 35, "min_sentiment": 0.35, "max_sentiment": 0.70},
+    ),
+    # Reference: PF_BE25_TP80_SL30. Filtre identique (age <= 12 h, bande de
+    # sentiment 0.25-0.75), horizon identique; on retire le BE, qui n'a plus de
+    # sens a TP20 (il s'armerait a +25 %, soit APRES la cible: no-op garanti,
+    # meme piege que le LOCK des TP200 du 11/08).
+    # ⚠️ `label` est OBLIGATOIRE: paper_trader.py:1739/1929 fait tranche["label"]
+    # en acces direct, pas .get() — une tranche sans label leve un KeyError a la
+    # premiere ouverture. Garde: test_toute_tranche_a_un_label.
+    "PFSC_TP20_SL30_BANDE": (
+        {"pct": 1.0, "tp_mult": 1.20, "sl_mult": 0.70, "horizon_min": 30,
+         "label": "main"},
+        {"max_age_hours": 12, "min_sentiment": 0.25, "max_sentiment": 0.75},
+    ),
+    # Sonde du gradient A L'INTERIEUR de la tranche gagnante: si "plus bas =
+    # mieux" continue sous TP20, ce bras bat PFSC_TP20_SL30_S35; s'il perd, le
+    # gradient a un plancher et TP20 est proche de l'optimum. Meme filtre que
+    # le premier, donc les deux sont appariables directement.
+    "PFSC_TP15_SL25_S35": (
+        {"pct": 1.0, "tp_mult": 1.15, "sl_mult": 0.75, "horizon_min": 120,
+         "label": "main"},
+        {"min_rt_score": 35, "min_sentiment": 0.35, "max_sentiment": 0.70},
+    ),
+}
+
+for _n, (_spec, _filt) in _PFSC_MEMBRES.items():
+    STRATEGIES[_n] = [dict(_spec)]
+    STRATEGY_FILTERS[_n] = {"chain": "solana", **_filt}
+    SHADOW_STRATEGIES.append(_n)
+
+# ---------------------------------------------------------------------------
 # v14e.90 — WHITELIST KOL, issue de la recherche exhaustive (2026-08-11)
 # ---------------------------------------------------------------------------
 # `scripts/kol_strategy_search.py` sur 4 mois: 1 105 617 lignes dedoublonnees,
