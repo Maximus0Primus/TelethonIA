@@ -1,5 +1,151 @@
 # Operational Backlog
 
+## 🔬 12/08 — « CHANGER DE STRATÉGIE SELON LE RÉGIME » : le mécanisme existe, le régime n'est pas prévisible
+
+> Question de l'user : « les meilleures strat changent selon les moments ; si on trouvait ces
+> ruptures et qu'on les prédisait, on aurait chaque mois la stratégie adaptée et on gagnerait
+> beaucoup plus. » Testé sur **1 027 446 lignes dédoublonnées** (1 215 344 brutes, 4 mois,
+> 439 stratégies hors artefacts × 18 semaines). Scripts : `scripts/regime_rotation_test.py`
+> (volets A/B) et `scripts/regime_signal_test.py` (volet C).
+
+L'idée se décompose en 3 conditions ; **il suffit qu'une casse**. Elles sont testées séparément
+pour savoir **laquelle** casse.
+
+### A. Y a-t-il seulement de l'argent à prendre ? — ❌ NON, le gisement est un mirage
+
+| granularité | oracle (rotation PARFAITE, triche) | meilleure fixe | ratio apparent |
+|---|---|---|---|
+| mois | +$6 173 | +$2 737 | ×2.3 |
+| quinzaine | +$13 326 | +$3 048 | ×4.4 |
+| semaine | **+$21 976** | +$3 058 | **×7.2** |
+
+À ce stade l'idée paraît valider : ×7.2, soit +$19 000 sur 4 mois. **Le contrôle tue le
+chiffre.** Plancher par permutation (étiquettes de période mélangées **indépendamment par
+bras** : chaque bras garde sa distribution de gains, seule la structure temporelle **commune**
+est détruite) :
+
+| granularité | oracle réel | H0 moyen | H0 p95 | verdict |
+|---|---|---|---|---|
+| mois | +$6 173 | **+$8 712** | +$9 198 | ❌ **sous H0** |
+| quinzaine | +$13 326 | **+$14 739** | +$15 724 | ❌ **sous H0** |
+| semaine | +$21 976 | **+$35 644** | +$37 218 | ❌ **très sous H0** |
+
+⇒ **L'oracle réel est SOUS son plancher aux 3 granularités.** Le ×7.2 n'est pas de la variation
+de régime, c'est le **biais mécanique d'un maximum pris sur 439 bras à queue épaisse** — le même
+piège que le +23.19 % du 11/08. 🔑 **Et le réel est *plus bas* que H0, ce qui est informatif** :
+si les bras étaient indépendants, il y aurait toujours un veinard à sélectionner. Ils ne le sont
+pas — **ils tradent les mêmes tokens**. Mesure directe du co-mouvement (114 jours) :
+**22 jours où > 90 % des bras perdent**, **11 jours où > 90 % gagnent**. Il n'y a pas « une
+stratégie qui gagne pendant que les autres perdent », il y a **des jours où le flux paie et des
+jours où il ne paie pas**. Aucune rotation ne peut sauver un mauvais jour.
+
+### B. « Le meilleur d'hier sera le meilleur demain » — ❌ NON, et c'est pire que le hasard
+
+Top-K de t−1 tradé en t, contre 100 tirages **aléatoires** de K bras :
+
+| granularité | K=1 | K=3 | K=5 | K=10 | H0 moyen |
+|---|---|---|---|---|---|
+| mois | −$5 130 | −$4 624 | −$3 200 | −$2 821 | ~−$4 000 |
+| quinzaine | **−$9 346** | −$4 604 | −$4 030 | −$3 603 | ~−$4 300 |
+| semaine | −$4 873 | −$7 453 | −$7 253 | −$5 801 | ~−$5 100 |
+
+**Sous le hasard dans 11 cas sur 12**, au niveau stratégie comme au niveau famille. Et le gain
+**monte quand K monte** (mois : −$5 130 → −$2 821) : plus on dilue la sélection, moins on perd.
+
+### 🔑 B ter. LE PARADOXE, ET SA RÉSOLUTION
+
+La persistance de rang n'est **pas** nulle : Spearman t−1 → t = **+0.448** (mois), **+0.365**
+(quinzaine), **+0.203** (semaine). Comment un classement qui persiste peut-il donner un top-K
+qui perd ? Décomposition par décile (argent moyen en t selon le décile en t−1) :
+
+| granularité | D1 *(meilleurs de t−1)* | D4-D5 *(milieu)* | D10 *(pires de t−1)* |
+|---|---|---|---|
+| mois | −$519 | **−$176 / −$318** | **−$3 264** |
+| quinzaine | −$310 | −$228 / −$221 | −$1 508 |
+| semaine | −$258 | −$196 / −$167 | −$666 |
+
+⇒ **Le haut du classement n'est pas meilleur que le milieu — il est légèrement PIRE.** Toute la
+corrélation vient du **bas**. Le classement est donc informatif **uniquement par le bas**, ce
+qui est exactement `downside_predictable_upside_not`, ici **au niveau stratégie et quantifié**.
+Aucune contradiction entre ρ = +0.45 et « top-K perd ».
+
+### ✅ B quater. CE QUI MARCHE : la rotation par EXCLUSION, pas par sélection
+
+Règle : garder **tous** les bras à argent > 0 en t−1, trader leur moyenne (l'analogue au niveau
+stratégie de la whitelist KOL « argent passé > 0 »).
+
+| granularité | exclusion | tous les bras | H0 même taille (p95) | verdict |
+|---|---|---|---|---|
+| mois | **−$1 244** | −$4 010 | −$3 652 | ✅ **dépasse** |
+| quinzaine | **−$1 754** | −$4 380 | −$4 034 | ✅ **dépasse** |
+| semaine | **−$2 868** | −$5 023 | −$4 704 | ✅ **dépasse** |
+
+⇒ **+$2 155 à +$2 766 sur 4 mois, en relatif**, et au-dessus du plancher aux 3 granularités.
+⚠️ Reste **négatif en absolu** : l'univers shadow est majoritairement perdant (bras sans filtre
+d'entrée). **Aucun chiffrage en euros** (règle E37) — c'est un ordre relatif.
+
+### C. Le REFRAME : piloter par le RÉGIME et non par le classement — C1 ✅, C2 ❌
+
+Une rotation par classement exige que les gagnants persistent. Un pilotage par régime n'exige
+qu'un **mécanisme**. Sonde = taux de tokens à ≥ +100 % vu par le bras le plus **large**
+(`TP200_SL40_4H`, 2 879 tokens, 11.6 % de runners en moyenne).
+
+| | résultat |
+|---|---|
+| **C1 MÉCANISME** — runners(t) vs (TP≥200 − TP≤80)(t), 18 semaines | ρ = **+0.719**, **p = 0.001** ✅ |
+| idem à la journée (109 jours) | ρ = **+0.636**, **p < 0.001** ✅ |
+| **C2 PERSISTANCE** — runners(t−1) → runners(t), semaine | ρ = +0.147, p = 0.573 ❌ |
+| idem à la journée (104 paires) | ρ = **+0.065**, p = 0.515 ❌ |
+| médiane de marché, semaine | ρ = +0.353, p = 0.165 ❌ |
+
+🔑 **Le mécanisme est réel et fort** — quand le marché produit des runners, l'écart TP large ↔
+TP serré se referme, exactement comme le prédit la mécanique des taux de TP (TP50 36 %,
+TP200 5 %, coût du SL ~−45 % quel que soit son niveau). **Mais le régime n'est pas prévisible :
+il ne se reproduit ni d'une semaine à l'autre, ni d'un jour au suivant.** On ne connaît le
+régime qu'**après** l'avoir traversé.
+
+C3 — règle **pré-spécifiée** walk-forward (`runners(t−1) > médiane historique → TP large,
+sinon TP serré`), contre 500 pile-ou-face :
+
+| | semaine (16 décisions) | jour (103 décisions) |
+|---|---|---|
+| règle de régime | −$5 977 | −$6 902 |
+| **toujours TP serré** | **−$1 396** | **−$1 393** |
+| toujours TP large | −$9 661 | −$10 613 |
+| pile-ou-face (moyen / p95) | −$5 650 / −$3 446 | −$5 993 / −$3 674 |
+
+⇒ La règle **ne dépasse pas le hasard** et **ne bat pas la famille fixe**. Rester bêtement sur
+TP serré bat toute tentative de rotation d'un facteur **4 à 5**.
+
+### 🐛 Deux bugs attrapés dans ce test — à retenir comme gardes
+
+1. 🔑 **Une sonde de régime à TP serré ne peut PAS voir un runner.** Premier jet : sonde
+   `BE15_TP50_SL30`, qui **sort à +50 %** ⇒ sa part de tokens à ≥ +100 % mesurait des **gaps
+   d'exécution** (0–3 %), pas le marché. Le mécanisme sortait alors à ρ = **−0.444**
+   (inversé !). Avec la bonne sonde : **+0.719**. **Une sonde doit pouvoir observer ce qu'elle
+   prétend mesurer** — variante de la leçon v14e.79 (« un filtre doit être satisfiable »).
+2. 🐛 **Dégénérescence silencieuse par NaN.** À la journée la sonde manque certains jours ; un
+   seul NaN rend `np.median` NaN, `x > NaN` est False, et la règle est devenue **« toujours
+   serré » 109 fois sur 109** — en affichant « DÉPASSE le hasard » puisqu'elle *était* devenue
+   la famille fixe. **Une règle qui ne choisit jamais n'est pas une règle** : compter les
+   décisions de chaque branche est le contrôle minimal.
+
+### ▶️ Conséquences
+
+- [x] ❌ **Ne pas construire de détecteur de rupture / rotation de stratégie.** Ce n'est pas un
+      problème de modèle : le prédicteur parfait lui-même (l'oracle) est sous son plancher.
+- [ ] ✅ **Piste retenue — généraliser la règle d'EXCLUSION au niveau des bras** : couper un bras
+      main dès qu'il est négatif sur la période écoulée, plutôt que de chercher à promouvoir le
+      meilleur. C'est la seule des 4 variantes testées qui dépasse son plancher, aux 3
+      granularités, et c'est la même forme que la whitelist KOL (+$1 410) et que la coupe des
+      TP200 du 11/08. **En attente user** : définir la période (quinzaine = meilleur compromis
+      signal/réactivité) et le seuil.
+- [ ] ⚠️ **Ne pas relire C1 comme un feu vert pour les TP larges.** Le mécanisme dit seulement
+      que TP large **cesse d'être toxique** quand les runners abondent — sur les 18 semaines,
+      TP≥200 ne bat TP≤80 que **4 fois**, et perd −$9 661 cumulés contre −$1 396.
+
+---
+
 ## 🔴 11/08 — AUDIT DECK MAIN × SWEEP : les 2 bras TP200 sont à tuer
 
 > Mesuré le 11/08 sur `paper_trades` (dédoublonné par token, `pnl_pct <= 20`) + run de sweep
