@@ -331,6 +331,115 @@ def robustness_table(M, fam_rows):
     return regles
 
 
+def single_arm_policies(M, fam_of_s, T_switch_costs=True):
+    """[E] UN SEUL BRAS EN LIVE — la vraie contrainte (user, 12/08).
+
+    Le panier du [D] n'est PAS deployable: en live il n'y a qu'une strategie,
+    donc "exclure les mauvais bras" ne veut rien dire. La seule question qui
+    reste est: **quelle politique de choix d'un bras unique**, sachant que
+      - le classement sur fenetre courte est du bruit ([B], ro = 0.019),
+      - mais une fixe choisie une fois pour toutes est fragile ([D]).
+
+    On compare des politiques qui produisent TOUTES un seul bras par periode et
+    ne lisent que le passe. On note aussi le NOMBRE DE CHANGEMENTS: chaque
+    changement est un cout reel (re-cablage des 4 endroits, perte de
+    comparabilite, et en live un risque d'erreur).
+
+    Idee testee au passage: le meilleur bras d'une famille est probablement le
+    plus CHANCEUX de la famille. Prendre le bras MEDIAN de la meilleure famille
+    devrait etre plus robuste que prendre son maximum.
+    """
+    T = M.shape[1]
+    fams = sorted({f for f in fam_of_s if f})
+    rows_of = {f: np.array([i for i, ff in enumerate(fam_of_s) if ff == f])
+               for f in fams}
+
+    def elig(t):
+        return np.flatnonzero(~np.isnan(M[:, t]))
+
+    def cum(idx, t):
+        """Argent cumule sur TOUT le passe (periodes 0..t-1)."""
+        return np.nansum(M[np.ix_(idx, range(0, t))], axis=1)
+
+    def best_family(t):
+        best, bf = -np.inf, None
+        for f in fams:
+            r = rows_of[f]
+            v = np.nanmean(cum(r, t)) if len(r) else np.nan
+            if not np.isnan(v) and v > best:
+                best, bf = v, f
+        return bf
+
+    def pol_fixe(t, state):
+        if state.get("row") is None:
+            e = elig(1)
+            state["row"] = int(e[np.argmax(M[e, 1])]) if len(e) else None
+        return state["row"]
+
+    def pol_cum_top(t, state):
+        e = elig(t)
+        return int(e[np.argmax(cum(e, t))]) if len(e) else None
+
+    def pol_cum_top_every(k):
+        def f(t, state):
+            if t % k == 1 or state.get("row") is None:
+                state["row"] = pol_cum_top(t, {})
+            return state["row"]
+        return f
+
+    def pol_fam_median(t, state):
+        bf = best_family(t)
+        if bf is None:
+            return None
+        r = np.intersect1d(rows_of[bf], elig(t))
+        if len(r) == 0:
+            return None
+        c = cum(r, t)
+        return int(r[np.argsort(c)[len(c) // 2]])       # le bras TYPE, pas le max
+
+    def pol_fam_top(t, state):
+        bf = best_family(t)
+        if bf is None:
+            return None
+        r = np.intersect1d(rows_of[bf], elig(t))
+        return int(r[np.argmax(cum(r, t))]) if len(r) else None
+
+    def pol_lag1(t, state):
+        e = np.flatnonzero(~np.isnan(M[:, t - 1]) & ~np.isnan(M[:, t]))
+        return int(e[np.argmax(M[e, t - 1])]) if len(e) else None
+
+    politiques = {
+        "fixe: choisi en t=1, jamais change": pol_fixe,
+        "cumule: top-1 sur TOUT le passe": pol_cum_top,
+        "cumule: re-choisi 1 periode sur 2": pol_cum_top_every(2),
+        "cumule: re-choisi 1 periode sur 4": pol_cum_top_every(4),
+        "meilleure FAMILLE -> son bras MEDIAN": pol_fam_median,
+        "meilleure FAMILLE -> son bras TOP": pol_fam_top,
+        "rotation: top-1 de la periode t-1": pol_lag1,
+    }
+    print("\n[E] UN SEUL BRAS EN LIVE — politiques deployables")
+    print(f"    {'politique':<38}{'total':>10}{'ecart-t':>9}{'pire':>10}"
+          f"{'% per +':>9}{'chgts':>7}")
+    out = {}
+    for nom, pol in politiques.items():
+        state, vals, prev, chg = {}, [], None, 0
+        for t in range(1, T):
+            r = pol(t, state)
+            if r is None or np.isnan(M[r, t]):
+                continue
+            if prev is not None and r != prev:
+                chg += 1
+            prev = r
+            vals.append(float(M[r, t]))
+        v = np.array(vals)
+        if len(v) == 0:
+            continue
+        out[nom] = v
+        print(f"    {nom:<38}${v.sum():>+9,.0f}{v.std():>9,.0f}${v.min():>+9,.0f}"
+              f"{100 * (v > 0).mean():>8.0f}%{chg:>7}")
+    return out
+
+
 def rank_persistence(M):
     """Spearman entre periodes consecutives (le coeur du probleme)."""
     from scipy.stats import spearmanr
@@ -459,6 +568,7 @@ def main() -> int:
                     if (lambda f: f and f.startswith(("TP<=50", "TP51-80"))
                         and ("SL<=20" in f or "SL21-30" in f))(family_of(s))]
         robustness_table(M, fam_rows)
+        single_arm_policies(M, [family_of(x) for x in strats])
 
         # ---- persistance de rang --------------------------------------------
         rp = rank_persistence(M)

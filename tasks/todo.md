@@ -160,6 +160,52 @@ période.** « meilleur cumulé (expansif) » contre « top-1 de t−1 » : **�
 MÉMOIRE COURTE.** Une période récente, c'est 15–30 tokens à queue épaisse : le classement qu'on
 en tire est du bruit, et le bruit est ce qu'on achète en le suivant.
 
+### 🎯 E. UN SEUL BRAS EN LIVE — la vraie contrainte, et elle change la réponse
+
+> Contrainte user (12/08) : « je n'aurai **qu'une** stratégie en live, donc je ne peux pas
+> couper des bras, le panier ne me sert à rien. » ⚠️ **Exact — le §D ci-dessus n'est pas
+> déployable.** La seule question qui reste : **quelle politique de choix d'un bras unique ?**
+> Toutes les politiques ci-dessous produisent **un seul bras par période** et ne lisent que le
+> passé. On note aussi le **nombre de changements** — chaque changement coûte (re-câblage des
+> 4 endroits, perte de comparabilité, risque d'erreur en live).
+
+| politique | mois | quinzaine | semaine | écart-type (quinz.) | pire (quinz.) | chgts |
+|---|---|---|---|---|---|---|
+| 🥇 **meilleure FAMILLE → son bras TOP** | **+$1 385** | **+$100** | **−$137** | **207** | **−$331** | 3–8 |
+| meilleure FAMILLE → son bras MÉDIAN | −$464 | −$136 | −$1 143 | 188 | −$331 | 3–13 |
+| cumulé : top-1 sur tout le passé | −$4 486 | −$2 317 | −$2 663 | 690 | −$1 420 | 3–9 |
+| cumulé : re-choisi 1 période sur 4 | −$12 948 | −$2 242 | −$3 903 | 566 | −$1 178 | 0–3 |
+| fixe : choisi en t=1, jamais changé | −$4 498 | **−$11 944** | −$1 756 | 1 740 | −$4 644 | 0 |
+| 🔴 **rotation : top-1 de la période t−1** | −$5 130 | **−$9 346** | −$4 873 | 1 381 | −$4 598 | 7–15 |
+
+🔑 **Une seule politique gagne, et aux TROIS granularités : choisir la FAMILLE sur tout
+l'historique, puis un bras dedans.** Elle a aussi le plus petit écart-type et la pire période la
+moins profonde. L'écart avec la rotation lag-1 est d'un ordre de grandeur (**+$100 vs −$9 346**
+à la quinzaine).
+
+**Pourquoi ça marche alors que tout le reste échoue** : l'ordre des **familles** tient d'une
+période à l'autre (documenté §4 du 11/08 : `TP≤80/SL≤25` et `TP81-120/SL26-30` en haut,
+`TP≥200/SL>40` en bas, dans les deux périodes), alors que l'ordre des **configs** ne tient pas
+(ρ = 0.019). La famille contraint le choix à une bonne région ; le bras choisi dedans importe
+peu.
+
+⚠️ **Ma prédiction était fausse** : j'attendais que le bras **médian** de la famille batte son
+**top** (« le top est le plus chanceux »). C'est l'inverse aux 3 granularités. Je le note tel
+quel — l'écart peut être du bruit, mais il n'est pas dans le sens que j'annonçais.
+
+⚠️ **Limites** : 4 décisions au mois, 8 à la quinzaine, et 7 politiques comparées (sélection
+légère). Le seul vrai appui est la **cohérence aux 3 granularités** et le fait que le mécanisme
+(stabilité des familles) soit **déjà documenté indépendamment**. **Aucun chiffrage en euros.**
+
+**▶️ Ce que ça donne concrètement pour le live :**
+- ❌ ne **pas** changer de bras sur le classement de la dernière période (la pire politique) ;
+- ❌ ne **pas** figer un bras à vie non plus (−$11 944 à la quinzaine) ;
+- ✅ **ré-évaluer la FAMILLE, pas le bras, et sur l'historique complet.** ~3 à 5 changements en
+  4 mois ≈ **un par mois**, pas un par semaine ;
+- ✅ **c'est déjà ce que fait le deck** depuis le 11/08 (famille TP≤80/SL≤30). La bonne question
+  n'est donc plus « quand changer de bras » mais **« la famille a-t-elle changé de rang ? »** —
+  et sur 4 mois, elle n'a pas changé.
+
 ### 🐛 Deux bugs attrapés dans ce test — à retenir comme gardes
 
 1. 🔑 **Une sonde de régime à TP serré ne peut PAS voir un runner.** Premier jet : sonde
