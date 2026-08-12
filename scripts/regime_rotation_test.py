@@ -260,6 +260,77 @@ def exclusion_rule(M, perms, rng):
     return real, base, null
 
 
+def robustness_table(M, fam_rows):
+    """[D] ADAPTATIF vs FIXE, a armes egales, et note sur la ROBUSTESSE.
+
+    Question user (12/08): "s'adapter donnerait plus de robustesse, car une
+    strategie excellente sur 4 mois d'affilee, ca n'existe pas".
+
+    Le [A] comparait l'adaptatif a la meilleure fixe choisie AVEC le futur —
+    comparateur malhonnete, aucun systeme n'y a acces. Ici toutes les regles
+    sont deployables en t: elles ne lisent que les periodes < t.
+
+    Et on ne note plus seulement le TOTAL: une regle plus robuste peut perdre
+    en moyenne tout en encaissant mieux les mauvaises periodes. On sort donc
+    aussi l'ecart-type, la pire periode et la part de periodes positives.
+    """
+    T = M.shape[1]
+
+    def elig(t):
+        return np.flatnonzero(~np.isnan(M[:, t - 1]) & ~np.isnan(M[:, t]))
+
+    def serie(sel):
+        out = np.full(T, np.nan)
+        for t in range(1, T):
+            idx = sel(t)
+            if idx is None or len(idx) == 0:
+                continue
+            out[t] = float(np.nanmean(M[idx, t]))
+        return out
+
+    # FIXE TRICHE: le bras au meilleur total sur TOUTE la periode (in-sample).
+    full = np.flatnonzero(~np.isnan(M[:, 1:]).any(axis=1))
+    triche = full[np.argmax(M[full, 1:].sum(axis=1))] if len(full) else None
+
+    # FIXE HONNETE: choisi apres la 1re periode, puis JAMAIS retouche.
+    e1 = elig(1)
+    honnete = e1[np.argmax(M[e1, 1])] if len(e1) else None
+
+    def best_so_far(t):
+        """Le meilleur CUMULE depuis le debut (fenetre expansive).
+
+        Version intermediaire entre le fixe et la rotation lag-1: elle s'adapte,
+        mais en moyennant tout l'historique au lieu de ne lire que t-1. C'est la
+        forme la plus defendable de l'idee de l'user.
+        """
+        idx = elig(t)
+        if len(idx) == 0:
+            return None
+        cum = np.nansum(M[np.ix_(idx, range(max(1, t - 99), t))], axis=1)
+        return np.array([idx[int(np.argmax(cum))]])
+
+    regles = {
+        "fixe TRICHE (in-sample)": serie(lambda t: np.array([triche])) if triche is not None else np.full(T, np.nan),
+        "fixe HONNETE (choisi en t=1)": serie(lambda t: np.array([honnete])) if honnete is not None else np.full(T, np.nan),
+        "meilleur CUMULE (expansif)": serie(best_so_far),
+        "rotation top-1 de t-1": serie(lambda t: (lambda i: i[np.argsort(-M[i, t - 1])[:1]] if len(i) else None)(elig(t))),
+        "rotation top-10 de t-1": serie(lambda t: (lambda i: i[np.argsort(-M[i, t - 1])[:10]] if len(i) >= 10 else None)(elig(t))),
+        "PANIER exclusion (>0 en t-1)": serie(lambda t: (lambda i: i[M[i, t - 1] > 0] if len(i) else None)(elig(t))),
+        "PANIER tous les bras": serie(lambda t: elig(t)),
+        "PANIER famille TP<=80/SL<=30": serie(lambda t: np.array([r for r in fam_rows if not np.isnan(M[r, t])])) if fam_rows else np.full(T, np.nan),
+    }
+    print(f"\n[D] ADAPTATIF vs FIXE, a armes egales (seules les periodes < t sont lues)")
+    print(f"    {'regle':<32}{'total':>10}{'moy/per':>10}{'ecart-t':>9}"
+          f"{'pire':>10}{'% per +':>9}")
+    for nom, s in regles.items():
+        v = s[~np.isnan(s)]
+        if len(v) == 0:
+            continue
+        print(f"    {nom:<32}${v.sum():>+9,.0f}${v.mean():>+9,.0f}"
+              f"{v.std():>9,.0f}${v.min():>+9,.0f}{100 * (v > 0).mean():>8.0f}%")
+    return regles
+
+
 def rank_persistence(M):
     """Spearman entre periodes consecutives (le coeur du probleme)."""
     from scipy.stats import spearmanr
@@ -382,6 +453,12 @@ def main() -> int:
         print(f"    exclusion ${rx:+,.0f}  |  tous les bras ${bx:+,.0f}  |  "
               f"H0 meme taille: moyen ${nx.mean():+,.0f} p95 ${np.percentile(nx, 95):+,.0f}")
         print(f"    -> {'DEPASSE le hasard' if rx > np.percentile(nx, 95) else 'ne depasse pas le hasard'}")
+
+        # ---- D. adaptatif vs fixe, a armes egales ---------------------------
+        fam_rows = [i for i, s in enumerate(strats)
+                    if (lambda f: f and f.startswith(("TP<=50", "TP51-80"))
+                        and ("SL<=20" in f or "SL21-30" in f))(family_of(s))]
+        robustness_table(M, fam_rows)
 
         # ---- persistance de rang --------------------------------------------
         rp = rank_persistence(M)

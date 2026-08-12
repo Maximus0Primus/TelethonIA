@@ -117,6 +117,49 @@ sinon TP serré`), contre 500 pile-ou-face :
 ⇒ La règle **ne dépasse pas le hasard** et **ne bat pas la famille fixe**. Rester bêtement sur
 TP serré bat toute tentative de rotation d'un facteur **4 à 5**.
 
+### 🔑 D. ROBUSTESSE — l'user a raison sur le problème, la rotation est la pire des réponses
+
+> 2e question user : « adapter donnerait plus de robustesse, parce qu'une stratégie excellente
+> sur les 4 mois d'affilée, on a vu que ça n'existe pas ».
+
+⚠️ **Mon comparateur du §A était malhonnête** : j'opposais l'adaptatif à la meilleure fixe
+choisie **avec le futur**. Aucun système n'y a accès. Refait à armes égales — **toutes** ces
+règles ne lisent que les périodes < t — et noté sur la **dispersion**, pas seulement le total :
+
+**Quinzaine (8 décisions)**
+
+| règle | total | moy/pér. | écart-type | pire période | % pér. + |
+|---|---|---|---|---|---|
+| *fixe TRICHE (in-sample, non déployable)* | *+$3 048* | *+$381* | *363* | *−$300* | *88 %* |
+| fixe HONNÊTE (choisi en t=1, jamais retouché) | **+$1 027** | +$128 | 711 | −$774 | 38 % |
+| **meilleur CUMULÉ (fenêtre expansive)** | −$452 | −$57 | 581 | −$1 420 | 62 % |
+| 🔴 **rotation top-1 de t−1** | **−$9 346** | −$1 168 | **1 381** | **−$4 598** | 12 % |
+| rotation top-10 de t−1 | −$3 603 | −$450 | 540 | −$1 690 | 12 % |
+| ✅ **PANIER exclusion (>0 en t−1)** | −$1 754 | −$219 | **186** | **−$467** | 12 % |
+| PANIER tous les bras | −$4 380 | −$547 | 334 | −$965 | 12 % |
+| ✅ **PANIER famille TP≤80/SL≤30** | **−$1 277** | −$160 | 260 | −$510 | 38 % |
+
+**Trois conclusions, dont deux nouvelles :**
+
+1. ✅ **L'user a raison sur le diagnostic.** Une stratégie **fixe choisie honnêtement** est
+   fragile : elle passe de **+$1 027** (quinzaine) à **−$4 498** (mois) et **−$1 756** (semaine)
+   selon la granularité de sa sélection, avec **25–41 %** de périodes positives et un
+   écart-type jusqu'à **1 598**. « Une strat excellente tout le temps », ça n'existe pas.
+2. 🔴 **Mais la rotation est la PIRE réponse possible à ce problème** — elle donne exactement
+   l'inverse de la robustesse recherchée : **écart-type 1 381** (7× le panier d'exclusion) et
+   **pire période −$4 598** (10× celle du panier). Changer de bras chaque période, c'est
+   acheter la variance de la sélection **en plus** de celle du marché.
+3. 🔑 **La robustesse vient du PANIER, pas du changement.** Panier famille TP≤80/SL≤30 :
+   **−$1 228 / −$1 277 / −$1 435** au mois / quinzaine / semaine — **quasi identique aux trois
+   granularités**. C'est *ça*, la robustesse : un résultat qui ne dépend pas du découpage. Et
+   il bat **toutes** les rotations, partout.
+
+🔑 **ET SI ON VEUT VRAIMENT ADAPTER SUR UN CLASSEMENT : lire TOUT l'historique, pas la dernière
+période.** « meilleur cumulé (expansif) » contre « top-1 de t−1 » : **−$452 vs −$9 346**
+(quinzaine), **−$1 386 vs −$5 130** (mois). ⇒ **Le problème n'est pas l'adaptativité, c'est la
+MÉMOIRE COURTE.** Une période récente, c'est 15–30 tokens à queue épaisse : le classement qu'on
+en tire est du bruit, et le bruit est ce qu'on achète en le suivant.
+
 ### 🐛 Deux bugs attrapés dans ce test — à retenir comme gardes
 
 1. 🔑 **Une sonde de régime à TP serré ne peut PAS voir un runner.** Premier jet : sonde
