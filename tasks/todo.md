@@ -206,6 +206,90 @@ légère). Le seul vrai appui est la **cohérence aux 3 granularités** et le fa
   n'est donc plus « quand changer de bras » mais **« la famille a-t-elle changé de rang ? »** —
   et sur 4 mois, elle n'a pas changé.
 
+### 🎯 F. FAMILLE FIXÉE — « quand changer de bras, et par lequel ? » → **jamais, sur la perf**
+
+> Question user (12/08) : la famille est actée, reste à savoir quand changer de bras et lequel
+> prendre pour maximiser les gains. L'ordre des sous-questions n'est pas celui qu'on croit :
+> avant « lequel », il faut **« est-ce que ça change quelque chose ? »**.
+
+**F1 — l'écart entre bras d'une même famille est ÉNORME.** Par période : niveau commun |moy|
+**$226–425**, dispersion intra-famille **$396–787**, écart meilleur↔pire **$2 246 à $4 000**.
+Corrélation moyenne entre deux bras de la famille : **+0.25 à +0.31** seulement. Donc oui, le
+choix du bras a un impact potentiel énorme — bien plus grand que le niveau commun.
+
+**F2 — mais cet écart est intégralement du BRUIT.** Oracle **intra-famille** (choisit le
+meilleur bras de la famille **avec le futur**) contre son plancher de permutation :
+
+| granularité | oracle intra-famille | plancher H0 (p95) | bras moyen | verdict |
+|---|---|---|---|---|
+| mois | +$5 899 | **+$9 198** | −$1 228 | ❌ sous |
+| quinzaine | +$8 447 | **+$9 846** | −$1 277 | ❌ sous |
+| semaine | +$15 077 | **+$28 856** | −$1 435 | ❌ sous |
+
+🔑 **Même un oracle parfait ne bat pas le hasard, aux 3 granularités.** ⇒ **Aucune règle de
+changement de bras intra-famille ne peut fonctionner.** La question « par lequel » n'a pas de
+réponse parce qu'elle n'a pas d'objet : l'écart de $4 000 entre le meilleur et le pire bras
+d'un mois est imprévisible par construction.
+
+**F3 — vérification directe : garder le même bras bat toutes les règles de changement.**
+
+| règle | mois | quinzaine | semaine | chgts |
+|---|---|---|---|---|
+| ✅ **garder le même bras, toujours** | **+$2 417** | **+$1 027** | −$1 756 | 0 |
+| changer si sous la médiane 2× de suite | −$1 460 | −$1 921 | +$514 | 0–2 |
+| top-1 sur tout l'historique | −$2 961 | −$771 | −$2 315 | 3–8 |
+| 🔴 top-1 de la période précédente | −$1 544 | −$4 392 | −$6 920 | 3–15 |
+| bras au hasard chaque période | −$2 224 | −$1 222 | −$358 | 3–16 |
+
+Garder gagne au mois **et** à la quinzaine (avec **100 %** de mois positifs et une pire période
+à **+$6**). À la semaine, une règle inertielle passe devant (+$514) — mais c'est **1 règle sur
+7 à 1 granularité sur 3** : du cherry-picking, pas un résultat.
+
+### 🔑 F bis. ALORS QU'EST-CE QUI DIFFÉRENCIE VRAIMENT LES BRAS ? Pas la sortie — l'ENTRÉE
+
+Dans la famille (155 bras à n ≥ 100), le **volume** corrèle **négativement** avec l'argent :
+Spearman **−0.328** (p < 0.001). Les bras à gros volume font **−$2 238** en moyenne, ceux à
+petit volume **−$204**. Or les bras à petit volume sont exactement ceux qui portent un **filtre
+d'entrée** (`_S40`, `AGE24_`, `KW34`…). ⇒ **Ce qui sépare les bras d'une même famille, c'est
+leur filtre d'entrée, pas leur sortie.** C'est le même axe que le deck exploite déjà
+(`min_rt_score` + bande de sentiment) et que la whitelist KOL exploite.
+
+**Gradient sur la cible, en contraste PRÉ-SPÉCIFIÉ** (4 tranches ordonnées, SL ≤ 30, argent
+moyen par bras et par mois — pas un maximum sur 155 bras) :
+
+| sous-famille | bras | avr | mai | juin | juil | août | **total** | mois+ |
+|---|---|---|---|---|---|---|---|---|
+| **A. TP≤20 (scalp)** | 35 | +97 | +214 | +573 | **−130** | −135 | **+$618** | **3/5** |
+| B. TP21-40 | 20 | +50 | −244 | +319 | −1 333 | −314 | −$1 521 | 2/5 |
+| C. TP41-60 | 81 | +42 | −279 | +356 | −1 343 | −277 | −$1 502 | 2/5 |
+| D. TP61-80 | 60 | −65 | −660 | +497 | −1 456 | −276 | −$1 960 | 1/5 |
+
+**Gradient monotone en TP**, et la seule tranche positive sur 4 mois est la plus serrée. C'est
+**mécaniquement prédit** par ce qu'on sait déjà (taux de TP : TP50 36 %, TP200 5 % ; coût du SL
+~−45 % quel que soit son niveau) : plus la cible est basse, plus on l'atteint. Et en juillet,
+mois catastrophique pour tout le monde, le scalp encaisse **−$130** contre −$1 333 à −$1 456.
+
+🚫 **MAIS NON DÉPLOYABLE TEL QUEL** : +$618 pour ~2 968 tokens ≈ **+0.2 à +0.8 % par trade**,
+très en dessous du **seuil de friction Solana de +3.5 %** (`solana_fees_per_trade`). **Un scalp
+non filtré est mort en live.** À comparer : les bras du deck, **avec** filtres, tournent à
+~**+7 % par trade** (`PF_TP50_SL40_S35`, +$27.46/j pour ~4 trades/j). ⇒ **La marge live vient
+du filtre d'entrée, pas de la sortie.**
+
+- [ ] **Piste bien formée (en attente user)** : un bras **shadow** scalp **AVEC les filtres du
+      deck** (`TP15-20 / SL25-30` + `min_rt_score` + bande de sentiment). C'est le croisement du
+      gradient ci-dessus et du seul axe qui crée de la marge. ℹ️ Recoupe une piste déjà ouverte
+      et jamais testée : `SCALP_TP20_NOSL` (`live_tested_wrong_horses_jul5`).
+
+**▶️ Réponse opérationnelle à « quand changer de bras et par lequel »**
+- **Quand : jamais sur la performance.** Ni P&L de la semaine, ni du mois. F2 le ferme.
+- **Les 3 seules raisons légitimes de changer** : (1) la **famille** change de rang — à vérifier
+  ~1×/mois, elle n'a pas bougé en 4 mois ; (2) le bras est **cassé** (câblage, bug, gate
+  insatisfiable) ; (3) on change délibérément son **filtre d'entrée**, qui est le vrai levier.
+- **Par lequel : celui qui a le meilleur filtre d'entrée**, pas le meilleur passé — le passé
+  intra-famille n'a aucun pouvoir prédictif (F2), le filtre en a un (F bis).
+- **Et le vrai levier de gain n'est pas là** : c'est le **sizing** (f = 0.10 → +313 % contre
+  f = 1 → −99 %, `kelly_sizing_is_the_lever`), plafonné par la **capacité** (+$23/j dès $1 000).
+
 ### 🐛 Deux bugs attrapés dans ce test — à retenir comme gardes
 
 1. 🔑 **Une sonde de régime à TP serré ne peut PAS voir un runner.** Premier jet : sonde

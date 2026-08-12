@@ -440,6 +440,154 @@ def single_arm_policies(M, fam_of_s, T_switch_costs=True):
     return out
 
 
+def within_family(M, fam_rows, strats, perms, rng):
+    """[F] LA FAMILLE EST FIXEE — quand changer de bras, et pour lequel ?
+
+    Question user (12/08), une fois la famille actee: "comment je sais quand
+    changer de bras et par lequel, pour maximiser les gains ?"
+
+    L'ordre des questions compte, et il n'est pas celui qu'on croit:
+      F1. EST-CE QUE CA CHANGE QUELQUE CHOSE ? Les bras d'une meme famille
+          tradent LES MEMES tokens avec des sorties voisines. Si l'ecart entre
+          eux est petit devant le niveau commun, la reponse a "lequel" est
+          "peu importe" et il n'y a pas de question F3.
+      F2. Y A-T-IL DE QUOI CHOISIR ? Oracle INTRA-famille (choisit avec le
+          futur) contre son plancher de permutation. S'il ne depasse pas, aucune
+          regle de changement ne peut aider — inutile d'en chercher une.
+      F3. Seulement si F1 et F2 passent: quelle regle de changement.
+    """
+    F = M[fam_rows, :]
+    noms = [strats[i] for i in fam_rows]
+    T = F.shape[1]
+    print(f"\n[F] FAMILLE FIXEE — {len(fam_rows)} bras, quand/comment changer ?")
+
+    # --- F1: l'ecart intra-famille est-il grand devant le niveau commun ? ----
+    ecarts, niveaux, spreads = [], [], []
+    for t in range(T):
+        v = F[:, t][~np.isnan(F[:, t])]
+        if len(v) < 3:
+            continue
+        ecarts.append(float(v.std()))
+        niveaux.append(float(abs(v.mean())))
+        spreads.append(float(v.max() - v.min()))
+    print(f"    [F1] par periode: niveau commun |moy| ${np.mean(niveaux):,.0f}  "
+          f"| dispersion INTRA-famille ecart-type ${np.mean(ecarts):,.0f}  "
+          f"| meilleur-pire ${np.mean(spreads):,.0f}")
+
+    # Correlation moyenne entre bras: s'ils bougent ensemble, choisir est vain.
+    ok_rows = [i for i in range(F.shape[0]) if np.sum(~np.isnan(F[i])) >= 4]
+    cors = []
+    for i in range(len(ok_rows)):
+        for j in range(i + 1, len(ok_rows)):
+            a, b = F[ok_rows[i]], F[ok_rows[j]]
+            m = ~np.isnan(a) & ~np.isnan(b)
+            if m.sum() >= 4 and a[m].std() > 0 and b[m].std() > 0:
+                cors.append(float(np.corrcoef(a[m], b[m])[0, 1]))
+    if cors:
+        print(f"         correlation moyenne entre 2 bras de la famille: "
+              f"{np.mean(cors):+.3f}  (1.0 = choisir ne sert a rien)")
+
+    # --- F2: borne haute INTRA-famille, avec son plancher --------------------
+    orac = float(np.nansum([np.nanmax(F[:, t]) for t in range(1, T)
+                            if np.any(~np.isnan(F[:, t]))]))
+    null = []
+    for _ in range(perms):
+        P = F.copy()
+        for i in range(P.shape[0]):
+            o = np.flatnonzero(~np.isnan(P[i]))
+            if len(o) > 1:
+                P[i, o] = P[i, rng.permutation(o)]
+        null.append(float(np.nansum([np.nanmax(P[:, t]) for t in range(1, T)
+                                     if np.any(~np.isnan(P[:, t]))])))
+    null = np.array(null)
+    moyen = float(np.nansum([np.nanmean(F[:, t]) for t in range(1, T)
+                             if np.any(~np.isnan(F[:, t]))]))
+    print(f"    [F2] oracle INTRA-famille ${orac:+,.0f}  |  H0 p95 "
+          f"${np.percentile(null, 95):+,.0f}  |  bras moyen ${moyen:+,.0f}")
+    print(f"         -> {'il y a de quoi choisir' if orac > np.percentile(null, 95) else 'RIEN a choisir: meme un oracle ne depasse pas le hasard'}")
+
+    # --- F3: les regles de changement ---------------------------------------
+    def elig(t):
+        return np.flatnonzero(~np.isnan(F[:, t]))
+
+    def cum(idx, t):
+        return np.nansum(F[np.ix_(idx, range(0, t))], axis=1)
+
+    def run(pol):
+        state, vals, prev, chg = {}, [], None, 0
+        for t in range(1, T):
+            r = pol(t, state)
+            if r is None or np.isnan(F[r, t]):
+                continue
+            if prev is not None and r != prev:
+                chg += 1
+            prev = r
+            vals.append(float(F[r, t]))
+        return np.array(vals), chg
+
+    def p_hold(t, state):
+        if state.get("row") is None:
+            e = elig(1)
+            state["row"] = int(e[np.argmax(F[e, 1])]) if len(e) else None
+        return state["row"]
+
+    def p_cum(t, state):
+        e = elig(t)
+        return int(e[np.argmax(cum(e, t))]) if len(e) else None
+
+    def p_lag1(t, state):
+        e = np.flatnonzero(~np.isnan(F[:, t - 1]) & ~np.isnan(F[:, t]))
+        return int(e[np.argmax(F[e, t - 1])]) if len(e) else None
+
+    def p_seuil(n_bad):
+        """Ne changer QUE si le bras courant est sous la mediane de la famille
+        n_bad periodes de suite. C'est la reponse directe a "quand changer".
+        """
+        def f(t, state):
+            e = elig(t)
+            if len(e) == 0:
+                return None
+            r = state.get("row")
+            if r is None or np.isnan(F[r, t]):
+                r = int(e[np.argmax(cum(e, t))])
+                state["row"], state["bad"] = r, 0
+                return r
+            prev_ok = ~np.isnan(F[:, t - 1])
+            if prev_ok.sum() >= 3 and not np.isnan(F[r, t - 1]):
+                med = float(np.nanmedian(F[prev_ok, t - 1]))
+                state["bad"] = state.get("bad", 0) + (1 if F[r, t - 1] < med else -1)
+                state["bad"] = max(0, state["bad"])
+            if state["bad"] >= n_bad:
+                r = int(e[np.argmax(cum(e, t))])
+                state["bad"] = 0
+            state["row"] = r
+            return r
+        return f
+
+    def p_alea(t, state):
+        e = elig(t)
+        return int(rng.choice(e)) if len(e) else None
+
+    regles = {
+        "garder le meme bras, toujours": p_hold,
+        "top-1 sur tout l'historique": p_cum,
+        "top-1 de la periode precedente": p_lag1,
+        "changer si sous la mediane 1 fois": p_seuil(1),
+        "changer si sous la mediane 2x de suite": p_seuil(2),
+        "changer si sous la mediane 3x de suite": p_seuil(3),
+        "bras AU HASARD chaque periode": p_alea,
+    }
+    print(f"    [F3] {'regle de changement':<40}{'total':>10}{'ecart-t':>9}"
+          f"{'pire':>10}{'% per +':>9}{'chgts':>7}")
+    for nom, pol in regles.items():
+        v, chg = run(pol)
+        if len(v) == 0:
+            continue
+        print(f"         {nom:<40}${v.sum():>+9,.0f}{v.std():>9,.0f}"
+              f"${v.min():>+9,.0f}{100 * (v > 0).mean():>8.0f}%{chg:>7}")
+    return noms
+
+
 def rank_persistence(M):
     """Spearman entre periodes consecutives (le coeur du probleme)."""
     from scipy.stats import spearmanr
@@ -569,6 +717,8 @@ def main() -> int:
                         and ("SL<=20" in f or "SL21-30" in f))(family_of(s))]
         robustness_table(M, fam_rows)
         single_arm_policies(M, [family_of(x) for x in strats])
+        if len(fam_rows) >= 3:
+            within_family(M, fam_rows, strats, min(a.perms, 100), rng)
 
         # ---- persistance de rang --------------------------------------------
         rp = rank_persistence(M)
