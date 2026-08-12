@@ -1,5 +1,92 @@
 # Operational Backlog
 
+## 💰 12/08 — SIZING & RISK MANAGEMENT : le seed est sous-dimensionné, et l'edge ≈ la friction
+
+> Question user : « dans les memecoins il y a deux choses importantes, le risk management et le
+> sizing — comment les appliquer pour améliorer les gains ? » Calculé sur les distributions
+> **réelles** (`scripts/sizing_risk_analysis.py`), pas sur la théorie.
+
+### 0. Fait structurel vérifié d'abord : la mise est PLATE, pas fractionnaire
+
+`rt_trade_config` : **`min_position_usd = max_position_usd = 100`**. La mise est donc **fixe à
+$100**, jamais `f × bankroll` ⇒ **aucune composition**. Conséquence : le risque n'est **pas** la
+ruine par composition (Kelly), c'est le **drawdown cumulé en dollars** — il faut que le seed
+encaisse la pire série perdante. Tout ce qui suit est calculé dans ce modèle-là.
+
+### 1. 🔴 LE SEED NE COUVRE PAS LA VARIANCE NORMALE
+
+Bootstrap 4 000 chemins × 200 trades (~50 jours à 4/j), mise plate $100 :
+
+| bras | n | EV brut | EV net | PnL médian | DD médian | **DD p95** | **P(griller $1 000)** |
+|---|---|---|---|---|---|---|---|
+| `PF_TP50_SL40_S35` | 48 | +3.20 % | −2.20 % | +$644 | $661 | **$1 326** | **15 %** *(net 57 %)* |
+| `PF_BE25_TP80_SL30` | 68 | +1.37 % | −4.03 % | +$274 | $744 | **$1 532** | **25 %** *(net 73 %)* |
+| `PFW_TP50_SL30_LM_WL` | 25 | +3.50 % | −1.90 % | +$671 | $1 087 | **$2 155** | **58 %** *(net 84 %)* |
+
+🔑 **Le drawdown p95 dépasse le seed sur les 3 bras, même en lecture BRUTE (optimiste).** À
+$100 de mise sur $1 000 de seed, on grille le seed avec **15 à 58 %** de probabilité sur
+50 jours **sans que la stratégie soit mauvaise** — c'est de la variance normale.
+
+**Deux routes indépendantes donnent le même chiffre :**
+- Kelly **empirique** (croissance log sur la distribution réelle, si on composait) :
+  **f\* = 0.045 à 0.10** — et à f = 0.10 le multiple **médian** est déjà **sous 1** pour 2 bras
+  sur 3, alors que la moyenne, elle, paraît bonne (queue épaisse : `p95` jusqu'à ×7).
+  ⚠️ La formule fermée `(p·b−q)/b` surestime f\* de **+2 à +5 pp** ici : ne pas l'utiliser.
+- Survie au **drawdown p95** en mise plate : il faut un seed de **$1 500 à $2 200** pour $100 de
+  mise.
+
+⇒ **Les deux disent : mise ≈ 5 % du bankroll, pas 10 %.** Aujourd'hui on est à 10 %.
+
+**▶️ Correctif recommandé : monter le SEED, ne pas baisser la mise.** À mise plafonnée,
+`argent = n × EV × mise` : baisser la mise à $50 diviserait les gains par deux, alors que monter
+le seed à ~$2 000 ne coûte rien en gains. **Le seed est un tampon, pas un levier** — d'autant
+que le plafond de capacité (+$23/j) fait qu'un seed plus gros ne rapporte rien de plus.
+
+### 2. 🔴 ET LE VRAI PROBLÈME N'EST PAS LE SIZING : l'edge brut ≈ la friction
+
+| bras | EV brut | − frais Solana (3.5 pp) | − drift live (1.9 pp de plus) |
+|---|---|---|---|
+| `PFW_TP50_SL30_LM_WL` | +3.50 % | **0.00 %** | −1.90 % |
+| `PF_TP50_SL40_S35` | +3.20 % | −0.30 % | −2.20 % |
+| `PF_BE25_TP80_SL30` | +1.37 % | −2.13 % | −4.03 % |
+| `BE15_LOCK5_TP50_SL30` *(4 mois, n=2 387)* | +0.89 % | −2.61 % | −4.51 % |
+
+🔑 **L'edge brut est de l'ordre de grandeur de la friction.** Net, le Kelly empirique tombe à
+**f\* = 0.005** sur les 4 bras : « toute mise significative détruit le capital ». **Aucun schéma
+de sizing ne répare une espérance négative** — c'est le seul message qui compte ici.
+⚠️ Le seuil de +3.5 % de `solana_fees_per_trade` n'est donc pas un détail de comptabilité :
+c'est **la barre à franchir**, et on est dessus, pas au-dessus.
+
+### 3. ▶️ Ce qui améliore réellement les gains, par ordre d'effet mesuré
+
+1. **L'EV par trade**, et elle vient du **filtre d'entrée** : ~+7 %/trade avec filtres contre
+   +0.2 à +0.8 %/trade sans (§F bis). C'est le seul levier qui franchit la friction.
+2. **`n` (trades/jour)**, pas la mise : la mise est plafonnée par la **liquidité** (~$100/token),
+   pas par le bankroll. Dès $1 000, `f` n'est plus un choix — il est imposé et **tombe** quand le
+   bankroll monte ($2 000 → f = 0.05, $10 000 → f = 0.01).
+3. **Le seed comme tampon** : ~20× la mise, pas 10× (§1).
+4. ❌ **PAS le niveau du SL** : le gap-through book un stop −30 % à **−49 %**, et le coût du SL
+   est ~−45 % *quel que soit son niveau nominal*. Le SL n'est pas un outil de risk management
+   sur ce flux — l'illusion de protection est le piège le plus coûteux du projet (2 bras TP200
+   à −85 % du seed en 4 jours).
+
+### 🏆 « Quelle est la meilleure strat qu'on a ? » — deux réponses, et elles ne coïncident pas
+
+| critère | gagnant | chiffre | confiance |
+|---|---|---|---|
+| **bankroll réel depuis le départ** | `PF_TP50_SL40_S35` | **$1 457** (+45.7 %, 40 trades) | ⚠️ **6 jours** |
+| **preuve la plus solide (4 mois, contrôlée)** | `PFW_TP50_SL30_LM_WL` | +$4 361 walk-forward, **4/4 folds**, seul à **dépasser son plancher de permutation** (p ~ 0.000) | ✅ la meilleure qu'on ait |
+
+⇒ **Si on doit n'en garder qu'une : `PFW_TP50_SL30_LM_WL`** (= `FAST_TP50_SL30_LAZYMED` +
+whitelist KOL, en main depuis le 11/08). Pas parce qu'elle gagne le plus aujourd'hui —
+`PF_TP50_SL40_S35` fait mieux — mais parce que c'est **la seule dont la procédure de sélection a
+passé un contrôle par permutation sur 4 mois**. Tout le travail du 12/08 dit que 6 jours et
+40 trades ne départagent rien (ρ = 0.019, oracle intra-famille sous son plancher).
+⚠️ **Et la vraie réponse est au niveau famille** : `TP≤80 / SL≤30` **+ filtres d'entrée +
+exclusion KOL**. Le bras exact est secondaire.
+
+---
+
 ## 🔬 12/08 — « CHANGER DE STRATÉGIE SELON LE RÉGIME » : le mécanisme existe, le régime n'est pas prévisible
 
 > Question de l'user : « les meilleures strat changent selon les moments ; si on trouvait ces
