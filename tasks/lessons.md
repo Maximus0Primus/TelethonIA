@@ -318,3 +318,23 @@ rapporté. La même cause, dans le chemin d'**ouverture**, faisait un dégât bi
 et n'a pas été cherchée.
 ⇒ Quand on trouve "ce filtre rejette tout", chercher **tous** les appelants de ce filtre
 avant de refermer, pas seulement celui qui a produit le ticket.
+
+### L9. Un fallback par défaut est une panne silencieuse déguisée
+`/stats 7d PFW_TP50S30` répondait de l'**All-time sur tout le deck** pour une question de
+7 jours sur un bras précis. Aucune erreur : deux fallbacks empilés, chacun « raisonnable »
+isolément.
+1. `_resolve_strategy` n'acceptait le nom **raccourci** qu'en égalité exacte (v14e.97).
+   Le bot affiche `PFW_TP50S30_LM_WL` ; l'utilisateur tape le début utile `PFW_TP50S30` ;
+   le préfixe n'était testé que sur le nom **canonique** `PFW_TP50_SL30_LM_WL`, qui ne
+   commence pas par `PFW_TP50S30`. ⇒ pas de match, token non consommé.
+2. `_parse_period` rendait `(0, "All-time")` pour **tout** token non reconnu. Le token du
+   bras étant resté dans le reliquat, la « période » devenait `7d PFW_TP50S30` — non
+   reconnue ⇒ All-time.
+⇒ **Un parseur ne doit jamais avoir de défaut muet sur une entrée non vide.** Vide ⇒
+défaut ; non vide et non compris ⇒ **erreur remontée**. Corrigé v14e.98 : `_parse_period`
+rend `(heures, label, erreur)` et les **7** appelants la retournent.
+⇒ **Quand un identifiant a plusieurs orthographes légitimes, toutes les étapes de matching
+doivent les tester** — pas seulement l'égalité. `_name_forms()` centralise les deux formes.
+⇒ Même famille que L8 : v14e.97 avait corrigé *l'égalité* du nom court (le symptôme
+rapporté) sans corriger *le préfixe*, qui était la même cause un cran plus loin. Troisième
+récidive de la famille « répond à côté sans le dire ».

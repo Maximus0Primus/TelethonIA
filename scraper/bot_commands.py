@@ -159,12 +159,33 @@ def _parse_chain_args(args: str) -> tuple[str, str | None]:
 
 # ── Helpers ──
 
-def _parse_period(arg: str) -> tuple[int, str]:
-    arg = arg.lower().strip()
+def _parse_period(arg: str,
+                  default: tuple[int, str] = (0, "All-time"),
+                  ) -> tuple[int, str, str | None]:
+    """Parse un token de periode -> (heures, label, erreur).
+
+    v14e.98: le 3e slot existe parce que l'ancienne version rendait
+    (0, "All-time") pour TOUT token non reconnu. Sur `/stats 7d PFW_TP50S30`
+    le bras ne resolvait pas, "7d PFW_TP50S30" restait donc comme periode,
+    n'etait pas reconnu, et le bot repondait 4 mois a une question de 7 jours
+    sans rien dire. Meme famille que v14e.97 : un argument non compris se DIT.
+    """
+    raw = (arg or "").strip()
+    arg = raw.lower()
+    if not arg:
+        return default[0], default[1], None
     if arg in _PERIODS:
         h = _PERIODS[arg]
-        return h, ("All-time" if h == 0 else arg)
-    return 0, "All-time"
+        return h, ("All-time" if h == 0 else arg), None
+    # Ne montrer que le(s) token(s) fautif(s) : sur '7d PFW_TP99S99' le
+    # '7d' etait compris, c'est le bras qui ne resout pas.
+    bad = ' '.join(t for t in raw.split() if t.lower() not in _PERIODS) or raw
+    periods = ', '.join(_PERIODS)
+    return default[0], default[1], (
+        f"❓ Argument non reconnu : <b>{bad}</b>\n"
+        f"Ce n'est ni une periode ni un nom de strategie connu.\n"
+        f"Periodes : {periods}."
+    )
 
 
 def _parse_int(arg: str, default: int) -> int:
@@ -172,6 +193,12 @@ def _parse_int(arg: str, default: int) -> int:
         return max(1, min(50, int(arg)))
     except (ValueError, TypeError):
         return default
+
+
+def _name_forms(name: str) -> tuple[str, str]:
+    """Les deux orthographes qu'un utilisateur peut legitimement taper pour un
+    bras : le nom canonique, et le nom raccourci que le bot lui a affiche."""
+    return name.upper(), _short_strat(name).upper()
 
 
 def _resolve_strategy(arg: str, sb) -> tuple[str | None, list[str]]:
@@ -201,15 +228,14 @@ def _resolve_strategy(arg: str, sb) -> tuple[str | None, list[str]]:
         return None, []
     active = _get_active_strategies(sb)
     all_strats = list(STRATEGIES.keys())
-    # v14e.97: accept the SHORTENED name the bot itself prints back.
-    # _short_strat('PFW_TP50_SL30_LM_WL') -> 'PFW_TP50S30_LM_WL'; copying that
-    # from a Telegram reply used to resolve to nothing.
-    for pool in (active, all_strats):
-        matches = [s for s in pool if _short_strat(s).upper() == arg_upper]
-        if len(matches) == 1:
-            return matches[0], []
-    for match_fn in (lambda s: s.upper().startswith(arg_upper),
-                     lambda s: arg_upper in s.upper()):
+    # v14e.98: chaque etape de matching teste les DEUX orthographes legitimes
+    # d'un bras (cf. _name_forms). v14e.97 n'acceptait la forme raccourcie
+    # qu'en egalite exacte : le bot affiche 'PFW_TP50S30_LM_WL', l'utilisateur
+    # tape le debut utile 'PFW_TP50S30', et plus rien ne matchait -- le nom
+    # canonique 'PFW_TP50_SL30_LM_WL' ne commence pas par 'PFW_TP50S30'.
+    for match_fn in (lambda s: any(f == arg_upper for f in _name_forms(s)),
+                     lambda s: any(f.startswith(arg_upper) for f in _name_forms(s)),
+                     lambda s: any(arg_upper in f for f in _name_forms(s))):
         for pool in (active, all_strats):
             matches = [s for s in pool if match_fn(s)]
             if len(matches) == 1:
@@ -720,7 +746,9 @@ def _handle_kol(sb, args: str) -> str:
     remaining, strat, strat_err = _split_strategy_args(args2, sb)
     if strat_err:
         return strat_err
-    hours, label = _parse_period(remaining) if remaining else (0, "All-time")
+    hours, label, per_err = _parse_period(remaining)
+    if per_err:
+        return per_err
     if chain_filter:
         label += f" | {_chain_tag(chain_filter)} {chain_filter.upper()}"
     if strat:
@@ -790,7 +818,9 @@ def _handle_stats(sb, args: str) -> str:
 
     # User specified a period → single window
     if remaining:
-        hours, label = _parse_period(remaining)
+        hours, label, per_err = _parse_period(remaining)
+        if per_err:
+            return per_err
         trades = _query_trades(sb, hours=hours, strategy=s, chain=chain_filter)
         # When no chain filter, break down by chain inside the single window.
         if not chain_filter:
@@ -861,7 +891,9 @@ def _handle_shadow(sb, args: str) -> str:
     # 1.53 M au total : l'all-time ne peut PAS etre agrege en passant les lignes
     # par REST. Avant, il rendait en silence les 1000 dernieres lignes -- soit
     # ~40 minutes de grille presentees comme "All-time".
-    hours, label = _parse_period(args_clean) if args_clean else (24, "24h")
+    hours, label, per_err = _parse_period(args_clean, default=(24, "24h"))
+    if per_err:
+        return per_err
     if hours == 0 or hours > _SHADOW_MAX_HOURS:
         hours, label = _SHADOW_MAX_HOURS, f"{label} → ramene a 7d"
     if chain_filter:
@@ -1233,7 +1265,9 @@ def _handle_extreme(sb, args: str, worst: bool) -> str:
     remaining, strat, strat_err = _split_strategy_args(args2, sb)
     if strat_err:
         return strat_err
-    hours, period_label = _parse_period(remaining) if remaining.strip() else (0, "All-time")
+    hours, period_label, per_err = _parse_period(remaining)
+    if per_err:
+        return per_err
     strategies = [strat] if strat else _get_active_strategies(sb)
 
     label_bits = [period_label]
@@ -1559,7 +1593,9 @@ def _handle_livepnl(sb, args: str) -> str:
     remaining, strat, strat_err = _split_strategy_args(args, sb)
     if strat_err:
         return strat_err
-    hours, label = _parse_period(remaining or "24h")
+    hours, label, per_err = _parse_period(remaining, default=(24, "24h"))
+    if per_err:
+        return per_err
     if strat:
         label += f" | {_short_strat(strat)}"
     q = (
@@ -1617,7 +1653,9 @@ def _handle_livestats(sb, args: str) -> str:
     strat_label = f" — {_short_strat(strat)}" if strat else ""
 
     if remaining:
-        hours, label = _parse_period(remaining)
+        hours, label, per_err = _parse_period(remaining)
+        if per_err:
+            return per_err
         trades = _query_trades(sb, hours=hours, strategy=s, source_live=True)
         d = _compute_stats(trades)
         return f"📊 <b>LIVE PERFORMANCE{strat_label}</b>\n\n{_fmt_stats(d, label)}"
@@ -1639,7 +1677,9 @@ def _handle_livekol(sb, args: str) -> str:
     remaining, strat, strat_err = _split_strategy_args(args, sb)
     if strat_err:
         return strat_err
-    hours, label = _parse_period(remaining) if remaining else (0, "All-time")
+    hours, label, per_err = _parse_period(remaining)
+    if per_err:
+        return per_err
     if strat:
         label += f" | {_short_strat(strat)}"
     try:
