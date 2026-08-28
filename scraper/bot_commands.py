@@ -21,6 +21,7 @@ Periods: 1h 6h 24h 7d 14d 30d all
 """
 
 import os
+import re
 import logging
 from datetime import datetime, timezone, timedelta
 
@@ -173,46 +174,105 @@ def _parse_int(arg: str, default: int) -> int:
         return default
 
 
-def _parse_strategy(arg: str, sb) -> str | None:
-    """Fuzzy-match a strategy name from user input.
-    Returns canonical strategy name or None if no match.
-    Matches case-insensitively and supports partial prefixes like 'dtrail10'."""
+def _resolve_strategy(arg: str, sb) -> tuple[str | None, list[str]]:
+    """v14e.97: resolve a user-typed strategy token.
+
+    Returns (canonical_name, candidates). Exactly one of the two is meaningful:
+    a name when the token resolves, otherwise the candidate list when the token
+    is AMBIGUOUS (e.g. 'PFWS' matches 3 shadow arms). Both empty => no match.
+
+    Why the split: the old _parse_strategy returned None both for "unknown" and
+    for "ambiguous", and callers silently fell back to *all* strategies — so
+    `/stats PFWS` answered with the whole deck and looked like the new arms
+    "didn't work". Ambiguity must be reported, not swallowed.
+    """
     if not arg:
-        return None
+        return None, []
     from strategies import STRATEGIES
     arg_upper = arg.upper().strip()
-    # Exact match
     if arg_upper in STRATEGIES:
-        return arg_upper
-    # Prefix match (e.g. 'dtrail10' matches 'DTRAIL10_ACT15_SL70')
-    # Only match within active strategies first, then all
+        return arg_upper, []
+    # v14e.97: tokens that are another argument, never a strategy. Without this
+    # guard `/trades 5` substring-matches 10 names containing "5" and reports a
+    # bogus ambiguity.
+    low = arg_upper.lower()
+    if (low in _PERIODS or low in _CHAIN_ALIASES or "=" in low
+            or not any(c.isalpha() for c in low)):
+        return None, []
     active = _get_active_strategies(sb)
-    for pool in [active, list(STRATEGIES.keys())]:
-        matches = [s for s in pool if s.upper().startswith(arg_upper)]
+    all_strats = list(STRATEGIES.keys())
+    # v14e.97: accept the SHORTENED name the bot itself prints back.
+    # _short_strat('PFW_TP50_SL30_LM_WL') -> 'PFW_TP50S30_LM_WL'; copying that
+    # from a Telegram reply used to resolve to nothing.
+    for pool in (active, all_strats):
+        matches = [s for s in pool if _short_strat(s).upper() == arg_upper]
         if len(matches) == 1:
-            return matches[0]
-    # Substring match as fallback
-    for pool in [active, list(STRATEGIES.keys())]:
-        matches = [s for s in pool if arg_upper in s.upper()]
-        if len(matches) == 1:
-            return matches[0]
-    return None
+            return matches[0], []
+    for match_fn in (lambda s: s.upper().startswith(arg_upper),
+                     lambda s: arg_upper in s.upper()):
+        for pool in (active, all_strats):
+            matches = [s for s in pool if match_fn(s)]
+            if len(matches) == 1:
+                return matches[0], []
+            if len(matches) > 1:
+                # Ambiguous: report the candidates rather than guessing.
+                return None, sorted(matches)
+    return None, []
 
 
-def _split_strategy_args(args: str, sb) -> tuple[str, str | None]:
-    """Split args into (remaining_args, strategy_name).
-    Tries each word as a potential strategy name.
-    Returns (other_args, matched_strategy or None)."""
+def _parse_strategy(arg: str, sb) -> str | None:
+    """Fuzzy-match a strategy name from user input.
+    Returns canonical strategy name or None if no match/ambiguous."""
+    return _resolve_strategy(arg, sb)[0]
+
+
+# v14e.97: a token shaped like NAME_PART_PART (>=2 underscores, alnum segments)
+# is a strategy name the user typed, not a KOL handle. Used to tell "unknown
+# strategy" apart from "/pnl FrenzGems" free text.
+_STRAT_SHAPED = re.compile(r"^[A-Za-z0-9]+(?:_[A-Za-z0-9]+){2,}$")
+
+
+def _split_strategy_args(args: str, sb,
+                         free_text: bool = False) -> tuple[str, str | None, str | None]:
+    """Split args into (remaining_args, strategy_name, error).
+
+    `error` is set only when a token clearly meant a strategy but could not be
+    resolved (ambiguous prefix, or a NAME_WITH_UNDERSCORES that matches nothing).
+    Callers must return it instead of silently answering about the whole deck.
+
+    free_text=True for handlers whose leftover is a KOL handle (/pnl,
+    /livepnlkol): `mad_apes_gambles` is strat-shaped but is a KOL, so the
+    unknown-name heuristic must not fire there. Ambiguity is still reported —
+    it only triggers on tokens that really matched several strategy names.
+    """
     if not args:
-        return "", None
+        return "", None, None
     parts = args.split()
+    ambiguous: tuple[str, list[str]] | None = None
     # Try last word first (most natural: /trades 10 dtrail10)
     for i in range(len(parts) - 1, -1, -1):
-        strat = _parse_strategy(parts[i], sb)
+        strat, candidates = _resolve_strategy(parts[i], sb)
         if strat:
             remaining = " ".join(parts[:i] + parts[i+1:]).strip()
-            return remaining, strat
-    return args, None
+            return remaining, strat, None
+        if candidates and ambiguous is None:
+            ambiguous = (parts[i], candidates)
+    if ambiguous:
+        tok, candidates = ambiguous
+        shown = "\n".join(f"  • {c}" for c in candidates[:12])
+        more = f"\n  … +{len(candidates) - 12} autres" if len(candidates) > 12 else ""
+        return args, None, (
+            f"❓ <b>{tok}</b> correspond à {len(candidates)} stratégies :\n"
+            f"{shown}{more}\n\nPrécise le nom complet."
+        )
+    for p in (() if free_text else parts):
+        if _STRAT_SHAPED.match(p):
+            return args, None, (
+                f"❓ Stratégie inconnue : <b>{p}</b>\n"
+                f"Vérifie le nom (les noms affichés sont raccourcis : "
+                f"<code>_SL30</code> → <code>S30</code>)."
+            )
+    return args, None, None
 
 
 def _send(text: str) -> bool:
@@ -278,11 +338,101 @@ def _exit_emoji(status: str, pnl: float) -> str:
     return "📊"
 
 
+# v14e.97: PostgREST caps an unbounded select at 1000 rows and says nothing.
+# Every all-time aggregate in this file was silently computed on the 1000 most
+# recent rows. Page through instead.
+_PAGE = 1000
+_MAX_ROWS = 50_000
+# La grille shadow ecrit ~20 k lignes/jour : budget separe, plus serre, et
+# toute troncature est annoncee dans la reponse.
+_SHADOW_MAX_ROWS = 20_000
+# Au-dela, `ORDER BY exit_at DESC` ne suit plus l'index du filtre et la
+# PREMIERE page meurt deja en 57014 (mesure: 30d et all-time echouent, 7d passe).
+_SHADOW_MAX_HOURS = 168
+
+
+def _fetch_all_seek(build_q, max_rows: int, cursor_col: str = "exit_at") -> list:
+    """Pagination par CURSEUR (seek), pas par OFFSET.
+
+    Un OFFSET profond force Postgres a re-scanner tout le prefixe : sur la
+    grille shadow (1.53 M lignes) `/shadow 30d` mourait en 57014. Le curseur
+    suit l'index de `cursor_col` et chaque page reste O(page).
+
+    `build_q` doit RECONSTRUIRE la requete a chaque page (les builders PostgREST
+    accumulent les filtres). Le curseur est `<=` et non `<` parce que la grille
+    ferme des dizaines de lignes sur le MEME timestamp : `<` en sauterait. D'ou
+    la dedup par `id`.
+    """
+    rows: list = []
+    seen: set = set()
+    cursor = None
+    while len(rows) < max_rows:
+        q = build_q()
+        if cursor is not None:
+            q = q.lte(cursor_col, cursor)
+        page = q.order(cursor_col, desc=True).limit(_PAGE).execute().data or []
+        if not page:
+            break
+        fresh = [r for r in page if r.get("id") not in seen]
+        for r in fresh:
+            seen.add(r.get("id"))
+        rows.extend(fresh[:max_rows - len(rows)])
+        next_cursor = page[-1].get(cursor_col)
+        if len(page) < _PAGE or not next_cursor or next_cursor == cursor:
+            break
+        cursor = next_cursor
+    return rows
+
+
+def _fetch_all(q, max_rows: int = _MAX_ROWS) -> list:
+    """Run a select paginated, so aggregates aren't silently capped at 1000.
+
+    `max_rows` is a budget, not a silent truncation: when len(rows) == max_rows
+    the caller MUST tell the user the answer is partial. The grille shadow
+    writes ~20 k lignes/jour (1.53 M all-time), so an unbounded page-through
+    both times out (57014, deep OFFSET) and would take 1500 round-trips.
+    """
+    rows: list = []
+    while len(rows) < max_rows:
+        page = q.range(len(rows), min(len(rows) + _PAGE, max_rows) - 1).execute().data or []
+        rows.extend(page)
+        if len(page) < _PAGE:
+            break
+    return rows
+
+
+_shadow_only_cache: dict[str, bool] = {}
+
+
+def _is_shadow_only(sb, strategy: str) -> bool:
+    """v14e.97: True when `strategy` has no main rows — a shadow-grid arm.
+
+    `/stats <shadow arm>` used to answer "Aucun trade" because _query_trades
+    hard-filtered is_shadow=false. Probing one row keeps main/shadow from being
+    mixed for arms that exist as both (PFW does), while still answering for
+    shadow-only ones (PFWS_*, PFSC_*, PFA_*).
+    """
+    if strategy in _shadow_only_cache:
+        return _shadow_only_cache[strategy]
+    try:
+        hit = (
+            sb.table("paper_trades").select("id")
+            .eq("strategy", strategy).eq("is_shadow", False)
+            .neq("status", "open").limit(1).execute().data or []
+        )
+        shadow_only = not hit
+    except Exception:
+        shadow_only = False
+    _shadow_only_cache[strategy] = shadow_only
+    return shadow_only
+
+
 def _query_trades(sb, hours: int = 0, limit: int = 0, strategy: str = "",
                   chain: str | None = None, source_live: bool = False):
     """Query closed trades.
 
     Paper (default): main trades (is_shadow=false) across active strategies.
+    When an explicit shadow-only strategy is asked for, read its shadow rows.
     Live (source_live=True): all rt_live rows regardless of active_strategies
     (live set differs from paper, and historic strats like DTRAIL10 matter
     for the trailing-window display even if retired from the current rotation).
@@ -298,7 +448,8 @@ def _query_trades(sb, hours: int = 0, limit: int = 0, strategy: str = "",
             q = q.eq("strategy", strategy)
     else:
         strategies = [strategy] if strategy else _get_active_strategies(sb)
-        q = q.eq("is_shadow", False).in_("strategy", strategies)
+        is_shadow = bool(strategy) and _is_shadow_only(sb, strategy)
+        q = q.eq("is_shadow", is_shadow).in_("strategy", strategies)
     if chain:
         q = q.eq("chain", chain)
     if hours > 0:
@@ -306,8 +457,8 @@ def _query_trades(sb, hours: int = 0, limit: int = 0, strategy: str = "",
         q = q.gte("exit_at", cutoff)
     q = q.order("exit_at", desc=True)
     if limit > 0:
-        q = q.limit(limit)
-    return q.execute().data or []
+        return q.limit(limit).execute().data or []
+    return _fetch_all(q)
 
 
 def _compute_stats(trades: list) -> dict:
@@ -512,7 +663,9 @@ def _handle_pos(sb, args: str) -> str:
 def _handle_trades(sb, args: str) -> str:
     """v14e: /trades [N] [chain] [strat] — Derniers trades avec tag chain sur chaque ligne."""
     args2, chain_filter = _parse_chain_args(args)
-    remaining, strat = _split_strategy_args(args2, sb)
+    remaining, strat, strat_err = _split_strategy_args(args2, sb)
+    if strat_err:
+        return strat_err
     n = _parse_int(remaining, 5) if remaining else 5
     try:
         trades = _query_trades(sb, limit=n, strategy=strat or "", chain=chain_filter)
@@ -564,7 +717,9 @@ def _handle_trades(sb, args: str) -> str:
 def _handle_kol(sb, args: str) -> str:
     """v14e: /kol [période] [chain] [strat] — KOL leaderboard scoped per chain."""
     args2, chain_filter = _parse_chain_args(args)
-    remaining, strat = _split_strategy_args(args2, sb)
+    remaining, strat, strat_err = _split_strategy_args(args2, sb)
+    if strat_err:
+        return strat_err
     hours, label = _parse_period(remaining) if remaining else (0, "All-time")
     if chain_filter:
         label += f" | {_chain_tag(chain_filter)} {chain_filter.upper()}"
@@ -621,7 +776,9 @@ def _handle_stats(sb, args: str) -> str:
     Sans chain: breakdown 24h/7d/all-time PAR chain si multi-chain actif.
     Avec chain: stats restreintes à cette chain."""
     args2, chain_filter = _parse_chain_args(args)
-    remaining, strat = _split_strategy_args(args2, sb)
+    remaining, strat, strat_err = _split_strategy_args(args2, sb)
+    if strat_err:
+        return strat_err
     s = strat or ""
 
     label_bits = []
@@ -700,29 +857,45 @@ def _handle_shadow(sb, args: str) -> str:
         else:
             cleaned_tokens.append(tok)
     args_clean = " ".join(cleaned_tokens)
-    hours, label = _parse_period(args_clean) if args_clean else (0, "All-time")
+    # v14e.97: defaut 24 h, pas all-time. La grille ecrit ~20 k lignes/jour et
+    # 1.53 M au total : l'all-time ne peut PAS etre agrege en passant les lignes
+    # par REST. Avant, il rendait en silence les 1000 dernieres lignes -- soit
+    # ~40 minutes de grille presentees comme "All-time".
+    hours, label = _parse_period(args_clean) if args_clean else (24, "24h")
+    if hours == 0 or hours > _SHADOW_MAX_HOURS:
+        hours, label = _SHADOW_MAX_HOURS, f"{label} → ramene a 7d"
     if chain_filter:
         label += f" | {_chain_tag(chain_filter)} {chain_filter.upper()}"
     label += f" | min N={min_n}"
 
     # ── Shadows ──
-    q_sh = (
-        sb.table("paper_trades")
-        .select("strategy,pnl_pct,status,chain")
-        .eq("is_shadow", True)
-        .neq("status", "open")
-    )
-    if chain_filter:
-        q_sh = q_sh.eq("chain", chain_filter)
-    if hours > 0:
-        cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
-        q_sh = q_sh.gte("exit_at", cutoff)
+    cutoff = ((datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+              if hours > 0 else None)
+
+    def _build_shadow_q():
+        q = (
+            sb.table("paper_trades")
+            .select("id,strategy,pnl_pct,status,chain,exit_at")
+            .eq("is_shadow", True)
+            .neq("status", "open")
+        )
+        if chain_filter:
+            q = q.eq("chain", chain_filter)
+        if cutoff:
+            q = q.gte("exit_at", cutoff)
+        return q
+
     try:
-        shadows = q_sh.execute().data or []
+        shadows = _fetch_all_seek(_build_shadow_q, max_rows=_SHADOW_MAX_ROWS)
     except Exception as e:
         return f"❌ Erreur: {e}"
     if not shadows:
         return f"📭 Aucun shadow trade ({label})."
+    # v14e.97: budget atteint => la reponse ne couvre PAS toute la fenetre
+    # demandee. On le dit, et on dit jusqu'ou elle va vraiment.
+    if len(shadows) >= _SHADOW_MAX_ROWS:
+        oldest = min((t.get("exit_at") or "") for t in shadows)[:16].replace("T", " ")
+        label += f" | ⚠️ tronque aux {_SHADOW_MAX_ROWS:,} plus recents (depuis {oldest})".replace(",", " ")
 
     # Aggregate shadows
     sh_agg: dict[str, dict] = {}
@@ -982,7 +1155,9 @@ def _handle_pnl(sb, args: str) -> str:
         return "Usage: /pnl <nom_du_KOL> [sol|eth|bsc|base] [stratégie]\nExemple: /pnl FrenzGems eth"
 
     args2, chain_filter = _parse_chain_args(args)
-    remaining, strat = _split_strategy_args(args2, sb)
+    remaining, strat, strat_err = _split_strategy_args(args2, sb, free_text=True)
+    if strat_err:
+        return strat_err
     kol_name = remaining.strip() if remaining else args2.strip()
     if not kol_name:
         return "Usage: /pnl <nom_du_KOL> [sol|eth|bsc|base] [stratégie]"
@@ -998,7 +1173,7 @@ def _handle_pnl(sb, args: str) -> str:
         q = (
             sb.table("paper_trades")
             .select("symbol,pnl_pct,pnl_usd,status,exit_at,position_usd,exit_minutes,strategy,chain")
-            .eq("is_shadow", False)
+            .eq("is_shadow", bool(strat) and _is_shadow_only(sb, strat))
             .in_("strategy", strategies)
             .ilike("kol_group", f"%{kol_name}%")
             .neq("status", "open")
@@ -1043,27 +1218,44 @@ def _handle_pnl(sb, args: str) -> str:
 
 # ── /best ──
 
-def _handle_best(sb, args: str) -> str:
-    """v14e: /best [chain] [strat] — Meilleur trade all-time."""
+def _handle_extreme(sb, args: str, worst: bool) -> str:
+    """v14e.97: coeur commun de /best et /worst.
+
+    Trois fautes corrigees ici, toutes de la meme famille que /stats :
+    - la periode etait AVALEE en silence (`/best 7d` rendait l'all-time sans le
+      dire) — elle est maintenant appliquee ;
+    - un nom de bras ambigu ou inconnu passait pour "pas de filtre" et on
+      repondait sur tout le deck — desormais rapporte ;
+    - `is_shadow=False` etait code en dur, donc un bras shadow-only rendait
+      toujours "Aucun trade".
+    """
     args2, chain_filter = _parse_chain_args(args)
-    strat = _parse_strategy(args2.strip(), sb) if args2.strip() else None
+    remaining, strat, strat_err = _split_strategy_args(args2, sb)
+    if strat_err:
+        return strat_err
+    hours, period_label = _parse_period(remaining) if remaining.strip() else (0, "All-time")
     strategies = [strat] if strat else _get_active_strategies(sb)
-    label_bits = []
+
+    label_bits = [period_label]
     if chain_filter:
         label_bits.append(f"{_chain_tag(chain_filter)} {chain_filter.upper()}")
     if strat:
         label_bits.append(_short_strat(strat))
-    strat_label = f" ({' | '.join(label_bits)})" if label_bits else ""
+    strat_label = f" ({' | '.join(label_bits)})"
     try:
         q = (
             sb.table("paper_trades")
             .select("symbol,pnl_pct,pnl_usd,status,kol_group,exit_at,position_usd,exit_minutes,entry_price,exit_price,high_price_seen,token_address,strategy,chain")
-            .eq("is_shadow", False).in_("strategy", strategies)
+            .eq("is_shadow", bool(strat) and _is_shadow_only(sb, strat))
+            .in_("strategy", strategies)
             .neq("status", "open")
-            .order("pnl_usd", desc=True).limit(1)
+            .order("pnl_usd", desc=not worst).limit(1)
         )
         if chain_filter:
             q = q.eq("chain", chain_filter)
+        if hours > 0:
+            cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+            q = q.gte("exit_at", cutoff)
         result = q.execute()
         t = (result.data or [None])[0]
     except Exception as e:
@@ -1072,39 +1264,18 @@ def _handle_best(sb, args: str) -> str:
     if not t:
         return f"📭 Aucun trade{strat_label}."
 
-    return _format_highlight_trade(t, f"🏆 BEST TRADE{strat_label}")
+    title = "💀 WORST TRADE" if worst else "🏆 BEST TRADE"
+    return _format_highlight_trade(t, f"{title}{strat_label}")
+
+
+def _handle_best(sb, args: str) -> str:
+    """v14e: /best [période] [chain] [strat] — Meilleur trade."""
+    return _handle_extreme(sb, args, worst=False)
 
 
 def _handle_worst(sb, args: str) -> str:
-    """v14e: /worst [chain] [strat] — Pire trade all-time."""
-    args2, chain_filter = _parse_chain_args(args)
-    strat = _parse_strategy(args2.strip(), sb) if args2.strip() else None
-    strategies = [strat] if strat else _get_active_strategies(sb)
-    label_bits = []
-    if chain_filter:
-        label_bits.append(f"{_chain_tag(chain_filter)} {chain_filter.upper()}")
-    if strat:
-        label_bits.append(_short_strat(strat))
-    strat_label = f" ({' | '.join(label_bits)})" if label_bits else ""
-    try:
-        q = (
-            sb.table("paper_trades")
-            .select("symbol,pnl_pct,pnl_usd,status,kol_group,exit_at,position_usd,exit_minutes,entry_price,exit_price,high_price_seen,token_address,strategy,chain")
-            .eq("is_shadow", False).in_("strategy", strategies)
-            .neq("status", "open")
-            .order("pnl_usd", desc=False).limit(1)
-        )
-        if chain_filter:
-            q = q.eq("chain", chain_filter)
-        result = q.execute()
-        t = (result.data or [None])[0]
-    except Exception as e:
-        return f"❌ Erreur: {e}"
-
-    if not t:
-        return f"📭 Aucun trade{strat_label}."
-
-    return _format_highlight_trade(t, f"💀 WORST TRADE{strat_label}")
+    """v14e: /worst [période] [chain] [strat] — Pire trade."""
+    return _handle_extreme(sb, args, worst=True)
 
 
 def _format_highlight_trade(t: dict, title: str) -> str:
@@ -1214,12 +1385,12 @@ def _handle_live(sb, args: str) -> str:
         # strat qui a traité en live sur 30j même si elle n'est plus allouée
         # (trace de strats retirées comme DTRAIL10, utile à voir).
         live_allocs = set((live_cfg.get("allocations") or {}).keys())
-        live_30d = sb.table("paper_trades").select(
+        live_30d = _fetch_all(sb.table("paper_trades").select(
             "pnl_usd,status,strategy,exit_at"
         ).eq("source", "rt_live").neq("status", "open").gte(
             "exit_at",
             (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
-        ).execute().data or []
+        ).order("exit_at", desc=True))
 
         per_strat: dict[str, dict] = {}
         for t in live_30d:
@@ -1349,7 +1520,9 @@ def _handle_livepos(sb, args: str) -> str:
 
 def _handle_livetrades(sb, args: str) -> str:
     """Last N closed live trades. Optional: /livetrades 10 dtrail10"""
-    remaining, strat = _split_strategy_args(args, sb)
+    remaining, strat, strat_err = _split_strategy_args(args, sb)
+    if strat_err:
+        return strat_err
     n = _parse_int(remaining, 10) if remaining else 10
     q = (
         sb.table("paper_trades")
@@ -1383,7 +1556,9 @@ def _handle_livetrades(sb, args: str) -> str:
 
 def _handle_livepnl(sb, args: str) -> str:
     """Live PnL by period. Optional: /livepnl 7d dtrail10"""
-    remaining, strat = _split_strategy_args(args, sb)
+    remaining, strat, strat_err = _split_strategy_args(args, sb)
+    if strat_err:
+        return strat_err
     hours, label = _parse_period(remaining or "24h")
     if strat:
         label += f" | {_short_strat(strat)}"
@@ -1398,7 +1573,7 @@ def _handle_livepnl(sb, args: str) -> str:
     if hours > 0:
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
         q = q.gte("exit_at", cutoff)
-    trades = q.order("exit_at", desc=True).execute().data or []
+    trades = _fetch_all(q.order("exit_at", desc=True))
 
     if not trades:
         return f"📭 Aucun trade live ({label})"
@@ -1435,7 +1610,9 @@ def _handle_livepnl(sb, args: str) -> str:
 
 def _handle_livestats(sb, args: str) -> str:
     """/livestats [période] [strat] — Performance live (source=rt_live)."""
-    remaining, strat = _split_strategy_args(args, sb)
+    remaining, strat, strat_err = _split_strategy_args(args, sb)
+    if strat_err:
+        return strat_err
     s = strat or ""
     strat_label = f" — {_short_strat(strat)}" if strat else ""
 
@@ -1459,7 +1636,9 @@ def _handle_livestats(sb, args: str) -> str:
 
 def _handle_livekol(sb, args: str) -> str:
     """/livekol [période] [strat] — KOL leaderboard live."""
-    remaining, strat = _split_strategy_args(args, sb)
+    remaining, strat, strat_err = _split_strategy_args(args, sb)
+    if strat_err:
+        return strat_err
     hours, label = _parse_period(remaining) if remaining else (0, "All-time")
     if strat:
         label += f" | {_short_strat(strat)}"
@@ -1603,7 +1782,9 @@ def _handle_livepnlkol(sb, args: str) -> str:
     Nommé différemment de /livepnl pour éviter la collision (/livepnl = période)."""
     if not args:
         return "Usage: /livepnlkol <nom_du_KOL> [stratégie]\nEx: /livepnlkol gubbinscalls"
-    remaining, strat = _split_strategy_args(args, sb)
+    remaining, strat, strat_err = _split_strategy_args(args, sb, free_text=True)
+    if strat_err:
+        return strat_err
     kol_name = remaining.strip() if remaining else args.strip()
     if not kol_name:
         return "Usage: /livepnlkol <nom_du_KOL> [stratégie]"

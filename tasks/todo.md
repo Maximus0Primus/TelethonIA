@@ -1,5 +1,840 @@
 # Operational Backlog
 
+## 🔎 26/08 — « LE MARCHÉ EST EN FEU, CERTAINS KOL DÉTRUISENT TOUT » : la WL paie, le classement INTRA-WL est du bruit
+
+> Question user : le paper est monté à ~$2 000 dans la journée puis redescendu à ~$1 500 ;
+> « je crois qu'il y a certains KOL qui détruisent toute la performance et d'autres qui sont super ».
+> Fenêtre : **19/08 → 26/08** (7 j). `paper_trades`, dédoublonné par token, `pnl_pct <= 20`,
+> familles artefact exclues. Net = brut − 2 pp/trade (§0 du 24/08, mise $100).
+
+### 1. Le bras que tu regardais : `PFW_TP50_SL30_LM_WL`. Le chiffre est exact.
+
+| jour | plus bas | **plus haut** | clôture |
+|---|---|---|---|
+| 21/08 | 527 | 611 | 601 |
+| 23/08 | 559 | **1 489** | 1 489 |
+| 25/08 | 1 252 | **1 701** | 1 701 |
+| **26/08** | 1 446 | **2 019** | **1 446** |
+
+`rt_bankroll.strategy_bankrolls_per_chain.solana` : **$1 445.87** (seed $1 000, +445.87 all-time).
+
+### 2. Le deck sur 7 j : **seul PFW gagne**, le reste paie la note
+
+| bras | n | EV | médiane | brut | **net** | TP | SL |
+|---|---|---|---|---|---|---|---|
+| **`PFW_TP50_SL30_LM_WL`** | 137 | **+7.32 %** | −5.17 % | **+$817** | **+$543** | 19.7 % | 34.3 % |
+| `PF_FAST_TP50_SL30_MCAP_S40` | 17 | −7.33 % | −25.4 % | −$111 | −$145 | 17.6 % | 47.1 % |
+| `PF_BE25_TP80_SL30` | 46 | −0.88 % | −32.5 % | −$133 | −$225 | 17.4 % | 58.7 % |
+| `PF_TP50_SL40_S35` | 20 | −12.17 % | −29.5 % | −$245 | −$285 | 30.0 % | 50.0 % |
+| **deck entier** | 220 | | | **+$318** | **≈ −$112** | | |
+
+🔑 **Toutes les médianes sont profondément négatives, PFW compris.** L'EV positive de PFW ne
+vient pas du corps de la distribution, elle vient de la queue.
+
+Côté **shadow**, la grille reste à peine vivante : le haut du classement est occupé par les bras
+`_A3to12` (bande d'âge 3-12 h) — `BE15_LOCK5_TP50_SL30_A3to12` +275 pts/$100 sur n=50,
+`_A1to3` +194, `FAST_TP100_SL20_A3to12` +178. ⚠️ **Ce sont des quasi-clones sur les mêmes
+~50 tokens = UNE observation**, et la bande d'âge est précisément le filtre qui *fait perdre*
+en production (11/08 : EV ×4 mais −82 % de volume ⇒ −28 %). Rien de neuf à en tirer.
+
+### 3. ✅ TON INTUITION EST VRAIE — MAIS ELLE EST **DÉJÀ ENCAISSÉE** PAR LA WHITELIST
+
+Contrôle propre : bras **neutre** `TP50_SL30` (grille shadow, univers complet, 50 KOL, même
+sortie pour tout le monde), mêmes 7 jours, dédoublonné :
+
+| segment | n | EV |
+|---|---|---|
+| KOL **dans** `_WL_LAZYMED` (les 30 de PFW) | 117 | **+1.87 %** |
+| KOL **hors** WL | 156 | **−11.91 %** |
+
+⇒ **+13.8 pp d'écart, à sortie identique.** « Certains KOL détruisent la performance » : oui,
+et c'est **exactement ce que la whitelist de PFW coupe déjà**. C'est là que vient la
+sur-performance de PFW, pas d'un TP/SL magique.
+
+### 4. 🔴 MAIS LE CLASSEMENT **À L'INTÉRIEUR** DE LA WL EST DU BRUIT — ET IL S'INVERSE
+
+**a. Corrélation train→test.** Bras neutre `TP50_SL30`, 25 KOL avec n≥5 en train et n≥3 en test.
+Train = 01/07 → 18/08, test = 19/08 → 26/08 : **Spearman(EV) = 0.145.** ≈ zéro.
+
+**b. Sur PFW lui-même, l'inversion est frontale** (11/08 → 18/08 vs 19/08 → 26/08) :
+
+| KOL | $ train | $ test |
+|---|---|---|
+| `eveesL` | **+603** *(n°1)* | **−314** *(dernier)* |
+| `FrenzGems` | **−719** *(dernier)* | **+208** |
+| `mad_apes_gambles` | −298 | +192 |
+| `explorer_gems` | −154 | **+477** |
+| `ChairmanDN1` | −149 | +24 |
+| `Archerrgambles` | −146 | **+492** |
+
+🔑 **Les 5 pires de la semaine 1 sont 5 des 6 meilleurs de la semaine 2.** Le « KOL qui détruit
+tout » de cette semaine (`eveesL`) est **+$231 / EV +2.8 % / 2 mois positifs sur 4** sur les
+4 derniers mois : il a fait une mauvaise semaine, ce n'est pas un mauvais KOL.
+
+**c. Et la règle d'exclusion ne passe pas son plancher sur 7 jours.** « Ne garder que les KOL à
+argent > 0 en train » appliqué à la semaine test : **observé −$7** ; 2 000 permutations de
+sous-ensembles de même taille : médiane −$568, **p95 +$399**, **p = 0.18**.
+⇒ La règle va dans le bon sens en argent (−$7 contre −$1 585 pour l'univers entier) mais
+**7 jours ne peuvent pas la trancher**. Ce qui la valide reste le test long du 11/08.
+
+### 5. 🚨 LA SEMAINE ENTIÈRE = **3 TRADES** — ET 2 VIENNENT DES KOL QU'IL FAUDRAIT COUPER
+
+`PFW`, 19→26/08, 140 tokens dédoublonnés :
+
+| | $ |
+|---|---|
+| total | **+$653** |
+| sans le top 1 | +$240 |
+| **sans le top 3** | **−$478** |
+| sans le top 5 | −$868 |
+
+Top 5 : `$BARK` (**explorer_gems**) +$414 · `$YOMOGI` (**FrenzGems**) +$386 ·
+`$LPC` (**Archerrgambles**) +$332 · `$XCAT` (**ghastlygems**) +$234 · `$PINU` (mad_apes) +$156.
+
+Or, sur le bras neutre et **4 mois** (mai→août), les 6 membres de la WL à argent négatif sont :
+
+| KOL (dans la WL) | n | $ 4 mois | mois positifs | EV |
+|---|---|---|---|---|
+| **FrenzGems** | 127 | **−489** | **0/4** | −3.8 % |
+| **DoxxedChannel** | 39 | **−441** | 1/4 | −11.3 % |
+| ghastlygems | 20 | −197 | 1/4 | −9.9 % |
+| BossmanCallsOfficial | 2 | −38 | 0/2 | −19.2 % |
+| Archerrgambles | 26 | −30 | 2/4 | −1.1 % |
+| snoopsalpha | 4 | −25 | 1/3 | −6.1 % |
+
+**Appliquer cette règle pré-spécifiée cette semaine aurait coûté $594** (+208 −102 −20 +16 +492) :
+PFW aurait fait **+$223 au lieu de +$817**. `FrenzGems` (0/4 mois) et `ghastlygems` (1/4) signent
+**2 des 3 trades qui font la semaine** — 4ᵉ illustration de `downside_predictable_upside_not`,
+et 3ᵉ fois que `FrenzGems` est le KOL qu'un top-K aurait éliminé.
+
+### 6. Le seul haut du classement 4 mois qui tient (référence, pas décision)
+
+`letswinallgems` **4/4** mois positifs (+$484, EV +9.9 %) · `mad_apes_gambles` 3/4 (+$1 281 sur
+n=426) · `dddegens` 3/4 (+$465) · `zcallz` 3/4 · `slingoorioyaps` 3/4 (+$261) — **oui, celui qui
+fait −$247 cette semaine**. Tous déjà dans la WL.
+
+### ▶️ Décisions
+
+- [x] **Ne rien changer.** Ni le deck, ni la whitelist. La semaine de PFW est **3 trades**, et
+      la règle de coupe la plus défendable les aurait **enlevés**. F2 interdit de suivre ça.
+- [x] **Ne pas bannir `eveesL`** : mauvaise semaine, pas mauvais KOL (2/4 mois, EV +2.8 %).
+- [ ] ⏰ **Décision KOL pré-spécifiée, lecture au 30/09** — règle figée **aujourd'hui** :
+      *retirer de `_WL_LAZYMED` un membre ssi il est négatif ET ≤1 mois positif sur les 4
+      derniers, avec n ≥ 30.* Aujourd'hui ça ne vise que **`FrenzGems`** et **`DoxxedChannel`**.
+      🔑 **Aucun bras à déployer** : la variante se calcule en **découpant les lignes de PFW**
+      (comme au §6 du 24/08) — pas de jumeau, pas de risque de mesurer du vide (cf. `_NOBAN`).
+- [ ] 📏 Re-mesurer la capacité : PFW tourne à **~20 trades/j** cette semaine (140/7), soit
+      **2.7×** l'hypothèse de `capacity_ceiling_23_per_day`.
+
+---
+
+## 🔬 26/08 (2) — « PEUT-ON FAIRE MIEUX EN STRATÉGIE ? » : 4 candidats testés, 4 égalités
+
+> Fenêtre courte demandée : **21/08 → 26/08**. Chaque candidat est ensuite jugé **apparié sur
+> 4 mois** (mai→août), univers = les 30 KOL de `_WL_LAZYMED`, dédoublonné, `pnl_pct <= 20`.
+> Règle du projet : un chiffre de 5 jours ordonne au mieux ; **seul l'apparié long décide**.
+
+### 1. L'axe SORTIE est mort — la seule chose vraie, c'est « pas de TP ≥ 100 »
+
+Grille shadow complète (≈310 bras, clones d'âge et familles artefact exclus), **depuis le 21/08** :
+
+| famille | n bras | n | EV | médiane | taux TP | taux SL |
+|---|---|---|---|---|---|---|
+| scalp TP≤20 | 33 | 4 862 | **−2.04 %** | **−0.49 %** | **49.1 %** | 42.8 % |
+| TP 30-60 | 102 | 15 906 | −2.06 % | −22.4 % | 30.5 % | 48.5 % |
+| TP 61-100 | 124 | 19 426 | −5.07 % | −27.0 % | 19.7 % | 47.0 % |
+| TP 101-150 | 13 | 2 077 | −8.56 % | −29.5 % | 8.8 % | 48.6 % |
+| **TP >150** | 41 | 5 212 | **−11.23 %** | **−43.2 %** | 7.1 % | **60.9 %** |
+
+🔑 **Monotone décroissant en TP, même dans la fenêtre la plus chaude de l'été.** C1 (« TP large
+en régime de runners ») reste **non activé**. Et le taux de SL grimpe avec le TP : c'est
+`regime_shift_dump_before_pump`, la volatilité sert les stops.
+
+### 2. Les 3 candidats sérieux perdent tous leur test apparié
+
+| candidat | ce qu'il est | n apparié | **d_EV vs `TP50_SL30`** | SE | mois gagnés |
+|---|---|---|---|---|---|
+| `TP30_SL30` | TP +30 / SL −30 | 1 422 | **−0.14 pp** | 0.75 | 2/4 |
+| `TP30_SL10` | TP +30 / SL −10 | 1 410 | **+0.43 pp** | 1.01 | 3/4 |
+| `FRESH_MICRO` | TP+30/SL−30, filtre score 10-49 + mcap ≤5 M + freshness | 1 057 | **−0.20 pp** | 0.93 | 2/4 |
+
+⚠️ `FRESH_MICRO` est le **n°1 de la grille depuis le 21/08** (EV +5.45 %, n=150, sd la plus
+basse). Sur 4 mois et en apparié : **zéro**. Le piège du top-K sur fenêtre courte, encore.
+
+### 3. ✅ CONTRÔLE INÉDIT : le mode d'évaluation de PFW n'est PAS un edge
+
+`PFW` tourne en **polling 360 s + `price_source = median_3`** (`rt_trade_config.strategy_overrides`),
+pas comme le reste de la grille. Soupçon légitime : son EV serait un artefact d'évaluation.
+Apparié sur les **tokens communs**, même sortie TP+50/SL−30 des deux côtés :
+
+| fenêtre | n | EV PFW | EV même sortie, polling normal | **d_EV** | SE |
+|---|---|---|---|---|---|
+| 11 → 20/08 | 158 | −7.26 % | −0.98 % | **−6.27** | 4.02 |
+| 21 → 26/08 | 100 | +7.35 % | +1.28 % | **+6.07** | 7.27 |
+| **TOTAL** | 258 | −1.60 % | −0.11 % | **−1.49** | 3.75 |
+
+⇒ **Le mode d'évaluation ne rapporte rien** (il amplifie la variance dans les deux sens).
+La sur-performance de PFW reste attribuable à **la whitelist**.
+⚠️ À noter : sur toute sa vie (11→26/08) et sur tokens communs, **PFW est à −1.60 % d'EV**.
+Son bankroll positif tient entièrement aux 5 derniers jours.
+
+### 4. 🚨 LE FILTRE DE SCORE : +5.84 % sur 4 mois, 4/4 mois… ET IL NE PASSE PAS SON PLANCHER
+
+Univers WL, `TP50_SL30`, 4 mois, découpage par `entry_score` :
+
+| bande | n | EV 4 mois | mois positifs | EV depuis 21/08 |
+|---|---|---|---|---|
+| **score 30-39** | 336 | **+5.84 %** | **4/4** | **+14.23 %** |
+| score ≥50 | 387 | +2.95 % | 2/4 | −20.10 % |
+| score <30 | 413 | +1.69 % | 2/4 | −2.58 % |
+| score 40-49 | 291 | −0.57 % | 2/4 | +7.44 % |
+
+Ça ressemble à un edge (une **bande**, comme le sentiment). **Permutation, 800 tirages : on
+rebat les bandes au hasard et on relit le meilleur quart :**
+
+```
+observé (meilleure des 4 bandes) : +5.84 %
+plancher moyen sous H0          : +5.29 %      p95 : +7.65 %
+p = 0.319  ->  NE PASSE PAS
+```
+
+🔑 **Prendre le meilleur de 4 seaux arbitraires rapporte +5.3 pp d'EV FICTIVE.** Voilà pourquoi
+presque rien ne survit ici : la distribution est si à queue lourde que le bruit de sélection
+vaut plus que n'importe quel edge réel jamais mesuré sur ce projet. **Bande de score : morte.**
+(Cohérent avec « le score seul n'est pas prédictif » ; contredit la lecture naïve du seuil
+`_S40` — 40-49 est ici la **pire** bande.)
+
+### 5. 🟢 LA SEULE AMÉLIORATION DÉFENDABLE N'EST PAS DANS L'EV, ELLE EST DANS LE RISQUE
+
+Univers WL, 4 mois, mise plate $100 :
+
+| bras | n | EV | **sd** | **t** | total $ | **pire DD** |
+|---|---|---|---|---|---|---|
+| `FRESH_MICRO` | 1 079 | 3.21 % | 42 | 2.53 | +3 468 | −$690 |
+| **`TP30_SL10`** | 1 410 | 3.13 % | **33** | **3.57** | **+4 415** | **−$755** |
+| `TP30_SL30` | 1 422 | 2.58 % | 42 | 2.33 | +3 674 | −$1 155 |
+| **`TP50_SL30`** *(famille du deck)* | 1 427 | 2.55 % | 50 | 1.93 | +3 637 | −$1 026 |
+| `TP50_SL15` | 1 438 | 2.13 % | 67 | 1.20 | +3 057 | −$1 572 |
+| `TP100_SL30` | 1 436 | 0.90 % | 65 | 0.52 | +1 288 | −$2 166 |
+
+`TP30_SL10` : **même argent, −34 % d'écart-type, t presque doublé, pire DD −$755 vs −$1 026.**
+Sur un seed de **$1 000** dont le DD p95 dépasse déjà le seed (12/08), c'est **l'axe qui compte** —
+pas l'EV. ✅ **Contrôle gap-through passé** : un stop à −10 % booke réellement **−22.2 %**
+(taux de SL 63 %) et un TP +30 booke **+40 %** — ces chiffres sont **déjà dans** l'EV ci-dessus.
+🔑 C'est exactement la famille que les bras `PFSC_*` (v14e.94) mesurent déjà ⇒ **rien à déployer,
+lecture au 09/09**, en lisant la **variance** et pas seulement le d_EV.
+
+### 6. Les KOL « depuis le 21/08 » — le classement brut est un piège
+
+Bras neutre `TP50_SL30`, univers complet, dédoublonné. `sans_best` = le total privé de son
+**unique** meilleur trade.
+
+| KOL | n | pts 21→26 | **sans son best** | pts 4 mois | mois positifs |
+|---|---|---|---|---|---|
+| spidersjournal | 4 | **+437** | **−54** | −645 | 1/4 |
+| explorer_gems | 3 | +370 | +134 | +231 | 2/4 |
+| CarnagecallsGambles | 6 | +259 | +130 | −78 | 2/4 |
+| **jadendegens** | 12 | **+161** | +60 | **−1 566** | **0/4** *(déjà banni)* |
+| eveesL | 18 | +106 | +19 | +231 | 2/4 |
+| Archerrgambles | 7 | +73 | **−16** | −30 | 2/4 |
+| **olympeqg** | 5 | +72 | **−51** | **−4 560** | 1/4 *(déjà banni)* |
+| **mad_apes_gambles** | 16 | +30 | −77 | **+1 281** | **3/4** |
+| **zcallz** | 9 | +12 | −82 | **+282** | **3/4** |
+| MaybachGambleCalls | 7 | −242 | −294 | −887 | 1/4 |
+| legerlegends | 37 | −386 | −540 | −1 008 | 1/2 |
+| **FrenzGems** | 19 | **−387** | −455 | **−489** | **0/4** |
+
+- **Le n°1 de la semaine (`spidersjournal`) passe à −54 sans un seul trade** et vaut −645 sur 4 mois.
+- **2 des 5 premiers (`jadendegens`, `olympeqg`) sont déjà bannis** et cumulent **−$6 126** sur 4 mois.
+- **Seuls `mad_apes_gambles` et `zcallz` sont positifs sur les DEUX horizons** (+ `letswinallgems`,
+  4/4 mois, mais n < 3 depuis le 21/08). Ce sont les seuls noms « bons » défendables.
+- Liste **stable** côté négatif (négative sur les deux horizons) : `FrenzGems` (0/4),
+  `legerlegends`, `MaybachGambleCalls`, `papicall`, `batman_gem`, `leoclub69` (0/4),
+  `gubbinscalls` (0/4), `ghastlygems`, `marcellcooks`.
+
+### ▶️ Décisions
+
+- [x] **Aucun changement de sortie.** 4 candidats, 4 égalités appariées ; le n°1 de la fenêtre
+      courte (`FRESH_MICRO`) est à zéro sur 4 mois.
+- [x] **Bande de score enterrée** (p = 0.319). 🔑 Retenir le plancher : **+5.3 pp d'EV fictive
+      pour le meilleur de 4 seaux** — à opposer à toute future « découverte » par découpage.
+- [x] **Le mode d'évaluation de PFW n'est pas un edge** (−1.49 ± 3.75) — l'item « PFW flatté »
+      de MEMORY.md concerne le slippage à liquidité 0, pas le polling.
+- [ ] ⏰ **09/09, bras `PFSC_*`** — lire **la variance autant que le d_EV** : c'est là qu'est le
+      seul gain défendable (`TP30_SL10` : même argent, DD −$755 vs −$1 026, t 3.57 vs 1.93).
+- [ ] ⏰ **30/09** — règle KOL pré-spécifiée. Les 2 seuls noms « bons » sur les deux horizons
+      (`mad_apes_gambles`, `zcallz`) sont **déjà dans la WL : rien à faire.**
+
+---
+
+## 🛠️ 26/08 (3) — CORRECTIF : ma référence était fausse. Le vrai gagnant de la grille, c'est l'HORIZON — et le deck l'a déjà
+
+> Relance après question user : « `TP30_SL10` c'est pas mieux ? et en shadow y a vraiment pas
+> mieux ? et le mega sweep ? ». Les deux premières réponses de la journée comparaient tout à
+> **`TP50_SL30`**. **C'était le mauvais témoin.**
+
+### 0. 🚨 LE BIAIS : `TP50_SL30` tourne en **horizon 120 min**, PFW en **30 min**
+
+```
+TP50_SL30               tp=1.5 sl=0.7 h=120  be=None  filtre={}
+FAST_TP50_SL30_NOLAZY   tp=1.5 sl=0.7 h=30   be=None  filtre={}   <-- LE JUMEAU EXACT DE PFW
+PFW_TP50_SL30_LM_WL     tp=1.5 sl=0.7 h=30   be=None  + whitelist
+BE25_LOCK15_TP120_SL30  tp=2.2 sl=0.7 h=30   be=0.25  lock=0.15
+```
+
+Tous les bras « BE/LOCK » de la grille sont en **h=30**. Les comparer à un témoin en **h=120**
+leur offrait gratuitement tout l'effet d'horizon. 🔑 **Un témoin doit différer du candidat par
+UNE seule chose.** Mesuré, l'horizon seul (`FAST_TP50_SL30_NOLAZY` vs `TP50_SL30`, univers WL,
+4 mois, n=1 419) vaut **+2.90 pp ± 0.74 (t = 3.94), négatif 0 mois sur 4** — c'est **le plus gros
+effet de sortie jamais mesuré proprement sur ce projet**, et il était **entièrement dans mon
+biais de témoin**.
+
+### 1. ✅ LE VRAI CLASSEMENT — témoin = `FAST_TP50_SL30_NOLAZY` (la sortie exacte de PFW)
+
+Univers WL (30 KOL), 4 mois, apparié par token, dédoublonné :
+
+| candidat | n | **d_EV** | SE | t | par mois (M/J/J/A) |
+|---|---|---|---|---|---|
+| `BE25_LOCK15_TP120_SL30` | 1 416 | +0.62 | 0.97 | 0.64 | 1.1 / 0.0 / 0.9 / 0.6 |
+| `BE25_LOCK10_TP100_SL30` | 1 417 | +0.08 | 0.86 | 0.10 | 0.0 / −1.0 / 0.3 / 1.2 |
+| `BE15_LOCK15_TP80_SL30` | 1 370 | −0.31 | 0.86 | −0.36 | |
+| `BE25_LOCK10_TP60_SL30` | 1 417 | −0.38 | 0.59 | −0.64 | |
+| **`BE25_TP80_SL30`** *(bras du deck)* | 1 175 | **−0.59** | 1.07 | −0.55 | |
+| `BE15_LOCK5_TP50_SL30` | 1 146 | −0.82 | 0.81 | −1.01 | |
+| **`TP30_SL10`** | 1 407 | **−2.46** | 0.98 | **−2.52** | −1.7 / −5.4 / 0.7 / −2.6 |
+| `SCALP_TP15_SL10` | 1 405 | −2.73 | 1.10 | −2.48 | |
+| **`TP50_SL30`** *(mon ancien témoin)* | 1 419 | **−2.90** | 0.74 | **−3.94** | −2.5 / −3.2 / −2.2 / −3.6 |
+| `FRESH_MICRO` | 1 051 | −3.20 | 1.03 | −3.11 | |
+
+🔴 **`TP30_SL10` est SIGNIFICATIVEMENT PIRE que la sortie de PFW (−2.46, t = −2.52), pas mieux.**
+Le « +$4 415 vs +$3 637, sd 33 vs 50 » du point (5) de la section précédente était **entièrement
+l'effet d'horizon du témoin**. La lecture « même argent, moins de risque » est **retirée**.
+
+🔴 **Aucun bras BE/LOCK ne bat la sortie de PFW.** Le « +3.31 ± 0.71 » mesuré sur
+`BE25_LOCK10_TP100_SL30 vs TP100_SL30` (n=3 190) était **BE + horizon** : ramené au même
+horizon il tombe à **+0.08 ± 0.86**. Et `LOCK20 vs LOCK10` = **+0.19 ± 0.31** ⇒ **LOCK = NO-OP
+confirmé** (leçon du 11/08 tenue).
+
+### 2. Le mécanisme, et pourquoi c'est cohérent avec tout le reste
+
+Distribution des sorties, 4 mois, univers complet :
+
+| bras | taux SL | booké SL | be_stop | booké BE | timeout | booké TO | TP | booké TP |
+|---|---|---|---|---|---|---|---|---|
+| `TP50_SL30` (h=120) | **51.3 %** | −44.6 | — | — | 15.3 % | −3.5 | 33.4 % | +61.6 |
+| `FAST_..._NOLAZY` (h=30) | **40.8 %** | −45.5 | — | — | **34.7 %** | −0.3 | 24.5 % | +71.2 |
+| `BE25_LOCK15_TP120` (h=30) | 33.0 % | −44.5 | **27.3 %** | −4.0 | 30.9 % | +6.0 | 8.9 % | +142.6 |
+
+🔑 **Tout ce qui gagne gagne en coupant la QUEUE BASSE**, jamais en visant plus haut :
+l'horizon court transforme **19 pp** de sorties « −45 % » en timeouts à **≈ 0 %** ; le BE en
+transforme 27 pp en « −4 % ». **4ᵉ confirmation de `downside_predictable_upside_not`.**
+
+### 3. 🔴 Et pourquoi le BE reste malgré tout à ne PAS promouvoir
+
+`drift_by_exit_type` (n=175 paires LIVE) : le drift live↔paper **par type de sortie** vaut
+**−0.85 pp sur les timeouts**, **+0.21 sur les tp_hit**… et **−14.69 pp (médiane) sur les
+`be_stop`** — de loin la sortie la plus dégradée du système.
+
+⇒ `BE25_LOCK15_TP120_SL30` fait **27.3 %** de ses sorties en `be_stop` : 0.273 × 14.7 ≈ **−4.0 pp**
+en live. Son +0.62 apparié devient **franchement négatif**. **L'horizon court, lui, gagne sur les
+`timeout` — la sortie au drift ZÉRO.** C'est ce qui rend le gain d'horizon *transférable* et le
+gain BE *fictif*.
+
+✅ Contrôle direct : `PFWS_BE25_LOCK15_TP120_SL30_WL` (déjà en shadow, même whitelist) contre
+`PFW_TP50_SL30_LM_WL`, 248 tokens communs : **d_EV −2.11 ± 3.52**. Il ne bat pas le bras main.
+
+### 4. 📡 MEGA SWEEP `32803505972` (25/08, 18/18 shards, 1 156 896 configs) — même verdict
+
+```
+[classement global]  plancher (p95 du max sous H0) : 22.49 pts
+                     meilleure config du CSV       : 17.07 pts
+                     0/1,034,532 configs depassent le plancher
+                     !! Ne rien promouvoir depuis ce run.
+
+[verdict SORTIE]     93 cellules, 559 sorties, plancher +127
+                     meilleure sortie reelle +1,057
+                     => 0 sorties au-dessus du plancher (0 apres regroupement des clones)
+
+[verdict KOL]        610 sorties x 88 KOL x 5 mois (2^88 sous-ensembles)
+                     plancher +12.3   —   meilleur reel +46.7
+                     => DEPASSE (p ~ 0.000, marge +281 % sur le p95)
+                     gagnante : AGE24_FAST15_TP100_SL20, whitelist 39/88
+                                +46.7 AVEC whitelist   vs   -33.0 SANS   —  4/4 mois
+```
+
+- ⏰ **L'item du 13/08 est soldé, par la négative** : `AGE24_FAST15_TP100_SL20` était au-dessus
+  du plancher **2 runs sur 2** (07/08, 12/08). Au 25/08 il **n'y est plus** — le verdict sortie
+  est **vide**. ⇒ **La réplication échoue à 2/3. L'axe sortie est mort dans le sweep aussi.**
+- 🔑 **Le seul axe qui passe est le KOL, et il passe énormément** (+281 % de marge sur son
+  plancher, contre p ~ 0.067 il y a un mois). Et la gagnante fait **+46.7 avec whitelist contre
+  −33.0 sans** : **c'est la whitelist qui porte la sortie, pas l'inverse.**
+- 🔴 **Toujours pas déployable telle quelle** : la whitelist 39/88 contient `ghastlygems`,
+  `gubbinscalls`, `DoxxedChannel`, `chiggajogambles`, `aliensalphacalls` — dont plusieurs sont
+  bannis en prod ou structurellement négatifs sur 4 mois. Le sweep optimise toujours sur un
+  univers **incluant les 23 bannis**.
+
+### 5. Convergence : 3 méthodes indépendantes, 1 seule conclusion
+
+| méthode | axe sortie | axe KOL |
+|---|---|---|
+| grille shadow appariée, 4 mois, témoin corrigé | **0** partout (max +0.62 ± 0.97) | +13.8 pp (dans WL vs hors WL) |
+| mega sweep 25/08, 1.03 M configs, permutations | **0 sortie au-dessus du plancher** | **p ~ 0.000, marge +281 %** |
+| P&L réel du deck, 7 j | seul PFW gagne, et sur 3 trades | la WL explique l'écart |
+
+### ▶️ Décisions
+
+- [x] **CORRECTIF appliqué** : `TP30_SL10` n'est **pas** meilleur — il est **−2.46 pp (t −2.52)**
+      contre la sortie de PFW. La reco « scalp serré pour le risque » du (2) est **retirée**.
+- [x] **Le deck a déjà la meilleure sortie de la grille.** `PFW` = TP+50 / SL−30 / **h=30** ;
+      rien ne la bat en apparié à horizon égal, et l'horizon 30 est le seul gros effet réel
+      (+2.90 pp, t 3.94, 4/4 mois) — **déjà encaissé**.
+- [x] **Ne pas promouvoir de BE** : +0.62 apparié, mais **27 % de sorties `be_stop` à −14.7 pp
+      de drift live** ⇒ négatif en réel. Le jumeau `PFWS_BE25_LOCK15_TP120_SL30_WL` le confirme
+      (−2.11 vs le bras main).
+- [ ] 🔍 **Seule piste ouverte sur la sortie** : `PF_BE25_TP80_SL30` (bras du deck) est à
+      **−0.59** contre la sortie de PFW **et** porte du `be_stop`. À réexaminer au **09/09** avec
+      les `PFSC_*` — c'est le maillon faible du deck, pas PFW.
+- [ ] ⏰ **30/09** — règle KOL pré-spécifiée (section du jour). Le sweep la renforce : l'axe KOL
+      est le seul à passer son plancher, sur 1.03 M configs et 2^88 sous-ensembles.
+
+---
+
+## ⚖️ 26/08 (4) — « PFW EST-ELLE POUSSABLE EN LIVE ? » — NON. Le composant est solide, le bras ne l'est pas
+
+> Question user : PFW a été choisie comme la n°1 sur 4 mois, elle reste n°1 dans la semaine de
+> changement de régime — a-t-on enfin une stratégie déployable en live ?
+> Traité comme une **décision d'engagement de capital**, pas comme une lecture de classement.
+
+### 1. 🔴 La prémisse ne tient pas : PFW n'est pas *stable*, elle est *concentrée*
+
+PFW est en main depuis le **11/08**. Son historique **hors échantillon** (le seul qui compte,
+puisqu'elle a été *choisie* sur les 4 mois d'avant) :
+
+| période | brut |
+|---|---|
+| 11 → 20/08 | **−$471** |
+| 21 → 26/08 | **+$845** |
+| **total 15 jours** | **+$374** |
+
+Elle n'a pas « tenu pendant que le marché changeait » : elle a **perdu la première moitié et
+gagné la seconde**. C'est exactement le profil que F2 interdit de suivre.
+
+### 2. 🔴 Les chiffres de décision — 258 tokens dédoublonnés, 11/08 → 26/08
+
+| | |
+|---|---|
+| EV | +2.41 % |
+| **médiane** | **−7.38 %** |
+| écart-type | 77 |
+| **t** | **0.50** ⇒ **indistinguable de zéro** |
+| brut | +$374 |
+| **net (−2 pp/trade)** | **−$142** |
+| **net sans les 3 meilleurs trades** | **−$1 214** |
+| **pire drawdown net** | **−$1 144** |
+| point le plus bas du cumul net | **−$854** |
+
+🔑 **Sur un seed de $1 000, le drawdown net de PFW a atteint −$1 144 : le seed aurait été
+grillé.** C'est le scénario chiffré le 12/08 (DD p95 > seed), réalisé en 15 jours.
+
+### 3. 🔴 Combien de temps pour *prouver* son edge ?
+
+Avec EV = 2.41 % et sd = 77, atteindre **t = 2** demande :
+
+```
+n = (2 x 77 / 2.41)^2 = 4 098 trades
+a ~17 trades/jour  ->  241 jours
+```
+
+⇒ **On ne peut pas trancher ce bras en semaines.** Toute lecture de 5, 7 ou 15 jours sur PFW
+est, par construction, du bruit. Ça ne veut pas dire qu'il n'a pas d'edge — ça veut dire que
+**son P&L réalisé ne peut pas servir de preuve**, ni dans un sens ni dans l'autre.
+
+### 4. ⚠️ Et 100 % de son gain brut est dans le segment au slippage le plus optimiste
+
+| segment | n | part | EV | brut |
+|---|---|---|---|---|
+| `rt_liquidity_usd > 0` | 188 | 72.9 % | **+0.21 %** | **−$144** |
+| **`rt_liquidity_usd = 0`** (bonding curve) | 70 | **27.1 %** | **+8.34 %** | **+$518** |
+
+C'est **exactement** le segment frappé par le zéro-falsy de `_dynamic_sell_slip_factor`
+(`float(liq or 50_000)` ⇒ liquidité 0 traitée comme $50 000 ⇒ facteur de slippage le **plus
+faible**). ⚠️ Les colonnes `buy/sell_slippage_bps` stockées sont **constantes** (225 / 10 bps)
+sur toutes les bandes : elles n'enregistrent pas le facteur dynamique, donc on ne peut pas
+**chiffrer** le flattage ici — mais on peut constater que **sans ce quart de lignes, PFW est à
+−$144 brut et +0.21 % d'EV.**
+
+### 5. ✅ EN REVANCHE, LE COMPOSANT — LA WHITELIST — PASSE SON CONTRÔLE LE PLUS DUR
+
+Le soupçon légitime : et si le fameux « +13.8 pp dans la WL » était lui aussi un artefact du
+segment liquidité 0 ? Découpage croisé, bras neutre `TP50_SL30`, 4 mois :
+
+| | dans la WL | hors WL | écart |
+|---|---|---|---|
+| **liquidité > 0** (segment propre) | **+2.07 %** (n=863) | **−5.44 %** (n=1 143) | **+7.5 pp** |
+| liquidité 0 (slip flatté) | +4.13 % (n=497) | −9.55 % (n=688) | +13.7 pp |
+
+⇒ **L'edge de la whitelist survit sur le segment propre : +7.5 pp sur n = 2 006.** Il est plus
+petit qu'annoncé (7.5 et non 13.8) mais **il est réel**, et il est corroboré indépendamment par
+le sweep du 25/08 (axe KOL, p ~ 0.000, marge +281 %).
+
+### 6. La distinction qui décide
+
+| objet | preuve | verdict |
+|---|---|---|
+| **la whitelist** (le composant) | +7.5 pp sur segment propre, n=2 006 ; sweep p~0.000 ; 3 méthodes convergentes | ✅ **solide** |
+| **`PFW`** (le bras, son P&L) | t = 0.50 ; net −$142 ; −$1 214 sans 3 trades ; DD −$1 144 | 🔴 **non prouvé** |
+
+**Un bon composant ne fait pas un bras déployable.** L'edge KOL est réel et vaut ~+7.5 pp
+d'EV ; le bras qui le porte n'a, à ce jour, **jamais rendu d'argent net**.
+
+### ▶️ Décisions
+
+- [x] **NE PAS passer PFW en live** sur les données actuelles. Aucun des trois seuils du projet
+      n'est atteint : P&L net **négatif**, t = 0.50, DD net **> seed**.
+- [x] **Retirer la formulation « la meilleure strat »** : PFW est le meilleur bras *du deck*, ce
+      qui n'est pas la même chose qu'un bras *profitable*. Depuis son déploiement, net −$142.
+- [ ] 🔬 **La seule chose que le paper ne pourra JAMAIS trancher, c'est le drift** sur ce profil
+      précis (27 % de bonding curve, 17 trades/j, horizon 30 min). Si un jour on ouvre le live,
+      la forme correcte est un **pilote de MESURE, pas de gain** :
+      - taille réduite (≤ $25/trade), objectif = **N ≥ 30 paires** paper↔live sur PFW ;
+      - critère de lecture **pré-spécifié** : drift médian par type de sortie (jamais la moyenne
+        globale, cf. `drift_by_exit_type`) ; kill si drift > ±5 pp (règle projet) ;
+      - vérifier en priorité le drift sur les lignes **liquidité 0** — c'est là qu'est tout le
+        gain papier et c'est là que le modèle est le plus optimiste.
+      - ⚠️ **Décision user requise** : `live_trading.enabled` est à `false` depuis le 05/06.
+- [ ] ⏰ **30/09** — la règle KOL pré-spécifiée reste le vrai chantier : c'est le composant qui a
+      des preuves, donc le seul endroit où travailler.
+
+---
+
+## 📊 26/08 (5) — « TOUT CE QU'ON FAIT DEPUIS LE DÉBUT NE SERT À RIEN ? » — non, et voici le chiffre
+
+> Réaction user après le verdict « PFW pas poussable en live ». Question légitime, réponse
+> chiffrée sur la donnée la plus propre dont on dispose : bras `FAST_TP50_SL30_NOLAZY`
+> (= **la sortie exacte de PFW**, TP+50/SL−30/h=30), **segment `rt_liquidity_usd > 0` uniquement**
+> (celui dont le slippage n'est pas flatté), 4 mois, dédoublonné, `pnl_pct <= 20`.
+
+### 1. Ce que le projet a produit, en une ligne
+
+| configuration | n | EV brut | **EV net** (−2 pp) | $/jour à 17 trades |
+|---|---|---|---|---|
+| **A. univers complet, sans whitelist** | 2 035 | **−0.79 %** | **−2.79 %** | **−$47** |
+| **B. avec la whitelist = config actuelle** | 878 | **+4.94 %** | **+2.94 %** | **+$50** |
+| C. WL moins `FrenzGems` + `DoxxedChannel` (règle du 30/09) | 799 | +4.92 % | +2.92 % | +$50 |
+
+🔑 **Le filtre KOL vaut ~+5.7 pp d'EV, soit l'écart entre −$47 et +$50 par jour.** Sur le
+segment propre, avec `t = 3.02` (n=922, sd 47) et une corroboration indépendante par le sweep
+(1.03 M configs, p ~ 0.000, marge +281 %). **C'est le produit du projet, et il est réel.**
+
+⚠️ Noter aussi : **la règle d'exclusion du 30/09 ne rapporte rien** sur le segment propre
+(+4.94 → +4.92). Elle reste bonne à appliquer (elle retire du risque de modèle), mais **ce
+n'est pas là que se trouve le prochain gain.**
+
+### 2. Ce qui ne va pas n'est PAS l'edge — c'est son rapport au bruit et à la friction
+
+Même configuration, mois par mois, net à −2 pp, mise $100 :
+
+| mois | n | EV brut | **net $** |
+|---|---|---|---|
+| mai | 212 | +5.89 % | **+$825** |
+| juin | 250 | **+11.56 %** | **+$2 391** |
+| juillet | 202 | −1.27 % | **−$661** |
+| août | 258 | +1.69 % | **−$79** |
+| **total** | **922** | **+4.68 %** | **+$2 475** |
+
+- **t = 3.02** sur 4 mois : c'est **la statistique la plus solide jamais obtenue sur ce projet**.
+- Mais **2 mois sur 4 sont nets négatifs**, et **juin porte tout**.
+- Cause mécanique : **+4.68 % d'EV brut contre 2 pp de friction et un sd de 47.** L'edge est du
+  **même ordre de grandeur que la friction** — c'est le constat du 12/08, désormais confirmé sur
+  la donnée la plus propre. Un mauvais mois suffit à le renverser.
+
+### 3. Pourquoi les 15 jours de PFW ne contredisent rien
+
+PFW mesure **+0.21 %** sur son segment liquidité > 0 (n=188). La configuration vaut **+4.94 %**.
+Contradiction ? Non : SE = 47/√188 = **3.4 pp**. L'écart est à **1.4 SE**. 🔑 **Un edge de +5 pp
+avec un sd de 47 est INVISIBLE sur 15 jours, par construction.** C'est un problème de
+**puissance statistique**, pas un problème d'edge.
+
+### 4. Le vrai chantier, maintenant identifié
+
+Pour que le net survive à un mois comme juillet, il faut passer d'un EV brut de **~+4.7 %** à
+**~+8-10 %**. Les axes sont classés par ce qu'on a mesuré aujourd'hui :
+
+| axe | ce qu'on sait | potentiel |
+|---|---|---|
+| **sortie** | 0 partout en apparié à horizon égal ; 0 sortie au-dessus du plancher dans le sweep | ❌ épuisé |
+| **filtre de score** | plancher de sélection +5.3 pp, p = 0.319 | ❌ mort |
+| **exclusion KOL** | +4.94 → +4.92 | ❌ ~nul |
+| **liquidité 0** | 27 % des lignes de PFW, EV papier +8.34 % mais slippage modélisé au plus optimiste | 🔬 **à trancher** |
+| **finesse de l'axe KOL** | seul axe qui passe son plancher (sweep p~0.000) mais on ne sait exploiter que « garder/exclure » | 🔬 **le seul avec du gras** |
+
+🔬 **Proposition concrète et gratuite** : un jumeau shadow `PFW_..._NOZEROLIQ` (la famille
+`NOZEROLIQ_*` existe déjà dans le code). Il tranche l'item le plus dangereux du système : le
+quart de lignes qui porte tout le gain papier est aussi celui dont le modèle de slippage est le
+plus optimiste. **Aujourd'hui on ne sait pas si ce segment est un edge ou un bug.**
+
+### ▶️ Décisions
+
+- [x] **« Ça ne sert à rien » est faux, et c'est chiffré** : sans le travail KOL, la config est à
+      **−$47/jour** ; avec, **+$50/jour**, `t = 3.02`, n = 922, plus une confirmation
+      indépendante à p ~ 0.000. Ce que le projet n'a **pas** encore, c'est un edge assez **gros**
+      pour survivre à un mauvais mois — ce n'est pas la même chose que « pas d'edge ».
+- [x] **Le projet a aussi évité de perdre de l'argent réel** : live coupé le 05/06, et les strats
+      qui y étaient étaient **déjà à médiane négative en shadow** (`live_tested_wrong_horses_jul5`).
+      21 hypothèses tuées sur 31 : c'est le produit autant que les 3 qui tiennent.
+- [ ] 🔬 **Déployer un shadow `PFW_TP50_SL30_LM_WL_NOZEROLIQ`** (même whitelist, même sortie,
+      filtre `rt_liquidity_usd > 0`). Coût : zéro dollar. Il répond à la seule question qui
+      bloque aujourd'hui toute lecture en euros de PFW.
+- [ ] ⏰ **30/09** — appliquer la règle KOL quand même (retire du risque), mais **ne pas en
+      attendre de gain** : mesurée à +0.00 pp sur le segment propre.
+
+---
+
+## 🔎 24/08 — « LE MARCHÉ PUMP DEPUIS 1 SEMAINE » : ce que disent les shadows et le paper
+
+> Mesuré sur `paper_trades`, dédoublonné par token, `pnl_pct <= 20`, familles artefact
+> (`DTRAIL|PTRAIL|TRAIL|SPLIT_|DIP30_|DIP_|BOND_|TD2_`) exclues.
+
+### 0. 🚨 D'ABORD UN CORRECTIF DE MÉTHODE : le « −3.5 pp de friction » est calibré pour des positions à **$1**, pas à $100
+
+Le protocole de lecture écrit le 12/08 (§ scalp, « retirer ~3.5 pp par trade ») applique à des
+mises de **$100** un chiffre mesuré sur des mises de **$1**. Vérifié sur les **342 trades live
+réels** qui portent `gas_usd_*` :
+
+| | mesuré |
+|---|---|
+| position moyenne des trades live | **$1.44** |
+| gas par aller-retour | $0.018 médian / **$0.093** moyen |
+| gas en % de la position | **4.93 %** |
+| **le même gas sur une mise de $100** | **0.09 %** |
+
+⇒ La mémoire `solana_fees_per_trade` le dit explicitement : « **À position $1/trade** : fee =
+1.8-3.5 % ». Le gas est **absolu**, la mise est le dénominateur : à $100 il pèse **~40× moins**.
+Retirer 3.5 pp à un bras à $100 **condamne à tort tous les bras**.
+
+**▶️ Déduction correcte à $100/trade : ~0.1 pp de gas + −1.90 pp de drift paper→live ≈ −2 pp.**
+Le slippage, lui, est **déjà dans** `pnl_pct` (paper : buy slip 225 bps ; live réel : **médiane
+260 bps** — cohérent ; la moyenne à 1 753 bps n'est qu'une queue, p95 3 979 bps).
+⚠️ Le seuil « +3.5 % par trade » reste juste **pour le live à $1** (`live_pnl_usd_gross_bug`).
+
+### 1. Le « pump » n'est pas une semaine, c'est UN JOUR
+
+Sonde de régime = part des tokens qui touchent **×2** depuis l'entrée (celle qui *peut* voir un
+runner, leçon 12/08). Sur **18 semaines** :
+
+| semaine | part ×2 | | semaine | part ×2 |
+|---|---|---|---|---|
+| 22/06 (max historique) | **36.6 %** | | 10/08 | 27.6 % |
+| **17/08** | **34.7 %** *(rang 2/18)* | | 03/08 | 29.4 % |
+| médiane des 18 semaines | ~30 % | | min (15/06) | 26.0 % |
+
+Au jour le jour, tout tient sur le **samedi 23/08** : **42.4 %** de ×2 et un **p90 de multiple
+à ×8.04** — de loin le plus haut des 21 derniers jours (les autres : ×2.4 à ×4.9). Le reste de
+la semaine est dans la bande normale, et le **multiple médian** (1.465) est *sous* la moyenne
+des 18 semaines. 🔑 **Le pump est dans la queue, pas dans le corps.**
+
+### 2. 🔴 ET LA GRILLE SHADOW A FAIT SES DEUX PIRES SEMAINES EN 4 MOIS
+
+⚠️ Contrôle de composition obligatoire : la grille est passée de ~10 k à ~33 k lignes/jour le
+12/08 (bras v14e.93-95). Les chiffres ci-dessous portent sur une **cohorte fixe de 403 bras**
+présents en juin **et** en août — la composition n'explique donc rien.
+
+| semaine | scalp TP≤20 | TP>150 | part ×2 |
+|---|---|---|---|
+| 22/06 | **+2.06 %** | **+4.01 %** | 36.6 % |
+| 20/07 | −0.12 % | −10.64 % | 32.9 % |
+| 03/08 | −0.23 % | −3.64 % | 29.4 % |
+| **10/08** | **−5.92 %** | **−18.48 %** | 27.6 % |
+| **17/08** | **−4.83 %** | **−17.12 %** | **34.7 %** |
+
+**Mécanisme, décomposé sur la famille TP>150 :**
+
+| semaine | taux de SL | coût du SL | taux de TP |
+|---|---|---|---|
+| 03/08 | 51.6 % | −51.9 % | 8.3 % |
+| 10/08 | **57.7 %** | −54.0 % | 6.4 % |
+| 17/08 | 55.8 % | **−54.9 %** | 7.6 % |
+
+🔑 **La volatilité du pump a servi les stops, pas les cibles.** C'est `regime_shift_dump_before_pump`
+au carré : le token plonge d'abord, le SL le sort à ~−55 %, *puis* il fait son ×2 — que la sonde
+compte et que le bras ne touche jamais. **Un marché qui pump se voit dans la sonde et reste
+invisible dans le P&L.**
+
+### 3. C1 n'est ni confirmé ni infirmé — il n'est pas ACTIVÉ
+
+Sur 12 semaines mesurées, **TP large ne bat TP serré qu'une fois** : le 22/06, la semaine au
+plus haut taux de runners (36.6 %). À **34.7 %** cette semaine, il ne l'a **pas** fait — et il
+perd de **−12 pp**. Le mécanisme (ρ = +0.719) existe, le **seuil n'est pas franchi**, et le
+régime n'est de toute façon pas persistant (ρ = +0.065/jour).
+⇒ **Aucun changement de famille. La garde du 12/08 tient mot pour mot.**
+
+### 4. Le deck main : +$133 brut sur 7 jours — un jour, et un trade
+
+| jour | PFW | PF_BE25 | PF_TP50_S35 | PF_FAST | **total** |
+|---|---|---|---|---|---|
+| 17/08 | −80 | −49 | −20 | +7 | **−142** |
+| 18/08 | −308 | −82 | +22 | · | **−368** |
+| 19/08 | +88 | −260 | −55 | −1 | **−228** |
+| 20/08 | −100 | −101 | −42 | −91 | **−334** |
+| 21/08 | +25 | +23 | −52 | +35 | **+31** |
+| 22/08 | +100 | +233 | +9 | · | **+342** |
+| **23/08** | **+924** | +132 | · | · | **+1 056** |
+| 24/08 | +57 | −153 | −109 | −19 | **−224** |
+| **total brut** | **+706** | **−257** | **−247** | **−69** | **+133** |
+
+- **6 jours sur 8 sont négatifs.** Le 23/08 seul fait **+$1 056**.
+- **Net** (−2 pp × 186 trades, §0) : **≈ −$220** sur la semaine pour le deck entier.
+- **`PFW_TP50_SL30_LM_WL` porte tout** : n = 106 tokens, EV **+6.86 %** brut, **médiane −5.77 %**,
+  TP 18.9 % / SL 31.1 %. **Net ≈ +$494 (~$71/j).**
+  🔑 Mais **un seul trade fait +$403** (`$YOMOGI`, tp_hit à **+403 %**) : sans lui, EV **+3.08 %**,
+  net **+$93 sur la semaine** (~$13/j). *La semaine du deck tient sur un trade.*
+  ⚠️ Et il vient de **`FrenzGems`** — le KOL exact de la leçon du 11/08 que **tout top-K aurait
+  éliminé**. Troisième illustration de `downside_predictable_upside_not`.
+- ⚠️ **PFW tourne à ~15 trades/jour**, soit **2×** l'hypothèse de capacité (7.4/j) de
+  `capacity_ceiling_23_per_day`. Le plafond +$23/j est à re-mesurer sur ce débit.
+- ⚠️ **25.3 % des trades de PFW ont `rt_liquidity_usd = 0`** (bonding curve) ⇒ frappés par le
+  zéro-falsy connu de `_dynamic_sell_slip_factor` (liq 0 traitée comme $50 000 ⇒ slippage le
+  **plus faible**). Un quart de ses lignes est **structurellement flatté**.
+
+### 5. ✅ Le +403 % sur un bras à TP +50 % n'est PAS une corruption — vérifié sur du live réel
+
+Suspicion légitime (un `tp_hit` ne devrait pas booker 8× sa cible). **Contrôle sur les 86
+`tp_hit` LIVE portant une `tx_signature`** — des fills on-chain, pas de la simulation :
+
+| | cible TP moyenne | **booké** | part > 1.2× la cible |
+|---|---|---|---|
+| **live réel (n=86)** | +55.6 % | **+73.1 %** | **44.2 %** |
+| paper, bras TP+50 (n=10 699) | +50 % | +72.6 % | 49.5 % |
+
+🔑 **Même signature.** Le gap-through **par le haut** est réel : le polling (360 s pour PFW) voit
+le prix déjà bien au-dessus de la cible et sort là. Le paper ne flatte pas sur ce point — c'est
+le **pendant symétrique** du gap-through par le bas trouvé le 07/08 (stop −30 % → sortie −49 %).
+Systémique sur toute la grille : à cible +20 %, un `tp_hit` booke **+32.9 %** en moyenne.
+
+### 6. ✅ ITEM DU 25/08 SOLDÉ (avec un jour d'avance) — la blacklist ne coûte rien
+
+⚠️ **Le jumeau `PFWS_TP50_SL30_LM_WL_NOBAN` n'existe pas** : supprimé volontairement en v14e.91
+(`strategies.py`, commentaire `_PFWS_MEMBRES`) — la blacklist ne filtrait que la ligne main, le
+jumeau ne mesurait donc rien. **La ligne « ⏰ vers le 25/08 » de MEMORY.md est périmée sur ce
+point.** Le coût du ban se calcule en **découpant les lignes du bras main** sur les 23 bannis.
+
+`PFW_TP50_SL30_LM_WL`, 11/08 → 24/08, 205 tokens dédoublonnés, blacklist DB relue ce jour
+(solana **23**, ethereum **6**) :
+
+| segment | n | EV brut | médiane | $ brut |
+|---|---|---|---|---|
+| KOL **bannis en prod** (9 de la WL) | 66 | **+1.45 %** | −0.08 % | +$95 |
+| KOL **non bannis** (21 de la WL) | 139 | **+4.63 %** | −8.13 % | +$643 |
+
+⇒ **Les bannis rapportent 3× moins par trade que les non-bannis.** La blacklist ne coûte pas
+d'argent, elle coupe le segment faible. Même forme que la règle d'**exclusion** (11/08, 12/08).
+⚠️ n = 66 et queues épaisses : **ça ordonne, ça ne chiffre pas.**
+
+### 7. 👀 Coup d'œil sur les 3 bras scalp (v14e.94) — ⛔ **la lecture officielle reste le 09/09**
+
+Apparié par token depuis le 12/08 11:00 UTC. La friction s'annule dans l'écart (mêmes tokens,
+même n), donc `d_EV` se lit tel quel :
+
+| bras | référence | n | EV bras | EV réf | **d_EV** | SE |
+|---|---|---|---|---|---|---|
+| `PFSC_TP20_SL30_S35` | `PF_TP50_SL40_S35` | 52 | −4.51 % | −16.59 % | **+12.08 pp** | 5.19 |
+| `PFSC_TP15_SL25_S35` | `PF_TP50_SL40_S35` | 52 | −3.69 % | −16.59 % | **+12.90 pp** | 5.46 |
+| `PFSC_TP20_SL30_BANDE` | `PF_BE25_TP80_SL30` | 102 | −7.15 % | −5.68 % | **−1.47 pp** | 4.19 |
+
+🔴 **Les deux bras TP20 se contredisent selon la référence** : +12.1 pp contre l'une, −1.5 pp
+contre l'autre. Et le +12 pp vient surtout de ce que la référence traverse sa pire fenêtre
+(−16.59 %). **Verdict de famille non tranché — ne rien conclure avant le 09/09** (§4 du
+protocole : décision au niveau famille, pas config).
+
+### ▶️ Décisions
+
+- [x] **Ne rien changer au deck.** Aucune des 3 raisons légitimes de changer de bras (famille
+      déclassée / bras cassé / filtre d'entrée modifié) n'est réunie. La semaine positive de
+      PFW est **un jour et un trade** — exactement ce que F2 interdit de suivre.
+- [ ] 🔧 **Corriger le protocole de lecture du 12/08** : remplacer « −3.5 pp » par « −2 pp à
+      $100/trade » (§0). Impacte la lecture du 09/09 et toute relecture des bras du deck.
+- [ ] 🔧 **Corriger MEMORY.md** : le bras `..._NOBAN` n'existe pas (v14e.91).
+- [ ] 📏 **Re-mesurer le plafond de capacité** : PFW tourne à ~15 trades/j contre l'hypothèse
+      de 7.4/j sur laquelle `capacity_ceiling_23_per_day` est bâti.
+- [ ] ⚠️ **Quantifier le flattage `_dynamic_sell_slip_factor` sur PFW** (25 % de ses lignes à
+      liquidité 0) avant tout chiffrage en euros de ce bras.
+
+---
+
+## 🔬 13/08 — DÉPOUILLEMENT run `31586082824` (12/08, 18/18 shards, 1 129 140 configs)
+
+> ⏳ Le run suivant (`31666375069`, schedule 13/08 04:14) **tournait encore** au moment de
+> ce dépouillement. Ce qui suit porte donc sur le dernier run **terminé**.
+
+### 0. 🚨 LE CLASSEMENT GLOBAL EST SOUS SON PROPRE PLANCHER — ne rien en promouvoir
+
+```
+plancher de bruit de selection (p95 du max sous H0): 24.38 pts
+  meilleure config du CSV: 19.61 pts — 0/1,029,510 configs depassent le plancher
+  !! AUCUNE config ne depasse le plancher: le classement du sweep est
+     du bruit de selection pur. Ne rien promouvoir depuis ce run.
+```
+
+⇒ **TOP 30, `top_at_cap`, portefeuille (« 3.25× »), « meilleur par EV » : À JETER.** Le script
+le dit lui-même. Deux signatures de biais de maximum, visibles à l'œil dans le TOP 30 :
+- il est rempli de **TP150→TP500 + BE/LOCK**, soit exactement la famille que la **production**
+  a désignée comme la **pire** le 11/08 (TP200/SL40 = −85 % du seed en 4 j ; LOCK = no-op) ;
+- des **clones** y comptent comme des observations distinctes : `ETH_BE50_LOCK25_TP200_SL40`
+  `_A3to6` / `_A6to12` / `_A12to24` ont des chiffres **strictement identiques** (n=200,
+  EV=15.358) ⇒ mêmes 200 trades, **une** observation, pas trois. Idem `ETH_*` / non-`ETH_*`.
+
+### 1. ✅ Ce qui survit : les 3 verdicts APPARIÉS (chacun avec son plancher)
+
+**a. Sortie — `AGE24_FAST15_TP100_SL20`, seule au-dessus du plancher** (+752 vs plancher +140,
+d_EV +3.94, gagne 99 %, 4/5 mois, top_mois 53 %).
+🔑 **C'est une RÉPLICATION** : même gagnante au run du **07/08** (+517, d_EV +3.40, 4/5 mois,
+cf. `strategies.py:4273`). **2 runs sur 2** parmi ceux dont les stops sont correctement bookés
+(post-v14e.84). C'est le résultat le plus solide de ce sweep.
+⚠️ **Ce que c'est exactement** : TP ×2.00, SL ×0.80, **`horizon_min = 15`**, âge **12–24 h**
+(`strategies.py:1308`) — un **scalp 15 minutes**.
+🔴 **Le bras déployé ne teste PAS cette sortie à l'identique** : `PFA_TP100_SL20_S35` reprend
+TP/SL mais tourne en **`horizon_min = 120`**. L'écart mesuré ne sera donc pas celui du sweep.
+
+**b. Filtre — `SENT50_60`, seul retenu sur 25 bras** (+142.2 $/j apparié, d_EV +8.87, gagne
+100 %, **4/5 mois**, top_mois 44 %). Tous les autres portent `!! plus d'un mois negatif`.
+🔑 **3ᵉ confirmation indépendante** que la **bande de sentiment** paie (05/08 bande 0.5-0.6
++7.97 % ; 11/08 bande 0.25-0.75 +8.5 % vs NOHYPE −29 %). Et `SENT_NOHYPE` finit **en bas**
+(1/5 mois, **top_mois 100 %** = tout son gain vient d'un seul mois) — E34 reste démenti.
+⚠️ Garde **5 % du volume** seulement (`duree` 60 %). L'analyse juge bien en **argent** et pas
+seulement en EV (d_argent +17 351 > 0), mais c'est le profil exact qui a fait perdre la bande
+d'âge 3-12 h sur les trades réels : **argent = n × EV**. À re-vérifier en production.
+
+**c. KOL — dépasse le plancher** : meilleur réel **+40.0** vs plancher **+25.8** (60 permutations
+du pipeline complet), **p ~ 0.000, marge +55 %**.
+🔑 **Changement vs le dernier run**, où l'apport de la whitelist était **p ~ 0.067** (non
+significatif). Meilleure = **la même sortie `AGE24_FAST15_TP100_SL20`**, whitelist **36/87**,
+**+40.0 avec WL contre −5.5 sans**.
+
+### 2. 🔑 La convergence est le vrai signal
+**Deux tests appariés indépendants** (verdict *sortie* et verdict *KOL*), chacun avec son propre
+plancher de permutation, désignent **la même sortie**. C'est plus fort que n'importe quelle
+ligne du TOP 30 — et c'est la seule chose de ce run qui mérite une décision.
+
+### 3. 🔴 La whitelist KOL n'est PAS déployable telle quelle
+Sur les **25 noms visibles** (sur 36), **5 sont BANNIS en prod sur solana** :
+`aliensalphacalls`, `ChairmanDN1`, `chiggajogambles`, `DegenSeals`, `UnemployedPlays`.
+(blacklist DB vérifiée le 13/08 : **solana 23**, **ethereum 6**.)
+⇒ Confirme et **chiffre** le known issue : le sweep optimise sur un univers **incluant les 23
+KOL bannis**. La recherche exhaustive doit être **relancée sur l'univers de production** avant
+d'en tirer une whitelist.
+
+### 4. Pas de chiffrage en €
+Interdit par la règle du projet (EV absolue du sweep non calibrée, 07/08) — et *a fortiori* ici,
+le classement global étant sous son plancher. Les nombres ci-dessus **ordonnent**, ils ne
+chiffrent pas.
+
+### À arbitrer
+- [ ] Tester la sortie gagnante **à l'identique** (`horizon_min=15`) et pas seulement en 120 ?
+- [ ] Relancer `kol_strategy_search` **hors les 23 bannis** avant toute lecture de whitelist.
+- [ ] Dépouiller `31666375069` quand il finit, et voir si `AGE24_FAST15_TP100_SL20` fait **3/3**.
+
+---
+
 ## 💰 12/08 — SIZING & RISK MANAGEMENT : le seed est sous-dimensionné, et l'edge ≈ la friction
 
 > Question user : « dans les memecoins il y a deux choses importantes, le risk management et le
@@ -2271,3 +3106,87 @@ Calibration verifiee sur donnees synthetiques:
 
 => Le sweep sait maintenant dire "mon classement est du bruit" au lieu de le
    presenter comme un top 30.
+
+---
+
+### [Aug 28] v14e.97 — /stats mentait sur les nouveaux bras (4 fautes silencieuses)
+
+Rapport user : « dans le Telegram, le /stats, les nouvelles strats genre PFW,
+elles marchent pas ». Reproduit en local contre la vraie DB avant tout fix.
+Quatre fautes distinctes dans `scraper/bot_commands.py`, toutes **muettes** :
+
+1. **Le nom affiche n'est pas reparsable.** Le bot imprime `PFW_TP50S30_LM_WL`
+   (`_short_strat` mange le `_SL`). Recopie tel quel dans `/stats`,
+   `_parse_strategy` ne trouvait rien.
+2. **Prefixe ambigu avale.** `/stats PFWS` matche 3 bras => l'ancien
+   `_parse_strategy` rendait `None`, et le handler repondait **sur tout le deck
+   sans le dire**. On lit des chiffres qu'on n'a pas demandes.
+3. **Bras shadow-only muets.** `_query_trades` forcait `is_shadow=False` :
+   `/stats PFWS_TP80_SL25_MED3_WL` (388 lignes en base) rendait « Aucun trade ».
+4. **Plafond 1000 silencieux.** PostgREST tronque un `select` non borne a 1000
+   lignes. Tous les « All-time » tournaient sur les 1000 dernieres :
+   `/stats` all-time affichait **1000 trades / $+781** au lieu de
+   **1425 trades / $+2 774** — soit **$1 992 de PnL invisibles**. Idem `/kol`, `/pnl`, `/shadow`, `/livepnl`.
+
+Correctifs : `_resolve_strategy` (nom court accepte, ambiguite **rapportee**
+avec la liste des candidats), `_split_strategy_args` rend un 3e element
+`error` que les 9 handlers renvoient, `_is_shadow_only` (sonde 1 ligne) pour
+lire les bras shadow dans leurs propres lignes, `_fetch_all` qui pagine.
+
+Deux gardes de non-regression, tirees d'un faux positif attrape en test :
+- un token qui n'est pas un nom de bras (`5`, `7d`, `sol`, `minN=20`) ne doit
+  jamais declencher l'ambiguite — `/trades 5` substring-matchait 10 noms ;
+- `mad_apes_gambles` est un **KOL** a 2 underscores : `/pnl` et `/livepnlkol`
+  passent `free_text=True` pour ne pas le prendre pour un bras inconnu.
+
+Tests : `scraper/tests/test_bot_commands_strat_args_v14e97.py` — **16 echecs
+sur le code d'avant, 18 verts apres**. Suite complete : 253 passed, 3 skipped.
+
+> 🔑 **Une commande de lecture qui ne trouve rien doit le DIRE.** Les 4 fautes
+> partagent la meme forme : repondre quelque chose de plausible au lieu de
+> signaler qu'on n'a pas repondu a la question posee. Meme famille que
+> « quand un instrument ne trouve jamais rien, suspecter l'instrument ».
+
+#### [Aug 28] Suite — l'audit des 29 commandes en a sorti 4 de plus
+
+Question user : « donc maintenant toutes les commandes marchent ? ». Reponse
+honnete = il fallait les tester TOUTES. Matrice de 650 combinaisons
+(commande x periode x chain x strat) contre la prod.
+
+**5. `/best` et `/worst` avalaient la periode.** `/best 7d` rendait l'all-time
+sans le dire — la commande n'acceptait que `[chain] [strat]`. La periode est
+maintenant appliquee.
+
+**6. `/best`, `/worst`, `/pnl` hors du chemin corrige.** Ils ecrivent leur
+requete a la main avec `is_shadow=False` en dur et appelaient `_parse_strategy`
+directement (donc aucun rapport d'ambiguite). Meme traitement que `/stats` :
+`_split_strategy_args` + `_is_shadow_only`. `/best` et `/worst` fusionnes dans
+`_handle_extreme` (ils ne differaient que par le sens du tri).
+
+**7. 🔴 Ma propre pagination a casse `/shadow`.** 1.53 M lignes shadow :
+`_fetch_all` par OFFSET faisait mourir `/shadow 30d` et `/shadow all` en
+**57014**. Avant mon fix ca "marchait" — en rendant les **1000 dernieres**
+lignes, soit **~40 minutes de grille presentees comme All-time**. Corrige en
+pagination **par curseur** (`_fetch_all_seek`) : le curseur suit l'index, chaque
+page reste O(page). Curseur `<=` et non `<`, avec dedup par `id`, parce que la
+grille ferme des dizaines de lignes sur le **meme** `exit_at`.
+
+**8. Une fenetre trop large n'est pas servable, on le DIT.** Meme par curseur,
+la *premiere* page de 30d/all-time meurt (le `ORDER BY` ne suit plus l'index du
+filtre — cf. [[monitor_must_not_alert_on_own_crash_aug13]]). Donc : defaut
+**24 h** (plus all-time), fenetre **bornee a 7 j** avec `→ ramene a 7d` dans
+l'en-tete, budget **20 000 lignes** avec `⚠️ tronque aux 20 000 plus recents
+(depuis <date>)`. Mesure apres : toutes les variantes repondent en **0.9–9.7 s**,
+zero 57014.
+
+> ⏰ **Reste ouvert** : un vrai `/shadow` all-time demande une agregation
+> **cote serveur** (fonction Postgres + `REVOKE public/anon`, cf. CLAUDE.md §8).
+> Migration sur la prod ⇒ **non faite sans accord**.
+
+Verification : 32 tests dans `test_bot_commands_strat_args_v14e97.py`, suite
+complete **267 passed, 3 skipped**.
+
+> 🔑 **Un correctif de lecture peut casser ce qu'il rend correct.** Rendre
+> `/shadow` exact l'a rendu inexecutable : sur 1.5 M lignes, "tout lire" n'est
+> pas une option. La bonne forme n'est pas *complet* ou *tronque en silence*,
+> c'est **borne et annonce**.
