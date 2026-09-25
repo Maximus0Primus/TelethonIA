@@ -431,6 +431,9 @@ def refresh_top_tokens(n: int = REFRESH_TOP_N) -> int:
                 seen_keys.add(key)
                 deduped_rows.append(row)
         update_rows = deduped_rows
+        # v14e.99: same lock order as push_to_supabase.upsert_tokens (conflict
+        # key), otherwise the concurrent batch upsert deadlocks (40P01).
+        update_rows.sort(key=lambda r: (r["symbol"], r["time_window"], r["token_address"]))
 
     # Batch upsert updates
     if update_rows:

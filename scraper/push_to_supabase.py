@@ -413,6 +413,10 @@ def upsert_tokens(
             })
             for t in tokens
         ]
+        # v14e.99: Postgres locks rows in VALUES order. price_refresh upserts the
+        # same rows concurrently — both writers MUST use the conflict-key order,
+        # otherwise two opposite lock orders deadlock (40P01 killed cycle #92).
+        rows.sort(key=lambda r: (r["symbol"], r["time_window"], r["token_address"]))
 
         # v95: Upsert on (symbol, time_window, token_address) — different CAs coexist
         result = (
